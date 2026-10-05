@@ -70,6 +70,31 @@ pub mod scenario {
     /// `Ready to submit your answers?` Review 汇总屏）——question.rs 各阶段机
     /// 判「确认屏在场」的标题锚
     pub const QUESTION_REVIEW: &str = "question_review";
+    /// **新建会话·信任框**（claude `Quick safety check…` / codex `Folder access` /
+    /// kimi `Trust this folder?`）——「新建会话」场景专用：创建管线弹窗处置段的
+    /// 信任框识别槽（spec §4 第 4 步；锚文案逐字取探测定案 §4）
+    pub const CREATE_TRUST: &str = "create_trust";
+    /// **新建会话·更新提示**（codex `Update available` 阻塞框 / claude
+    /// `✔ Update installed · Restart to apply` 非阻塞横幅）——「新建会话」场景专用：
+    /// 阻塞框须按红线键序处置（codex = 字符 `'2'`），横幅仅作诊断（spec §4 第 4 步；
+    /// 探测定案 §5）
+    pub const CREATE_UPDATE: &str = "create_update";
+    /// **新建会话·空闲输入框**（claude `? for shortcuts` 等四家 idle 锚）——
+    /// 「新建会话」场景专用：**见到本槽锚才进入首句注入**（spec §4 第 4 步；
+    /// 探测定案 §7）
+    pub const CREATE_IDLE: &str = "create_idle";
+    /// **新建会话·首装不可处置态**（claude 403 网络墙 / codex 登录三选屏）——
+    /// 「新建会话」场景专用：识别后走「未识别界面」专属失败码，不尝试自动处置
+    /// （spec §4 第 4 步；探测定案 §6）
+    pub const CREATE_ONBOARD: &str = "create_onboard";
+    /// **新建会话·MAM hooks 审查框**（codex 0.160.0 实机：`Hooks need review /
+    /// 8 hooks are new or changed`）——「新建会话」场景专用：MAM T5 注册的
+    /// hooks 在 codex 侧待审查时**阻塞 composer**（spec §4.8 原假设其出现在新建
+    /// 成功后不阻塞——实机定案修正，用户在场裁决 2026-10-02：核验式自动信任）。
+    /// 处置见 C5 run_pipeline：codex_hooks_all_ours 核验通过 → '2' 选中 + enter
+    /// 确认（Trust all——实机定案数字键只移动高亮）；混杂/核验失败 → esc
+    /// （屏面明示 `esc skip`，不信任只解锁）
+    pub const CREATE_HOOKS: &str = "create_hooks";
 }
 
 /// 槽位 wire 词（账本 `slot` 字段）：同一场景内的不同位置。
@@ -274,6 +299,182 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "# questions",
         observed_version: "1.18.32",
         evidence: "戊探A E-A1 提交后 transcript 摘要段 `# Questions`（question.rs OPENCODE_ANSWERED_ANCHOR）",
+    },
+    // ===== 「新建会话」场景（Phase C Task C1；锚文案逐字取 2026-09-27 新建会话
+    // 四家探测定案 §4/§5/§6/§7，Windows run 20260927-100552 / Mac run 20260927-100524）=====
+    // ----- 信任框（create_trust；键序红线见 spec §4 第 4 步）-----
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::TITLE,
+        text: "quick safety check",
+        observed_version: "2.1.278",
+        evidence: "2026-09-27 新建会话探测定案 §4（夹具 create-probe/20260927-100552/p1/p1-conhost-claude-screen.txt 与 p2/p2b-claude-conhost-dialog.txt；标题原句更长，锚取首段以容忍换行）",
+    },
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::CONFIRM,
+        text: "no, exit",
+        observed_version: "2.1.278",
+        evidence: "2026-09-27 新建会话探测定案 §4 键序红线（同上夹具 `❯ No, exit` 为危险默认项：处置须 ↓+Enter，直按 Enter=退出 claude）",
+    },
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::CONFIRM,
+        text: "yes, i trust this folder",
+        observed_version: "2.1.278",
+        evidence: "2026-09-27 新建会话探测定案 §4（同上夹具信任选项行 `Yes, I trust this folder`；2.1.278/2.1.283 两版本文案一致）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::TITLE,
+        text: "folder access",
+        observed_version: "0.156.1",
+        evidence: "2026-09-27 新建会话探测定案 §4（夹具 create-probe/20260927-100552/p1/p1-conhost-codex-screen.txt；Windows 0.156.1 形态）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::TITLE,
+        text: "do you trust the contents of this directory",
+        observed_version: "0.155.1",
+        evidence: "2026-09-27 Mac 报告 M3（Mac run 20260927-100524；Mac 0.155.1 长问句形态，与 Windows `Folder access` 同槽并存——版本号不参与筛选）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::CONFIRM,
+        text: "1. trust and continue",
+        observed_version: "0.156.1",
+        evidence: "2026-09-27 新建会话探测定案 §4（夹具 create-probe/20260927-100552/p1/p1-conhost-codex-screen.txt `› 1. Trust and continue`；默认项即信任，Enter 直通）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::CONFIRM,
+        text: "yes, continue",
+        observed_version: "0.155.1",
+        evidence: "2026-09-27 Mac 报告 M3（Mac run 20260927-100524；Mac 0.155.1 确认项 `› 1. Yes, continue`，与 Windows `1. Trust and continue` 同槽并存）",
+    },
+    AnchorRow {
+        tool: "kimi",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::TITLE,
+        text: "trust this folder?",
+        observed_version: "2.0.2",
+        evidence: "2026-09-27 新建会话探测定案 §4（夹具 create-probe/20260927-100552/p1/p1-conhost-kimi-screen.txt；per-folder，与 HOME 无关）",
+    },
+    AnchorRow {
+        tool: "kimi",
+        scenario: scenario::CREATE_TRUST,
+        slot: slot::CONFIRM,
+        text: "❯ trust this folder",
+        observed_version: "2.0.2",
+        evidence: "2026-09-27 新建会话探测定案 §4（同上夹具选项行 `❯ Trust this folder`，默认项即信任、Enter 直通；带 ❯ 标记锚定选项行——标题行 `trust this folder?` 是本串的超集子串，不带标记会使 TITLE 单独满足 CONFIRM 合取）。C5 评审 C1 补行：处置判据 TITLE+CONFIRM 同屏，缺本行 kimi 信任框永不可处置",
+    },
+    // ----- 更新提示（create_update；阻塞框键序红线见 spec §4 第 4 步）-----
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_UPDATE,
+        slot: slot::TITLE,
+        text: "update available",
+        observed_version: "0.156.1",
+        evidence: "2026-09-27 新建会话探测定案 §5 实机构造 0.156.1→0.157.1（夹具 create-probe/20260927-100552/p2/p2b-codex-conhost-firstframe.txt；启动即弹，且在信任框之前）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_UPDATE,
+        slot: slot::CONFIRM,
+        text: "1. update now",
+        observed_version: "0.156.1",
+        evidence: "2026-09-27 新建会话探测定案 §5 键序红线（同上夹具 `› 1. Update now` 为默认项：Enter 禁用、esc 无效，处置 = 字符 '2' Skip）",
+    },
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::CREATE_UPDATE,
+        slot: slot::PRESENT,
+        text: "update installed · restart to apply",
+        observed_version: "2.1.283",
+        evidence: "2026-09-27 新建会话探测定案 §5 Mac 自然构造（Mac run 20260927-100524；后台自动更新完成后 idle 屏追加，非阻塞横幅不占锚行、无需处置）",
+    },
+    // ----- idle 输入框（create_idle；见到本槽锚才进入首句注入）-----
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::CREATE_IDLE,
+        slot: slot::PRESENT,
+        text: "? for shortcuts",
+        observed_version: "2.1.278",
+        evidence: "2026-09-27 新建会话探测定案 §7（夹具 create-probe/20260927-100552/p2/p2b-claude-conhost-idle.txt 状态行 `⏸ manual mode on · ? for shortcuts · ← for agents`）",
+    },
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::CREATE_IDLE,
+        slot: slot::PRESENT,
+        text: "auto mode on (shift+tab to cycle)",
+        observed_version: "2.1.283",
+        evidence: "2026-09-27 新建会话探测定案 §7 版本槽（2.1.283 状态行 `⏵⏵ auto mode on (shift+tab to cycle) · ← for agents`；Mac 报告 run 20260927-100524；2026-09-23 账本裁决：版本号不参与筛选，同槽多文案承接）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_IDLE,
+        slot: slot::PRESENT,
+        text: "ask codex to do anything",
+        observed_version: "0.156.1",
+        evidence: "2026-09-27 新建会话探测定案 §7（夹具 create-probe/20260927-100552/p3/p3a-codex-r2-idle.txt；残留更新横幅不构成 idle 排除条件）",
+    },
+    AnchorRow {
+        tool: "kimi",
+        scenario: scenario::CREATE_IDLE,
+        slot: slot::PRESENT,
+        text: "no session yet",
+        observed_version: "2.0.2",
+        evidence: "2026-09-27 新建会话探测定案 §7（夹具 create-probe/20260927-100552/p2/p2b-kimi-conhost-idle.txt；新建会话特有锚，兼验确为新会话）",
+    },
+    AnchorRow {
+        tool: "opencode",
+        scenario: scenario::CREATE_IDLE,
+        slot: slot::PRESENT,
+        text: "ask anything",
+        observed_version: "1.18.32",
+        evidence: "2026-09-27 新建会话探测定案 §7（夹具 create-probe/20260927-100552/p2/p2b-opencode-conhost-idle.txt；首帧即达）",
+    },
+    // ----- 首装不可处置态（create_onboard；识别 → 「未识别界面」专属失败码）-----
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::CREATE_ONBOARD,
+        slot: slot::TITLE,
+        text: "unable to connect to anthropic services",
+        observed_version: "2.1.278",
+        evidence: "2026-09-27 新建会话探测定案 §6 首装 403 网络墙（夹具 create-probe/20260927-100552/p3/p3iso-claude-firstframe.txt；需真人不可自动处置 → 「未识别界面」兜底）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_ONBOARD,
+        slot: slot::TITLE,
+        text: "sign in with chatgpt",
+        observed_version: "0.156.1",
+        evidence: "2026-09-27 新建会话探测定案 §6 登录三选屏（夹具 create-probe/20260927-100552/p3/p3iso-codex-r2-dialog1.txt；需真人不可自动处置 → 「未识别界面」兜底）",
+    },
+    // ----- MAM hooks 审查框（create_hooks；C8 实机捕获——探测批未及，spec §4.8
+    // 阻塞语义实机修正 + 核验式自动信任，用户在场裁决 2026-10-02）-----
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_HOOKS,
+        slot: slot::TITLE,
+        text: "hooks need review",
+        observed_version: "0.160.0",
+        evidence: "C8 实机捕获（~/.mam/create-evidence/20261002-125609-codex.log 屏读原文；codex 0.160.0，MAM T5 注册的 8 hooks 待审查时阻塞 composer）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::CREATE_HOOKS,
+        slot: slot::CONFIRM,
+        text: "trust all and continue",
+        observed_version: "0.160.0",
+        evidence: "C8 实机捕获（同上；选项行 `› 1. Review hooks / 2. Trust all and continue / 3. Continue without trusting`，屏面明示 `esc skip`——处置键序见 run_pipeline 核验分支）",
     },
 ];
 
@@ -582,5 +783,150 @@ mod tests {
         assert!(detect(&receipts, "kimi", scenario::QUESTION, slot::RECEIPT).is_some());
         assert!(detect(&receipts, "codex", scenario::QUESTION, slot::RECEIPT).is_some());
         assert!(detect(&receipts, "opencode", scenario::QUESTION, slot::RECEIPT).is_some());
+    }
+
+    /// **「新建会话」四场景锚点回归锁**（Phase C Task C1）：信任框 / 更新框 / idle /
+    /// 首装不可处置态，四家逐字锚文案全部可认（原文小写化后）。锚文案与键序以
+    /// `2026-09-27 新建会话四家探测定案` §4/§5/§6/§7 为准。
+    #[test]
+    fn create_scenarios_anchors_hit_verbatim() {
+        let hit = |tool: &str, sc: &str, sl: &str, line: &str| {
+            detect(&[line.to_lowercase()], tool, sc, sl).is_some()
+        };
+        // 信任框：claude（标题 + 双选项行都在 CONFIRM 槽）
+        assert!(hit(
+            "claude",
+            scenario::CREATE_TRUST,
+            slot::TITLE,
+            "Quick safety check: Is this a project you created or one you trust?"
+        ));
+        assert!(hit(
+            "claude",
+            scenario::CREATE_TRUST,
+            slot::CONFIRM,
+            "❯ No, exit"
+        ));
+        assert!(hit(
+            "claude",
+            scenario::CREATE_TRUST,
+            slot::CONFIRM,
+            "Yes, I trust this folder"
+        ));
+        // codex 双形态：Windows 0.156.1（Folder access）与 Mac 0.155.1（长问句）同槽并存
+        assert!(hit(
+            "codex",
+            scenario::CREATE_TRUST,
+            slot::TITLE,
+            "Folder access"
+        ));
+        assert!(hit(
+            "codex",
+            scenario::CREATE_TRUST,
+            slot::TITLE,
+            "Do you trust the contents of this directory?"
+        ));
+        assert!(hit(
+            "codex",
+            scenario::CREATE_TRUST,
+            slot::CONFIRM,
+            "1. Trust and continue"
+        ));
+        assert!(hit(
+            "codex",
+            scenario::CREATE_TRUST,
+            slot::CONFIRM,
+            "› 1. Yes, continue"
+        ));
+        // kimi（per-folder：标题 + 选项行双槽，选项行带 ❯ 标记锚定）
+        assert!(hit(
+            "kimi",
+            scenario::CREATE_TRUST,
+            slot::TITLE,
+            "Trust this folder?"
+        ));
+        assert!(hit(
+            "kimi",
+            scenario::CREATE_TRUST,
+            slot::CONFIRM,
+            "❯ Trust this folder"
+        ));
+        // 更新框：codex 实机构造 + claude 非阻塞横幅
+        assert!(hit(
+            "codex",
+            scenario::CREATE_UPDATE,
+            slot::TITLE,
+            "Update available"
+        ));
+        assert!(hit(
+            "codex",
+            scenario::CREATE_UPDATE,
+            slot::CONFIRM,
+            "1. Update now"
+        ));
+        assert!(hit(
+            "claude",
+            scenario::CREATE_UPDATE,
+            slot::PRESENT,
+            "✔ Update installed · Restart to apply"
+        ));
+        // idle：claude 双版本同槽多文案（2026-09-23 裁决：版本不参与筛选）
+        assert!(hit(
+            "claude",
+            scenario::CREATE_IDLE,
+            slot::PRESENT,
+            "? for shortcuts"
+        ));
+        assert!(hit(
+            "claude",
+            scenario::CREATE_IDLE,
+            slot::PRESENT,
+            "auto mode on (shift+tab to cycle)"
+        ));
+        assert!(hit(
+            "codex",
+            scenario::CREATE_IDLE,
+            slot::PRESENT,
+            "Ask Codex to do anything"
+        ));
+        assert!(hit(
+            "kimi",
+            scenario::CREATE_IDLE,
+            slot::PRESENT,
+            "No session yet"
+        ));
+        assert!(hit(
+            "opencode",
+            scenario::CREATE_IDLE,
+            slot::PRESENT,
+            "Ask anything"
+        ));
+        // 首装不可处置态（识别 → 专属失败码）
+        assert!(hit(
+            "claude",
+            scenario::CREATE_ONBOARD,
+            slot::TITLE,
+            "Unable to connect to Anthropic services"
+        ));
+        assert!(hit(
+            "codex",
+            scenario::CREATE_ONBOARD,
+            slot::TITLE,
+            "Sign in with ChatGPT"
+        ));
+        // MAM hooks 审查框（C8 实机捕获——核验式自动信任，用户裁决 2026-10-02）
+        assert!(hit(
+            "codex",
+            scenario::CREATE_HOOKS,
+            slot::TITLE,
+            "Hooks need review"
+        ));
+        assert!(hit(
+            "codex",
+            scenario::CREATE_HOOKS,
+            slot::CONFIRM,
+            "2. Trust all and continue"
+        ));
+        // 既有场景零影响（append-only 基线）
+        assert!(!candidates("codex", scenario::PERMISSION_MENU, slot::TITLE).is_empty());
     }
 }

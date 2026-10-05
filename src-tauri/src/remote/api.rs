@@ -14,7 +14,7 @@ use axum::{
 };
 use futures::stream::{Stream, StreamExt as _};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
@@ -57,19 +57,20 @@ pub async fn sessions(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
     // 闭包捕获 state 的 Arc（Send + Sync + 'static）：`session_source` 是 Box<dyn Fn> 不可
     // clone，故整体 move 进阻塞线程池，在池内调用注入源
     let st = st.clone();
-    let response =
-        tokio::task::spawn_blocking(move || apply_board_hidden(&st, (st.session_source)()))
-            .await
-            .unwrap_or_else(|e| {
-                // JoinError（任务 panic/取消）降级为空响应：移动端拿到 0 会话而非连接错误，
-                // 与桌面侧 sessions 命令的降级形态一致
-                log::error!("远程会话扫描任务异常: {e}");
-                crate::session::SessionsResponse {
-                    sessions: Vec::new(),
-                    total_count: 0,
-                    waiting_count: 0,
-                }
-            });
+    let response = tokio::task::spawn_blocking(move || {
+        let resp = apply_board_hidden(&st, (st.session_source)());
+        // C7：配对不确定打标（spec §5）——进程缝与快照同段取得（生产同为 sysinfo
+        // 同步重活）；打标在 Value 层做，Session 结构体与其构造点零改动
+        let ambiguous = pairing_ambiguous_set(&st);
+        tag_pairing_ambiguous(resp, &ambiguous)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        // JoinError（任务 panic/取消）降级为空响应：移动端拿到 0 会话而非连接错误，
+        // 与桌面侧 sessions 命令的降级形态一致
+        log::error!("远程会话扫描任务异常: {e}");
+        empty_sessions_value()
+    });
     // M2-R2 顺手项：会话数据是设备门禁下的私有数据，禁止中间层/浏览器缓存
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -82,6 +83,74 @@ pub async fn sessions(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
 /// （C 风格字段无 map 键/浮点 NaN）时的防御性降级——前端拿到合法空载荷而非空串
 /// （空串会让 JSON.parse 抛错、看板卡死）
 const EMPTY_SESSIONS_JSON: &str = r#"{"sessions":[],"totalCount":0,"waitingCount":0}"#;
+
+/// 空快照 Value（C7 打标路径的防御性降级）：与 [`EMPTY_SESSIONS_JSON`] 同形——
+/// 前端拿到合法空载荷而非空串/Null（JSON.parse 不抛错、看板不卡死）
+fn empty_sessions_value() -> serde_json::Value {
+    serde_json::json!({ "sessions": [], "totalCount": 0, "waitingCount": 0 })
+}
+
+/// C7 配对键归一（与桌面跳转门 require_evidence 同判据）：工具小写；项目先走
+/// `normalize_cwd_for_match` 同域归一（尾分隔符/反斜杠/Windows 大小写），再整体
+/// 小写以对齐桌面门的 `to_lowercase` 口径（Unix 大小写敏感差异在此抹平）。
+/// 会话侧取 `Session.project_name`（与进程侧 cwd file_name 同源：均为目录名）。
+fn pairing_key(tool: &str, project: &str) -> (String, String) {
+    (
+        tool.to_lowercase(),
+        crate::monitor::cwd::normalize_cwd_for_match(project).to_lowercase(),
+    )
+}
+
+/// C7 配对不确定集合（spec §5）：缝取运行进程 (工具, 项目) 表 → 按 [`pairing_key`]
+/// 归一计数 → 出现 **≥2** 的键入集合。端点只做集合查询（/sessions 逐会话打标、
+/// session-send 回执提示）；「≥2 运行进程」是发现层配对启发式（kimi wire mtime /
+/// opencode time_updated）可能交叉的实证判据（桌面跳转域 issue #48 系）。
+fn pairing_ambiguous_set(st: &Arc<RemoteState>) -> HashSet<(String, String)> {
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for (tool, project) in (st.pairing_counter)() {
+        *counts.entry(pairing_key(&tool, &project)).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// C7：/sessions 响应打标——序列化成 `serde_json::Value` 后逐会话附加
+/// `pairingAmbiguous`（**恒在场** true/false）。为什么恒在场而非仅 true 时附加：
+/// 移动端「缺省 = false」语义下两者等价，但恒在场让「单会话 → false」可判、
+/// 消费方无需区分字段缺失与 false（C7 自裁决登记）。Session 结构体与其构造点
+/// 零改动（计划红线），打标只在此 Value 层。
+fn tag_pairing_ambiguous(
+    resp: crate::session::SessionsResponse,
+    ambiguous: &HashSet<(String, String)>,
+) -> serde_json::Value {
+    let mut v = serde_json::to_value(&resp).unwrap_or_else(|e| {
+        // 理论不可达（字段无 map 键/浮点 NaN）；防御性降级为空快照（同形 EMPTY_SESSIONS_JSON）
+        log::warn!("会话快照序列化失败，降级为空快照: {e}");
+        empty_sessions_value()
+    });
+    if let Some(sessions) = v.get_mut("sessions").and_then(|s| s.as_array_mut()) {
+        for s in sessions {
+            let key = pairing_key(
+                s.get("agentType")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default(),
+                s.get("projectName")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default(),
+            );
+            if let Some(obj) = s.as_object_mut() {
+                obj.insert(
+                    "pairingAmbiguous".to_string(),
+                    serde_json::Value::Bool(ambiguous.contains(&key)),
+                );
+            }
+        }
+    }
+    v
+}
 
 /// GET /m/api/v1/events（M3 Task 6，C1 后半）：SSE 实时通道。
 /// - 首帧 = 全量会话快照（**直调注入源**，数据同源铁律 3），此后只推跃迁边沿
@@ -707,7 +776,8 @@ pub async fn session_messages(
 
 // ==== M7 Task 6：注入三端点（session-send / send-info / queue 系）====
 // 契约（JSON camelCase；所有 Json 响应带 Cache-Control: no-store——门禁下私有写路径）：
-//   POST /session-send          → delivered | queued{itemId,position} | failed{error} | 400 | 404 | 403
+//   POST /session-send          → delivered{pairingHint} | queued{itemId,position} | failed{error} | 400 | 404 | 403
+//                                 （pairingHint = C7 配对不确定提示，恒在场 true/false，不拦截）
 //   GET  /session-send-info     → {injectable, reasonCode?, reason?, channels, visibility}
 //   GET  /session-queue         → {items:[{id,content,enqueuedAt,position}]}
 //   POST /session-queue/jump    → delivered | queued{itemId,position} | failed{error} | 400 | 404 | 403
@@ -892,17 +962,24 @@ pub async fn session_send(
     // ③ 会话查找（spawn_blocking：扫描是重活）+ 路由判定
     let probe_st = st.clone();
     let probe_sid = sid.clone();
-    let session =
-        match tokio::task::spawn_blocking(move || find_session_sync(&probe_st, &probe_sid)).await {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("session-send 会话扫描任务异常: {e}");
-                return json_no_store(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    serde_json::json!({ "error": "internal" }),
-                );
-            }
-        };
+    let (session, pairing_ambiguous) = match tokio::task::spawn_blocking(move || {
+        let session = find_session_sync(&probe_st, &probe_sid);
+        // C7：配对不确定集合与快照同段取得（缝 = 运行进程表；生产为 sysinfo 全量
+        // 扫描，与 session_source 同为同步重活，不留在 async worker）
+        let ambiguous = pairing_ambiguous_set(&probe_st);
+        (session, ambiguous)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-send 会话扫描任务异常: {e}");
+            return json_no_store(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "internal" }),
+            );
+        }
+    };
     let Some(session) = session else {
         return json_no_store(
             StatusCode::NOT_FOUND,
@@ -911,6 +988,10 @@ pub async fn session_send(
     };
     // ④ 路由判定（W3 纯核；platform = 本机 OS）。不可注入 → 403（带原因），不入队
     let tool = session.agent_type.tool_id().to_string();
+    // C7 配对不确定提示（spec §5）：同工具同项目 ≥2 运行进程 → 成功回执附
+    // `pairingHint=true`；**不拦截**——投递路径与 status 语义零变化（提示 ≠ 拒绝）。
+    // 与表单黄字（C6 ≥1 活跃会话）是两个分层信号：本判据只数运行进程。
+    let pairing_hint = pairing_ambiguous.contains(&pairing_key(&tool, &session.project_name));
     if let crate::inject::routing::RouteOutcome::NotInjectable {
         reason_code,
         reason,
@@ -1006,7 +1087,13 @@ pub async fn session_send(
                     audit_action_for(&req.text, "send"),
                     "ok",
                 );
-                json_no_store(StatusCode::OK, serde_json::json!({ "status": "delivered" }))
+                // C7：成功回执附配对提示（恒在场 true/false；未命中 = false = 无提示）。
+                // 只挂 delivered 臂——queued/submitted/failed 均非「成功投递」回执，
+                // 字段形态保持不变（自裁决登记）。
+                json_no_store(
+                    StatusCode::OK,
+                    serde_json::json!({ "status": "delivered", "pairingHint": pairing_hint }),
+                )
             }
             // D7/T3 中性回执（验收问题 #5）：注入 Ok + 戳未中 + 屏读无滞留草稿 =
             // 消息已被 TUI 收进内部队列（已投递未确认）——不冒充 delivered（未确认
@@ -7083,10 +7170,744 @@ fn mode_verify_receipt(
     }
 }
 
+// ============================================================
+// C6 远程新建会话（spec §3/§5）：POST /session-create（异步任务起窗 + 弹窗处置
+// + 首句注入 + 物化确认）+ GET /session-create/status + GET /create-projects。
+// 任务簿（RemoteState.create_hub.tasks）内存态不持久化——MAM 重启丢任务，status
+// 404 引导重试。审计三类行：create（任务终态）/ dialog（弹窗处置留痕）/ send（首句）。
+// ============================================================
+
+/// POST /m/api/v1/session-create 请求体（camelCase；缺参不触发提取器 422）
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCreateReq {
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub project_path: String,
+    /// 首句（缺省/空白 → 默认探针 `hi`——spec §2：四家空回车不物化，探针是物化
+    /// 必要条件）
+    #[serde(default)]
+    pub first_message: Option<String>,
+}
+
+/// 默认探针首句（spec §2：空回车不物化）
+const CREATE_DEFAULT_FIRST_MESSAGE: &str = "hi";
+
+/// 400 bad_request + reasonCode（校验链机器可判失败码：tool_unavailable / 路径码 /
+/// mkdir_failed）
+fn bad_request_reason(reason: &str) -> Response {
+    json_no_store(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({ "error": "bad_request", "reasonCode": reason }),
+    )
+}
+
+/// 400 bad_request + reasonCode + reason（校验链**带定位详情**的失败——黑名单命中
+/// 段与所属表等。修复批 I1：定位信息必须可达消费方（响应体 + 服务端日志双通道），
+/// 不能只存在于单元测试；`reason` 与 403 not_injectable 的 {reason, reasonCode}
+/// 配对形态同族）
+fn bad_request_reason_detail(reason: &str, detail: &str) -> Response {
+    json_no_store(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({ "error": "bad_request", "reasonCode": reason, "reason": detail }),
+    )
+}
+
+/// 工具门第二道：enabledTools 同源判定（host_source 载荷的 enabledTools 数组——
+/// P8d 数据源，与 /host 端点/移动端 chips 同一份）
+fn tool_enabled(st: &Arc<RemoteState>, tool: &str) -> bool {
+    (st.host_source)()
+        .get("enabledTools")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().any(|t| t.as_str() == Some(tool)))
+        .unwrap_or(false)
+}
+
+/// 目标目录的活跃会话信号（黄字数据源，spec §3「不拦截」）：session_source 快照
+/// 中同工具 + 同目录（monitor::cwd 归一域，与 find_tui_pid 的 cwd 判据同款）≥1 条。
+/// spawn_blocking 内调用（session_source 是同步阻塞扫描）。
+fn has_active_session_for(st: &Arc<RemoteState>, tool: &str, dir: &str) -> bool {
+    let want = crate::monitor::cwd::normalize_cwd_for_match(dir);
+    if want.is_empty() {
+        return false;
+    }
+    (st.session_source)().sessions.iter().any(|s| {
+        s.agent_type.tool_id() == tool
+            && crate::monitor::cwd::normalize_cwd_for_match(&s.project_path) == want
+    })
+}
+
+/// P1-2：mkdir 后 canonicalize 真值复核（仅 Windows，调用点见 session_create ③）。
+/// `\\?\` 前缀剥离（Windows canonicalize 的 NT 路径形态）后交完整校验链——剥离
+/// 后以 `\\` 开头 = 网络卷真身（映射盘/subst），validate 的 not_local_volume 拦。
+/// canonicalize 自身失败 → 拒绝（fail-closed）：安全复核的存在前提是能取到真值，
+/// 取不到（mkdir 刚成功却读不到真值 = 异常态）时放行等于跳过整道复核。
+/// 返回**校验通过的 canonical 串**（评审二轮 P2-2）：调用方以同一串贯穿后续
+/// spawn current_dir / find_tui_pid 匹配 / 审计——校验 canonical 而 spawn 原始
+/// 串存在 TOCTOU 残余，且 8.3/junction 形态原始串会让 cwd 匹配假阴性（假超时）。
+#[cfg(windows)]
+fn revalidate_canonical_dir(dir: &str) -> Result<String, crate::inject::create_path::PathReject> {
+    let canon = std::fs::canonicalize(dir).map_err(|e| crate::inject::create_path::PathReject {
+        code: "mkdir_failed",
+        message: format!("路径真值解析失败（{dir}）：{e}"),
+    })?;
+    let canon = canon
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    crate::inject::create_path::validate(&canon, std::env::consts::OS)?;
+    Ok(canon)
+}
+
+/// POST /m/api/v1/session-create：新建会话任务（spec §3）。
+/// - 校验链（同步 400 带 reasonCode）：工具门（白名单 ∧ enabledTools ∧ 安装探测）
+///   → `create_path::validate`（trim 契约：判定与 create_dir_all 与起窗 cwd 全用
+///   同一 trim 后串，评审 I1）→ `create_dir_all`（mkdir_failed）；
+/// - 首句超 [`MAX_SEND_CHARS`] → 400（与常规发送同一入参封顶标尺，C6 自裁登记）；
+///   路径超长同标尺 → 400 reasonCode="path_too_long"（评审修复⑥，移动端可辨）；
+/// - 全局单飞：存在任一非终态任务 → 409 {error:"conflict"}（终态任务不占额度）；
+/// - 黄字信号：响应附 hasActiveSession（同项目同工具已有活跃会话——**不拦截**）；
+/// - 200 {taskId, hasActiveSession}：任务占单飞后立即返回；管线在 detached
+///   spawn_blocking 中逐段推进 phase（不依赖手机持续在线——spec §4.5）。
+pub async fn session_create(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionCreateReq>,
+) -> Response {
+    // ① 设备身份（防御 403 + 花名；管线全程持有——不依赖手机持续在线）
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // ② 工具门（三道：白名单 ∧ enabledTools ∧ 安装探测）
+    let tool = req.tool.trim().to_lowercase();
+    let hub = st.create_hub.clone();
+    if !crate::inject::create::CREATE_TOOLS.contains(&tool.as_str())
+        || !tool_enabled(&st, &tool)
+        || !(hub.tool_probe)(&tool)
+    {
+        return bad_request_reason("tool_unavailable");
+    }
+    // ③ 路径校验链（trim 契约：同一 trim 后串贯穿 validate / create_dir_all / 起窗 cwd）
+    let dir = req.project_path.trim().to_string();
+    if dir.chars().count() > MAX_SEND_CHARS {
+        // 评审修复⑥：超长路径回 reasonCode（移动端分診可辨），与首句封顶同标尺
+        return bad_request_reason("path_too_long");
+    }
+    // 首句入参封顶（C6 评审 I1）：与 /session-send 同标尺（10k），防无界注入文本
+    if let Some(m) = &req.first_message {
+        if m.trim().chars().count() > MAX_SEND_CHARS {
+            return bad_request();
+        }
+    }
+    if let Err(rej) = crate::inject::create_path::validate(&dir, std::env::consts::OS) {
+        // 修复批 I1：定位详情双通道（响应体 reason + 服务端日志），排障主张成立
+        log::warn!("session-create 路径拒绝（{dir}）: {}", rej.message);
+        return bad_request_reason_detail(rej.code, &rej.message);
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("session-create mkdir 失败（{dir}）: {e}");
+        return bad_request_reason("mkdir_failed");
+    }
+    // P1-2 安全复核（评审 2026-10-03）：文本段黑名单挡不住文件系统层变形——
+    // 8.3 短名（C:\PROGRA~1）、尾点段、junction/符号链接都能以「无害段名」通过
+    // validate，真实落点却在系统/凭据目录。mkdir 后 canonicalize 取**真值路径**
+    // 再过一遍完整校验链（黑名单 + 本地卷 + ASCII：junction 目标任一不达标同拒），
+    // 并以**同一 canonical 串**贯穿后续全链（评审二轮 P2-2：spawn current_dir /
+    // find_tui_pid 匹配 / 审计不得回用原始变形串——校验与使用的 TOCTOU 残余 +
+    // 8.3/junction 原始串的 cwd 匹配假阴性一并消除）。仅 Windows：变形向量
+    // （8.3/junction）是 Windows 形态；非 Windows 跳过还避开 macOS /tmp→/private
+    // 符号链接把合法临时目录误判进 CREATE_SYSTEM_DIRS_MAC。
+    #[cfg(windows)]
+    let dir = match revalidate_canonical_dir(&dir) {
+        Ok(canon) => canon,
+        Err(rej) => {
+            log::warn!(
+                "session-create canonicalize 复核拒绝（{dir}）: {}",
+                rej.message
+            );
+            return bad_request_reason_detail(rej.code, &rej.message);
+        }
+    };
+    // ④ 黄字信号（探测性扫描不占单飞判定——先取数，后原子占位）
+    let probe_st = st.clone();
+    let probe_dir = dir.clone();
+    let probe_tool = tool.clone();
+    let has_active = tokio::task::spawn_blocking(move || {
+        has_active_session_for(&probe_st, &probe_tool, &probe_dir)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log::error!("session-create 活跃信号扫描任务异常: {e}");
+        false
+    });
+    // ⑤ 全局单飞（占位与检查同锁原子）：在飞 → 409
+    let Some(task_id) = hub.reserve() else {
+        return json_no_store(
+            StatusCode::CONFLICT,
+            serde_json::json!({ "error": "conflict" }),
+        );
+    };
+    // ⑥ 组装首句（既有 compose 单点复用——签名/斜杠裸注入分流与常规投递同词表，
+    // 勿手写第二份 `[mobile …]` 构造）并启动 detached 管线
+    let text = req
+        .first_message
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| CREATE_DEFAULT_FIRST_MESSAGE.to_string());
+    let composed = crate::inject::normalize::compose_injection(&device_name, &text);
+    let run = CreateRun {
+        task_id,
+        tool,
+        dir,
+        composed,
+        device_id,
+        device_name,
+    };
+    // 管线 detached 跑 + panic 兜底（C6 评审 M4）：spawn_blocking panic 会留下
+    // 非终态任务 → 单飞额度被永久占用（后续 create 恒 409）。监视 JoinHandle，
+    // panic（JoinError）时把任务置 failed——正常路径已自置终态，此处只兜异常中止。
+    let pipeline_st = st.clone();
+    let handle = tokio::task::spawn_blocking(move || run_create_pipeline(pipeline_st, run));
+    let watch_st = st.clone();
+    tokio::spawn(async move {
+        if handle.await.is_err() {
+            watch_st.create_hub.update(task_id, |t| {
+                if t.phase != "done" && t.phase != "failed" {
+                    t.phase = "failed".to_string();
+                    t.detail = Some("创建管线异常中止——单飞额度已释放，请重试".to_string());
+                }
+            });
+        }
+    });
+    // ⑦ 立即回执（任务在飞；黄字信号随行）
+    json_no_store(
+        StatusCode::OK,
+        serde_json::json!({ "taskId": task_id, "hasActiveSession": has_active }),
+    )
+}
+
+/// 管线一次运行的封闭上下文（spawn_blocking 全程持有；设备身份来自 POST 闸门
+/// 上下文，管线内审计/组装均取自此——spec §4.5）
+struct CreateRun {
+    task_id: u64,
+    tool: String,
+    /// trim 后目标目录（validate / create_dir_all / 起窗 cwd 同一串）
+    dir: String,
+    /// 实际注入的首句（compose 产物，带移动端签名）
+    composed: String,
+    device_id: String,
+    device_name: String,
+}
+
+/// create 审计行的 content 摘要（目标目录+tool；**不写首句原文**——首句走 send 行）
+fn create_audit_summary(run: &CreateRun) -> String {
+    format!("create {} @ {}", run.tool, run.dir)
+}
+
+/// 任务置 failed（detail = 中文现场；`window_kept` = 终端窗口在场，追加
+/// 「保留供查看现场」减压指引——失败不自动清场）并落 create 审计行。
+/// `evidence`（§4.4 补实现）：unrecognized_screen 失败的证据快照路径——追加到
+/// detail（用户可见排障入口）与审计 result（`failed:<code> evidence=<path>`，
+/// spec「审计行附路径」的落点）
+fn fail_create_task(
+    st: &Arc<RemoteState>,
+    run: &CreateRun,
+    code: &str,
+    detail: String,
+    window_kept: bool,
+    evidence: Option<&str>,
+) {
+    let detail = if window_kept {
+        format!("{detail}（终端窗口保留供查看现场）")
+    } else {
+        detail
+    };
+    let detail = match evidence {
+        Some(p) => format!("{detail}（现场快照：{p}）"),
+        None => detail,
+    };
+    st.create_hub.update(run.task_id, |t| {
+        t.phase = "failed".to_string();
+        t.detail = Some(detail);
+    });
+    let result = match evidence {
+        Some(p) => format!("failed:{code} evidence={p}"),
+        None => format!("failed:{code}"),
+    };
+    endpoint_audit(
+        st,
+        &run.device_id,
+        &run.device_name,
+        &run.tool,
+        "",
+        &create_audit_summary(run),
+        "create",
+        &result,
+    );
+}
+
+/// §4.4 证据落档（2026-10-03 用户裁决补实现）：`unrecognized_screen` 失败时把
+/// **末次屏读快照**（文本逐行——spec 原文「截图」，落档形态取文本快照：管线
+/// 内已有逐行屏读，文本可 grep 可 diff，PNG 需另起 PrintWindow 通道，排障价值
+/// 不抵增量）写入 `<base>/create-<taskId>-<时间戳>.txt`，返回完整路径。base =
+/// None（测试缝禁用）或建目录/写文件失败 → None：证据落档是尽力而为的辅助
+/// 通道，失败不阻塞失败回执主流程。
+fn write_create_evidence(
+    base: Option<&std::path::Path>,
+    task_id: u64,
+    tool: &str,
+    dir: &str,
+    screen: &[String],
+) -> Option<String> {
+    let base = base?;
+    std::fs::create_dir_all(base).ok()?;
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = base.join(format!("create-{task_id}-{ts}.txt"));
+    let mut body = format!(
+        "MAM 新建会话未识别屏现场快照\n任务 {task_id} · 工具 {tool} · 目录 {dir}\n\
+         采集 {ts}（末次屏读逐行原文）\n----\n"
+    );
+    for line in screen {
+        body.push_str(line);
+        body.push('\n');
+    }
+    std::fs::write(&path, body).ok()?;
+    Some(path.to_string_lossy().to_string())
+}
+
+/// 新建会话管线（C6，spec §4 第 3–5 步；detached spawn_blocking 全程）：
+/// 1. opening_terminal：起窗（resume_spawner 缝）→ **立即** pid 锚定（不得插入耗时
+///    步骤——C5 not_before 松量 +1s 的硬约束）；
+/// 2. dialog_handling：`run_pipeline` 缝装配（屏读步距 / 键间隔 / 物化轮询步距的
+///    真实睡眠全部经 create_hub.pacer 缝——内核与管线逻辑零真实睡眠）；
+/// 3. waiting_materialize：物化轮询（[`MATERIALIZE_MAX_ROUNDS`] 轮 × 2s 步距预算）
+///    → discover 缝逐候选 → confirm_probe 戳命中 → done；
+/// 4. 超时 → failed（materialize_timeout）。失败一律不自动清场。
+fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
+    let hub = st.create_hub.clone();
+    let task_id = run.task_id;
+    // since 在管线起点采样（信任处置即建 rollout 的工具——codex——其落盘早于首句
+    // 注入；since 晚于落盘会整轮 miss。confirm 戳是最终判据，since 取宽不假阳）
+    let since = std::time::SystemTime::now();
+    // ---- 1. opening_terminal ----
+    hub.update(task_id, |t| t.phase = "opening_terminal".to_string());
+    let spec = crate::inject::resume::build_create_spawn_spec(
+        crate::inject::resume::windows_terminal_path().as_deref(),
+        &run.dir,
+        &run.tool,
+    );
+    if let Err(e) = (st.resume_spawner)(&spec) {
+        fail_create_task(
+            &st,
+            &run,
+            "spawn_failed",
+            format!("终端启动失败：{e}"),
+            false,
+            None,
+        );
+        return;
+    }
+    let pid = match (hub.pid_finder)(&run.tool, std::path::Path::new(&run.dir)) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_create_task(&st, &run, "tui_not_found", e, true, None);
+            return;
+        }
+    };
+    hub.update(task_id, |t| t.spawned_pid = Some(pid));
+    // ---- 2. dialog_handling（run_pipeline 缝装配）----
+    hub.update(task_id, |t| t.phase = "dialog_handling".to_string());
+    // 族规格：None → FALLBACK_SPEC + 登记一条 log（families 单点，勿自造规格）
+    let fam = crate::inject::families::family_for(&run.tool).unwrap_or_else(|| {
+        log::warn!(
+            "create: 工具 {} 无族规格，按 FALLBACK_SPEC 快消费者口径注入（登记）",
+            run.tool
+        );
+        crate::inject::families::FALLBACK_SPEC
+    });
+    let st_screen = st.clone();
+    // 末次屏读快照（§4.4 证据落档）：screen 缝每次回读顺手留存——unrecognized
+    // 失败时这就是「现场」；Arc<Mutex> 穿 move 闭包
+    let last_screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let screen_sink = last_screen.clone();
+    let screen = move |_p: u32| -> Option<Vec<String>> {
+        // 步距睡眠在真缝闭包内（SCREEN_POLL_STEP_MS 消费契约；处置→idle 沉降由本
+        // 步距近似覆盖——探测口径内，C6 报告登记）
+        (st_screen.create_hub.pacer)(crate::inject::create::SCREEN_POLL_STEP_MS);
+        let s = (st_screen.screen_probe)("", pid);
+        if let Some(lines) = &s {
+            *screen_sink.lock().unwrap_or_else(|e| e.into_inner()) = lines.clone();
+        }
+        s
+    };
+    let st_key = st.clone();
+    let send_key = move |_p: u32, k: &str| -> Result<(), String> {
+        (st_key.create_hub.pacer)(crate::inject::create::KEY_GAP_MS);
+        st_key.injector.locate_and_send_key_spec(pid, k, &fam)
+    };
+    let st_text = st.clone();
+    let hub_text = hub.clone();
+    let send_text = move |_p: u32, text: &str| -> Result<(), String> {
+        // injecting_first 是真实可观察相变——在闭包内置 phase
+        hub_text.update(task_id, |t| t.phase = "injecting_first".to_string());
+        st_text.injector.locate_and_inject_spec(pid, text, &fam)
+    };
+    let deps = crate::inject::create::CreateDeps {
+        screen: &screen,
+        send_key: &send_key,
+        send_text: &send_text,
+    };
+    let params = crate::inject::create::Params {
+        tool: run.tool.clone(),
+        dir: std::path::PathBuf::from(&run.dir),
+        first_message: String::new(),
+        // codex hooks 审查框核验式信任（C8 用户在场裁决）：读本机 ~/.codex/hooks.json
+        // 全条目我方核验（monitor::hooks 同判据）——混杂/失败 false → 管线 esc 跳过
+        hooks_trust_ok: dirs::home_dir()
+            .map(|h| crate::monitor::hooks::codex_hooks_all_ours(&h))
+            .unwrap_or(false),
+        composed: run.composed.clone(),
+    };
+    let outcome = crate::inject::create::run_pipeline(&deps, &params);
+    // dialog 行（场景+键序摘要，如 `create_trust: down,enter`——计划权威示例形态；
+    // 物化前 session_id=""）
+    for (scenario, keys) in &outcome.dialog_log {
+        let summary = if keys.is_empty() {
+            scenario.clone()
+        } else {
+            format!("{scenario}: {}", keys.join(","))
+        };
+        endpoint_audit(
+            &st,
+            &run.device_id,
+            &run.device_name,
+            &run.tool,
+            "",
+            &summary,
+            "dialog",
+            "ok",
+        );
+    }
+    match outcome.status {
+        crate::inject::create::CreateStatus::WaitingMaterialize => {
+            // send 行：首句（与常规投递同词表 content=composed 原文；物化前 sid=""）
+            endpoint_audit(
+                &st,
+                &run.device_id,
+                &run.device_name,
+                &run.tool,
+                "",
+                &run.composed,
+                "send",
+                "ok",
+            );
+        }
+        crate::inject::create::CreateStatus::Failed { code, message, .. } => {
+            // §4.4 证据落档（用户裁决补实现）：未识别屏失败留末屏快照（其他失败码
+            // 无屏读现场或已有结构化原因码，不落档）
+            let evidence = if code == "unrecognized_screen" {
+                let screen = last_screen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                write_create_evidence(
+                    (hub.evidence_dir)().as_deref(),
+                    task_id,
+                    &run.tool,
+                    &run.dir,
+                    &screen,
+                )
+            } else {
+                None
+            };
+            fail_create_task(&st, &run, &code, message, true, evidence.as_deref());
+            return;
+        }
+        // 内核只产出 WaitingMaterialize / Failed 两态（create.rs 模块文档）；防御臂
+        // 按「未知现场」失败收口，不静默吞（同落末屏快照）
+        _ => {
+            let screen = last_screen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let evidence = write_create_evidence(
+                (hub.evidence_dir)().as_deref(),
+                task_id,
+                &run.tool,
+                &run.dir,
+                &screen,
+            );
+            fail_create_task(
+                &st,
+                &run,
+                "unrecognized_screen",
+                "状态机返回了非预期的终态".to_string(),
+                true,
+                evidence.as_deref(),
+            );
+            return;
+        }
+    }
+    // ---- 3. waiting_materialize（物化轮询；候选 confirm 戳终判）----
+    hub.update(task_id, |t| t.phase = "waiting_materialize".to_string());
+    let stamp = crate::inject::confirm::stamp_of(&run.composed).to_string();
+    for _ in 0..crate::inject::create::MATERIALIZE_MAX_ROUNDS {
+        (hub.pacer)(crate::inject::create::SCREEN_POLL_STEP_MS);
+        let candidates = (hub.discoverer)(&run.tool, since, &run.dir);
+        for sid in candidates {
+            if (st.confirm_probe)(&run.tool, &sid, &stamp) {
+                hub.update(task_id, |t| {
+                    t.phase = "done".to_string();
+                    t.session_id = Some(sid.clone());
+                });
+                // codex hooks 信任提示（Done 附带）：T5 信号健康度同源 KV 一行判定
+                //（hooks_registered_{tool}；经 DeviceStore 连接读——测试内存库同语义，
+                // 零真实 ~/.mam 接触），不新建机制
+                if run.tool == "codex" {
+                    let registered = st.store.with(|c| {
+                        crate::database::dao::settings::get_setting_conn(
+                            c,
+                            "hooks_registered_codex",
+                        )
+                    });
+                    if registered.as_deref() != Some("true") {
+                        hub.update(task_id, |t| {
+                            t.detail = Some(
+                                "codex 需在 TUI 内 /hooks 审阅并信任 MAM 钩子一次，事件才会触发（trust 后 hash 落用户层 config）"
+                                    .to_string(),
+                            );
+                        });
+                    }
+                }
+                endpoint_audit(
+                    &st,
+                    &run.device_id,
+                    &run.device_name,
+                    &run.tool,
+                    &sid,
+                    &create_audit_summary(&run),
+                    "create",
+                    "ok",
+                );
+                return;
+            }
+        }
+    }
+    // ---- 4. 物化超时 ----
+    fail_create_task(
+        &st,
+        &run,
+        "materialize_timeout",
+        format!(
+            "首句已注入但 {} 物化超时（{}s 预算）——请检查终端现场",
+            run.tool,
+            crate::inject::create::MATERIALIZE_MAX_ROUNDS
+                * crate::inject::create::SCREEN_POLL_STEP_MS as usize
+                / 1000
+        ),
+        true,
+        None,
+    );
+}
+
+/// GET /m/api/v1/session-create/status?taskId=：任务快照（内存态读口）。
+/// 未知 taskId → 404（MAM 重启丢任务亦此形态——引导移动端重新发起）。
+pub async fn session_create_status(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(id) = params.get("taskId").and_then(|s| s.parse::<u64>().ok()) else {
+        return json_no_store(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "no_task" }),
+        );
+    };
+    let Some(t) = st.create_hub.snapshot(id) else {
+        return json_no_store(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "no_task" }),
+        );
+    };
+    json_no_store(
+        StatusCode::OK,
+        serde_json::json!({
+            "phase": t.phase,
+            "detail": t.detail,
+            "sessionId": t.session_id,
+            "spawnedPid": t.spawned_pid,
+        }),
+    )
+}
+
+/// GET /create-projects 响应项（camelCase）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateProjectDto {
+    path: String,
+    last_active_at: String,
+    tools: Vec<String>,
+    active_tools: Vec<String>,
+}
+
+/// 聚合桶（按归一目录名合并；path 保留快照优先的首见原形态）
+#[derive(Default)]
+struct CreateProjectBucket {
+    path: String,
+    last_active: chrono::DateTime<chrono::Utc>,
+    tools: std::collections::BTreeSet<String>,
+    active_tools: std::collections::BTreeSet<String>,
+}
+
+/// RFC3339 → UTC（畸形 None）
+fn parse_rfc3339_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// GET /m/api/v1/create-projects?days=N（默认 7）：新建会话的目标目录候选列表。
+/// 数据 = session_source 快照 ∪ archive_source（last_seen RFC3339 UTC 过 N 天窗，
+/// parse 后比较——不裸串比较，sessions_archived 同规）；v1 路径规同款**非 ASCII
+/// 过滤**（入参校验会拒，列表不再给不能用的候选）；project_path 归一去重
+/// （monitor::cwd 归一域，与活跃信号/进程匹配同域）；lastActiveAt 降序。
+pub async fn create_projects(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let days = params
+        .get("days")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(7)
+        .clamp(1, 365);
+    let st2 = st.clone();
+    let resp = tokio::task::spawn_blocking(move || {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+        let mut buckets: std::collections::HashMap<String, CreateProjectBucket> =
+            std::collections::HashMap::new();
+        // 合并核（局部闭包非 fn：活/归档两源共用一段去重/窗口逻辑，单一实现）。
+        // v1 同规：非 ASCII / 空白路径不入候选（create_path::validate 会拒）。
+        let merge =
+            |path: &str,
+             tool: &str,
+             seen: chrono::DateTime<chrono::Utc>,
+             active: bool,
+             buckets: &mut std::collections::HashMap<String, CreateProjectBucket>| {
+                // 展示形态统一剥尾部分隔符（快照可能带尾斜杠，归一键同域不影响去重）
+                let p = path.trim().trim_end_matches(['/', '\\']);
+                if p.is_empty() || !p.is_ascii() {
+                    return;
+                }
+                // 「不给不能用的候选」（C6 评审 M1）：黑名单/UNC 等命中 create_path
+                // 拒绝码的路径不入列——点选后必 400 的候选没有价值
+                if crate::inject::create_path::validate(p, std::env::consts::OS).is_err() {
+                    return;
+                }
+                let key = crate::monitor::cwd::normalize_cwd_for_match(p);
+                if key.is_empty() {
+                    return;
+                }
+                let b = buckets.entry(key).or_insert_with(|| CreateProjectBucket {
+                    path: p.to_string(),
+                    last_active: seen,
+                    tools: std::collections::BTreeSet::new(),
+                    active_tools: std::collections::BTreeSet::new(),
+                });
+                if seen > b.last_active {
+                    b.last_active = seen;
+                }
+                b.tools.insert(tool.to_string());
+                if active {
+                    b.active_tools.insert(tool.to_string());
+                }
+            };
+        // 快照优先（活跃 + 展示形态优先）；畸形时间按当前时间兜底（sessions_archived
+        // 软归档合成条目同款——活会话不该因时间串畸形而消失）
+        for s in (st2.session_source)().sessions {
+            let seen = parse_rfc3339_utc(&s.last_activity_at).unwrap_or_else(chrono::Utc::now);
+            merge(
+                &s.project_path,
+                s.agent_type.tool_id(),
+                seen,
+                true,
+                &mut buckets,
+            );
+        }
+        // 归档行：过 N 天窗（畸形时间行防御性排除，sessions_archived 同规）
+        for row in (st2.archive_source)() {
+            let Some(seen) = parse_rfc3339_utc(&row.last_seen) else {
+                continue;
+            };
+            if seen < cutoff {
+                continue;
+            }
+            merge(
+                &row.project_path,
+                &row.agent_type,
+                seen,
+                false,
+                &mut buckets,
+            );
+        }
+        let mut items: Vec<CreateProjectBucket> = buckets.into_values().collect();
+        items.sort_by_key(|b| std::cmp::Reverse(b.last_active));
+        items
+            .into_iter()
+            .map(|b| CreateProjectDto {
+                path: b.path,
+                last_active_at: b
+                    .last_active
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                tools: b.tools.into_iter().collect(),
+                active_tools: b.active_tools.into_iter().collect(),
+            })
+            .collect::<Vec<_>>()
+    })
+    .await;
+    match resp {
+        Ok(projects) => json_no_store(StatusCode::OK, serde_json::json!({ "projects": projects })),
+        Err(e) => {
+            log::error!("create-projects 聚合任务异常: {e}");
+            json_no_store(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "internal" }),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::remote::content::SessionMessage;
+
+    /// §4.4 证据落档（2026-10-03 用户裁决补实现）：tempdir 基座下快照文件落盘、
+    /// 内容带现场头与逐行原文；base=None（测试缝禁用形态）不落档返回 None
+    #[test]
+    fn write_create_evidence_writes_snapshot_and_honors_disabled_base() {
+        let td = tempfile::tempdir().unwrap();
+        let path = write_create_evidence(
+            Some(td.path()),
+            7,
+            "claude",
+            r"E:\proj\demo",
+            &["line 1".to_string(), "".to_string(), "❯ Yes".to_string()],
+        )
+        .expect("tempdir 基座必须落档");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("任务 7"), "头部带任务号：{body}");
+        assert!(body.contains(r"E:\proj\demo"), "头部带目标目录");
+        assert!(
+            body.contains("line 1") && body.contains("❯ Yes"),
+            "屏读逐行原文"
+        );
+        assert!(path.contains("create-7-"), "文件名带任务号（定位）：{path}");
+        // 禁用形态：None 基座（stub 缝）→ 不落档不报错
+        assert_eq!(
+            write_create_evidence(None, 8, "kimi", "/tmp/x", &["a".to_string()]),
+            None
+        );
+    }
 
     /// **E2① 键序档锁**（用户终裁 CL-3 + kimi 数字禁令）：
     /// claude=数字优先+验证回退（渲染等待消除假阴性）；codex=数字直选；

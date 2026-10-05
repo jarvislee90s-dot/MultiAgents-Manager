@@ -85,7 +85,7 @@ fn sensitive_under_home(child: &Path, home_base: &Path, windows: bool) -> bool {
 /// 敏感目录拒绝清单（2026-09-16 用户裁决）：主目录放宽后，这些目录下的文件
 /// 对**已配对设备**一律不可读——密钥/凭据/浏览器与会话数据。按路径段精确匹配
 /// （`.ssh2` 这类前缀相似目录不误伤），平台语义可注入便于测试
-const SENSITIVE_DIRS: &[&str] = &[
+pub(crate) const SENSITIVE_DIRS: &[&str] = &[
     ".ssh",
     ".aws",
     ".gnupg",

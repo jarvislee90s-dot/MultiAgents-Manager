@@ -10,14 +10,14 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// message.data JSON 结构
+/// message.data JSON 结构（1.x）
 #[derive(Deserialize)]
 struct MessageData {
     role: Option<String>,
     error: Option<ErrorData>,
 }
 
-/// message.data.error JSON 结构（取证样本：`{"name":"APIError","data":{…}}`，
+/// message.data.error JSON 结构（1.x 取证样本：`{"name":"APIError","data":{…}}`，
 /// 本机 10 条：9×APIError 401 + 1×MessageAbortedError）
 #[derive(Deserialize)]
 struct ErrorData {
@@ -25,10 +25,33 @@ struct ErrorData {
     data: Option<ErrorDataInner>,
 }
 
-/// error.data JSON 结构（API 错误详情等）
+/// error.data JSON 结构（1.x，API 错误详情等）
 #[derive(Deserialize)]
 struct ErrorDataInner {
     message: Option<String>,
+}
+
+/// session_message.data.error JSON 结构（2.x，D0-2 实证 11 条）：
+/// `{"type":"aborted"|"provider.error","message":"…"}`——**键名从 1.x 的 `name`
+/// 改为 `type`，message 由 `data.message` 提升为顶层**（D0 定案 §D0-2）
+#[derive(Deserialize)]
+struct V2ErrorData {
+    #[serde(rename = "type")]
+    error_type: Option<String>,
+    message: Option<String>,
+}
+
+/// session_message.data 顶层（2.x）：`finish` 读取见 `get_session_tail_v2`
+///（该处直接取原始 `serde_json::Value`，故此处不重复声明字段）
+#[derive(Deserialize)]
+struct V2MessageData {
+    #[serde(default)]
+    content: Vec<serde_json::Value>,
+    error: Option<V2ErrorData>,
+    /// v2 的 user 消息文本在 `data.text` 顶层、**无 content[]**（D0-4 迁移形态
+    /// 对比 + content.rs v2 reader 同口径）——卡片消息行的 user 尾取此键
+    #[serde(default)]
+    text: Option<String>,
 }
 
 /// 末条消息失败错误的摘要（§4.3 前置规则：状态判定 + 卡片消息行展示）
@@ -37,12 +60,63 @@ struct LastError {
     message: Option<String>,
 }
 
-/// part.data JSON 结构
+/// part.data JSON 结构（1.x）
 #[derive(Deserialize)]
 struct PartData {
     #[serde(rename = "type")]
     part_type: Option<String>,
     text: Option<String>,
+}
+
+/// 库 schema 分派（D0-4 定案）：**整库按表存在性分派，prefer v2**。
+///
+/// 2.x 的 1.x→2.x 迁移是**单向且完备**的——`session_v2` 是 `session` 的超集
+/// （本机 72 条 1.x 会话 id 交集 72/72、仅 v1 有 0 条），消息同样全含
+/// （898/898），且 1.x 消息内容已投影进 v2 的 `data.content[]`（reasoning/text/
+/// tool 三类齐全）。故 v2 表对两个时代的会话都完整可用，无需按行混合分派；
+/// 三张 v1 表在 2.x 下**冻结**（max(time_updated) 停在迁移时刻）。
+/// 表不存在（纯 1.x 环境）→ 走 v1 旧路径，零回归。
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Schema {
+    is_v2: bool,
+}
+
+/// 2.x 判据单点（评审 P2 收口，2026-10-03）：`session_v2` 表存在
+/// （`session_message` 与其同生共死）。parser 与 remote::content 的 schema 分派
+/// 共用此函数——双实现漂移会让状态与内容走不同 schema。
+pub(crate) fn schema_is_v2(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='session_v2'",
+        [],
+        |_| Ok(()),
+    )
+    .is_ok()
+}
+
+impl Schema {
+    /// 2.x 判据 = `session_v2` 表存在（[`schema_is_v2`] 单点）
+    fn detect(conn: &Connection) -> Self {
+        Schema {
+            is_v2: schema_is_v2(conn),
+        }
+    }
+
+    /// 会话表名（列表 / 主查 / 项目兜底三处 SQL 共用）
+    fn session_table(&self) -> &'static str {
+        if self.is_v2 {
+            "session_v2"
+        } else {
+            "session"
+        }
+    }
+}
+
+/// 会话行（主匹配 / 项目兜底两处 SQL 的同形产物）——打包传参，避免逐字段透传
+struct SessionRow {
+    id: String,
+    directory: String,
+    title: Option<String>,
+    time_updated: i64,
 }
 
 /// 获取 OpenCode 会话（生产入口：DB 固定在 ~/.local/share/opencode/opencode.db）。
@@ -89,18 +163,30 @@ fn get_opencode_sessions_with_db(db_path: &Path, processes: &[AgentProcess]) -> 
         }
     }
 
+    // schema 分派（D0-4 定案）：2.x（session_v2 在场）走 v2 表（超集，两时代通吃）；
+    // 纯 1.x 环境走旧表。此后所有 SQL 的表名经 schema 取，分派一次贯穿全程。
+    let schema = Schema::detect(&conn);
+    debug!(
+        "OpenCode schema: {} (table={})",
+        if schema.is_v2 { "v2" } else { "v1" },
+        schema.session_table()
+    );
+
     // 最近会话行（主匹配数据源，归一化比较在 Rust 侧做）
-    let recent: Vec<(String, String, Option<String>, i64)> = conn
-        .prepare("SELECT id, directory, title, time_updated FROM session ORDER BY time_updated DESC LIMIT 200")
+    let recent: Vec<SessionRow> = conn
+        .prepare(&format!(
+            "SELECT id, directory, title, time_updated FROM {} ORDER BY time_updated DESC LIMIT 200",
+            schema.session_table()
+        ))
         .ok()
         .map(|mut stmt| {
             stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
+                Ok(SessionRow {
+                    id: row.get(0)?,
+                    directory: row.get(1)?,
+                    title: row.get(2)?,
+                    time_updated: row.get(3)?,
+                })
             })
             .ok()
             .map(|rows| rows.filter_map(|r| r.ok()).collect())
@@ -123,18 +209,9 @@ fn get_opencode_sessions_with_db(db_path: &Path, processes: &[AgentProcess]) -> 
         if let Some((row_idx, row)) = recent
             .iter()
             .enumerate()
-            .find(|(i, (_, dir, _, _))| !matched_rows.contains(i) && cwd_equivalent(dir, &cwd_str))
+            .find(|(i, r)| !matched_rows.contains(i) && cwd_equivalent(&r.directory, &cwd_str))
         {
-            let (session_id, directory, title, time_updated) = row;
-            if let Some(session) = build_session_from_row(
-                &conn,
-                session_id,
-                directory,
-                title.as_deref(),
-                None,
-                *time_updated,
-                process,
-            ) {
+            if let Some(session) = build_session_from_row(&conn, schema, row, None, process) {
                 sessions.push(session);
                 // 构造成功才认领行与 pid（与 kimi Phase 1 同时序）：若将来构造可能
                 // 过滤返回 None，失败时不烧掉行/pid，该进程仍可走回退匹配
@@ -179,7 +256,7 @@ fn get_opencode_sessions_with_db(db_path: &Path, processes: &[AgentProcess]) -> 
             );
             matched_pids.insert(process.pid);
             if let Some(session) =
-                get_latest_session_for_project(&conn, project_id, name.as_deref(), process)
+                get_latest_session_for_project(&conn, schema, project_id, name.as_deref(), process)
             {
                 sessions.push(session);
             }
@@ -197,63 +274,82 @@ fn get_opencode_sessions_with_db(db_path: &Path, processes: &[AgentProcess]) -> 
 /// 获取项目的最新会话
 fn get_latest_session_for_project(
     conn: &Connection,
+    schema: Schema,
     project_id: &str,
     project_name: Option<&str>,
     process: &AgentProcess,
 ) -> Option<Session> {
-    let (session_id, directory, title, time_updated) = conn
-        .prepare("SELECT id, directory, title, time_updated FROM session WHERE project_id = ? ORDER BY time_updated DESC LIMIT 1")
+    let row = conn
+        .prepare(&format!(
+            "SELECT id, directory, title, time_updated FROM {} WHERE project_id = ? ORDER BY time_updated DESC LIMIT 1",
+            schema.session_table()
+        ))
         .ok()?
         .query_row([project_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
+            Ok(SessionRow {
+                id: row.get(0)?,
+                directory: row.get(1)?,
+                // title 为 String（NOT NULL 列），转 Option 统一行形态
+                title: Some(row.get::<_, String>(2)?),
+                time_updated: row.get(3)?,
+            })
         })
         .ok()?;
 
-    build_session_from_row(
-        conn,
-        &session_id,
-        &directory,
-        // title 为 String（行内值），转 Option<&str> 传给共用构造
-        Some(title.as_str()),
-        project_name,
-        time_updated,
-        process,
-    )
+    build_session_from_row(conn, schema, &row, project_name, process)
 }
 
 /// 由会话行构造 Session（主匹配与项目匹配共用）
 fn build_session_from_row(
     conn: &Connection,
-    session_id: &str,
-    directory: &str,
-    title: Option<&str>,
+    schema: Schema,
+    row: &SessionRow,
     project_name_override: Option<&str>,
-    time_updated: i64,
     process: &AgentProcess,
 ) -> Option<Session> {
-    let (last_role, last_message, last_error) = get_last_message_info(conn, session_id);
-    let last_msg_time = get_last_message_time(conn, session_id);
-    // 会话尾部部件信号（§4.3）：末条 part + 所属 role；仅 text/patch 尾按需查 step 部件。
-    // user 消息的 part 也是 text 类型，但 tail_part_signal 对 role=user 首行即短路，
-    // 先排除 user 尾再查 has_step，省掉最高频状态（输入刚提交）的每轮查询
-    let tail = get_session_tail_part(conn, session_id)
-        .map(|t| {
-            let ptype = t
-                .part
-                .get("type")
-                .and_then(|x| x.as_str())
-                .unwrap_or_default();
-            let has_step = t.message_role.as_deref() != Some("user")
-                && (ptype == "text" || ptype == "patch")
-                && message_has_step_part(conn, &t.message_id);
-            tail_part_signal(&t.part, t.message_role.as_deref(), has_step)
-        })
-        .unwrap_or(TailSignal::Fallback);
+    let (session_id, directory, title, time_updated) = (
+        row.id.as_str(),
+        row.directory.as_str(),
+        row.title.as_deref(),
+        row.time_updated,
+    );
+    // 会话尾部信号（§4.3）先算——v2 的 error 查询按尾信号分派（TurnFailed 时
+    // 回看最近 assistant，见 get_last_message_info_v2 的 error_lookback）：
+    // - v1：末条 part + 所属 role；仅 text/patch 尾按需查 step 部件（旧链不变的
+    //   user 尾短路优化）
+    // - v2：末条 session_message 的 type + data.finish + data.outcome + content[]
+    //   尾元素（D0-1：v2 无 step 部件，`data.finish` 取代 step-finish；工具名键
+    //   为 name）
+    let tail = if schema.is_v2 {
+        get_session_tail_v2(conn, session_id)
+            .map(|t| tail_signal_v2(&t))
+            .unwrap_or(TailSignal::Fallback)
+    } else {
+        get_session_tail_part(conn, session_id)
+            .map(|t| {
+                let ptype = t
+                    .part
+                    .get("type")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default();
+                let has_step = t.message_role.as_deref() != Some("user")
+                    && (ptype == "text" || ptype == "patch")
+                    && message_has_step_part(conn, &t.message_id);
+                tail_part_signal(&t.part, t.message_role.as_deref(), has_step)
+            })
+            .unwrap_or(TailSignal::Fallback)
+    };
+    // 消息读取按 schema 分派（v2 走 session_message 内联 content[]；v1 走 message+part）
+    let (last_role, last_message, last_error) = if schema.is_v2 {
+        get_last_message_info_v2(conn, session_id, tail == TailSignal::TurnFailed)
+    } else {
+        get_last_message_info(conn, session_id)
+    };
+    let last_msg_time = if schema.is_v2 {
+        get_last_message_time_v2(conn, session_id)
+    } else {
+        get_last_message_time(conn, session_id)
+    };
 
     // §4.3 前置规则优先：末条消息失败/中止判定高于尾部部件信号
     let status = failed_request_status(last_error.as_ref().map(|e| e.name.as_str()))
@@ -281,8 +377,9 @@ fn build_session_from_row(
         });
     let display_message = match &last_error {
         // 失败请求：错误摘要进消息行（与完成绿/中止一眼可辨，spec §4.3）；
-        // 主动中止不标注（不提示裁决，维持原展示）
-        Some(e) if e.name != "MessageAbortedError" => Some(format!(
+        // 主动中止（1.x MessageAbortedError / 2.x aborted）不标注（不提示裁决，
+        // 维持原展示）
+        Some(e) if !is_abort_error(&e.name) => Some(format!(
             "❌ {}: {}",
             if e.name.is_empty() { "Error" } else { &e.name },
             e.message.as_deref().unwrap_or("")
@@ -390,22 +487,7 @@ fn get_message_text(conn: &Connection, message_id: &str) -> Option<String> {
     }
 
     let content = text_content.or(reasoning_content)?;
-
-    // 跳过系统提示（XML 格式）
-    let trimmed = content.trim();
-    if trimmed.starts_with('<') && (trimmed.contains("ultrawork") || trimmed.contains("mode>")) {
-        return None;
-    }
-
-    // 截断过长的消息
-    if content.chars().count() > 100 {
-        Some(format!(
-            "{}...",
-            content.chars().take(100).collect::<String>()
-        ))
-    } else {
-        Some(content)
-    }
+    truncate_display_text(&content)
 }
 
 /// 会话末条部件（跨消息，按落盘时间倒序取 1）+ 所属消息 role（spec §4.3）。
@@ -446,6 +528,230 @@ fn get_session_tail_part(conn: &Connection, session_id: &str) -> Option<SessionT
     })
 }
 
+// ============================================================================
+// 2.x（session_v2 / session_message）读路径——D0 定案 §D0-1/§D0-2
+//
+// 2.x 把 part 概念内联进 `session_message.data.content[]`，且新增消息级
+// `data.finish` 宣告回合终态（v2 全库零 step 部件，见 D0-1）。下列函数与 1.x
+// 并行存在：`Schema::detect` 分派后各走一路，1.x 路径零改动（零回归）。
+// ============================================================================
+
+/// 末条消息的角色、文本与失败错误摘要（2.x 版）。
+/// 角色由 `session_message.type` 列给出（1.x 是 `message.data.role`）；
+/// 文本取 `data.content[]` 内联内容；错误取 `data.error`（键名 `type`）。
+fn get_last_message_info_v2(
+    conn: &Connection,
+    session_id: &str,
+    error_lookback: bool,
+) -> (Option<String>, Option<String>, Option<LastError>) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT type, data FROM session_message WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+    ) else {
+        return (None, None, None);
+    };
+    let Ok((_, data_json)) = stmt.query_row([session_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return (None, None, None);
+    };
+    let data = serde_json::from_str::<V2MessageData>(&data_json).ok();
+    let parse_err = |d: &V2MessageData| {
+        d.error.as_ref().map(|e| LastError {
+            // 2.x 错误类型键名为 `type`（1.x 是 `name`）——对齐 1.x 的 name 语义，
+            // `aborted` 对应 1.x 的 MessageAbortedError（D0-2 实证 11 条）
+            name: e.error_type.clone().unwrap_or_default(),
+            message: e.message.clone(),
+        })
+    };
+    let mut error = data.as_ref().and_then(parse_err);
+    if error.is_none() && error_lookback {
+        // 评审二轮必办项 A（2026-10-03）：失败 idle 收尾时，错误证据可能挂在其前
+        // 一条 assistant（1.x 形态）——回看最近 assistant 的 error。仅 TurnFailed
+        // 场景置位（调用方按尾信号分派），既有形态（assistant 真尾 / 成功 idle）
+        // 零影响
+        if let Ok(assistant_json) = conn.query_row(
+            "SELECT data FROM session_message WHERE session_id = ?1 AND type = 'assistant' ORDER BY seq DESC LIMIT 1",
+            [session_id],
+            |r| r.get::<_, String>(0),
+        ) {
+            error = serde_json::from_str::<V2MessageData>(&assistant_json)
+                .ok()
+                .as_ref()
+                .and_then(parse_err);
+        }
+    }
+    // role 与文本都取**最近的 user/assistant 消息**，不取真末条：
+    // - 文本：2.x 回合收尾追加 `idle` 消息（无 content），取真末条会退化成标题；
+    // - role：真末条在完工后是 `idle` ≠ "assistant"，会击穿 determine_opencode_status
+    //   的 CPU 噪声护栏（`cpu>15 && last_role!=assistant`，2026-09-17 为完工后
+    //   GC/索引后台尖峰绿黄横跳所设）——v1 完工末条 role=assistant 受保护，v2
+    //   必须取最近对话消息的 role 才等价（评审 I3）。
+    // error 仍取真末条（状态判定的前置规则要看末条错误）+ TurnFailed 时的
+    // assistant 回看（见上）。
+    let (role, text) = get_v2_last_conversation_text(conn, session_id);
+    (role, text, error)
+}
+
+/// 最近的 user/assistant 消息的（角色, 展示文本）（跳过 2.x 特有的
+/// idle/system/synthetic）。理由见 [`get_last_message_info_v2`]：回合收尾的
+/// idle 消息既无 content 也不该作 role——role 与文本同源取最近对话消息。
+fn get_v2_last_conversation_text(
+    conn: &Connection,
+    session_id: &str,
+) -> (Option<String>, Option<String>) {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT type, data FROM session_message WHERE session_id = ?1 AND type IN ('user','assistant')
+         ORDER BY seq DESC LIMIT 1",
+    ) else {
+        return (None, None);
+    };
+    let Ok((mtype, data_json)) = stmt.query_row([session_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) else {
+        return (None, None);
+    };
+    let data = serde_json::from_str::<V2MessageData>(&data_json).ok();
+    // user 消息文本在 data.text 顶层（无 content[]）——评审 I2：漏此分支时 user 尾
+    // （「输入刚提交」/悬垂提交）卡片消息行退化为标题。与 content.rs v2 reader
+    // 的 user 分支同口径；assistant 仍走 content[] 提取。
+    let text = data.as_ref().and_then(|d| match &d.text {
+        Some(t) if !t.is_empty() => truncate_display_text(t),
+        _ => v2_message_text(&d.content),
+    });
+    (Some(mtype), text)
+}
+
+/// 从 2.x `content[]` 提取展示文本：优先首个 text 元素，其次 reasoning；
+/// 沿 1.x `get_message_text` 的系统提示跳过与 100 字符截断口径
+fn v2_message_text(content: &[serde_json::Value]) -> Option<String> {
+    let mut text_content: Option<String> = None;
+    let mut reasoning_content: Option<String> = None;
+    for c in content {
+        let Some(t) = c.get("text").and_then(|x| x.as_str()) else {
+            continue;
+        };
+        match c.get("type").and_then(|x| x.as_str()) {
+            Some("text") if text_content.is_none() => text_content = Some(t.to_string()),
+            Some("reasoning") if reasoning_content.is_none() => {
+                reasoning_content = Some(t.to_string())
+            }
+            _ => {}
+        }
+    }
+    let content = text_content.or(reasoning_content)?;
+    truncate_display_text(&content)
+}
+
+/// 展示文本归一化（1.x/2.x 共用）：跳过系统提示 XML、按字符截断 100
+fn truncate_display_text(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    if trimmed.starts_with('<') && (trimmed.contains("ultrawork") || trimmed.contains("mode>")) {
+        return None;
+    }
+    if content.chars().count() > 100 {
+        Some(format!(
+            "{}...",
+            content.chars().take(100).collect::<String>()
+        ))
+    } else {
+        Some(content.to_string())
+    }
+}
+
+/// 会话末条消息（2.x）+ `data.finish` / `data.outcome`——尾部信号的全部输入。
+/// 2.x 无 part 表、无跨表 JOIN：一条 SQL 取末条即得 type/seq/data。
+struct SessionTailV2 {
+    message_type: String,
+    finish: Option<String>,
+    /// idle 消息的收尾结果（`{"outcome":"succeeded"}` 等，D0-2 定案判据输入）：
+    /// 非 succeeded 的 idle 尾**不是完成**——不得给绿
+    outcome: Option<String>,
+    /// 末条 content 元素（待决 question 判据在此元素上跑，与 1.x 同一纯函数）
+    tail_content: Option<serde_json::Value>,
+}
+
+fn get_session_tail_v2(conn: &Connection, session_id: &str) -> Option<SessionTailV2> {
+    let row = conn
+        .query_row(
+            "SELECT type, data FROM session_message WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+            [session_id],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok()?;
+    let (message_type, data_json) = row;
+    let data: serde_json::Value = serde_json::from_str(&data_json).ok()?;
+    let tail_content = data
+        .get("content")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.last())
+        .cloned();
+    Some(SessionTailV2 {
+        message_type,
+        finish: data
+            .get("finish")
+            .and_then(|f| f.as_str())
+            .map(String::from),
+        outcome: data
+            .get("outcome")
+            .and_then(|o| o.as_str())
+            .map(String::from),
+        tail_content,
+    })
+}
+
+/// 会话末条消息的时间戳（2.x，毫秒）——按 seq 倒序取（v2 无 id 平局键，seq 单调）
+fn get_last_message_time_v2(conn: &Connection, session_id: &str) -> i64 {
+    conn.query_row(
+        "SELECT time_created FROM session_message WHERE session_id = ?1 ORDER BY seq DESC LIMIT 1",
+        [session_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+}
+
+/// v2 尾部信号（D0-1 映射表）：
+/// - 末条消息 `type == "idle"` 且 `data.outcome == "succeeded"`
+///   （`{"outcome":"succeeded"}`）→ TurnDone（回合已收尾）。**D0-2 定案判据**
+///   （评审 P1-4 + 二轮必办项 A，2026-10-03）：`outcome==succeeded` 才绿；
+///   `outcome` 在场且 ≠ succeeded → **TurnFailed**（determine 层直接红——有
+///   error 证据的场景已被 failed_request_status 前置规则正确着色，落到这里的是
+///   无证据残余面，不落启发式假绿）；缺 `outcome` 证据 → Fallback 回退启发式
+///   （2.0.22 实证 idle 恒带 outcome，缺失=形态漂移信号，保守但不猜）
+/// - 末条 content 元素为**待决 question 工具**（丁T1，名字/形态判据同 1.x，
+///   2.x 工具名键为 `name`）→ WaitingForUser
+/// - 末条 content 元素 `type ∈ {reasoning, tool}` 或末条消息 `type == "user"`
+///   → Running（进行中 / 输入刚提交）
+/// - 末条 content 为 `text` ∧ 消息 `finish == "stop"` → TurnDone
+/// - 其余（`finish == "tool-calls"`、system/synthetic 尾等）→ Fallback 启发式
+fn tail_signal_v2(tail: &SessionTailV2) -> TailSignal {
+    match tail.message_type.as_str() {
+        "user" => return TailSignal::Running,
+        "idle" if tail.outcome.as_deref() == Some("succeeded") => return TailSignal::TurnDone,
+        "idle" if tail.outcome.is_some() => return TailSignal::TurnFailed,
+        "idle" => return TailSignal::Fallback,
+        _ => {}
+    }
+    let Some(c) = tail.tail_content.as_ref() else {
+        // 无 content（system/synthetic 之类）→ 启发式
+        return TailSignal::Fallback;
+    };
+    if pending_question_part(c) {
+        return TailSignal::WaitingForUser;
+    }
+    match c.get("type").and_then(|t| t.as_str()).unwrap_or_default() {
+        "reasoning" | "tool" => TailSignal::Running,
+        "text" => {
+            if tail.finish.as_deref() == Some("stop") {
+                TailSignal::TurnDone
+            } else {
+                // 无 finish（少数 22 条）或 finish=tool-calls → 尚有后续动作
+                TailSignal::Running
+            }
+        }
+        _ => TailSignal::Fallback,
+    }
+}
+
 /// 消息是否含 step 部件（新格式标识；仅尾部为 text/patch 时按需调用）。
 /// 沿模块既有模式取原始 data 在 Rust 侧解析（不依赖 SQLite JSON1 扩展）
 fn message_has_step_part(conn: &Connection, message_id: &str) -> bool {
@@ -473,6 +779,14 @@ enum TailSignal {
     /// step-finish(reason=stop)：回合结束 → 走既有 last_role+60s 启发式
     ///（60s 窗内 Waiting 红 → Idle 绿；用户验证该收尾转换为正常语义，保留）
     TurnDone,
+    /// **2.x idle 非成功收尾**（`outcome` 在场且 ≠ succeeded，评审二轮必办项 A，
+    /// 2026-10-03）→ Waiting 红。分工边界：error 证据（末条 assistant 的
+    /// `data.error`）由 build_session_from_row 的 `failed_request_status` **前置
+    /// 规则**先消费（aborted→绿 / provider.error→红）——能走到本信号的失败收尾
+    /// 都是「无 error 证据」的残余面，直接红不落启发式（假绿治理：非成功回合
+    /// 显示为完成正是要防的现象）。值域备注：2.0.22 实证只见过 succeeded，其余
+    /// 值（failed/…）未观测——红是保守方向（需用户过目），观测到实值后按证据校准
+    TurnFailed,
     /// 步骤进行中 / 用户输入刚提交 / step-finish(reason≠stop) → Processing 黄
     Running,
     /// **用户输入类工具待决**（丁T1，2026-09-21）→ Waiting 红：终端正显示问答 UI
@@ -562,7 +876,14 @@ fn pending_question_part(part: &serde_json::Value) -> bool {
         return false;
     }
     let state = part.get("state").unwrap_or(&serde_json::Value::Null);
-    let by_name = part.get("tool").and_then(|t| t.as_str()) == Some(USER_INPUT_TOOL_NAME);
+    // 工具名双键（适配批评审 I1）：v1 part 的键是 `tool`，v2 content 元素的键是
+    // `name`（D0-1 定案）——单查 `tool` 在 v2 下恒 false，名字分支（pending 拍
+    // input={} 时的唯一判据，F2-3）整体失效。双键对 v1 语义无害叠加。
+    let tool_name = part
+        .get("name")
+        .and_then(|t| t.as_str())
+        .or_else(|| part.get("tool").and_then(|t| t.as_str()));
+    let by_name = tool_name == Some(USER_INPUT_TOOL_NAME);
     let by_shape = input_has_questions_shape(state);
     if !(by_name || by_shape) {
         return false;
@@ -632,16 +953,23 @@ fn tail_part_signal(
     }
 }
 
+/// 该错误名是否代表「用户主动中止」——跨 schema 双形态（D0-2 实证）：
+/// 1.x `data.error.name == "MessageAbortedError"`；2.x `data.error.type == "aborted"`
+/// （本机 11 条实测，形如 `{"type":"aborted","message":"Aborted"}`）
+fn is_abort_error(name: &str) -> bool {
+    name == "MessageAbortedError" || name == "aborted"
+}
+
 /// 末条消息失败判定（spec §4.3 前置规则，2026-09-17 用户裁决）：末条消息
 /// `data.error` 非空 → Some(终态)，优先于尾部部件信号——失败请求的 error 落在
 /// 0 part 的空 assistant 占位行上、尾部 part 停留在 user 文本，走部件规则会
-/// 误判「输入刚提交」永久黄。`MessageAbortedError`（用户主动 Esc）→ Idle 绿
-/// （主动终止是用户已知事实，不提示）；其余 error（含 name 缺失）→ Waiting 红
-/// （需要介入，绿→红边沿为正确报警）
+/// 误判「输入刚提交」永久黄。用户主动中止（1.x `MessageAbortedError` /
+/// 2.x `aborted`，见 [`is_abort_error`]）→ Idle 绿（主动终止是用户已知事实，
+/// 不提示）；其余 error（含 name 缺失）→ Waiting 红（需要介入，绿→红边沿为正确报警）
 fn failed_request_status(error_name: Option<&str>) -> Option<SessionStatus> {
     match error_name {
         None => None,
-        Some("MessageAbortedError") => Some(SessionStatus::Idle),
+        Some(n) if is_abort_error(n) => Some(SessionStatus::Idle),
         Some(_) => Some(SessionStatus::Waiting),
     }
 }
@@ -674,6 +1002,13 @@ fn determine_opencode_status(
     // 丁T1：待决问答 = 语义红（终端在等用户作答）——短路既有启发式（否则 60s 后
     // 落 Idle 绿、问答卡挂不上去）
     if tail == TailSignal::WaitingForUser {
+        return SessionStatus::Waiting;
+    }
+    // 2.x idle 非成功收尾（评审二轮必办项 A）：语义红，不落启发式——能走到这里的
+    // 是「无 error 证据」的残余面（有证据已被 failed_request_status 前置规则
+    // 着色：aborted→绿 / provider.error→红），非成功回合显示为完成正是假绿治理
+    // 要防的现象。近期/过期都红（失败不随时间转绿）
+    if tail == TailSignal::TurnFailed {
         return SessionStatus::Waiting;
     }
     // CPU 为瞬时采样噪声大：仅当会话不是"assistant 已回复完"且 CPU 明显高（阈值提高至 15%）
@@ -1158,6 +1493,550 @@ mod tail_signal_tests {
     }
 }
 
+/// 2.x schema 分派与读路径测试（D1，夹具=本机真实库脱敏导出，D0-4 定案）
+#[cfg(test)]
+mod v2_tests {
+    use super::*;
+    use crate::session::ProcessForm;
+
+    fn fake_process(pid: u32, cwd: &str) -> AgentProcess {
+        AgentProcess {
+            pid,
+            cpu_usage: 0.0,
+            cwd: Some(std::path::PathBuf::from(cwd)),
+            form: ProcessForm::Cli,
+            exe: None,
+        }
+    }
+
+    /// 建 v2 库：session_v2 + session_message（+ project 供兜底段安静退场）
+    fn v2_db(path: &std::path::Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT,
+                 time_updated INTEGER, version TEXT, time_idle INTEGER, idle_outcome TEXT);
+             CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+                 time_created INTEGER, time_updated INTEGER, data TEXT);
+             CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT, name TEXT);",
+        )
+        .unwrap();
+    }
+
+    fn ins_session(conn: &Connection, id: &str, dir: &str, title: &str, ts: i64) {
+        conn.execute(
+            "INSERT INTO session_v2 (id, project_id, directory, title, time_updated, version)
+             VALUES (?1,'p1',?2,?3,?4,'2.0.22')",
+            rusqlite::params![id, dir, title, ts],
+        )
+        .unwrap();
+    }
+
+    fn ins_msg(conn: &Connection, id: &str, sid: &str, mtype: &str, seq: i64, ts: i64, data: &str) {
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+             VALUES (?1,?2,?3,?4,?5,?5,?6)",
+            rusqlite::params![id, sid, mtype, seq, ts, data],
+        )
+        .unwrap();
+    }
+
+    /// 夹具形态取自本机真实库脱敏导出（out/v2-messages.json）：
+    /// assistant 消息 data 顶层含 time/agent/model/content/finish/cost/tokens
+    fn assistant_data(content: &str, finish: Option<&str>) -> String {
+        match finish {
+            Some(f) => format!(
+                r#"{{"time":{{"created":1}},"agent":"build","content":{content},"finish":"{f}"}}"#
+            ),
+            None => format!(r#"{{"time":{{"created":1}},"agent":"build","content":{content}}}"#),
+        }
+    }
+
+    /// schema 探测：v2 库 → is_v2；纯 v1 库 → 非 v2（分派判据）
+    #[test]
+    fn schema_detect_by_table_presence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("v2.db");
+        v2_db(&p);
+        let c = Connection::open(&p).unwrap();
+        assert!(Schema::detect(&c).is_v2);
+        assert_eq!(Schema::detect(&c).session_table(), "session_v2");
+
+        let p1 = tmp.path().join("v1.db");
+        let c1 = Connection::open(&p1).unwrap();
+        c1.execute_batch("CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT);")
+            .unwrap();
+        assert!(!Schema::detect(&c1).is_v2);
+        assert_eq!(Schema::detect(&c1).session_table(), "session");
+    }
+
+    /// v2 消息读取：type 列给角色、content[] 内联给文本（无需 part 表）
+    #[test]
+    fn v2_message_info_reads_type_and_inline_content() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+                 time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .unwrap();
+        ins_msg(
+            &conn,
+            "m1",
+            "s1",
+            "user",
+            1,
+            100,
+            r#"{"time":{"created":100},"text":"hi","files":[],"agents":[]}"#,
+        );
+        ins_msg(
+            &conn,
+            "m2",
+            "s1",
+            "assistant",
+            2,
+            200,
+            &assistant_data(r#"[{"type":"text","text":"Hello there"}]"#, Some("stop")),
+        );
+        let (role, text, err) = get_last_message_info_v2(&conn, "s1", false);
+        assert_eq!(role.as_deref(), Some("assistant"));
+        assert_eq!(text.as_deref(), Some("Hello there"));
+        assert!(err.is_none());
+        assert_eq!(get_last_message_time_v2(&conn, "s1"), 200);
+    }
+
+    /// v2 错误形态：`data.error.{type,message}`（1.x 是 `{name,data.message}`）
+    #[test]
+    fn v2_error_uses_type_key() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_message (id TEXT PRIMARY KEY, session_id TEXT, type TEXT, seq INTEGER,
+                 time_created INTEGER, time_updated INTEGER, data TEXT);",
+        )
+        .unwrap();
+        ins_msg(
+            &conn,
+            "m1",
+            "s1",
+            "assistant",
+            1,
+            100,
+            r#"{"time":{"created":100},"content":[],"error":{"type":"aborted","message":"Aborted"}}"#,
+        );
+        let (_, _, err) = get_last_message_info_v2(&conn, "s1", false);
+        let e = err.expect("错误须解析");
+        assert_eq!(e.name, "aborted");
+        assert_eq!(e.message.as_deref(), Some("Aborted"));
+        // aborted → Idle 绿（沿 1.x MessageAbortedError 语义，D0-2）
+        assert_eq!(
+            failed_request_status(Some(&e.name)),
+            Some(crate::session::SessionStatus::Idle)
+        );
+        // provider.error → Waiting 红
+        assert_eq!(
+            failed_request_status(Some("provider.error")),
+            Some(crate::session::SessionStatus::Waiting)
+        );
+    }
+
+    /// v2 尾部信号映射（D0-1 表）逐臂
+    #[test]
+    fn v2_tail_signal_mapping() {
+        let mk = |mtype: &str, content: Option<&str>, finish: Option<&str>| SessionTailV2 {
+            message_type: mtype.to_string(),
+            finish: finish.map(String::from),
+            outcome: None,
+            tail_content: content.map(|c| serde_json::from_str(c).unwrap()),
+        };
+        // 末条 idle 消息 ∧ outcome=succeeded → TurnDone（2.0.22 实证 10 条）
+        assert_eq!(
+            tail_signal_v2(&SessionTailV2 {
+                message_type: "idle".into(),
+                finish: None,
+                outcome: Some("succeeded".into()),
+                tail_content: None,
+            }),
+            TailSignal::TurnDone
+        );
+        // D0-2 定案判据（评审 P1-4 + 二轮必办项 A）：idle outcome 在场且非
+        // succeeded → TurnFailed（determine 层红）；缺 outcome → Fallback 回退启发式
+        assert_eq!(
+            tail_signal_v2(&SessionTailV2 {
+                message_type: "idle".into(),
+                finish: None,
+                outcome: Some("failed".into()),
+                tail_content: None,
+            }),
+            TailSignal::TurnFailed,
+            "failed 收尾不得给绿信号"
+        );
+        assert_eq!(
+            tail_signal_v2(&mk("idle", None, None)),
+            TailSignal::Fallback,
+            "缺 outcome 证据不足 → 回退启发式，不猜"
+        );
+        // 用户尾 → Running（输入刚提交）
+        assert_eq!(
+            tail_signal_v2(&mk("user", Some(r#"{"type":"text","text":"hi"}"#), None)),
+            TailSignal::Running
+        );
+        // 尾 content = reasoning → Running
+        assert_eq!(
+            tail_signal_v2(&mk(
+                "assistant",
+                Some(r#"{"type":"reasoning","text":"x"}"#),
+                Some("tool-calls")
+            )),
+            TailSignal::Running
+        );
+        // 尾 content = tool（非 question）→ Running
+        assert_eq!(
+            tail_signal_v2(&mk(
+                "assistant",
+                Some(r#"{"type":"tool","name":"bash","state":{"status":"completed"}}"#),
+                Some("tool-calls")
+            )),
+            TailSignal::Running
+        );
+        // 尾 content = text ∧ finish=stop → TurnDone（回合收尾）
+        assert_eq!(
+            tail_signal_v2(&mk(
+                "assistant",
+                Some(r#"{"type":"text","text":"done"}"#),
+                Some("stop")
+            )),
+            TailSignal::TurnDone
+        );
+        // 尾 content = text ∧ finish=tool-calls → Running（尚有后续动作）
+        assert_eq!(
+            tail_signal_v2(&mk(
+                "assistant",
+                Some(r#"{"type":"text","text":"x"}"#),
+                Some("tool-calls")
+            )),
+            TailSignal::Running
+        );
+        // system 尾（无 content）→ Fallback 启发式
+        assert_eq!(
+            tail_signal_v2(&mk("system", None, None)),
+            TailSignal::Fallback
+        );
+    }
+
+    /// v2 待决 question（工具名键为 `name`，非 1.x 的 `tool`）→ WaitingForUser 语义红
+    #[test]
+    fn v2_pending_question_routes_to_waiting() {
+        let c = r#"{"type":"tool","id":"call_1","name":"question","state":{"status":"running","input":{"questions":[{"question":"q","options":[{"label":"a"}]}]}}}"#;
+        let tail = SessionTailV2 {
+            message_type: "assistant".to_string(),
+            finish: Some("tool-calls".to_string()),
+            outcome: None,
+            tail_content: Some(serde_json::from_str(c).unwrap()),
+        };
+        assert_eq!(tail_signal_v2(&tail), TailSignal::WaitingForUser);
+        assert_eq!(
+            determine_opencode_status(0.0, Some("assistant"), 0, 0, TailSignal::WaitingForUser),
+            crate::session::SessionStatus::Waiting
+        );
+    }
+
+    /// 评审 I1 回归锁：**仅 `name` 键、无 T3 形态**（pending 拍 input={} 的实况，
+    /// F2-3）也须判待决——单查 v1 的 `tool` 键在 v2 下名字分支恒 false，
+    /// 红牌会延迟到 running 拍 / 非标形态问答永不亮红
+    #[test]
+    fn v2_pending_question_name_key_alone_without_shape_still_waits() {
+        let c = r#"{"type":"tool","id":"call_2","name":"question","state":{"status":"running","input":{}}}"#;
+        let tail = SessionTailV2 {
+            message_type: "assistant".to_string(),
+            finish: Some("tool-calls".to_string()),
+            outcome: None,
+            tail_content: Some(serde_json::from_str(c).unwrap()),
+        };
+        assert_eq!(tail_signal_v2(&tail), TailSignal::WaitingForUser);
+    }
+
+    /// 评审 I2+I3 回归锁：user 尾文本取 `data.text`（卡片不退化为标题）；
+    /// role 取**最近对话消息**而非真末条——idle 尾下 role 须为 assistant
+    /// （CPU 噪声护栏 `cpu>15 && last_role!=assistant` 的前提，v1 等价语义）
+    #[test]
+    fn v2_user_tail_text_and_idle_tail_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        v2_db(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            ins_session(&conn, "ses_u", "E:/proj/u", "会话U", 5000);
+            ins_msg(
+                &conn,
+                "mu1",
+                "ses_u",
+                "assistant",
+                1,
+                4100,
+                &assistant_data(r#"[{"type":"text","text":"上一轮回复"}]"#, Some("stop")),
+            );
+            // 悬垂 user 尾：文本在 data.text 顶层、无 content[]（D0-4 迁移形态）
+            ins_msg(
+                &conn,
+                "mu2",
+                "ses_u",
+                "user",
+                2,
+                4200,
+                r#"{"time":{"created":4200},"text":"刚输入的问题"}"#,
+            );
+        }
+        let conn = Connection::open(&db).unwrap();
+        let (role, text) = get_v2_last_conversation_text(&conn, "ses_u");
+        assert_eq!(role.as_deref(), Some("user"), "role=最近对话消息的 type");
+        assert_eq!(text.as_deref(), Some("刚输入的问题"), "user 尾取 data.text");
+
+        // idle 尾追加后：role 仍取最近对话消息（assistant），不得变 "idle"
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, seq, time_created, time_updated, data)
+             VALUES ('mi9','ses_u','idle',3,4300,4300,'{\"outcome\":\"succeeded\"}')",
+            [],
+        )
+        .unwrap();
+        let procs = vec![fake_process(4343, "E:/proj/u")];
+        let sessions = get_opencode_sessions_with_db(&db, &procs);
+        assert_eq!(sessions.len(), 1);
+        let s = &sessions[0];
+        // 高 CPU 护栏走 determine_opencode_status：role=assistant 时 Fallback 信号
+        // 下 CPU 噪声不回黄（对齐 cpu_spike_after_assistant_reply_is_not_processing）
+        assert_eq!(
+            determine_opencode_status(
+                50.0,
+                Some("assistant"),
+                chrono::Utc::now().timestamp_millis(),
+                chrono::Utc::now().timestamp_millis(),
+                TailSignal::Fallback
+            ),
+            SessionStatus::Idle
+        );
+        // 端到端：该会话状态 Idle（idle 尾 finish 语义）且卡片文本是 user 尾
+        assert_eq!(s.status, SessionStatus::Idle);
+        assert_eq!(s.last_message.as_deref(), Some("刚输入的问题"));
+    }
+
+    /// v2 端到端：会话列表出卡 + 状态为 Idle（真实链路，替代旧 `no such table` 全断）
+    #[test]
+    fn v2_sessions_end_to_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        v2_db(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            ins_session(&conn, "ses_a", "E:/proj/a", "会话A", 5000);
+            ins_msg(
+                &conn,
+                "m1",
+                "ses_a",
+                "user",
+                1,
+                4000,
+                r#"{"time":{"created":4000},"text":"hi"}"#,
+            );
+            ins_msg(
+                &conn,
+                "m2",
+                "ses_a",
+                "assistant",
+                2,
+                4100,
+                &assistant_data(r#"[{"type":"text","text":"Hello"}]"#, Some("stop")),
+            );
+            ins_msg(
+                &conn,
+                "m3",
+                "ses_a",
+                "idle",
+                3,
+                4200,
+                r#"{"outcome":"succeeded"}"#,
+            );
+        }
+        let procs = vec![fake_process(4242, "E:/proj/a")];
+        let sessions = get_opencode_sessions_with_db(&db, &procs);
+        assert_eq!(
+            sessions.len(),
+            1,
+            "v2 库须出卡（旧路径 no such table 全断）"
+        );
+        let s = &sessions[0];
+        assert_eq!(s.id, "ses_a");
+        assert_eq!(s.status, crate::session::SessionStatus::Idle);
+        assert_eq!(s.last_message.as_deref(), Some("Hello"));
+    }
+
+    /// 评审二轮必办项 A 终态层（用户可见行为）：idle 非成功收尾的着色分工——
+    /// 无 error 证据 → TurnFailed 红（不落启发式假绿，近期/过期都红）；有 error
+    /// 证据走 failed_request_status 前置规则（provider.error 红 / aborted 绿，
+    /// 既有链零改动）。2.0.22 未观测过失败 idle，本测试锁的是**分工边界语义**
+    /// 而非实值形态。
+    #[test]
+    fn v2_idle_failed_outcome_colors_terminal_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        v2_db(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            // 会话 1：失败收尾且无任何 error 证据 → 红（TurnFailed 臂）
+            ins_session(&conn, "ses_noev", "E:/proj/f", "无证据失败", 5000);
+            ins_msg(
+                &conn,
+                "n1",
+                "ses_noev",
+                "user",
+                1,
+                4000,
+                r#"{"time":{"created":4000},"text":"hi"}"#,
+            );
+            ins_msg(
+                &conn,
+                "n2",
+                "ses_noev",
+                "assistant",
+                2,
+                4100,
+                &assistant_data(r#"[{"type":"text","text":"部分输出"}]"#, None),
+            );
+            ins_msg(
+                &conn,
+                "n3",
+                "ses_noev",
+                "idle",
+                3,
+                4200,
+                r#"{"outcome":"failed"}"#,
+            );
+            // 会话 2：失败收尾 + provider 类 error → 前置规则红（与 TurnFailed 同
+            // 色但不同路——前置规则优先级在先）
+            ins_session(&conn, "ses_pverr", "E:/proj/f2", "服务错误", 5100);
+            ins_msg(
+                &conn,
+                "p1",
+                "ses_pverr",
+                "user",
+                1,
+                4000,
+                r#"{"time":{"created":4000},"text":"hi"}"#,
+            );
+            ins_msg(
+                &conn,
+                "p2",
+                "ses_pverr",
+                "assistant",
+                2,
+                4100,
+                r#"{"time":{"created":4100},"content":[],"error":{"type":"provider.error","message":"quota"}}"#,
+            );
+            ins_msg(
+                &conn,
+                "p3",
+                "ses_pverr",
+                "idle",
+                3,
+                4200,
+                r#"{"outcome":"failed"}"#,
+            );
+            // 会话 3：失败收尾 + aborted（用户中断类）→ 前置规则绿（既有裁决：
+            // 中断是正常收尾语义）
+            ins_session(&conn, "ses_abort", "E:/proj/f3", "用户中断", 5200);
+            ins_msg(
+                &conn,
+                "a1",
+                "ses_abort",
+                "user",
+                1,
+                4000,
+                r#"{"time":{"created":4000},"text":"hi"}"#,
+            );
+            ins_msg(
+                &conn,
+                "a2",
+                "ses_abort",
+                "assistant",
+                2,
+                4100,
+                r#"{"time":{"created":4100},"content":[],"error":{"type":"aborted","message":"Aborted"}}"#,
+            );
+            ins_msg(
+                &conn,
+                "a3",
+                "ses_abort",
+                "idle",
+                3,
+                4200,
+                r#"{"outcome":"failed"}"#,
+            );
+        }
+        let procs = vec![
+            fake_process(4343, "E:/proj/f"),
+            fake_process(4344, "E:/proj/f2"),
+            fake_process(4345, "E:/proj/f3"),
+        ];
+        let mut sessions = get_opencode_sessions_with_db(&db, &procs);
+        sessions.sort_by(|a, b| a.id.cmp(&b.id));
+        assert_eq!(sessions.len(), 3);
+        let by = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(
+            by("ses_noev").status,
+            crate::session::SessionStatus::Waiting,
+            "无证据失败收尾 → 红（不落启发式假绿）"
+        );
+        assert_eq!(
+            by("ses_pverr").status,
+            crate::session::SessionStatus::Waiting,
+            "provider 类 error → 前置规则红"
+        );
+        assert_eq!(
+            by("ses_abort").status,
+            crate::session::SessionStatus::Idle,
+            "aborted（中断类）→ 前置规则绿（既有裁决语义）"
+        );
+    }
+
+    /// 混合库分派：v1 冻结表 + v2 表并存 → 走 v2（超集），1.x 历史会话仍可读
+    /// （D0-4 实证：session_v2 覆盖全部 1.x 会话）
+    #[test]
+    fn mixed_db_dispatches_to_v2_superset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("opencode.db");
+        v2_db(&db);
+        {
+            let conn = Connection::open(&db).unwrap();
+            // v1 冻结表也在场（内容为 1.x 遗留；v2 已含其投影）
+            conn.execute_batch(
+                "CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT, title TEXT, time_updated INTEGER);
+                 CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, data TEXT);
+                 CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO session VALUES ('ses_legacy','p1','E:/proj/legacy','旧会话',100)",
+                [],
+            )
+            .unwrap();
+            // v2 侧含该 1.x 会话的迁移投影（无 idle 列填充，末条 assistant finish=stop）
+            ins_session(&conn, "ses_legacy", "E:/proj/legacy", "旧会话", 100);
+            ins_msg(
+                &conn,
+                "lm1",
+                "ses_legacy",
+                "assistant",
+                1,
+                100,
+                &assistant_data(r#"[{"type":"text","text":"旧回复"}]"#, Some("stop")),
+            );
+        }
+        let procs = vec![fake_process(99, "E:/proj/legacy")];
+        let sessions = get_opencode_sessions_with_db(&db, &procs);
+        assert_eq!(sessions.len(), 1, "混合库须走 v2 且 1.x 历史会话可读");
+        assert_eq!(sessions[0].id, "ses_legacy");
+        assert_eq!(sessions[0].status, crate::session::SessionStatus::Idle);
+        assert_eq!(sessions[0].last_message.as_deref(), Some("旧回复"));
+    }
+}
+
 #[cfg(test)]
 mod matching_tests {
     use super::*;
@@ -1552,5 +2431,63 @@ mod live_probe_tests {
                 "未命中待决 question part（此刻无 opencode 问答在等；请在提问窗口内重跑）"
             }
         );
+    }
+
+    /// D1 验收②：真实库**副本**冒烟——2.x 会话出卡 + 1.x 历史会话仍可读。
+    ///
+    /// 跑法（须指向三件套副本，绝不查活库）：
+    /// `MAM_OC_SMOKE_DB=<副本路径> cargo test --lib opencode2_live_smoke -- --ignored --nocapture`
+    ///
+    /// 断言口径（对副本库跑**纯查询**，只读连接）：
+    /// ① `Schema::detect` 判 v2；② 库内每条 v2 会话都能在给定进程集下走出卡片
+    /// （旧路径下这些查询 `no such table` 全空——本用例即防该回归）；
+    /// ③ 抽样 1.x 时代的会话行同样可取到角色/文本（历史可见）。
+    #[test]
+    #[ignore = "实机冒烟：需 MAM_OC_SMOKE_DB 指向真实库三件套副本（只读）"]
+    fn opencode2_live_smoke_real_db_copy() {
+        let Ok(path) = std::env::var("MAM_OC_SMOKE_DB") else {
+            eprintln!("未设 MAM_OC_SMOKE_DB，跳过");
+            return;
+        };
+        let db = std::path::PathBuf::from(&path);
+        if !db.exists() {
+            eprintln!("副本不存在（{path}），跳过");
+            return;
+        }
+        let Some(conn) = crate::monitor::sqlite::open_readonly_with_timeout(&db) else {
+            eprintln!("DB 不可读，跳过");
+            return;
+        };
+        let schema = Schema::detect(&conn);
+        assert!(schema.is_v2, "真实 2.x 库须判为 v2 schema");
+        eprintln!("schema 判定：v2（表 {}）", schema.session_table());
+
+        // 逐会话取「角色/文本/尾部信号」三件（不依赖进程匹配，纯读路径冒烟）
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT id, version FROM session_v2 ORDER BY time_updated DESC")
+            .unwrap()
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let (mut n_v1, mut n_v2, mut ok) = (0, 0, 0);
+        for (sid, ver) in &rows {
+            let (role, _text, _err) = get_last_message_info_v2(&conn, sid, false);
+            assert!(
+                role.is_some(),
+                "{sid} 须取到末条消息角色（旧路径 no such table）"
+            );
+            let tail = get_session_tail_v2(&conn, sid).expect("须取到末条消息");
+            let _ = tail_signal_v2(&tail);
+            if ver.starts_with("1.") {
+                n_v1 += 1;
+            } else {
+                n_v2 += 1;
+            }
+            ok += 1;
+        }
+        eprintln!("副本冒烟：共 {ok} 条会话全数可读（2.x {n_v2} 条 / 1.x 历史 {n_v1} 条）");
+        assert!(ok > 0, "副本内须至少有一条会话");
+        assert!(n_v1 > 0, "1.x 历史会话须仍可读（迁移投影可见性）");
     }
 }

@@ -55,6 +55,7 @@ function okHost(enabledTools: string[]): Response {
     JSON.stringify({
       host: { name: "JARVIS-Mac", platform: "macos", version: "0.4.1" },
       enabledTools,
+      installedTools: ["claude", "codex", "kimi", "opencode"],
     }),
     { status: 200 }
   );
@@ -527,6 +528,7 @@ describe("Board 页头品牌行", () => {
           JSON.stringify({
             host: { name: "JARVIS-Win", platform: "windows", version: "0.4.1" },
             enabledTools: ["claude"],
+            installedTools: ["claude", "codex", "kimi", "opencode"],
           }),
           { status: 200 }
         );
