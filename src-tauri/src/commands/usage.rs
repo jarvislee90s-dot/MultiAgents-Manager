@@ -333,9 +333,11 @@ mod tests {
         );
     }
 
-    /// 三处登记之二/之三的一致性：前端码表 `KNOWN_USAGE_CODES`
-    /// 必须与 Rust 的 `USAGE_CODES` **同序同集合**——漏一个码，前端会把它收敛成
+    /// 码表**前端那一处**的一致性：`KNOWN_USAGE_CODES`
+    /// 必须与 Rust 权威表 `USAGE_CODES` **同序同集合**——漏一个码，前端会把它收敛成
     /// `usage-internal`（静默显示成通用错误，用户看到的 detail 也对不上）。
+    /// （码表的登记处 = ① Rust `USAGE_CODES` ② 前端本数组 ③ zh/en locale 模板；
+    /// 第 4 处 = `usage_ipc_test.rs` 的镜像副本**已删除**，该集成测试直接 `use` ①。）
     #[test]
     fn usage_codes_match_frontend_table() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

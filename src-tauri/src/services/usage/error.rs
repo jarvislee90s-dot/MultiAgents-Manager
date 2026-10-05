@@ -12,14 +12,15 @@ pub struct UsageError {
 impl UsageError {
     pub fn new(code: &str, detail: impl Into<String>) -> Self {
         // **码表是硬约束**（Task 20 fix round 1 / 评审 Minor 3）：本函数是**生产码的唯一入口**，
-        // 而三处一致性断言只比对「USAGE_CODES ↔ 前端码表 ↔ locale」——新增一个**没进表**的
-        // 生产码时那三处全绿，前端 `usageErrMsg` 却会把它静默收敛成 `usage-internal`
-        // （用户只看到通用错误，正是本任务点名的那一类静默失效）。
+        // 而一致性断言只比对「USAGE_CODES ↔ 前端 `KNOWN_USAGE_CODES` ↔ zh/en locale 模板」——
+        // 新增一个**没进表**的生产码时那三张表全绿，前端 `usageErrMsg` 却会把它静默收敛成
+        // `usage-internal`（用户只看到通用错误，正是本任务点名的那一类静默失效）。
         // 故在 debug/dev 构建里直接硬失败；release 不 panic（不把开发期笔误升级成线上崩溃），
         // 同一份表的生产可见性 + 自省用例仍守着它。
         debug_assert!(
             USAGE_CODES.contains(&code),
-            "错误码 `{code}` 未登记进 USAGE_CODES（三处登记：Rust 表 / 前端 KNOWN_USAGE_CODES / zh+en locale）"
+            "错误码 `{code}` 未登记进 USAGE_CODES（权威表；登记处：① Rust USAGE_CODES / \
+             ② 前端 KNOWN_USAGE_CODES / ③ zh+en locale 的 usage.rpc.* 模板）"
         );
         Self {
             code: code.into(),
@@ -32,12 +33,15 @@ impl UsageError {
     }
 }
 
-/// 全量错误码单一清单（**三处登记之一**：Rust 常量表 / 前端 `KNOWN_USAGE_CODES` /
-/// zh.json+en.json 的 `usage.rpc.*`）。新增码必须同时改三处，下面的测试负责锁住两侧不漂移。
+/// 全量错误码单一清单——**权威表**。同一张码表的**登记处**（新增码必须逐处同步）：
+/// ① 本表 `USAGE_CODES`；② 前端 `src/components/usage/usageErrors.ts` 的 `KNOWN_USAGE_CODES`；
+/// ③ `zh.json` + `en.json` 的 `usage.rpc.*` 模板。原先还有第 4 处 = `src-tauri/tests/usage_ipc_test.rs`
+/// 里另存的镜像副本，**已删除**（该集成测试改为直接 `use` 本表）。下面的测试负责锁住各处不漂移。
 ///
 /// **不是 `#[cfg(test)]`**（Task 20 fix round 1 / 评审 Minor 3）：它必须被 `UsageError::new`
 /// 在生产代码里引用，否则「生产码字面量」这一侧根本没有锁——`#[cfg(test)]` 下新增一个
-/// 没进表的生产码，三处断言全绿（评审实测）。
+/// 没进表的生产码，各断言全绿（评审实测）。`pub const` ⇒ 集成构建（如 `usage_ipc_test.rs`）
+/// **直接可用**，这是删除那份镜像的前提（P2-1）。
 pub const USAGE_CODES: &[&str] = &[
     "usage-db-failed",       // 账本库读写失败
     "usage-source-io",       // 源文件读取失败（该源本轮判失败，其余源继续）
@@ -165,7 +169,7 @@ mod tests {
         );
     }
 
-    /// 码表闭环（三处登记之二/之三）：每个码都必须在 zh.json 与 en.json 有 usage.rpc.<code>。
+    /// 码表闭环（locale 侧那一处的机械锁）：每个码都必须在 zh.json 与 en.json 有 usage.rpc.<code>。
     /// 文件读不到时 panic 带明确信息（不静默跳过）——与 pet 的 rpc_codes_have_i18n_keys 同款。
     #[test]
     fn usage_codes_have_i18n_keys() {

@@ -27,14 +27,16 @@
 //! **取飞行锁之前**调用。
 //! 锁：`cached_result_never_blocks_behind_an_in_flight_scan`（真跑复现整条环路）。
 //!
-//! ## ⚠️ 时区：窗口键按宿主本地、落库键可能按源自带时区（W-14，spec vs 计划冲突项）
-//! 本域**落库**的 `hour_key`/`day_key` 由各采集器按「该源自带时区，缺失才回退宿主本地」产出
-//! （§P6；七个源里**只有 codex** 用 `turn_context.timezone` 这个 IANA 名），而**查询侧**
-//! `range::resolve_range` 的窗口键一律走 `hour_key_of_host` / `day_key_of_host`（宿主本地）。
-//! 当某源的 IANA 时区 ≠ 宿主时区（δ ≠ 0）时，边界附近的明细行会落到查询窗口之外 → **少算**
-//! （静默、跨整点最多错 1 小时、跨日最多错 1 天）。**本机 δ = 0**（codex 的 `Asia/Shanghai`
-//! = 宿主 CST+8）→ 阶段① 验收不受影响。修复需要把 tz 持久化（改契约），属用户裁决范围——
-//! **不得在此处或采集器里静默假设两个时钟恒等**（详见 KNOWN-PLAN-DEFECTS「W-14」）。
+//! ## ✅ 时区：落库键与窗口键**一律宿主本地**（W-14 已由 Q-4 裁决消除）
+//! 本域**落库**的 `hour_key` / `day_key` 由各采集器一律走 `hour_key_of_host`（宿主本地）产出，
+//! 与**查询侧** `range::resolve_range` 的窗口键**同源**（spec §P6，2026-10-05 用户裁决）。
+//! **实现纪律**：各源自带的时区（七源里只有 codex 读 `turn_context.timezone`）**可读入备查、
+//! 不参与任何键计算**——「读得到却不用」是**有意**的，后来者**不得**把它当 bug「改回去」
+//! （改回命名时区即重造两套时钟）。封棺钉：`collect::tests::no_source_timezone_is_fed_into_any_key_function`
+//! （源码级自省：生产半边不得出现命名时区机器）+ `collectors::codex::tests::detail_hour_key_is_host_local_even_when_source_timezone_is_present`。
+//! **W-14 的旧失败模式作废**：原先「落库用源自带时区、窗口用宿主本地」= 两套时钟，δ ≠ 0 时
+//! 边界行落到窗外 → **静默少算**（跨整点 ≤1h、跨日 ≤1d）。统一到宿主本地后该分叉**结构上
+//! 不可能发生**，也**不再需要**「把 tz 持久化（改契约）」那类修法（详见 KNOWN-PLAN-DEFECTS「W-14」）。
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1305,6 +1307,125 @@ mod tests {
         assert_eq!(
             stats.bytes_read, 4,
             "4 字节文件、一遍扫描 = 4 字节（不是 0、不是 8）"
+        );
+    }
+
+    /// 源码自省锁的输入：**生产半边**（首个 `#[cfg(test)]` 之前）+ 去掉注释行与空白后的骨架。
+    /// 与 `commands/usage.rs` 的 `prod_only` / `code_only` 同款——只看代码、不看注释，
+    /// 否则把禁项抄进文档注释就能骗过反向锁（假绿）。
+    fn prod_only(src: &str) -> &str {
+        let marker = concat!("#[cfg", "(test)]");
+        match src.find(marker) {
+            Some(i) => &src[..i],
+            None => src,
+        }
+    }
+
+    fn code_only(src: &str) -> String {
+        src.lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect()
+    }
+
+    /// **实现纪律的源码级自省锁（spec §P6 改写后 / Q-4 裁决 / A-1）**：`services/usage/` 的
+    /// **生产半边**里，**没有任何地方把源时区喂进键函数**，且命名时区机器**不得回到本域**。
+    ///
+    /// 为什么行为锁不够：`collectors::codex::tests::detail_hour_key_is_host_local_even_when_source_timezone_is_present`
+    /// 只钉住 **codex 一路**（它是七源里唯一读过命名时区的源）。后来者「修回去」更可能的形态是
+    /// 在 `range.rs` 重造一个**带 tz 参数**的键函数、或让**别的源**也去读时区——那两条都不经过
+    /// codex 的用例。本锁把裁决的**结构面**钉死：键函数**只有宿主本地单参形态**。
+    ///
+    /// **能变红**（三支）：
+    /// ① 任一生产半边写回 `SourceTz` / `chrono_tz` / `from_name(` → 反向断言红；
+    /// ② 重造带参键函数（出现 `hour_key_of(` / `day_key_of(` 而非 `…_host(`）→ 反向断言红
+    ///    （**这就是「把源时区喂进键函数」的唯一可行形态**：宿主本地入口是单参的）；
+    /// ③ 把宿主本地键入口删光 → 正向断言红（防「本域压根没有键函数」时反向全绿的假绿）。
+    ///
+    /// 针一律 `concat!` 拆开写：否则本用例自己的字面量就会命中自己（恒真/恒假）。
+    /// 「生产半边」= 首个 `#[cfg(test)]` 之前：`collect.rs` 在中段就有 `#[cfg(test)] fn`，
+    /// 故它只被截到该处；**键计算全在 `collectors/*` 与 `range.rs` 的生产半边**，判别力不受影响。
+    #[test]
+    fn no_source_timezone_is_fed_into_any_key_function() {
+        let files: [(&str, &str); 24] = [
+            ("caps.rs", include_str!("caps.rs")),
+            ("collect.rs", include_str!("collect.rs")),
+            ("collectors/claude.rs", include_str!("collectors/claude.rs")),
+            ("collectors/codex.rs", include_str!("collectors/codex.rs")),
+            ("collectors/dsh.rs", include_str!("collectors/dsh.rs")),
+            ("collectors/kimi.rs", include_str!("collectors/kimi.rs")),
+            ("collectors/mod.rs", include_str!("collectors/mod.rs")),
+            (
+                "collectors/opencode.rs",
+                include_str!("collectors/opencode.rs"),
+            ),
+            (
+                "collectors/workbuddy.rs",
+                include_str!("collectors/workbuddy.rs"),
+            ),
+            ("collectors/zcode.rs", include_str!("collectors/zcode.rs")),
+            ("cursor.rs", include_str!("cursor.rs")),
+            ("dedup.rs", include_str!("dedup.rs")),
+            ("delta.rs", include_str!("delta.rs")),
+            ("error.rs", include_str!("error.rs")),
+            ("ledger.rs", include_str!("ledger.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+            ("model.rs", include_str!("model.rs")),
+            ("project.rs", include_str!("project.rs")),
+            ("provider.rs", include_str!("provider.rs")),
+            ("query.rs", include_str!("query.rs")),
+            ("range.rs", include_str!("range.rs")),
+            ("semantics.rs", include_str!("semantics.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("stream.rs", include_str!("stream.rs")),
+        ];
+        let code: String = files
+            .iter()
+            .map(|(_, src)| code_only(prod_only(src)))
+            .collect();
+        // 反向 ①：命名时区机器不得回来（A-1 已把它与 `chrono-tz` 依赖一起移除）
+        for forbidden in [
+            concat!("Source", "Tz"),
+            concat!("chrono", "_tz"),
+            concat!("chrono", "-tz"),
+            concat!("from_", "name("),
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "生产半边不得出现 `{forbidden}`：各源时区**可读入备查、不得参与键计算**\
+                 （spec §P6 / 2026-10-05 用户裁决）。「读得到却不用」是**有意**的，\
+                 后来者不得把它当 bug 修回去"
+            );
+        }
+        // 反向 ②：键函数**只有宿主本地单参形态**——出现带参形态即有人在给键函数喂时区
+        for forbidden in [concat!("hour_key", "_of("), concat!("day_key", "_of(")] {
+            assert!(
+                !code.contains(forbidden),
+                "生产半边出现了 `{forbidden}`：键函数只允许**宿主本地单参**形态\
+                 （`hour_key_of_host` / `day_key_of_host`）——带 tz 参数的键函数就是\
+                 「源时区参与键计算」，会重造窗口键与落库键的两套时钟（R-32/W-14 已随裁决消除）"
+            );
+        }
+        // 正向：宿主本地入口必须在场（否则上面两条会因为「本域压根没有键函数」而假绿）
+        for required in [
+            concat!("hour_key_of", "_host("),
+            concat!("day_key_of", "_host("),
+        ] {
+            assert!(
+                code.contains(required),
+                "生产半边必须仍有 `{required}`：这是本域**唯一**的键入口，\
+                 缺了它上面两条反向断言就退化成恒真"
+            );
+        }
+        // 正向（spec §P6「可读入备查」的另一半，不得被顺手删掉）：codex 仍必须把源时区
+        // 读进续读状态——删掉它就把「可读入备查」也一起做没了（与反向 ① 互为约束）。
+        assert!(
+            code.contains(concat!("tz_", "name")),
+            "codex 生产半边必须仍把 `turn_context.timezone` 读进续读状态备查\
+             （spec §P6：可读入备查**但**不得参与键计算；两半都要在）"
         );
     }
 }

@@ -22,6 +22,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use multi_agents_manager_lib::commands::usage as ipc;
 use multi_agents_manager_lib::services::usage::collect;
+use multi_agents_manager_lib::services::usage::error::USAGE_CODES;
 use multi_agents_manager_lib::services::usage::model::{
     UsageFilters, UsageGroupBy, UsageRange, UsageRangePreset, UsageSettings, UsageSettingsPatch,
 };
@@ -75,21 +76,14 @@ const SOURCE_IDS: [&str; 7] = [
     "dsh",
 ];
 
-/// 前端码表（`src/components/usage/usageErrors.ts`）的镜像：`errorCode` 必须落在这 8 个码里，
-/// 否则前端 `usageErrMsg` 会把它**静默收敛成通用错误**（用户看不到是哪一步失败）。
-/// （Rust 侧权威表 `USAGE_CODES` 是 `#[cfg(test)]`，集成构建拿不到，故在此镜像一份；
-/// 两侧的一致性由 `commands::usage` 的单测锁住。）
-const KNOWN_USAGE_CODES: [&str; 9] = [
-    "usage-db-failed",
-    "usage-source-io",
-    "usage-source-db-open",
-    "usage-range-invalid",
-    "usage-groupby-invalid",
-    "usage-filter-unavailable",
-    "usage-settings-invalid",
-    "usage-disabled",
-    "usage-internal",
-];
+// **直接引用权威码表**（P2-1：原先此处另存一份**镜像** `KNOWN_USAGE_CODES`，已删除）。
+// 错误码的登记处是：① `services/usage/error.rs` 的 `USAGE_CODES`（**权威表**，`pub const`、
+// **不是** `#[cfg(test)]`）；② 前端 `src/components/usage/usageErrors.ts` 的 `KNOWN_USAGE_CODES`；
+// ③ zh.json + en.json 的 `usage.rpc.*` 模板。②③ 与权威表的同序同集合由
+// `commands::usage` / `error` 的单测锁住，**集成构建不再需要也不得另存副本**
+// （旧镜像的注释自称「Rust 表是 `#[cfg(test)]` 拿不到」——那是**假陈述**，见 `error.rs:38`）。
+// 判据：`errorCode` 必须落在权威表内，否则前端 `usageErrMsg` 会把它**静默收敛成通用错误**。
+// （改动前，本文件在旧 `:78-92` 处另存了那份 `[&str; 9]` 镜像——本说明取代它。）
 
 /// ① `usage_collect`：真跑一轮采集（7 源，空 home）。
 ///
@@ -155,8 +149,8 @@ fn usage_collect_runs_seven_sources_and_pairs_ok_with_error_code() {
                 panic!("源 {} ok=false 必须给出 errorCode", s.source_id.db_id())
             });
             assert!(
-                KNOWN_USAGE_CODES.contains(&code),
-                "源 {} 的错误码 `{code}` 不在前端码表里 → 前端会静默显示成通用错误（W-23/W-28）",
+                USAGE_CODES.contains(&code),
+                "源 {} 的错误码 `{code}` 不在权威表 USAGE_CODES 里 → 前端会静默显示成通用错误（W-23/W-28）",
                 s.source_id.db_id()
             );
         }
@@ -185,7 +179,7 @@ fn usage_collect_runs_seven_sources_and_pairs_ok_with_error_code() {
     want.sort();
     assert_eq!(seen, want, "7 个源 id 必须各出现一次");
 
-    // **裁决 C**：恰 1 个失败源（workbuddy）、码在 8 码白名单内、且该源 0 行——
+    // **裁决 C**：恰 1 个失败源（workbuddy）、码在权威表 `USAGE_CODES` 内、且该源 0 行——
     // 这条把上面的 `else` 分支从「纸面」变成真跑（此前 7/7 ok=true，白名单从不被查）。
     let failed: Vec<_> = r.sources.iter().filter(|s| !s.ok).collect();
     assert_eq!(
@@ -205,7 +199,7 @@ fn usage_collect_runs_seven_sources_and_pairs_ok_with_error_code() {
         Some("usage-source-io"),
         "workbuddy 的坏库必须报 usage-source-io（`workbuddy.rs` 的 NOTADB 路径）"
     );
-    assert!(KNOWN_USAGE_CODES.contains(&bad.error_code.as_deref().unwrap()));
+    assert!(USAGE_CODES.contains(&bad.error_code.as_deref().unwrap()));
     assert_eq!(
         (bad.parsed_files, bad.new_records),
         (0, 0),
@@ -349,7 +343,7 @@ fn usage_dashboard_wire_shape_is_frozen_contract() {
         v["collectedAt"].as_i64().is_some(),
         "collectedAt 是非空 number"
     );
-    assert!(!KNOWN_USAGE_CODES.is_empty());
+    assert!(!USAGE_CODES.is_empty());
 }
 
 /// ③ `usage_records`：W6——记录页 `groupBy` **只接受 tool | project**；

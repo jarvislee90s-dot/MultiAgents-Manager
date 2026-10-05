@@ -9,7 +9,7 @@ const t = vi.fn((k: string, p?: Record<string, unknown>) =>
 );
 
 describe("usageErrMsg（用量域错误码 → i18n）", () => {
-  it("KNOWN_USAGE_CODES 与 zh/en 的 usage.rpc.* 键集合一致（三处登记不漂移）", () => {
+  it("KNOWN_USAGE_CODES 与 zh/en 的 usage.rpc.* 键集合一致（码表各处同步、不漂移）", () => {
     const codeSet = [...KNOWN_USAGE_CODES].sort();
     expect(codeSet).toEqual(Object.keys(zhLocale.usage.rpc).sort());
     expect(codeSet).toEqual(Object.keys(enLocale.usage.rpc).sort());

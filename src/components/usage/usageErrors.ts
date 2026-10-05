@@ -1,5 +1,11 @@
-// 用量域前端错误码白名单——与 Rust 的 USAGE_CODES（services/usage/error.rs）及
-// locales 的 usage.rpc.* **三处一一对应**（同 pet 的 KNOWN_RPC_CODES 纪律）。
+// 用量域前端错误码白名单。**同一张码表的登记处**（新增码必须逐处同步）：
+// ① 权威表 = Rust `services/usage/error.rs` 的 `USAGE_CODES`（`pub const`，**不是** `#[cfg(test)]`）；
+// ② 本数组 `KNOWN_USAGE_CODES`（**必须与权威表同序同集合**，由 `commands::usage` 的源码自省锁逐字比对）；
+// ③ zh.json + en.json 的 `usage.rpc.*` 模板（每个码都要有键，含 `{{err}}` 的要求见
+//    `tests/usage/usageErrors.test.ts`）。**原先还有第 4 处 = `src-tauri/tests/usage_ipc_test.rs`
+//    里另存的镜像副本，已删除**——该集成测试改为**直接 `use` 权威表 `USAGE_CODES`**
+//    （旧镜像的注释自称"Rust 表是 `#[cfg(test)]` 拿不到"，与 `error.rs:38` 的明文相反，是假陈述）。
+// 同 pet 的 KNOWN_RPC_CODES 纪律：未知码一律收敛 `usage-internal`，不得静默放行。
 export const KNOWN_USAGE_CODES = [
   "usage-db-failed",
   "usage-source-io",

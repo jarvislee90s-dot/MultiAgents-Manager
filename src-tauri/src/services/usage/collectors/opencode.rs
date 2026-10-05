@@ -71,7 +71,21 @@ impl OpenCodeCollector {
         // 口径是「解析了**几个文件**」——SQLite 源读的是**一个库文件**（不是会话行数；
         // 任务书按会话行累加会让 UI 把「库里的会话数」当文件数显示）。
         b.parsed_files = 1;
-        let has_v2 = table_exists(&conn, "session_v2");
+        // **A-3 三态（第三轮评审必改 P1）**：`table_exists` 的布尔便捷形态已删除——它把
+        // `ProbeFailed`（探测本身失败）压成 `false`，与三态语义矛盾。此处是「在场才继续」的
+        // gate，同样必须显式 match：`Absent` 是 V1-only 安装的**预期**分支（静默退回 V1），
+        // 而 `ProbeFailed` 必须**响亮**（否则安静地少一批 V2 会话，正是 A-3 要消灭的静默族）。
+        let has_v2 = match table_state(&conn, "session_v2") {
+            TableState::Present => true,
+            TableState::Absent => false,
+            TableState::ProbeFailed(e) => {
+                log::warn!(
+                    "usage/opencode: `session_v2` 表探测本身失败（库损坏 / 锁死 / 权限？）：{e} → \
+                     本轮按 V1 口径采集（该源可能少一批 V2 会话）"
+                );
+                false
+            }
+        };
         // 会话行：V2 优先，V1 仅补 V2 没有的 id（**超集去重**）
         let mut sessions: Vec<SessionRow> = Vec::new();
         let v2_ids: HashSet<String> = if has_v2 {
@@ -87,16 +101,18 @@ impl OpenCodeCollector {
         // 缺表时 turn / 请求 / 工具会**整层归零**而四桶照常出数 → 用户看到的是「这个源没有回合/
         // 请求/工具」，而不是「表缺了」。这里**每轮一次性**告警（避免逐会话刷屏）；
         // 「表在场却查不动」（列名不符 / 库被锁）由各扫描器自报。
-        if has_v2 && !table_exists(&conn, "session_message") {
-            log::warn!(
-                "usage/opencode: `session_v2` 在场但 `session_message` 不存在 → 逐消息层整层不可得\
-                 （turn/请求/工具本轮为 0，四桶仍出数）"
+        if has_v2 {
+            warn_if_table_missing(
+                &conn,
+                "session_message",
+                "逐消息层整层不可得（turn / 请求 / 工具本轮为 0，四桶仍出数）",
             );
         }
-        if v1_only_n > 0 && !table_exists(&conn, "message") {
-            log::warn!(
-                "usage/opencode: {v1_only_n} 个 V1 独有会话存在但 `message` 表不存在 → \
-                 它们的 turn/请求/工具本轮为 0（四桶仍出数）"
+        if v1_only_n > 0 {
+            warn_if_table_missing(
+                &conn,
+                "message",
+                &format!("{v1_only_n} 个 V1 独有会话的 turn / 请求 / 工具本轮为 0（四桶仍出数）"),
             );
         }
         sessions.extend(v1_only.into_iter().filter(|s| !v2_ids.contains(&s.id)));
@@ -259,7 +275,10 @@ enum TableState {
     ProbeFailed(rusqlite::Error),
 }
 
-/// 表探测（三态）。**调用方必须显式处理 `ProbeFailed`**（响亮），不得再压回 bool。
+/// 表探测（三态）。**调用方必须显式处理 `ProbeFailed`**（响亮），不得再压回 bool——
+/// 旧的布尔便捷形态 `table_exists` 已删除（第三轮评审必改 P1：它把 `ProbeFailed` 压成 `false`，
+/// 与本三态的语义直接矛盾）。有源码级自省锁钉住：
+/// `tests::production_half_never_folds_the_table_probe_back_to_bool`。
 fn table_state(conn: &Connection, name: &str) -> TableState {
     match conn.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
@@ -274,11 +293,20 @@ fn table_state(conn: &Connection, name: &str) -> TableState {
     }
 }
 
-/// 布尔便捷形态（**只给"在场才继续"的调用点**）：`Present` 才算在场。
-/// `ProbeFailed` 也返回 `false` 是刻意的——**入口已由 `open_usage_db` 的探针挡住**
-/// 不可读的库（A-3 步②），走到这里的连接必定可读；此处再压成 bool 不会造成新的静默。
-fn table_exists(conn: &Connection, name: &str) -> bool {
-    matches!(table_state(conn, name), TableState::Present)
+/// **「表不在场」的告警（A-3 三态 / 第三轮评审必改 P1）**：两种"不在场"必须**分开说**——
+/// `Absent` = 该代际安装里**确定**没有这张表（V1/V2 双 schema 的**预期**分支）；
+/// `ProbeFailed` = **探测本身失败**（库损坏 / 锁死 / 权限），处置完全不同（要去看库）。
+/// 旧形态 `!table_exists(..)` 把两者说成同一句「表不存在」= **误报**（与三态语义矛盾，
+/// 且把探测失败藏进"预期分支"的静默里）。两种都**响亮**，话术不同、可区分。
+fn warn_if_table_missing(conn: &Connection, table: &str, consequence: &str) {
+    match table_state(conn, table) {
+        TableState::Absent => log::warn!("usage/opencode: `{table}` 表不存在 → {consequence}"),
+        TableState::ProbeFailed(e) => log::warn!(
+            "usage/opencode: `{table}` 表探测本身失败（库损坏 / 锁死 / 权限？）：{e} → {consequence}"
+        ),
+        // 在场：调用点只在「它不在场」时才告警，走到这里说明前提已变（不告警、不误报）
+        TableState::Present => {}
+    }
 }
 
 /// **A-3 推广**：`prepare()` 失败时统一留痕（把 fix round 1 在 `load_sessions` 里做的
@@ -310,9 +338,9 @@ fn load_sessions(conn: &Connection, table: &str, out: &mut Vec<SessionRow>) -> H
     // **这里的软失败是刻意的，不要"顺手"改成返回 `Err`**（与 zcode 的 `load_sessions` 不同）：
     // 本函数是 **V1/V2 双 schema 的表探测**——调用方对 `"session"`（V1）无条件试一次，
     // 而 **V2-only 的安装里 `session` 表本来就不存在**，此时 `prepare()` 必然失败且属预期，
-    // 所以只能软失败为空集（调用方再用 `table_exists("session_v2")` 与超集去重决定用哪代）。
+    // 所以只能软失败为空集（调用方再用 `table_state("session_v2")` 与超集去重决定用哪代）。
     // 已知边界（登记在 §3.2.2 的"未改/有保留"）：**表存在但列名不符**时也会走这条静默路径，
-    // 表现为该源安静地少一批会话。要收紧就得先 `table_exists` 再区分"表不存在"与"列不符"，
+    // 表现为该源安静地少一批会话。要收紧就得先 `table_state` 再区分"表不存在"与"列不符"，
     // 属可选加固、不在本轮范围（现有 fixture 四表合法，不会红）。
     let Ok(mut stmt) = conn.prepare(&sql) else {
         // **Minor #3（fix round 1，不静默）+ A-3（三态）**：三种情况必须分开——
@@ -1165,7 +1193,9 @@ mod tests {
             matches!(table_state(&v2_only, "session"), TableState::Absent),
             "V2-only 安装里 V1 的 `session` 表**确定不存在** = 预期分支（不告警）"
         );
-        assert!(!table_exists(&v2_only, "session"), "布尔便捷形态同义");
+        // 旧的布尔便捷形态 `table_exists` 已删除（它会 `ProbeFailed → false`）——该断言的
+        // 语义等价物就是上面这一条 `Absent`，而「不得再压回 bool」由源码级自省锁
+        // `production_half_never_folds_the_table_probe_back_to_bool` 承担（覆盖**全部**调用点）。
         // ② NOTADB：探测**本身失败** → 必须是 ProbeFailed（响亮），不得伪装成「表不存在」
         let dir = tempfile::tempdir().unwrap();
         let bad = dir.path().join("bad.db");
@@ -1182,6 +1212,59 @@ mod tests {
                 "NOTADB 上探测本身失败 → 必须是 ProbeFailed（响亮），实际 {other:?} \
                  —— 退回 `.unwrap_or(false)` 语义则那条告警永不触发"
             ),
+        }
+    }
+
+    /// **第三轮评审必改 P1 的源码级自省锁**：本文件的**生产半边**不得再把三态表探测压回 bool。
+    ///
+    /// `TableState` 的 doc 明文写着「调用方必须显式处理 `ProbeFailed`（响亮），不得再压回 bool」，
+    /// 而修前有一支布尔便捷形态 `table_exists`（`ProbeFailed → false`）、**三处调用点全走它**
+    /// ⇒ 那条要求当时只是**纸面纪律**（P1 复核实证：`!table_exists(..)` 在探测失败时会误报
+    /// 「表不存在」，把库损坏/锁死/权限说成该代际的预期缺表）。本锁把它变成机械纪律，
+    /// 覆盖**全部**调用点（不只是被点名的那两处）。
+    ///
+    /// **能变红**：把任一处改回 `table_exists(...)`（或重造该便捷形态）→ 反向断言红；
+    /// 删掉两种"不在场"话术之一、或删掉三态任一臂 → 正向断言红。
+    ///
+    /// 针一律 `concat!` 拆开写（否则本用例自己的字面量命中自己）；只看**生产半边 + 去注释**
+    /// ——注释里为说明历史确实写了旧形态的名字，不看注释才谈得上机械纪律。
+    #[test]
+    fn production_half_never_folds_the_table_probe_back_to_bool() {
+        let marker = concat!("#[cfg", "(test)]");
+        let src = include_str!("opencode.rs");
+        let prod = match src.find(marker) {
+            Some(i) => &src[..i],
+            None => src,
+        };
+        let code: String = prod
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        // 反向：布尔便捷形态不得存在（它正是「压回 bool」的载体）
+        let forbidden = concat!("table_", "exists(");
+        assert!(
+            !code.contains(forbidden),
+            "生产半边不得出现 `{forbidden}`：三态探测的调用方必须**显式 match**——\
+             压回 bool 会让 `ProbeFailed`（库损坏 / 锁死 / 权限）伪装成「表不存在」（误报），\
+             正是 A-3 三态要消灭的那类静默"
+        );
+        // 正向：两种"不在场"必须各有一句可区分的话术，且三态必须都还在场
+        // （针里**不得带空格**：`code` 已去掉全部空白）
+        for required in [
+            concat!("warn_if_table", "_missing("),
+            concat!("TableState::", "Absent"),
+            concat!("TableState::", "ProbeFailed"),
+            concat!("TableState::", "Present"),
+        ] {
+            assert!(
+                code.contains(required),
+                "生产半边必须仍有 `{required}`：缺了它，「表不存在」与「探测本身失败」\
+                 就无法区分 / 无法被显式处理"
+            );
         }
     }
 
