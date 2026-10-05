@@ -8,9 +8,9 @@
 //! `DB`；claude 那条还要 `settings::save`）再额外调 `support::setup()`，两者互不干扰。
 //! （lib 单测构建不走这条路：`CollectContext::new` 注入空规则 → 采集器不读设置库，
 //! 见 GC 21 / §3.2.3 FIX-6。）
-// `setup()` 只被最后一条用例（全局入口冒烟）调用：全局 `DB` 是 `Lazy`，不重定向 HOME/MAM_HOME
-// 就会读写开发机真实 `~/.mam/mam.db`（D-07）；其余用例全走私有库、不碰 `setup()`，
-// 因此 `INIT` / `setup` 在本 target 有调用方、不产生 dead_code 告警（零新告警门禁）。
+// `setup()` 被两条用例调用（全局入口冒烟 + Task 11 的 claude 三态落库）：全局 `DB` 是 `Lazy`，
+// 不重定向 HOME/MAM_HOME 就会读写开发机真实 `~/.mam/mam.db`（D-07）；其余用例全走私有库、
+// 不碰 `setup()`，因此 `INIT` / `setup` 在本 target 有调用方、不产生 dead_code 告警（零新告警门禁）。
 mod support;
 
 use std::collections::BTreeMap;
@@ -557,5 +557,79 @@ fn cursor_row_write_failure_keeps_the_watermark_unadvanced() {
     assert!(
         dao::load_cursors_conn(&conn, "claude").is_empty(),
         "游标批必须整体回滚：半推进的水位会让毒行对应的源数据永久丢失"
+    );
+}
+
+/// **B6 回归（Task 11 Step 6）**：供应商三态必须由采集器经 `DeltaBuilder::provider_of` 落进
+/// `usage_detail.provider_kind`。采集器若直接调 `provider::resolve_provider`，
+/// `kind_by_provider` 永远是空的 → `DeltaBuilder::detail()` 只能 `unwrap_or(Unknown)`
+/// → 明细与日聚合的 `provider_kind` 恒 `unknown` → 说明书 D8 / §4.3 的
+/// 「实测 / 推断 / 未知」三态在 UI 上永久退化（这是需求项，不是诊断列）。
+#[test]
+fn claude_provider_kind_is_persisted_to_usage_detail() {
+    // 全局设置库：本用例要 settings::save(...)，且**集成构建**下采集器经 `ctx.provider_rules()`
+    // 回落到 `settings::load()` → 必须先重定向 HOME/MAM_HOME（否则写/读开发机真实库）
+    // （lib 单测构建不走这条路：`CollectContext::new` 注入空规则，见 §3.2.3 FIX-6）
+    support::setup();
+    // 账本库：**本用例私有**（不用全局 DB —— 见 Global Constraints 19 / §3.2.2 阻塞 2）
+    let mut conn = support::open_ledger_db("claude_provider_kind");
+    // claude 没有供应商字段（矩阵：❌ 无字段 → 推断）→ 配一条用户规则，期望判定为 Inferred
+    multi_agents_manager_lib::services::usage::settings::save(
+        &multi_agents_manager_lib::services::usage::model::UsageSettings {
+            provider_map_rules: r#"{"rules":[{"prefix":"claude-","provider":"anthropic"}]}"#.into(),
+            ..Default::default()
+        },
+    );
+    let home = tempfile::tempdir().unwrap();
+    let proj = home.path().join(".claude/projects/-p-A");
+    std::fs::create_dir_all(&proj).unwrap();
+    std::fs::write(
+        proj.join("sess-kind.jsonl"),
+        format!(
+            "{}\n",
+            serde_json::json!({"type":"assistant","sessionId":"s-kind","cwd":"/p/A","uuid":"u1",
+                "message":{"id":"m1","model":"claude-sonnet-4",
+                    "usage":{"input_tokens":10,"cache_read_input_tokens":0,
+                             "cache_creation_input_tokens":0,"output_tokens":1},"content":[]},
+                "timestamp":"2026-10-03T09:00:00Z"})
+        ),
+    )
+    .unwrap();
+    let cursors = std::collections::HashMap::new();
+    let ctx = multi_agents_manager_lib::services::usage::collect::CollectContext::new(
+        home.path(),
+        1_700_000_000_000,
+        &cursors,
+    );
+    use multi_agents_manager_lib::services::usage::collect::UsageCollector;
+    let delta = multi_agents_manager_lib::services::usage::collectors::claude::ClaudeCollector
+        .collect(&ctx)
+        .unwrap();
+    ledger::apply_delta_conn(&mut conn, UsageSourceId::Claude, &delta).unwrap();
+
+    // 明细回读用**全时段哨兵窗口**：本用例的 hour_key 由 fixture 的记录时间戳
+    // （`"timestamp":"2026-10-03T09:00:00Z"`）经 `hour_key_of(ts, &TZ)`（`TZ = HostLocal`）换算，
+    // 键值随宿主时区漂（UTC+8 → `2026-10-03T17`）。字面量窗口 `2026-10-03T00..T23` 只在
+    // UTC-9..+14 的宿主上同代，UTC-10 以西就滑到前一天 → `.expect` 假红。
+    // 哨兵窗口与宿主时区无关，**永远不可能再漂**（§3.2.3 FIX-3 同类）。
+    let rows = dao::query_detail_conn(&conn, "0000-00-00T00", "9999-99-99T99");
+    let row = rows
+        .iter()
+        .find(|r| r.session_id == "s-kind")
+        .expect("采集器产出的明细必须落库");
+    assert_eq!(row.provider, "anthropic");
+    assert_eq!(
+        row.provider_kind,
+        SourceKind::Inferred,
+        "provider_kind 必须经 provider_of 落库；恒 Unknown = 采集器绕过了唯一入口（B6）"
+    );
+    // 日聚合仍用**同代字面量窗口**（2026-10）：它同时锁住"明细/日聚合的日键来自 fixture 的
+    // 2026-10-03 记录时间戳"——若 ts 解析失败退化到 ctx.now_ms（2023-11-14），这里立刻空集。
+    let daily = dao::query_daily_conn(&conn, "2026-10-01", "2026-10-31");
+    assert!(
+        daily
+            .iter()
+            .any(|r| r.provider == "anthropic" && r.provider_kind == SourceKind::Inferred),
+        "日聚合必须带三态（B6）：{daily:?}"
     );
 }
