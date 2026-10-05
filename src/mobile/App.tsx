@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 import ArchiveBoard from "./ArchiveBoard";
 import ArchiveDetail from "./ArchiveDetail";
 import Board from "./Board";
+import NewSessionForm from "./NewSessionForm";
 import PairPage from "./PairPage";
 import SessionDetail from "./SessionDetail";
 import type { ArchivedSession } from "./api";
@@ -36,6 +37,10 @@ export default function App() {
   // 归档会话（历史页 → 归档详情）。激活回执（onActivated）一次清两级——乐观回看板
   const [historyOpen, setHistoryOpen] = useState(false);
   const [archiveSelected, setArchiveSelected] = useState<ArchivedSession | null>(null);
+  // 新建会话页（H10 Task 12）：zcode 无头新建表单。Board 常驻（hidden）——表单返回后
+  // 看板数据与滚动位置原生保留（与历史页同款）；与四家 CLI 新建入口的 UI 融合留
+  // session-create Phase C（计划范围注记）
+  const [newSessionOpen, setNewSessionOpen] = useState(false);
   // onPaired 双通道复用（PairPage 手动配对成功 / Board 首拍探测成功）：
   // Board 侧一次挂载只发一次，重复置 true 时 React 对相同值自动 bail out，无谓重渲染可忽略
   const onPaired = useCallback(() => setPaired(true), []);
@@ -60,17 +65,25 @@ export default function App() {
       {/* Board 常驻持轮询（探测也来自轮询首拍）；未配对态 / 查看详情 / 历史页时隐藏
           （hidden 而非卸载：会话数据与轮询保持，返回免重拉） */}
       {paired !== false && (
-        <div className={paired === true && !selected && !historyOpen ? "contents" : "hidden"}>
+        <div
+          className={
+            paired === true && !selected && !historyOpen && !newSessionOpen ? "contents" : "hidden"
+          }
+        >
           <Board
             onPaired={onPaired}
             onUnpaired={onUnpaired}
             onOpenSession={setSelected}
             onOpenHistory={() => setHistoryOpen(true)}
+            onOpenNewSession={() => setNewSessionOpen(true)}
             onSessionsChanged={handleSessionsChanged}
           />
         </div>
       )}
       {paired === true && selected && <SessionDetail session={selected} onBack={onBackToBoard} />}
+      {paired === true && newSessionOpen && (
+        <NewSessionForm onBack={() => setNewSessionOpen(false)} />
+      )}
       {paired === true && historyOpen && !archiveSelected && (
         <ArchiveBoard
           onBack={() => setHistoryOpen(false)}

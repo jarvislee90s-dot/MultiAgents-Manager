@@ -77,6 +77,10 @@ interface BoardProps {
   onOpenSession?: (session: Session) => void;
   /** 历史入口点击回调（历史会话区 spec §7.1）：进入归档历史页 */
   onOpenHistory: () => void;
+  /** 新建会话入口回调（H10 Task 12：zcode 无头新建表单）。**缺省时不渲染该按钮**
+   *  ——既有 Board 测试/用法完全不受影响；与四家 CLI 新建的入口融合留 session-create
+   *  Phase C（计划范围注记） */
+  onOpenNewSession?: () => void;
   /** T1 活状态流：看板数据每拍更新（SSE 快照/跃迁、降级 3s 轮询、30s 对账）时
    *  上报当前会话列表。App 据此把进入详情时定格的 selected 快照按会话身份对齐到
    *  活会话——停留详情页期间状态自动更新（红卡/总结横幅自动切换），不另起轮询 */
@@ -93,6 +97,7 @@ export default function Board({
   onUnpaired,
   onOpenSession,
   onOpenHistory,
+  onOpenNewSession,
   onSessionsChanged,
 }: BoardProps) {
   const [data, setData] = useState<SessionsResponse | null>(null);
@@ -428,6 +433,18 @@ export default function Board({
       <header className="mb-3 flex items-baseline justify-between">
         <h1 className="text-lg font-semibold text-[var(--tx)]">会话看板</h1>
         <span className="flex items-center gap-2">
+          {/* H10（Task 12）新建入口：与「历史」并列；缺回调时不渲染（既有用法零变化） */}
+          {onOpenNewSession && (
+            <button
+              type="button"
+              data-testid="open-new-session"
+              onClick={onOpenNewSession}
+              className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 enabled:hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300"
+              aria-label="新建会话"
+            >
+              ＋ 新建
+            </button>
+          )}
           <button
             type="button"
             onClick={onOpenHistory}
