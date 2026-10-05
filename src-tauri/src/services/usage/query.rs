@@ -1,0 +1,2321 @@
+//! 用量查询层：只读本地账本，**零文件扫描**（契约 §3 要点 1 / GC 3）。
+//! 取数口径（本节的实现约定，逐条可测）：
+//! * **小时粒度视图**（近 5 小时 / 当日）→ 明细表 `usage_detail`（小时桶）；项目键**取自明细行**
+//!   （记录级 `project_key`，D21 规则④/R2——**不再**按 session 反查会话维度表）；
+//! * **日粒度视图**（近 7 天 / 近 30 天 / 自定义）→ 日聚合表 `usage_daily`（永久保留），
+//!   项目键同样取自日聚合行（与小时档同一记录级键，两档口径一致）；
+//! * **计数类/工作小结** 一律取明细表（保留期内可得），超出保留期 → 相应字段 `null`（空态）；
+//!   其中**会话数与 turn 数只计父会话**（D17 计数类分层，R3）；
+//! * **`userEst` 可空**：`None` = 该源读不到用户文本 = 不可得（两档都出 `null`，不填 0，R1）；
+//! * 分组行**返回全部**（组数天然有界：8 工具 / ~40 项目 / 12 供应商 / ~40 模型），
+//!   「10 行 + 等N」的折叠是展示层的事（UI 自己知道总行数）；
+//! * 环比：上一等长周期区间同法取数；**上一周期无数据 → `compare: None`**（不显示对比段）。
+//! * **跨小时的 `tool_stats` `(0, ms>0)` 条目**（W-39 / Task 17 实测：次数落在 `tool/call` 那一小时、
+//!   耗时落在 `result` 那一小时）**如实呈现**——本层不删、不归零；0 次调用时「平均耗时」按
+//!   **不可得**给 `null`（不做除零，也不编造 0）。
+//!
+//! ## ⚠️ 已知假设与分叉（R-32：**不得静默假设窗口键与落库键同钟**）
+//!
+//! 本层的窗口键**一律按宿主本地时区**生成（`range::resolve_range` 内部只用
+//! `hour_key_of_host` / `day_key_of_host`），而采集侧按 spec §P6 对**有自带时区的源**
+//! （目前只有 codex 的 `turn_context.timezone`，本机 `Asia/Shanghai`）用**该源的命名时区**生成落库键。
+//! 当**源时区 ≠ 宿主时区**（记 δ = 两者偏移差）时，边界附近的明细行会落到查询窗口之外 → **少算**
+//! （跨整点最多错 1 小时、跨日最多错 1 天；静默，行数不涨、数值偏小）。
+//!
+//! **这是 spec 与计划之间的冲突，不是本模块的选择**：spec §P6 逐字写着「跨源日界：**优先用各源
+//! 自带时区**……参考实现 Codex++ 在这里有缺陷（只用宿主本地时区），本次不沿用其做法」——即 spec
+//! **明文拒绝**「只按宿主本地日界」；而计划① 的 `resolve_range(range, now_ms)` **没有 tz 参数**。
+//! 本模块按**计划①** 实现（契约 §2 的 `UsageRange.from/to` 也明文是「本地日 `YYYY-MM-DD`」），
+//! 并在此**显式登记**该分叉，上报 ①→② 对齐复核与用户裁决。
+//! 真修法需要把「每条记录属于哪个时区」**持久化**（`usage_detail` / `usage_session` 加列或加表）
+//! → 属契约 §4 变更，按契约变更纪律必须**先回写契约**，执行侧不得自行选一个执行。
+//! **本机 δ = 0**（宿主 CST+8 == codex 的 `Asia/Shanghai`）⇒ 阶段① 的本机验收不受影响。
+//!
+//! ## 已知口径差异（**如实登记，本层不修**；均为上游/契约级决定，带进 ①→② 对齐复核）
+//!
+//! * **日档无会话维度**（评审判决 A）：日聚合行**不带 `session_id`**（粒度是「日 × 源 × 项目 ×
+//!   供应商 × 模型」）⇒ 日档里任何**按会话**的判定都**不可得**。本层按 GC 7 的处理：
+//!   **`recentSession` 日档直接给 `null`**（契约里该块本身可空；**不得**再聚合出空集，否则 UI 会
+//!   显示「本会话 **0**」这个**看起来像真实测量值的 0**，`miniBarRange = last7d` 时可见）；
+//!   **分组行的 `is_subagent` 恒 `false`**（**已知妥协**：契约 §2 把 `UsageRow.isSubagent` 定为
+//!   **非空** `boolean`，本层无权造 `null`（那要改契约），故只能如实标注「此位在日档不可得」；
+//!   小时档（浮窗默认「今日 / 近 5 小时」）不受影响）。**候选修法**（需 ①→② 裁决）：给
+//!   `UsageRow.isSubagent` 开可空、或日档改从明细表按会话取数（受保留期限制）——两条都动
+//!   契约/口径，不在执行侧。
+//! * **kimi 的模型/供应商兜底**（W-44）：真机 23/82 个文件通篇无 `usage.record`，其 model/provider
+//!   来自**同轮其它文件**，落库 `provider_kind = measured` 是**兜底猜出来的**（不是实测）——本层只透传该列。
+//! * **kimi 明细行数口径**（W-45）：84（含 28 空模型行）→ 59 → **58**。
+//! * **opencode V1 的 `error_turn` 恒 0**（W-46）：`caps` 仍声明该源可得 → 本层 `availability`
+//!   也照 caps 报 `available = true`，与 GC 7 存在张力，**待 ①→② 裁决，不得自行改 caps**。
+//! * **`dropped_no_model`（W-51）** 只在采集器私有 `state_json` 里，不进本层任何字段。
+//! * **`is_subagent` 语义**（W-30/W-31）= 「**本会话自身就是**子代理会话」（D17 分层的唯一依据），
+//!   不是「文件里出现过侧链」；DAO 侧是只升不降的粘滞位（`MAX`）。
+//! * **D-39**：zcode 的 `fork` / `selection_side_chat` **也带 `parent_id`** ⇒ 属**子会话**一侧，
+//!   不计入父会话数 / turn 数（采集侧已按 `parent_id` 非空置位，本层只消费）。
+//!
+//! 本层**不做任何口径发明**（GC 6）：命中率与 hero 走 `semantics` 的两个纯函数，
+//! 其余只是把 DAO 读回的行按组/按桶重新聚合。
+
+use std::collections::BTreeMap;
+
+use super::caps::{caps_of, turn_semantics};
+use super::collect;
+use super::error::UsageError;
+use super::model::*;
+use super::range::{day_label, hour_label, resolve_range, RangeGranularity, ResolvedRange};
+use super::semantics::{cache_hit_rate, hero_of};
+use crate::database::connection::DB;
+
+/// 一行账（已按当前视图粒度取数）。`Clone` 便于按组/按桶重切。
+/// `project_key` / `project_label` 是**记录级**键与标签（R2）；`user_est` 可空（R1）。
+#[derive(Debug, Clone)]
+pub(crate) struct LedgerRow {
+    pub bucket_key: String,
+    pub source_id: String,
+    /// **日档恒为空串**：日聚合的粒度是「日 × 源 × 项目 × 供应商 × 模型」，**不带会话 id**
+    /// ⇒ 日档里任何**按会话**的判定都不可得。本层两个消费点的处理（GC 7 / 评审判决 A）：
+    /// * `recent_session_with` → 日档直接返回 `None`（不可得给 `null`，**不给 0**）；
+    /// * 分组行的 `is_subagent` → 契约把该字段定为**非空**，只能恒 `false`（**已知妥协**，
+    ///   见模块文档「已知口径差异」1.2 与报告偏差申报；改它属契约变更）。
+    pub session_id: String,
+    pub project_key: String,
+    pub project_label: String,
+    pub provider: String,
+    pub provider_kind: SourceKind,
+    pub model: String,
+    pub buckets: UsageBuckets,
+    pub request_total: i64,
+    pub requests: i64,
+    pub user_est: Option<i64>,
+}
+
+/// 连接注入版：按视图粒度取数（Hour → **明细行自带的记录级项目键**；Day → 日聚合）
+pub(crate) fn load_ledger_rows_with(
+    conn: &rusqlite::Connection,
+    resolved: &ResolvedRange,
+) -> Vec<LedgerRow> {
+    load_rows_for_keys(conn, resolved.cur.granularity, &resolved.cur.keys)
+}
+
+/// 全局连接包装（**只读**；锁中毒 → 空表 + 由调用方 `dashboard` 判错，绝不静默写）
+///
+/// `#[allow(dead_code)]`：消费者（`usage_dashboard` / `usage_records` / `usage_export_csv`
+/// 三条 IPC 命令）落在 Task 19/20，本任务只交付查询层、不接线——而 `pub(crate)` 无人调用
+/// 会触发 dead_code，在门禁 `-D warnings` 下是 error。**接口形状与可见性一字未改**
+/// （与 D-05/D-18/D-25 同族：计划代码不总是能过本仓自己的门禁）。
+#[allow(dead_code)]
+pub(crate) fn load_ledger_rows(resolved: &ResolvedRange) -> Vec<LedgerRow> {
+    match DB.lock() {
+        Ok(conn) => load_ledger_rows_with(&conn, resolved),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 按「粒度 + 桶键集合」取数（当期与上一周期共用同一条取数路径，保证口径一致）。
+/// **R2 口径**：小时档与日档的项目键**都直接取记录级列**（`usage_detail.project_key` /
+/// `usage_daily.project_key`），两档不得分叉；会话维度表只用于**标签字典**（键 → 显示名原文），
+/// 不充当归属来源。日档的 `user_est` 同样直接取列（R1：不可得 = `None`）。
+///
+/// 窗口键的时钟假设见模块文档（R-32）：这里是**宿主本地**生成的窗口键与落库键做字符串比较，
+/// δ ≠ 0 时边界行会落到窗口外 → 少算；本机 δ = 0 不发作，冲突已上报 ①→②。
+pub(crate) fn load_rows_for_keys(
+    conn: &rusqlite::Connection,
+    granularity: RangeGranularity,
+    keys: &[String],
+) -> Vec<LedgerRow> {
+    let Some(first) = keys.first() else {
+        return Vec::new();
+    };
+    let last = keys.last().cloned().unwrap_or_default();
+    let labels = key_label_dict(conn);
+    match granularity {
+        RangeGranularity::Hour => {
+            // 记录级项目键**就在明细行上**（不再按 session_id 反查会话维度表——那会丢记录级归属）
+            crate::database::dao::usage::query_detail_conn(conn, first, &last)
+                .into_iter()
+                .filter(|r| keys.contains(&r.hour_key))
+                .map(|r| {
+                    let pk = r.project_key;
+                    let pl = labels.get(&pk).cloned().unwrap_or_default();
+                    LedgerRow {
+                        bucket_key: r.hour_key,
+                        source_id: r.source_id,
+                        session_id: r.session_id,
+                        project_key: pk,
+                        project_label: pl,
+                        provider: r.provider,
+                        provider_kind: r.provider_kind,
+                        model: r.model,
+                        buckets: r.buckets,
+                        request_total: r.request_total,
+                        requests: r.requests,
+                        user_est: r.user_est, // R1：可空直传，绝不 `Some(unwrap_or(0))`
+                    }
+                })
+                .collect()
+        }
+        RangeGranularity::Day => crate::database::dao::usage::query_daily_conn(conn, first, &last)
+            .into_iter()
+            .filter(|r| keys.contains(&r.day_key))
+            .map(|r| {
+                let pk = r.project_key;
+                let pl = labels.get(&pk).cloned().unwrap_or_default();
+                LedgerRow {
+                    bucket_key: r.day_key,
+                    source_id: r.source_id,
+                    session_id: String::new(), // 日聚合不带会话 id（会话数走明细表）
+                    project_key: pk,
+                    project_label: pl, // 与小时档同一本标签字典（D21 显示名 = 原文）
+                    provider: r.provider,
+                    provider_kind: r.provider_kind,
+                    model: r.model,
+                    buckets: r.buckets,
+                    request_total: r.request_total,
+                    requests: r.requests,
+                    user_est: r.user_est, // R1：日档必须出真值（缺列就会恒显示「—」）
+                }
+            })
+            .collect(),
+    }
+}
+
+/// 项目键 → 显示名原文的**标签字典**（键 = 小写 projectName）。
+/// **只用于给记录级项目键配显示名，不是归属来源**（归属看明细/日聚合的 `project_key`）。
+/// 同一键可能对应多个原文（Windows 上 claude 已小写、zcode 保留原文）→
+/// 取最近活跃会话的原文（先按 `last_seen_at` 倒序，再 `or_insert` 即确定性首选）。
+pub(crate) fn key_label_dict(
+    conn: &rusqlite::Connection,
+) -> std::collections::HashMap<String, String> {
+    let mut sessions = crate::database::dao::usage::load_sessions_conn(conn, None);
+    // `sort_by_key(Reverse(..))` 与 `sort_by(|a, b| b.x.cmp(&a.x))` 语义相同（都是稳定排序），
+    // 改写只为过门禁 `clippy::unnecessary_sort_by`（`-D warnings` 下是 error，D-05/D-18 同族）
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_seen_at));
+    let mut out = std::collections::HashMap::new();
+    for s in sessions {
+        if s.project_key.is_empty() || s.project_label.is_empty() {
+            continue;
+        }
+        out.entry(s.project_key).or_insert(s.project_label);
+    }
+    out
+}
+
+/// (源, 会话) → 是否子代理（D17 分层判据；明细表不带该列，按会话维度查）
+pub(crate) fn session_subagent_flags(
+    conn: &rusqlite::Connection,
+) -> std::collections::HashMap<(String, String), bool> {
+    crate::database::dao::usage::load_sessions_conn(conn, None)
+        .into_iter()
+        .map(|s| ((s.source_id, s.session_id), s.is_subagent))
+        .collect()
+}
+
+/// 分组键/标签/三态（D21：项目键 = 小写 projectName，标签 = projectName 原文）。
+/// 供应商不可得（空串）时标签回 **i18n 键** `UNKNOWN_PROVIDER_LABEL_KEY`（W5：不得硬编码中文，
+/// 前端 `t(label)` 渲染；CSV 是导出文件、由 Task 19 把该键还原成空串）。
+pub(crate) fn group_of(row: &LedgerRow, group_by: UsageGroupBy) -> (String, String, SourceKind) {
+    match group_by {
+        UsageGroupBy::Tool => (
+            row.source_id.clone(),
+            row.source_id.clone(),
+            row.provider_kind,
+        ),
+        UsageGroupBy::Project => (
+            row.project_key.clone(),
+            if row.project_label.is_empty() {
+                row.project_key.clone()
+            } else {
+                row.project_label.clone()
+            },
+            row.provider_kind,
+        ),
+        UsageGroupBy::Provider => {
+            if row.provider.is_empty() {
+                // W5：不可得 = i18n 键（zh/en 同父同键），不是硬编码「未知」
+                (
+                    String::new(),
+                    super::UNKNOWN_PROVIDER_LABEL_KEY.to_string(),
+                    row.provider_kind,
+                )
+            } else {
+                let key = row.provider.clone();
+                (key.clone(), key, row.provider_kind)
+            }
+        }
+        UsageGroupBy::Model => (row.model.clone(), row.model.clone(), row.provider_kind),
+    }
+}
+
+/// 汇总一组行为 (四桶, 派生口径)。`user_est`：**只要有任一行有值就汇总，全不可得才是 None**
+/// （R1：不可得的源不填 0；小时档与日档走同一个 `aggregate`，口径天然一致）
+pub(crate) fn aggregate(rows: &[LedgerRow]) -> (UsageBuckets, UsageMetrics) {
+    let mut b = UsageBuckets::default();
+    let mut request_total = 0i64;
+    let mut requests = 0i64;
+    let mut user_est: Option<i64> = None;
+    for r in rows {
+        b.add(&r.buckets);
+        request_total += r.request_total;
+        requests += r.requests;
+        if let Some(v) = r.user_est {
+            user_est = Some(user_est.unwrap_or(0) + v);
+        }
+    }
+    (
+        b,
+        UsageMetrics {
+            request_total,
+            cache_hit_rate: cache_hit_rate(b.cache_read, request_total),
+            user_est,
+            requests,
+        },
+    )
+}
+
+/// 逐源可得性表（D15/D16/D19：不可得写 false + reason，绝不填 0）。
+/// **项目归属不进本表**：小时档与日档都取记录级 `project_key`，不存在「只能拿会话级」的档位
+/// （会话维度表的项目列是会话级近似、不参与分组，见 Task 2 的 DDL 注释与 GC 18-R2）；
+/// 若将来真的出现会话级降级档位，必须先在这里登记条目再上线（`UsageMetric` 是契约冻结枚举）。
+pub fn availability_table() -> Vec<UsageAvailability> {
+    let per = |pick: fn(&super::caps::SourceCaps) -> bool, reason: &str| {
+        let mut map = BTreeMap::new();
+        for s in UsageSourceId::ALL {
+            map.insert(s.db_id().to_string(), pick(&caps_of(s)));
+        }
+        let any = map.values().any(|v| *v);
+        UsageAvailability {
+            metric: UsageMetric::Turn, // 调用处覆盖
+            available: any,
+            reason: Some(reason.to_string()),
+            per_source: Some(map),
+        }
+    };
+    let mut out = Vec::new();
+    let mk = |metric: UsageMetric, pick: fn(&super::caps::SourceCaps) -> bool, reason: &str| {
+        let mut a = per(pick, reason);
+        a.metric = metric;
+        a
+    };
+    out.push(mk(
+        UsageMetric::Turn,
+        |c| c.turn,
+        &format!(
+            "逐源口径不可比（D16），只在按工具维度显示、不做合计；{}",
+            UsageSourceId::ALL
+                .iter()
+                .map(|s| turn_semantics(*s))
+                .collect::<Vec<_>>()
+                .join("；")
+        ),
+    ));
+    out.push(mk(
+        UsageMetric::ErrorModel,
+        |c| c.error_model,
+        "模型/传输层错误（D18 三层分列，互不包含、不得相加）",
+    ));
+    out.push(mk(
+        UsageMetric::ErrorTurn,
+        |c| c.error_turn,
+        "回合失败层（claude 无回合级失败字段）",
+    ));
+    out.push(mk(
+        UsageMetric::ErrorTool,
+        |c| c.error_tool,
+        "工具执行层（opencode 的 part.state.status 全 completed → 不可得）",
+    ));
+    out.push(mk(
+        UsageMetric::Interrupted,
+        |c| c.interrupted,
+        "用户主动打断（单列，不计入错误；kimi 未取得判据）",
+    ));
+    out.push(mk(
+        UsageMetric::LongestTurn,
+        |c| c.longest_turn,
+        "逐工具 p50 + 最长，不跨工具合计；**含挂机、未剔 idle**（D19）；dsh 仅覆盖有原始日志的会话（本机 19/99）、workbuddy 无 duration 字段",
+    ));
+    out.push(mk(
+        UsageMetric::ToolCalls,
+        |c| c.tool_calls,
+        "工具调用次数/耗时；dsh 逐工具维度仅覆盖有原始日志的会话",
+    ));
+    out.push(mk(
+        UsageMetric::UserEst,
+        |c| c.user_est,
+        "用户输入(估)：CJK 每字 1 + ASCII 每词 1，只对能读到用户文本的源计算（claude / codex / kimi）",
+    ));
+    out
+}
+
+/// 大看板（契约 §3）
+pub fn dashboard(
+    range: &UsageRange,
+    group_by: UsageGroupBy,
+    now_ms: i64,
+) -> Result<UsageDashboard, UsageError> {
+    if let Ok(conn) = DB.lock() {
+        let d = dashboard_with_conn(&conn, range, group_by, now_ms)?;
+        return Ok(d);
+    }
+    Err(UsageError::new("usage-db-failed", "DB 锁中毒"))
+}
+
+/// 连接注入版（单测直连内存库）
+pub fn dashboard_with_conn(
+    conn: &rusqlite::Connection,
+    range: &UsageRange,
+    group_by: UsageGroupBy,
+    now_ms: i64,
+) -> Result<UsageDashboard, UsageError> {
+    if !super::settings::load_from_conn(conn).enabled {
+        // 总开关关闭：不采集不落库 → 查询出空态（零扫描、零行）。
+        // 用连接注入版读设置：单测直连内存库时不触碰真实 ~/.mam/mam.db（W-24：
+        // 单测**不得**调进程级 `settings::load()`，那会被别的模块注入的值串味）
+        return Ok(empty_dashboard(range, group_by));
+    }
+    let resolved = resolve_range(range, now_ms)?;
+    let rows = load_ledger_rows_with(conn, &resolved);
+    let (totals_buckets, totals) = aggregate(&rows);
+    let subs = session_subagent_flags(conn);
+    // 分组行（全量返回；折叠交 UI）
+    let mut groups: BTreeMap<String, (String, SourceKind, Vec<LedgerRow>)> = BTreeMap::new();
+    for r in &rows {
+        let (k, label, kind) = group_of(r, group_by);
+        groups
+            .entry(k)
+            .or_insert_with(|| (label, kind, Vec::new()))
+            .2
+            .push(r.clone());
+    }
+    let mut out_rows: Vec<UsageRow> = groups
+        .into_iter()
+        .map(|(key, (label, kind, rs))| {
+            let (b, m) = aggregate(&rs);
+            // 该组是否只由子代理会话贡献（供 UI「单列一层可展开」，D17）。
+            //
+            // **日档的已知妥协（契约限制，登记 ①→②）**：日档的行来自日聚合表、`session_id` 恒为空串
+            // （见 `LedgerRow::session_id`），`subs` 必然查不到 → 此位**恒 `false`（不可得）**。
+            // 契约 §2 把 `UsageRow.isSubagent` 定为**非空** `boolean`，本层无权造 `null`（那要改契约）；
+            // 按 GC 7「不得用假值冒充测量值」的原则，此处只能**如实标注为不可得**并写进模块文档与
+            // 偏差申报，由 ①→② 裁决是否改契约。小时档（浮窗默认「今日 / 近 5 小时」）不受影响。
+            let is_sub = !rs.is_empty()
+                && rs.iter().all(|r| {
+                    subs.get(&(r.source_id.clone(), r.session_id.clone()))
+                        .copied()
+                        .unwrap_or(false)
+                });
+            UsageRow {
+                key,
+                label,
+                buckets: b,
+                metrics: m,
+                source_kind: kind,
+                is_subagent: is_sub,
+            }
+        })
+        .collect();
+    out_rows.sort_by_key(|r| std::cmp::Reverse(r.metrics.request_total));
+    // 趋势：逐桶
+    let label_of = |k: &str| match resolved.cur.granularity {
+        RangeGranularity::Hour => hour_label(k),
+        RangeGranularity::Day => day_label(k),
+    };
+    let trend = resolved
+        .cur
+        .keys
+        .iter()
+        .map(|k| {
+            let rs: Vec<LedgerRow> = rows
+                .iter()
+                .filter(|r| &r.bucket_key == k)
+                .cloned()
+                .collect();
+            let (b, m) = aggregate(&rs);
+            TrendPoint {
+                key: k.clone(),
+                label: label_of(k),
+                buckets: b,
+                metrics: m,
+            }
+        })
+        .collect();
+    // 环比：上一等长周期（完整四桶 + 完整口径；无数据 → None，不得显示 0% / NaN）
+    let compare = resolved.prev.as_ref().and_then(|p| {
+        let prev_rows = load_rows_for_keys(conn, p.granularity, &p.keys);
+        let (pb, pm) = aggregate(&prev_rows);
+        if pm.requests == 0 && pb.total() == 0 {
+            return None;
+        }
+        Some(CompareBlock {
+            prev_buckets: pb,
+            prev_metrics: pm,
+        })
+    });
+    let recent_session = recent_session_with(conn, &rows, resolved.cur.granularity);
+    let work_summary = work_summary_with(conn, &resolved);
+    Ok(UsageDashboard {
+        range: range.clone(),
+        group_by,
+        rows: out_rows,
+        totals,
+        totals_buckets,
+        hero: hero_of(totals.request_total, totals_buckets.output),
+        trend,
+        compare,
+        recent_session,
+        work_summary,
+        availability: availability_table(),
+        collected_at: collect::cached_result()
+            .map(|r| r.collected_at)
+            .unwrap_or(0),
+    })
+}
+
+fn empty_dashboard(range: &UsageRange, group_by: UsageGroupBy) -> UsageDashboard {
+    UsageDashboard {
+        range: range.clone(),
+        group_by,
+        rows: Vec::new(),
+        totals: UsageMetrics {
+            request_total: 0,
+            cache_hit_rate: 0.0,
+            user_est: None,
+            requests: 0,
+        },
+        totals_buckets: UsageBuckets::default(),
+        hero: 0,
+        trend: Vec::new(),
+        compare: None,
+        recent_session: None,
+        work_summary: WorkSummary::default(),
+        availability: availability_table(),
+        collected_at: 0,
+    }
+}
+
+/// 浮窗第 4 行「本会话 X」= **最近有活动的会话**（`lastSeenAt` 最大者，
+/// **不是**当前打开的会话），其用量按**当前 range** 统计；无会话 → `None`。
+///
+/// **日档一律 `None`**（GC 7 / 评审判决 A）：日聚合行**不带 `session_id`**（见 `LedgerRow::session_id`），
+/// 日档无法按会话取数。若照旧让它在空集上聚合，UI 会拿到一个 `buckets` 全 0 的 `recentSession`，
+/// 显示成「**本会话 0**」——一个**看起来像真实测量值的 0**；正确语义是「不可得」。
+/// 契约里该块本身可空（`RecentSessionUsage | null`），故日档给 `null` 是契约内的正确表达。
+/// 小时档（浮窗默认「今日 / 近 5 小时」）不受影响；`miniBarRange = last7d` 时由 UI 显示空态。
+fn recent_session_with(
+    conn: &rusqlite::Connection,
+    rows: &[LedgerRow],
+    granularity: RangeGranularity,
+) -> Option<RecentSessionUsage> {
+    if granularity == RangeGranularity::Day {
+        return None;
+    }
+    let sessions = crate::database::dao::usage::load_sessions_conn(conn, None);
+    let latest = sessions.iter().max_by_key(|s| s.last_seen_at)?;
+    let mine: Vec<LedgerRow> = rows
+        .iter()
+        .filter(|r| r.source_id == latest.source_id && r.session_id == latest.session_id)
+        .cloned()
+        .collect();
+    let (buckets, metrics) = aggregate(&mine);
+    Some(RecentSessionUsage {
+        source_id: latest.source_id.clone(),
+        session_id: latest.session_id.clone(),
+        title: latest.title.clone(),
+        buckets,
+        metrics,
+    })
+}
+
+/// 工作小结（D15–D19）。**一律取明细表**（保留期内可得）：
+/// * `sessions`：父会话数（D17 分层：`is_subagent = 0`）；
+/// * `turns_per_tool`：逐工具，**不合计**（D16）；**只累加父会话的 turn**（D17 计数类分层，
+///   与 `sessions` 同一口径，R3）；不可得的工具值 = `None`；
+/// * 三层报错 + 打断：按可得源求和，逐源可得性进 `availability.per_source`；
+/// * `longest_turn_per_tool`：逐工具 p50 + max，**不跨工具合计**（D19），无样本 → `None`；
+/// * `top_tool` / `top_tool_ms`：合并各源 tool_stats 取第一（**如实呈现 `(0, ms>0)` 的跨小时条目**，W-39）。
+fn work_summary_with(conn: &rusqlite::Connection, resolved: &ResolvedRange) -> WorkSummary {
+    let from = match resolved.cur.granularity {
+        RangeGranularity::Hour => resolved.cur.keys.first().cloned().unwrap_or_default(),
+        RangeGranularity::Day => format!(
+            "{}T00",
+            resolved.cur.keys.first().cloned().unwrap_or_default()
+        ),
+    };
+    let to = match resolved.cur.granularity {
+        RangeGranularity::Hour => resolved.cur.keys.last().cloned().unwrap_or_default(),
+        RangeGranularity::Day => format!(
+            "{}T23",
+            resolved.cur.keys.last().cloned().unwrap_or_default()
+        ),
+    };
+    // W-02：先按时间窗过滤（`WHERE hour_key BETWEEN ?1 AND ?2`）再由 DAO 做 GROUP_CONCAT——
+    // 30 天档下拼接量随「窗口内的行数」而非全表行数增长；本机量级（保留期 90 天）可接受，
+    // 若将来样本暴涨，退路是 SQL 外聚合（属 DAO 改动，不在本层）。
+    let rows = crate::database::dao::usage::query_counters_conn(conn, &from, &to);
+    if rows.is_empty() {
+        return WorkSummary::default(); // 全部 null（空态），绝不填 0
+    }
+    let mut per_source: BTreeMap<String, Vec<&crate::database::dao::usage::CounterAggRow>> =
+        BTreeMap::new();
+    for r in &rows {
+        per_source.entry(r.source_id.clone()).or_default().push(r);
+    }
+    let mut turns_per_tool: BTreeMap<String, Option<i64>> = BTreeMap::new();
+    let mut longest_turn_per_tool: BTreeMap<String, Option<LongestTurn>> = BTreeMap::new();
+    let mut tool_stats: BTreeMap<String, (i64, i64)> = BTreeMap::new();
+    let (mut em, mut et, mut e_tool, mut intr, mut calls, mut ms) =
+        (0i64, 0i64, 0i64, 0i64, 0i64, 0i64);
+    let mut sessions = 0i64;
+    for s in UsageSourceId::ALL {
+        let Some(rs) = per_source.get(s.db_id()) else {
+            if !caps_of(s).turn {
+                turns_per_tool.insert(s.db_id().to_string(), None);
+            }
+            if !caps_of(s).longest_turn {
+                longest_turn_per_tool.insert(s.db_id().to_string(), None);
+            }
+            continue;
+        };
+        let caps = caps_of(s);
+        if caps.turn {
+            // R3/D17：**计数类分层**——turn 数与会话数一样只计父会话（token 总量仍含子代理）
+            turns_per_tool.insert(
+                s.db_id().to_string(),
+                Some(rs.iter().filter(|r| !r.is_subagent).map(|r| r.turns).sum()),
+            );
+        } else {
+            turns_per_tool.insert(s.db_id().to_string(), None);
+        }
+        if caps.longest_turn {
+            let mut samples: Vec<i64> = rs.iter().flat_map(|r| r.turn_ms.clone()).collect();
+            longest_turn_per_tool.insert(s.db_id().to_string(), percentiles(&mut samples));
+        } else {
+            longest_turn_per_tool.insert(s.db_id().to_string(), None);
+        }
+        if caps.error_model {
+            em += rs.iter().map(|r| r.error_model).sum::<i64>();
+        }
+        if caps.error_turn {
+            et += rs.iter().map(|r| r.error_turn).sum::<i64>();
+        }
+        if caps.error_tool {
+            e_tool += rs.iter().map(|r| r.error_tool).sum::<i64>();
+        }
+        if caps.interrupted {
+            intr += rs.iter().map(|r| r.interrupted).sum::<i64>();
+        }
+        if caps.tool_calls {
+            calls += rs.iter().map(|r| r.tool_calls).sum::<i64>();
+            ms += rs.iter().map(|r| r.tool_ms).sum::<i64>();
+        }
+        // D17：会话数分层——只数父会话
+        sessions += rs.iter().filter(|r| !r.is_subagent).count() as i64;
+        // W-39：`(0, ms>0)` 的跨小时条目在此**原样合并**（不丢、不归零）
+        for r in rs {
+            for (name, (c, m)) in &r.tool_stats {
+                let e = tool_stats.entry(name.clone()).or_insert((0, 0));
+                e.0 += c;
+                e.1 += m;
+            }
+        }
+    }
+    let any = |pick: fn(&super::caps::SourceCaps) -> bool| {
+        UsageSourceId::ALL.iter().any(|s| pick(&caps_of(*s)))
+    };
+    WorkSummary {
+        // 「会话数」= 明细表里出现过的父会话数（D17 分层后的会话数）
+        sessions: Some(sessions),
+        turns_per_tool,
+        error_model: any(|c| c.error_model).then_some(em),
+        error_turn: any(|c| c.error_turn).then_some(et),
+        error_tool: any(|c| c.error_tool).then_some(e_tool),
+        interrupted: any(|c| c.interrupted).then_some(intr),
+        tool_calls: any(|c| c.tool_calls).then_some(calls),
+        // calls == 0 时均值**不可得**（null），不得编造 0、不得除零
+        tool_avg_ms: (calls > 0).then(|| ms / calls),
+        top_tool: tool_stats
+            .iter()
+            .max_by_key(|(_, (c, _))| *c)
+            .map(|(n, (c, _))| TopTool {
+                name: n.clone(),
+                count: *c,
+            }),
+        top_tool_ms: tool_stats
+            .iter()
+            .max_by_key(|(_, (_, m))| *m)
+            .map(|(n, (_, m))| TopToolMs {
+                name: n.clone(),
+                ms: *m,
+            }),
+        longest_turn_per_tool,
+    }
+}
+
+/// p50 + max（样本已聚合到逐工具；**含挂机**，D19 要求在 UI 标注）。
+/// 形参是 `&mut [i64]`（不是 `&mut Vec<i64>`）：调用方传 `&mut samples`，deref 强转即可，
+/// 只为过门禁 `clippy::ptr_arg`（`-D warnings` 下是 error；判据与期望值一字未改）。
+fn percentiles(samples: &mut [i64]) -> Option<LongestTurn> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    let n = samples.len();
+    let median = if n % 2 == 1 {
+        samples[n / 2]
+    } else {
+        (samples[n / 2 - 1] + samples[n / 2]) / 2
+    };
+    Some(LongestTurn {
+        p50: median,
+        max: *samples.last().unwrap(),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::usage::delta::{DetailDelta, DetailKey, SessionCounters, SessionDimDelta};
+    // 计划① 在这里还列了 `use crate::services::usage::model::*;` —— 它是**多余**的：
+    // `use super::*` 已经带进 `query` 自己的 `use super::model::*;` 绑定（D-01 的口诀：
+    // 看 `super` 是谁——这里是 `query`，而 `query` 自己就 `use` 了 model），
+    // 保留它会触发 `unused_imports`，在门禁 `-D warnings` 下是 error（D-10 同族）。
+    // 计划① 的测试代码块漏了这一行：`chrono::Local.with_ymd_and_hms` 是 `TimeZone` trait 的方法，
+    // 不导入就是 E0599（`query.rs` 模块级没有 `use chrono::TimeZone;`）。**已批准的最小修复**
+    // （D-01/D-05/D-18 同族：任务书代码块不总是自洽，判据与期望值一字未改）。
+    use chrono::TimeZone;
+
+    fn local_ms(y: i32, m: u32, d: u32, h: u32, min: u32) -> i64 {
+        chrono::Local
+            .with_ymd_and_hms(y, m, d, h, min, 0)
+            .single()
+            .expect("测试时刻必须存在（避开 DST 跳变）")
+            .timestamp_millis()
+    }
+
+    fn range(preset: UsageRangePreset) -> UsageRange {
+        UsageRange {
+            preset,
+            from: None,
+            to: None,
+        }
+    }
+
+    fn mem_empty() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::database::schema::init(&conn);
+        conn
+    }
+
+    /// 明细 + **日聚合**成对写入（真实路径是 `ledger::apply_delta`；单测直连 DAO，
+    /// 必须显式折叠一次——只写 usage_detail 的话，日档用例会读到空表）
+    fn write_pair(conn: &rusqlite::Connection, d: DetailDelta) {
+        let daily = crate::services::usage::ledger::daily_rows_of(
+            &d.source_id,
+            &crate::services::usage::delta::SourceDelta {
+                details: vec![d.clone()],
+                ..Default::default()
+            },
+        );
+        // 两个 DAO 都返回 `usize`（写入行数），**不是 `Result`** —— 对它调 `.unwrap()` 是
+        // E0599（§3.2.3 FIX-2）。写入行数顺手当断言用：应写入 1 行。
+        assert_eq!(
+            crate::database::dao::usage::upsert_detail_conn(conn, &[d], 1),
+            1,
+            "明细应写入 1 行"
+        );
+        assert_eq!(
+            crate::database::dao::usage::upsert_daily_conn(conn, &daily, 1),
+            1,
+            "日聚合应写入 1 行（与明细成对）"
+        );
+    }
+
+    /// 完整行描述（新增用例用；`add_detail` 只覆盖「只给 input_fresh」的形态）
+    #[derive(Clone)]
+    struct RowSpec {
+        buckets: UsageBuckets,
+        request_total: i64,
+        requests: i64,
+        counters: SessionCounters,
+        user_est: Option<i64>,
+        model: String,
+        provider: String,
+    }
+
+    impl Default for RowSpec {
+        fn default() -> Self {
+            Self {
+                buckets: UsageBuckets::default(),
+                request_total: 0,
+                requests: 1,
+                counters: SessionCounters::default(),
+                user_est: None,
+                model: "m".into(),
+                provider: "p".into(),
+            }
+        }
+    }
+
+    fn add_spec(
+        conn: &rusqlite::Connection,
+        source: &str,
+        session: &str,
+        project: &str,
+        hour: &str,
+        spec: RowSpec,
+    ) {
+        write_pair(
+            conn,
+            DetailDelta {
+                source_id: source.into(),
+                provider_kind: SourceKind::Inferred,
+                key: DetailKey {
+                    session_id: session.into(),
+                    hour_key: hour.into(),
+                    day_key: hour[..10].into(),
+                    project_key: project.into(),
+                    model: spec.model,
+                    provider: spec.provider,
+                },
+                buckets: spec.buckets,
+                request_total: spec.request_total,
+                requests: spec.requests,
+                user_est: spec.user_est,
+                cache_semantics: crate::services::usage::semantics::CacheSemantics::Exclusive,
+                counters: spec.counters,
+                ts_ms: 1,
+            },
+        );
+    }
+
+    /// 简版：只给 `input_fresh`（其余桶为 0）——任务书 Step 1 那张 fixture 表用的形态。
+    /// `#[allow(clippy::too_many_arguments)]`：任务书给的 helper 就是 8 参，而 clippy 默认阈值是 7
+    /// （`-D warnings` 下是 error，D-05/D-18 同族的最小修复；本仓已有 8 处同款 allow）。
+    #[allow(clippy::too_many_arguments)]
+    fn add_detail(
+        conn: &rusqlite::Connection,
+        source: &str,
+        session: &str,
+        project: &str,
+        hour: &str,
+        input: i64,
+        turns: i64,
+        user_est: Option<i64>,
+    ) {
+        add_spec(
+            conn,
+            source,
+            session,
+            project,
+            hour,
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: input,
+                    ..Default::default()
+                },
+                request_total: input,
+                counters: SessionCounters {
+                    turns,
+                    ..Default::default()
+                },
+                user_est,
+                ..Default::default()
+            },
+        );
+    }
+
+    /// 会话维度登记（父会话）——同时充当「项目键 → 显示名原文」标签字典的来源。
+    /// **四参**：源由调用方给（`SessionDimDelta` 里没有 `source_id`，见 Task 3 Interfaces）；
+    /// 返回值是 `usize`（写入行数），不是 `Result`。
+    fn add_session(
+        conn: &rusqlite::Connection,
+        source: &str,
+        session: &str,
+        project: &str,
+        label: &str,
+    ) {
+        add_session_at(conn, source, session, project, label, 1, None, false);
+    }
+
+    /// 完整控制版（新增用例用）：可控 `last_seen_at` / `title` / `is_subagent`。
+    /// 同款 8 参 allow（见 `add_detail`）。
+    #[allow(clippy::too_many_arguments)]
+    fn add_session_at(
+        conn: &rusqlite::Connection,
+        source: &str,
+        session: &str,
+        project: &str,
+        label: &str,
+        last_seen_at: i64,
+        title: Option<String>,
+        is_subagent: bool,
+    ) {
+        assert_eq!(
+            crate::database::dao::usage::upsert_session_conn(
+                conn,
+                source,
+                &[SessionDimDelta {
+                    session_id: session.into(),
+                    project_key: project.into(),
+                    project_label: label.into(),
+                    project_path_raw: format!("/p/{project}"),
+                    project_realpath: format!("/p/{project}"),
+                    title,
+                    is_subagent,
+                    parent_session_id: is_subagent.then(|| "parent".to_string()),
+                    originator: None,
+                    last_seen_at,
+                }],
+                1
+            ),
+            1,
+            "会话维度应登记 1 行"
+        );
+    }
+
+    fn mem_with_rows() -> rusqlite::Connection {
+        let conn = mem_empty();
+        // 明细：今日 10 点 claude 100/800/0/20（请求输入 900）、11 点 codex 500/0/0/100（请求输入 500）
+        add_spec(
+            &conn,
+            "claude",
+            "s1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 100,
+                    cache_read: 800,
+                    output: 20,
+                    ..Default::default()
+                },
+                request_total: 900,
+                requests: 1,
+                counters: SessionCounters {
+                    turns: 2,
+                    ..Default::default()
+                },
+                user_est: Some(7),
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "codex",
+            "s2",
+            "proj",
+            "2026-10-03T11",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 500,
+                    output: 100,
+                    ..Default::default()
+                },
+                request_total: 500,
+                requests: 1,
+                counters: SessionCounters {
+                    turns: 3,
+                    ..Default::default()
+                },
+                user_est: None,
+                ..Default::default()
+            },
+        );
+        // 会话维度：s2 是子代理（D17 分层：会话数与 turn 数都不含它）。
+        // **一批 = 一个源**（`upsert_session_conn` 的 `source_id` 是批级参数）→ 父子两个会话
+        // 分属 claude / codex，必须分两次登记（合并成一次会把 s2 记到 claude 名下，
+        // `query_counters_conn` 的 `LEFT JOIN usage_session` 按 (source_id, session_id) 连接，
+        // 于是 codex 的 s2 拿不到 is_subagent=1 → D17 分层失效）。
+        add_session(&conn, "claude", "s1", "proj", "Proj");
+        add_session_at(&conn, "codex", "s2", "proj", "Proj", 1, None, true);
+        conn
+    }
+
+    #[test]
+    fn dashboard_hero_trend_and_layered_session_count() {
+        let conn = mem_with_rows();
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        // hero = 请求输入 + 产出 = (900 + 500) + (20 + 100)
+        assert_eq!(d.totals.request_total, 1400);
+        assert_eq!(d.totals_buckets.output, 120);
+        assert_eq!(d.hero, 1520);
+        // 命中率 = 800 / 1400
+        assert!((d.totals.cache_hit_rate - 800.0 / 1400.0).abs() < 1e-9);
+        // 用户输入(估)：只有 claude 有值 → 汇总 7（不可得的源不填 0）
+        assert_eq!(d.totals.user_est, Some(7));
+        // 趋势：当日 = 小时桶（0 时到当前 12 时 → 13 个桶），命中两个点
+        assert_eq!(d.trend.len(), 13, "当日 0 时到当前小时共 13 个桶");
+        assert_eq!(d.trend.iter().filter(|t| t.buckets.total() > 0).count(), 2);
+        assert_eq!(d.trend.first().unwrap().key, "2026-10-03T00");
+        assert_eq!(d.trend.last().unwrap().key, "2026-10-03T12");
+        // 按工具分组：claude / codex 各一行；按请求输入降序（900 > 500）
+        assert_eq!(d.rows.len(), 2);
+        assert_eq!(d.rows[0].key, "claude");
+        assert_eq!(d.rows[1].key, "codex");
+        // D17：该组是否**只由子代理会话贡献**（供 UI 单列一层可展开）
+        assert!(
+            !d.rows[0].is_subagent,
+            "claude 组含父会话 s1 → 不是「只由子代理贡献」"
+        );
+        assert!(
+            d.rows[1].is_subagent,
+            "codex 组只有子代理 s2 → D17 分层标记必须为真"
+        );
+        // D17：会话数分层（s2 是子代理，不计入）
+        assert_eq!(d.work_summary.sessions, Some(1));
+        // D16：turn 数只逐工具给、不合计；**R3：也只计父会话** → codex 的唯一会话是子代理 → 0
+        assert_eq!(d.work_summary.turns_per_tool.get("claude"), Some(&Some(2)));
+        assert_eq!(
+            d.work_summary.turns_per_tool.get("codex"),
+            Some(&Some(0)),
+            "R3：子代理会话的 turn 不计入（强断言见 turns_per_tool_counts_parent_sessions_only）"
+        );
+        // D16/GC 7：workbuddy 无回合概念（caps 恒 false）→ 显式 null（不是 0，也不是「条目消失」）
+        assert_eq!(
+            d.work_summary.turns_per_tool.get("workbuddy"),
+            Some(&None),
+            "不可得的工具必须显式为 null"
+        );
+        // D19：最长单 turn 逐工具。workbuddy 无 duration 字段 → 显式 null（不得填 0）；
+        // kimi 本区间**无样本** → 不出条目（「无数据」与「不可得」是两件事）
+        assert_eq!(
+            d.work_summary.longest_turn_per_tool.get("workbuddy"),
+            Some(&None),
+            "D19/GC 7：不可得 = 显式 null（不是 0）"
+        );
+        assert_eq!(
+            d.work_summary.longest_turn_per_tool.get("kimi"),
+            None,
+            "本区间无样本的工具不出条目"
+        );
+        // 环比：上一周期（昨日同一时段）无数据 → 整体 None（不得显示 0% / NaN）
+        assert!(d.compare.is_none());
+        // 契约字段回显（GC 1）
+        assert_eq!(d.range.preset, UsageRangePreset::Today);
+        assert_eq!(d.group_by, UsageGroupBy::Tool);
+    }
+
+    #[test]
+    fn availability_marks_unavailable_metrics_instead_of_zero() {
+        let table = availability_table();
+        let turn = table
+            .iter()
+            .find(|a| a.metric == UsageMetric::Turn)
+            .unwrap();
+        assert!(turn.available);
+        assert!(turn.reason.as_deref().unwrap().contains("口径") || turn.per_source.is_some());
+        let per = turn.per_source.as_ref().unwrap();
+        assert_eq!(
+            per.get("workbuddy"),
+            Some(&false),
+            "workbuddy 无回合概念 → false 而不是 0"
+        );
+        let user = table
+            .iter()
+            .find(|a| a.metric == UsageMetric::UserEst)
+            .unwrap();
+        let per = user.per_source.as_ref().unwrap();
+        assert_eq!(per.get("claude"), Some(&true));
+        assert_eq!(per.get("zcode"), Some(&false));
+    }
+
+    /// 可得性表的**形状锁**（新增）：8 条指标逐条覆盖、每条都带七源可得性、
+    /// `available` 必须等于「至少一个源可得」（防「available 恒 true/false」的假绿）；
+    /// 并把 D16/D19 点名的不可得源与文案纪律钉住。
+    #[test]
+    fn availability_table_covers_all_eight_metrics_with_per_source_truth() {
+        let table = availability_table();
+        let metrics: Vec<UsageMetric> = table.iter().map(|a| a.metric).collect();
+        assert_eq!(
+            metrics,
+            vec![
+                UsageMetric::Turn,
+                UsageMetric::ErrorModel,
+                UsageMetric::ErrorTurn,
+                UsageMetric::ErrorTool,
+                UsageMetric::Interrupted,
+                UsageMetric::LongestTurn,
+                UsageMetric::ToolCalls,
+                UsageMetric::UserEst,
+            ],
+            "8 条逐源可得性条目，一条都不能少（D15–D19）"
+        );
+        for a in &table {
+            let per = a
+                .per_source
+                .as_ref()
+                .expect("逐源可得性必须逐条给 per_source（D16/D19 的逐源口径）");
+            assert_eq!(per.len(), 7, "{:?} 的 per_source 必须覆盖七源", a.metric);
+            assert_eq!(
+                a.available,
+                per.values().any(|v| *v),
+                "{:?} 的 available 必须等于「至少一个源可得」（不得恒 true/false）",
+                a.metric
+            );
+            assert!(
+                a.reason.is_some(),
+                "{:?} 必须给原因文案（UI tooltip）",
+                a.metric
+            );
+        }
+        let pick = |m: UsageMetric, k: &str| {
+            table
+                .iter()
+                .find(|a| a.metric == m)
+                .unwrap()
+                .per_source
+                .as_ref()
+                .unwrap()
+                .get(k)
+                .copied()
+        };
+        assert_eq!(pick(UsageMetric::ErrorTurn, "claude"), Some(false));
+        assert_eq!(pick(UsageMetric::ErrorTool, "opencode"), Some(false));
+        assert_eq!(pick(UsageMetric::Interrupted, "kimi"), Some(false));
+        assert_eq!(pick(UsageMetric::LongestTurn, "workbuddy"), Some(false));
+        assert_eq!(pick(UsageMetric::UserEst, "kimi"), Some(true));
+        assert_eq!(pick(UsageMetric::UserEst, "dsh"), Some(false));
+        // 文案纪律（Task 17 已补逐工具维度）：dsh 的覆盖面必须如实写成「逐工具维度仅覆盖有原始日志的会话」，
+        // 不得写成「全量可得」（也不得改成相反说法）。
+        let tc = table
+            .iter()
+            .find(|a| a.metric == UsageMetric::ToolCalls)
+            .unwrap();
+        assert!(
+            tc.reason.as_deref().unwrap().contains("逐工具维度"),
+            "dsh 逐工具维度的覆盖面必须写明：{}",
+            tc.reason.as_deref().unwrap()
+        );
+        let lt = table
+            .iter()
+            .find(|a| a.metric == UsageMetric::LongestTurn)
+            .unwrap();
+        assert!(
+            lt.reason
+                .as_deref()
+                .unwrap()
+                .contains("workbuddy 无 duration"),
+            "D19：workbuddy 无 duration 字段必须写明"
+        );
+    }
+
+    /// R3/D17：**turn 数只计父会话**（与会话数同一分层口径）。
+    /// fixture：codex 的 s2 是子代理（turns=3）+ 新加父会话 s3（turns=5）→ 只算 5；
+    /// 会话数 = s1(claude 父) + s3(codex 父) = 2（s2 不计）。
+    #[test]
+    fn turns_per_tool_counts_parent_sessions_only() {
+        let conn = mem_with_rows();
+        add_detail(&conn, "codex", "s3", "proj", "2026-10-03T12", 10, 5, None);
+        add_session(&conn, "codex", "s3", "proj", "Proj");
+        let now = local_ms(2026, 10, 3, 13, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            d.work_summary.turns_per_tool.get("codex"),
+            Some(&Some(5)),
+            "R3：只累加父会话的 turn（3 属子代理，必须被剔除）"
+        );
+        assert_eq!(d.work_summary.sessions, Some(2), "会话数同样只数父会话");
+        // token 总量**含子代理**（不受分层影响）
+        assert_eq!(d.totals_buckets.input_fresh, 100 + 500 + 10);
+        // 分层标记也要跟着变：该组现在同时含父会话 s3 → 不再是「只由子代理贡献」
+        let codex = d.rows.iter().find(|r| r.key == "codex").unwrap();
+        assert!(
+            !codex.is_subagent,
+            "R3 只改计数类；codex 组含父会话 s3 → is_subagent=false"
+        );
+    }
+
+    /// R1：`userEst` 的「不可得就是 null」在**小时档与日档**都成立（不是 0）；
+    /// 有值的源在两档都出真值（日聚合必须有该列，否则日档恒显示「—」）
+    #[test]
+    fn user_est_is_null_not_zero_in_both_hour_and_day_tier() {
+        let conn = mem_with_rows();
+        // zcode：读不到用户文本 → 两批写入都是 None（累加后仍是 None）
+        add_detail(&conn, "zcode", "z1", "proj", "2026-10-03T10", 10, 0, None);
+        add_detail(&conn, "zcode", "z1", "proj", "2026-10-03T10", 5, 0, None);
+        add_session(&conn, "zcode", "z1", "proj", "Proj");
+        let now = local_ms(2026, 10, 3, 13, 0);
+        // 前提断言（§4.1 防假绿）：两批**同一行键**必须合并成 1 行，且 `user_est` 列在两张表里
+        // 都真的是 NULL——若库里是 0，下面两条 `None` 断言就不可能成立，用例会红在更早的位置
+        let (sum, rows): (i64, i64) = conn
+            .query_row(
+                "SELECT SUM(input_fresh), COUNT(*) FROM usage_detail WHERE source_id = 'zcode'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (sum, rows),
+            (15, 1),
+            "两批同键必须合并成 1 行（15 = 10 + 5）"
+        );
+        for table in ["usage_detail", "usage_daily"] {
+            let n: i64 = conn
+                .query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM {table} WHERE source_id = 'zcode' AND user_est IS NULL"
+                    ),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                n, 1,
+                "前提：{table} 里 zcode 的 user_est 必须是 NULL（不是 0）"
+            );
+        }
+        // 小时档（今日）
+        let hour = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            hour.totals.user_est,
+            Some(7),
+            "汇总只累加有值的源（zcode 不贡献 0）"
+        );
+        let zrow = hour.rows.iter().find(|r| r.key == "zcode").unwrap();
+        assert_eq!(
+            zrow.metrics.user_est, None,
+            "R1：小时档里不可得的源是 null，不是 0"
+        );
+        let crow = hour.rows.iter().find(|r| r.key == "claude").unwrap();
+        assert_eq!(crow.metrics.user_est, Some(7));
+        // 日档（近 7 天 → 走 usage_daily）
+        let day = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            day.totals.user_est,
+            Some(7),
+            "R1：日档必须出真值（缺列会恒为 null）"
+        );
+        let zrow = day.rows.iter().find(|r| r.key == "zcode").unwrap();
+        assert_eq!(
+            zrow.metrics.user_est, None,
+            "R1：日档里不可得的源同样是 null，不是 0"
+        );
+        let crow = day.rows.iter().find(|r| r.key == "claude").unwrap();
+        assert_eq!(crow.metrics.user_est, Some(7), "R1：日档与小时档同口径");
+    }
+
+    /// R2：同一会话内两个 cwd → **小时档与日档都**按记录级 projectKey 分成两组
+    /// （两档口径不得分叉），且显示名走标签字典（projectName 原文）
+    #[test]
+    fn two_project_keys_in_one_session_are_grouped_separately() {
+        let conn = mem_with_rows();
+        // 同一会话 s1、同一小时、同一模型/供应商，只有 cwd 不同
+        add_detail(&conn, "claude", "s1", "alpha", "2026-10-03T10", 30, 0, None);
+        add_detail(&conn, "claude", "s1", "beta", "2026-10-03T10", 70, 0, None);
+        // 标签字典（D21 显示名 = projectName 原文）：两个项目各自另有会话
+        add_session(&conn, "claude", "s-alpha", "alpha", "Alpha");
+        add_session(&conn, "claude", "s-beta", "beta", "Beta");
+        let now = local_ms(2026, 10, 3, 13, 0);
+        let hour = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Project,
+            now,
+        )
+        .unwrap();
+        let hkey: Vec<(&str, i64)> = hour
+            .rows
+            .iter()
+            .map(|r| (r.key.as_str(), r.buckets.input_fresh))
+            .collect();
+        assert!(
+            hkey.contains(&("alpha", 30)),
+            "R2：小时档必须按记录级键分组，实测 {hkey:?}"
+        );
+        assert!(
+            hkey.contains(&("beta", 70)),
+            "R2：同一会话的第二个 cwd 必须自成一组，实测 {hkey:?}"
+        );
+        let alpha = hour.rows.iter().find(|r| r.key == "alpha").unwrap();
+        assert_eq!(
+            alpha.label, "Alpha",
+            "D21：显示名取 projectName 原文（标签字典）"
+        );
+        // 日档：同一记录级键折叠，两档分组键一致
+        let day = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Project,
+            now,
+        )
+        .unwrap();
+        let dkey: Vec<(&str, i64)> = day
+            .rows
+            .iter()
+            .map(|r| (r.key.as_str(), r.buckets.input_fresh))
+            .collect();
+        assert!(
+            dkey.contains(&("alpha", 30)),
+            "R2：日档同一组，实测 {dkey:?}"
+        );
+        assert!(
+            dkey.contains(&("beta", 70)),
+            "R2：日档同一组，实测 {dkey:?}"
+        );
+        let alpha = day.rows.iter().find(|r| r.key == "alpha").unwrap();
+        assert_eq!(
+            alpha.label, "Alpha",
+            "D21/R2：日档与小时档共用同一本标签字典"
+        );
+        let beta = day.rows.iter().find(|r| r.key == "beta").unwrap();
+        assert_eq!(beta.label, "Beta");
+    }
+
+    /// W5：供应商不可得时的行标签必须是 **i18n 键**（zh/en 同父同键），不得硬编码中文
+    #[test]
+    fn unknown_provider_label_is_an_i18n_key_present_in_both_locales() {
+        let row = LedgerRow {
+            bucket_key: "2026-10-03T10".into(),
+            source_id: "workbuddy".into(),
+            session_id: "s1".into(),
+            project_key: "alpha".into(),
+            project_label: "ALPHA".into(),
+            provider: String::new(), // 供应商不可得（workbuddy 实测）
+            provider_kind: SourceKind::Unknown,
+            model: "hy3".into(),
+            buckets: UsageBuckets::default(),
+            request_total: 0,
+            requests: 0,
+            user_est: None,
+        };
+        let (key, label, _) = group_of(&row, UsageGroupBy::Provider);
+        assert_eq!(key, "", "供应商不可得 → key 为空串");
+        assert_eq!(label, crate::services::usage::UNKNOWN_PROVIDER_LABEL_KEY);
+        assert!(
+            !label
+                .chars()
+                .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c)),
+            "W5：Rust 侧不得硬编码中文标签"
+        );
+        for locale in ["zh.json", "en.json"] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../src/i18n/locales")
+                .join(locale);
+            let text = std::fs::read_to_string(&path).unwrap();
+            let root: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(
+                root.pointer("/usage/label/unknownProvider")
+                    .and_then(|v| v.as_str())
+                    .is_some(),
+                "{locale} 缺 usage.label.unknownProvider（zh/en 同父同键）"
+            );
+        }
+    }
+
+    /// 环比（D14 / 契约 `CompareBlock`）的**另一半**：上一周期**有**数据时必须出完整聚合。
+    /// 任务书原用例只断言「无数据 → None」——把 `compare` 改成**恒 None** 也能全绿，
+    /// 这是本轮必须补上的真锁。
+    #[test]
+    fn compare_is_populated_from_the_previous_period() {
+        let conn = mem_with_rows(); // 当日：claude 10 时（900 请求输入）+ codex 11 时（500）
+                                    // 昨日同一时段（Today 档的上一周期 = 昨日 0 时到昨日 12 时）
+        add_spec(
+            &conn,
+            "claude",
+            "p1",
+            "proj",
+            "2026-10-02T05",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 200,
+                    cache_read: 100,
+                    output: 40,
+                    ..Default::default()
+                },
+                request_total: 300,
+                requests: 2,
+                user_est: Some(3),
+                ..Default::default()
+            },
+        );
+        add_session(&conn, "claude", "p1", "proj", "Proj");
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        let c = d
+            .compare
+            .expect("上一周期有数据 → 必须出对比段（否则 UI 永远看不到环比）");
+        assert_eq!(c.prev_buckets.input_fresh, 200);
+        assert_eq!(c.prev_buckets.cache_read, 100);
+        assert_eq!(c.prev_buckets.cache_write, 0);
+        assert_eq!(c.prev_buckets.output, 40);
+        assert_eq!(c.prev_metrics.request_total, 300);
+        assert_eq!(c.prev_metrics.requests, 2);
+        assert!(
+            (c.prev_metrics.cache_hit_rate - 100.0 / 300.0).abs() < 1e-9,
+            "命中率必须与当期同一条纯函数（semantics::cache_hit_rate）"
+        );
+        assert_eq!(
+            c.prev_metrics.user_est,
+            Some(3),
+            "R1：上一周期同样按「不可得不填 0」累加"
+        );
+        // 当期不得被上一周期污染，且两段窗口必须是不同的数据
+        assert_eq!(d.totals.request_total, 1400);
+        assert_eq!(d.hero, 1520);
+        assert_eq!(c.prev_buckets.total(), 340);
+        assert_ne!(
+            c.prev_buckets.total(),
+            d.totals_buckets.total(),
+            "上一周期与当期必须是两段不同的窗口"
+        );
+        assert!(
+            d.trend.iter().all(|t| t.key.starts_with("2026-10-03")),
+            "趋势桶只能是当期窗口（不得混入上一周期）"
+        );
+    }
+
+    /// 日档（7d/30d/自定义）的上一周期也必须走**日粒度**取数路径（`p.granularity`）；
+    /// 若实现把上一周期一律按小时档取（或按当期取），这条会红。
+    #[test]
+    fn day_tier_compare_uses_the_previous_day_window() {
+        let conn = mem_with_rows();
+        // 近 7 天的上一周期 = 再往前 7 天：2026-09-20 ~ 2026-09-26
+        add_spec(
+            &conn,
+            "codex",
+            "old1",
+            "proj",
+            "2026-09-24T08",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 50,
+                    output: 5,
+                    ..Default::default()
+                },
+                request_total: 50,
+                ..Default::default()
+            },
+        );
+        let now = local_ms(2026, 10, 3, 13, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        // 当期 7 个日桶：09-27 ~ 10-03（含今日）
+        assert_eq!(d.trend.len(), 7);
+        assert_eq!(d.trend.first().unwrap().key, "2026-09-27");
+        assert_eq!(
+            d.trend.first().unwrap().label,
+            "9/27",
+            "日档标签 M/D（去前导零）"
+        );
+        assert_eq!(d.trend.last().unwrap().key, "2026-10-03");
+        let c = d.compare.expect("前 7 天有数据 → 出对比段");
+        assert_eq!(c.prev_buckets.input_fresh, 50, "上一周期走日聚合表");
+        assert_eq!(c.prev_buckets.output, 5);
+        assert_eq!(c.prev_metrics.request_total, 50);
+        assert_eq!(c.prev_metrics.requests, 1);
+        assert_eq!(
+            d.totals_buckets.input_fresh,
+            100 + 500,
+            "当期不得把 09-24 的行算进来（否则就是「当期=上一周期」口径错）"
+        );
+    }
+
+    /// 空账本（stub 边界：一行都没有 / 某源一行都没有 / 时间段无数据）→ **全 null 空态**，
+    /// 绝不填 0；趋势仍按窗口出满桶（UI 自己判「暂无数据」）。
+    #[test]
+    fn empty_ledger_yields_null_empty_state_not_zero() {
+        let conn = mem_empty();
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert!(d.rows.is_empty());
+        assert_eq!(d.totals.request_total, 0);
+        assert_eq!(d.totals.requests, 0);
+        assert_eq!(d.totals_buckets.total(), 0);
+        assert_eq!(d.hero, 0);
+        assert_eq!(
+            d.totals.cache_hit_rate, 0.0,
+            "分母为 0 记 0（§4.3），空态判定交给 request_total"
+        );
+        // GC 7：不可得一律 null（绝不 0）——空账本下没有任何源有值
+        assert_eq!(d.totals.user_est, None);
+        assert_eq!(
+            d.work_summary,
+            WorkSummary::default(),
+            "空账本的「工作小结」必须整块空态（全 null），不得填 0"
+        );
+        assert_eq!(d.work_summary.sessions, None);
+        assert_eq!(d.work_summary.tool_calls, None);
+        assert_eq!(d.work_summary.top_tool, None);
+        assert!(d.compare.is_none());
+        assert!(
+            d.recent_session.is_none(),
+            "无任何会话 → recentSession = null"
+        );
+        assert_eq!(d.trend.len(), 13, "空数据也要出满窗口的桶");
+        assert!(d
+            .trend
+            .iter()
+            .all(|t| t.buckets.total() == 0 && t.metrics.user_est.is_none()));
+        assert_eq!(d.availability.len(), 8, "可得性表与数据无关（恒返回）");
+    }
+
+    /// 总开关关闭 → 空态；重新打开 → 同一库数据回来。
+    /// 证明①门真的生效；②门读的是**传入连接**的设置（W-24：不碰进程级 `settings::load()`）。
+    #[test]
+    fn disabled_setting_returns_empty_dashboard_and_reenabling_restores_rows() {
+        use crate::services::usage::settings::SETTINGS_KEY;
+        let conn = mem_with_rows(); // 库里**有**数据
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let off = serde_json::to_string(&UsageSettings {
+            enabled: false,
+            ..Default::default()
+        })
+        .unwrap();
+        crate::database::dao::settings::set_setting_conn(&conn, SETTINGS_KEY, &off);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert!(d.rows.is_empty(), "总开关关闭 → 零行");
+        assert_eq!(d.totals.request_total, 0);
+        assert_eq!(d.totals.user_est, None, "空态仍是 null，不是 0");
+        assert!(
+            d.trend.is_empty(),
+            "关闭时连桶都不出（与「开着但无数据」不同）"
+        );
+        assert!(d.recent_session.is_none());
+        assert_eq!(d.work_summary, WorkSummary::default());
+        assert_eq!(d.availability.len(), 8, "可得性说明照常返回");
+        // **顺序效应**（如实固定，见报告「自审发现」）：本层先判总开关、后解析区间 →
+        // 关闭态下「非法区间」不报错（空态优先）。打开态下同一非法区间**必须**回结构化错误码。
+        let bad = UsageRange {
+            preset: UsageRangePreset::Custom,
+            from: None,
+            to: None,
+        };
+        assert!(
+            dashboard_with_conn(&conn, &bad, UsageGroupBy::Tool, now).is_ok(),
+            "关闭态不解析区间（空态优先）"
+        );
+        // 对照（防假绿）：重新打开后同一个库必须出数据，否则上面的空态只是因为库空
+        let on = serde_json::to_string(&UsageSettings {
+            enabled: true,
+            ..Default::default()
+        })
+        .unwrap();
+        crate::database::dao::settings::set_setting_conn(&conn, SETTINGS_KEY, &on);
+        let d2 = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert_eq!(d2.rows.len(), 2, "开关打开后同一库必须出 2 行");
+        assert_eq!(d2.totals.request_total, 1400);
+        // 打开态：非法区间 → 结构化错误码（契约 §1「采集类错误用结构化错误码」+ §3 要点）
+        let err = dashboard_with_conn(&conn, &bad, UsageGroupBy::Tool, now)
+            .expect_err("打开态下非法区间必须报错（不得静默回落成空态）");
+        assert_eq!(err.code, "usage-range-invalid");
+    }
+
+    /// GC 3（只读账本、零扫描）+ W-26（持 `DB` 锁的路径**不得**调采集 → ABBA 死锁）的**结构性自省锁**。
+    ///
+    /// 为什么不用行为式断言（`collect::collect_calls()` 前后不变）：那个原子量与 `collect.rs` 的
+    /// 采集用例**在同一个 lib 测试二进制里并行**共享，别人一 `fetch_add` 本用例就假红
+    /// （W-22 已把这条行为断言留给 Task 20 的集成构建）。自省锁（`include_str!` 读自己的源码，
+    /// Task 17 的 `every_test_in_this_file_takes_the_serial_lock` 同款）变异即可真红。
+    ///
+    /// **针必须拆开写**（`concat!`）：否则本用例自己的字符串字面量就会命中自己 → 恒真/恒假。
+    #[test]
+    fn query_layer_never_calls_collection_and_reads_only_cached_result() {
+        let src = include_str!("query.rs");
+        // 正向：数据截止时间只能走 W-26 的唯一安全形式（它只碰 LAST_RESULT、不碰飞行锁）
+        let safe = concat!("collect::", "cached_result()");
+        assert!(
+            src.contains(safe),
+            "查询层取「数据截止时间」必须经 cached_result()（W-26 安全形式）"
+        );
+        // 反向：采集入口一律不得出现在查询层（持 DB 锁调采集 = ABBA 死锁）
+        for forbidden in [
+            concat!("collect", "_with("),
+            concat!("run", "_collection("),
+            concat!("collect::", "collect("),
+        ] {
+            assert!(
+                !src.contains(forbidden),
+                "查询层不得出现 `{forbidden}`：它会扫描并取 DB → 与持 DB 锁的查询路径构成 ABBA 死锁（W-26）"
+            );
+        }
+        // GC 3：零文件扫描——不得碰增量读入口与采集上下文
+        for forbidden in [
+            concat!("read_", "incremental"),
+            concat!("Collect", "Context"),
+        ] {
+            assert!(
+                !src.contains(forbidden),
+                "查询层不得出现 `{forbidden}`（GC 3：只读账本、零文件扫描）"
+            );
+        }
+    }
+
+    /// D21 标签字典：同一 `project_key` 可能对应多个原文（Windows 上 claude 路径已小写、
+    /// zcode 保留原文）→ 取**最近活跃**会话的原文（`last_seen_at` 倒序 + `or_insert`，确定性）。
+    #[test]
+    fn key_label_dict_prefers_the_most_recently_seen_session_label() {
+        let conn = mem_empty();
+        add_session_at(&conn, "claude", "old", "mam", "OldName", 100, None, false);
+        add_session_at(&conn, "zcode", "new", "mam", "NewName", 900, None, false);
+        // 前提：同一 project_key 必须真有两行不同原文，才谈得上「取最近」（否则假绿）
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_session WHERE project_key = 'mam'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "前提：同一 project_key 应有两行");
+        let labels = key_label_dict(&conn);
+        assert_eq!(
+            labels.get("mam").map(String::as_str),
+            Some("NewName"),
+            "同一项目键必须取最近活跃会话的原文（不得随查询顺序漂移）"
+        );
+        // 空 project_key / 空 label 不得进字典（W-01：Unknown 桶只有 "unknown" 一个键）
+        add_session_at(&conn, "dsh", "blank", "", "", 999, None, false);
+        let labels = key_label_dict(&conn);
+        assert!(!labels.contains_key(""), "空 project_key 的会话不得进字典");
+    }
+
+    /// W-39 / Task 17 实测：`tool_stats` 里存在 `(0, ms>0)` 条目（跨小时调用的产物：次数落在
+    /// `tool/call` 那一小时的行、耗时落在 `result` 那一小时的行）。
+    /// 查询层**必须如实呈现**（不得删掉、不得归零）：Top 工具按耗时第一名要能看到它；
+    /// 而「平均耗时」在 0 次调用时**不可得**（null，不是 0、不许除零）。
+    #[test]
+    fn zero_call_tool_stats_entry_keeps_its_duration() {
+        let conn = mem_empty();
+        let mut counters = SessionCounters {
+            tool_ms: 500,
+            ..Default::default()
+        };
+        counters.tool_stats.insert("Agent".to_string(), (0, 500));
+        add_spec(
+            &conn,
+            "dsh",
+            "h1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                counters,
+                ..Default::default()
+            },
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        // 前提断言：库里确实是 `(0 次调用, 500ms)` 那一形态（不是夹具写成 (1, 500)）
+        let text: String = conn
+            .query_row(
+                "SELECT tool_stats FROM usage_detail WHERE source_id = 'dsh'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            text, r#"{"Agent":[0,500]}"#,
+            "前提：落库条目就是 (0 次调用, 500ms)"
+        );
+        assert_eq!(
+            d.work_summary.top_tool_ms,
+            Some(TopToolMs {
+                name: "Agent".into(),
+                ms: 500
+            }),
+            "W-39：有耗时无次数的条目不得被归零/删除"
+        );
+        assert_eq!(
+            d.work_summary.top_tool,
+            Some(TopTool {
+                name: "Agent".into(),
+                count: 0
+            }),
+            "W-39：0 次调用如实呈现（不得伪造成 1 次）"
+        );
+        assert_eq!(d.work_summary.tool_calls, Some(0));
+        assert_eq!(
+            d.work_summary.tool_avg_ms, None,
+            "0 次调用 → 平均耗时不可得（null，不得 0、不得除零）"
+        );
+    }
+
+    /// `recentSession`（契约 §2 / P2 第 4 行）：「本会话」= **最近有活动的会话**（不是当前打开的会话），
+    /// 用量按**当前 range** 统计；`title` 直传（可空）。
+    #[test]
+    fn recent_session_is_the_most_recently_seen_session() {
+        let conn = mem_with_rows();
+        add_session_at(
+            &conn,
+            "claude",
+            "s-late",
+            "proj",
+            "Proj",
+            9_999,
+            Some("最近会话".into()),
+            false,
+        );
+        add_spec(
+            &conn,
+            "claude",
+            "s-late",
+            "proj",
+            "2026-10-03T11",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 42,
+                    output: 8,
+                    ..Default::default()
+                },
+                request_total: 42,
+                user_est: Some(1),
+                ..Default::default()
+            },
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        let rs = d.recent_session.expect("有会话 → recentSession 必须有值");
+        assert_eq!(
+            (rs.source_id.as_str(), rs.session_id.as_str()),
+            ("claude", "s-late"),
+            "取 last_seen_at 最大者，不是当前打开的会话"
+        );
+        assert_eq!(rs.title.as_deref(), Some("最近会话"), "title 直传（可空）");
+        assert_eq!(
+            rs.buckets.input_fresh, 42,
+            "只算**该会话**在当期窗口内的用量（不含同源其它会话）"
+        );
+        assert_eq!(rs.buckets.output, 8);
+        assert_eq!(rs.metrics.request_total, 42);
+        assert_eq!(rs.metrics.requests, 1);
+        assert_eq!(rs.metrics.user_est, Some(1));
+        assert_ne!(
+            rs.metrics.request_total, d.totals.request_total,
+            "本会话行不得等于全体总量"
+        );
+        // **已知分叉（如实断言现状，不视为正确口径；见模块文档「已知口径差异」）**：
+        // 日聚合行不带 session_id → 日档 recentSession 恒 0。若 ② 裁决为「不可得 → null」
+        // 或补会话级取数，本断言会红——这正是它存在的意义。
+        let day = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert!(day.totals_buckets.total() > 0, "前提：日档总量有数据");
+        // GC 7（评审判决 A）：日档无会话维度 → `recentSession` 必须**整体为 null**，
+        // 不得给一个 `buckets` 全 0 的块（那会被 UI 显示成「本会话 0」＝假测量值）
+        assert!(
+            day.recent_session.is_none(),
+            "日档不可得 → null（GC 7）；给 Some(全 0) 就是把「不可得」伪装成「真的是 0」"
+        );
+    }
+
+    /// 取数辅助的边界：**空键集 → 零行**（不查表）；**非连续键集 → 只回键集内的行**
+    /// （`keys.contains` 过滤不能省：区间查询按 `BETWEEN first..last` 取数，键集中间缺桶时
+    /// 那些桶的行**必须**被剔掉，否则环比/趋势会混入窗口外的数据）。
+    #[test]
+    fn load_rows_for_keys_respects_the_key_set_and_empty_keys() {
+        let conn = mem_with_rows();
+        assert!(
+            load_rows_for_keys(&conn, RangeGranularity::Hour, &[]).is_empty(),
+            "空键集不得回任何行"
+        );
+        // 键集刻意**跳过 11 时**（该小时在库里有一行 codex 明细）→ 只有 10 时的 claude 行能回
+        let keys: Vec<String> = vec!["2026-10-03T10".to_string(), "2026-10-03T12".to_string()];
+        let picked = load_rows_for_keys(&conn, RangeGranularity::Hour, &keys);
+        assert_eq!(
+            picked.len(),
+            1,
+            "键集外的桶必须被剔除（区间查询的 BETWEEN 会把它带出来）"
+        );
+        assert_eq!(picked[0].bucket_key, "2026-10-03T10");
+        assert_eq!(picked[0].source_id, "claude");
+        assert_eq!(picked[0].project_key, "proj", "记录级项目键随行读回（R2）");
+        let dkeys: Vec<String> = vec!["2026-10-03".to_string()];
+        let onlyday = load_rows_for_keys(&conn, RangeGranularity::Day, &dkeys);
+        assert_eq!(onlyday.len(), 2, "10-03 的两条日聚合（claude / codex）");
+        assert!(onlyday.iter().all(|r| r.bucket_key == "2026-10-03"));
+        assert!(
+            onlyday.iter().all(|r| r.session_id.is_empty()),
+            "**根因前提**（不是对输出的背认）：日聚合行不带会话 id ⇒ 日档任何按会话的判定都不可得；\
+             它对输出的两个后果由 `recent_session_is_the_most_recently_seen_session`（日档 → null）\
+             与 `subagent_flag_is_only_meaningful_in_the_hour_tier`（日档 → 恒 false）正向锁定"
+        );
+        // **日档也要有非连续键集**（否则 Day 分支的 `keys.contains` 过滤同样是零覆盖：
+        // 单日键集时 `BETWEEN 2026-10-03..2026-10-03` 恰好只覆盖那一天，删掉过滤也抓不住）。
+        // 库里 10-02 另有 1 行 → 键集取 {10-02, 10-04}，中间那天（10-03）的两行必须被剔除。
+        add_spec(
+            &conn,
+            "codex",
+            "prev",
+            "proj",
+            "2026-10-02T08",
+            RowSpec::default(),
+        );
+        let dgap: Vec<String> = vec!["2026-10-02".to_string(), "2026-10-04".to_string()];
+        let picked = load_rows_for_keys(&conn, RangeGranularity::Day, &dgap);
+        assert_eq!(
+            picked.len(),
+            1,
+            "日档：键集外的日（10-03）必须被剔除（BETWEEN 会把它带出来）"
+        );
+        assert_eq!(picked[0].bucket_key, "2026-10-02");
+        assert_eq!(picked[0].source_id, "codex");
+    }
+
+    /// 评审判决 A 的第三半（**outcome 断言**，非根因断言）：行级 `is_subagent` 的**分叉结果**——
+    /// 小时档能分层（codex 组只由子代理 s2 贡献 → `true`），**日档不可得 → 恒 `false`**
+    /// （契约把该字段定为非空 `boolean`，属**已知妥协**）。本断言让妥协**可见**：
+    /// 若 ② 裁决改契约（例如允许 `null`、或日档补会话级取数），它会立刻变红。
+    #[test]
+    fn subagent_flag_is_only_meaningful_in_the_hour_tier() {
+        let conn = mem_with_rows(); // codex 的 s2 是子代理；claude 的 s1 是父会话
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let hour = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        let hsub = |k: &str| hour.rows.iter().find(|r| r.key == k).unwrap().is_subagent;
+        assert!(
+            hsub("codex"),
+            "小时档：codex 组只由子代理会话贡献 → true（D17 分层的依据可用）"
+        );
+        assert!(!hsub("claude"), "小时档：claude 组含父会话 s1 → false");
+        let day = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        // 前提断言：日档**确实**有 codex 组（否则下面两条只是「组不存在」的假绿）
+        assert!(
+            day.rows.iter().any(|r| r.key == "codex"),
+            "前提：日档必须有 codex 组"
+        );
+        let dsub = |k: &str| day.rows.iter().find(|r| r.key == k).unwrap().is_subagent;
+        assert!(
+            !dsub("codex"),
+            "日档：日聚合不带 session_id → 该位**不可得**；契约定为非空故只能恒 false\
+             （已知妥协，见模块文档「已知口径差异」1.2 与报告偏差申报 F-1）"
+        );
+        assert!(!dsub("claude"));
+    }
+
+    /// D19 的**数值锁**（评审 Important #2）：`longestTurnPerTool` 的 p50 与 max。
+    /// 四条边界各锁一个命门：
+    /// * **奇数样本**（claude 100/200/1000 → p50=200、max=1000）——样本刻意让**均值(433)≠中位数**，
+    ///   把「拿均值冒充 p50」的退化实现抓住；
+    /// * **偶数样本**（codex 10/20/30/100 → p50=(20+30)/2=**25**、max=100）；
+    /// * **caps 不可得**（workbuddy `longest_turn=false`，库里**却真有**样本 5/7）→ 必须 `None`
+    ///   （不得 0，也不得把别的工具的样本混进来）；
+    /// * **有行无样本**（opencode）→ `None`；**无行的源**（kimi）→ 不出条目。
+    #[test]
+    fn longest_turn_p50_max_odd_even_and_unavailable() {
+        let conn = mem_empty();
+        add_spec(
+            &conn,
+            "claude",
+            "s1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                counters: SessionCounters {
+                    turns: 3,
+                    turn_ms: vec![100, 200, 1000],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "codex",
+            "s2",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                counters: SessionCounters {
+                    turns: 4,
+                    turn_ms: vec![10, 20, 30, 100],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "workbuddy",
+            "s3",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                counters: SessionCounters {
+                    turn_ms: vec![5, 7],
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        add_spec(
+            &conn,
+            "opencode",
+            "s4",
+            "proj",
+            "2026-10-03T10",
+            RowSpec::default(),
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        // 前提断言：三行样本确已落库（否则下面全是假绿）
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_detail WHERE turn_ms <> ''",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 3, "前提：三行带 turn_ms 样本");
+        let lt = |k: &str| d.work_summary.longest_turn_per_tool.get(k).cloned();
+        assert_eq!(
+            lt("claude"),
+            Some(Some(LongestTurn {
+                p50: 200,
+                max: 1000
+            })),
+            "奇数样本：p50=200、max=1000（均值 433 ≠ p50，防「均值冒充中位数」）"
+        );
+        assert_eq!(
+            lt("codex"),
+            Some(Some(LongestTurn { p50: 25, max: 100 })),
+            "偶数样本：p50=(20+30)/2=25、max=100"
+        );
+        assert_eq!(
+            lt("workbuddy"),
+            Some(None),
+            "caps.longest_turn=false → 不可得（库里真有 5/7 也不得显示；D19/GC 7）"
+        );
+        assert_eq!(lt("opencode"), Some(None), "有行但无样本 → None（不得 0）");
+        assert_eq!(
+            lt("kimi"),
+            None,
+            "无行的源不出条目（「无数据」≠「不可得」）"
+        );
+    }
+
+    /// D18 三层报错 + 打断 + 工具计数的**数值锁**（评审 Important #2）。
+    /// 命门：① 四层都必须出**非零真值**（空账本用例走早退分支，`根本到不了求和`）；
+    /// ② **caps 为 false 的层不得计入**（夹具在那些层故意填 `99`，漏 caps 门数值立刻炸）；
+    /// ③ `tool_avg_ms > 0`；④ `topTool`/`topToolMs` 的**非零选择**；
+    /// ⑤ `tool_stats` 的**跨源累加**；⑥ **并列时的确定性**。
+    #[test]
+    fn work_summary_error_layers_tool_counters_and_top_tools() {
+        let conn = mem_empty();
+        // 每源的 tool_stats 刻意设计（合并后见断言）：
+        //   Alpha = claude(2,500) + codex(2,10) = **(4, 510)** ← 跨源累加；耗时第一名
+        //   Zeta  = claude(4,5)                   ← 与 Alpha 次数并列（4），确定性取字典序最大者
+        //   Weird = workbuddy(0,300)              ← W-39 形态：0 次调用却有耗时，**不得**被选为第一名
+        let mut claude = SessionCounters {
+            turns: 2,
+            error_model: 3,
+            error_turn: 99, // claude 的 caps.error_turn = false → 必须被剔除
+            error_tool: 5,
+            interrupted: 1,
+            tool_calls: 4,
+            tool_ms: 800,
+            ..Default::default()
+        };
+        claude.tool_stats = [
+            ("Alpha".to_string(), (2, 500)),
+            ("Zeta".to_string(), (4, 5)),
+        ]
+        .into_iter()
+        .collect();
+        let mut codex = SessionCounters {
+            turns: 1,
+            error_model: 2,
+            error_turn: 4,
+            error_tool: 1,
+            tool_calls: 2,
+            tool_ms: 400,
+            ..Default::default()
+        };
+        codex.tool_stats = [
+            ("Alpha".to_string(), (2, 10)),
+            ("Beta".to_string(), (2, 100)),
+        ]
+        .into_iter()
+        .collect();
+        let mut workbuddy = SessionCounters {
+            error_model: 99, // workbuddy 的 caps.error_model = false → 剔除
+            error_turn: 99,  // 同上（caps.error_turn = false）
+            error_tool: 7,
+            interrupted: 2,
+            tool_calls: 1,
+            tool_ms: 100,
+            ..Default::default()
+        };
+        workbuddy.tool_stats = [("Weird".to_string(), (0, 300))].into_iter().collect();
+        let opencode = SessionCounters {
+            turns: 1,
+            error_model: 1,
+            error_turn: 1,
+            error_tool: 99, // opencode 的 caps.error_tool = false → 剔除
+            interrupted: 3,
+            tool_calls: 0, // 0 次调用 + 50ms 耗时（W-39 形态）：`tool_avg_ms` 仍按**总** calls 算
+            tool_ms: 50,
+            ..Default::default()
+        };
+        // kimi 只用来锁**第四层**（打断）的 caps 门：它唯一 `caps.interrupted = false`。
+        // 其余计数全 0（不影响上面任何一条期望值），只有 `interrupted: 99` 必须被剔除。
+        let kimi = SessionCounters {
+            interrupted: 99,
+            ..Default::default()
+        };
+        for (src, sess, counters) in [
+            ("claude", "s1", claude),
+            ("codex", "s2", codex),
+            ("workbuddy", "s3", workbuddy),
+            ("opencode", "s4", opencode),
+            ("kimi", "s5", kimi),
+        ] {
+            add_spec(
+                &conn,
+                src,
+                sess,
+                "proj",
+                "2026-10-03T10",
+                RowSpec {
+                    counters,
+                    ..Default::default()
+                },
+            );
+            add_session(&conn, src, sess, "proj", "Proj");
+        }
+        // **日档窗口的「首日早期小时」样本**（下面日档断言专锁 `from = 首日 T00`）：
+        // 近 7 天的首日是 09-27，这一行落在 09-27T01。若把日档窗口的 `from` 写成 `T23`，
+        // 这一行会被整体丢出窗口 → 日档数值静默变少（评审后补的真锁，见变异 O1）。
+        add_spec(
+            &conn,
+            "dsh",
+            "s6",
+            "proj",
+            "2026-09-27T01",
+            RowSpec {
+                counters: SessionCounters {
+                    error_model: 10,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        );
+        add_session(&conn, "dsh", "s6", "proj", "Proj");
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        let w = &d.work_summary;
+        assert_eq!(
+            w.error_model,
+            Some(6),
+            "模型/传输层：claude 3 + codex 2 + opencode 1（workbuddy caps=false，其 99 必须被剔除）"
+        );
+        assert_eq!(
+            w.error_turn,
+            Some(5),
+            "回合失败层：codex 4 + opencode 1（claude / workbuddy 该层 caps=false，各自的 99 被剔除）"
+        );
+        assert_eq!(
+            w.error_tool,
+            Some(13),
+            "工具执行层：claude 5 + codex 1 + workbuddy 7（opencode caps=false，其 99 被剔除）"
+        );
+        assert_eq!(
+            w.interrupted,
+            Some(6),
+            "用户打断单列：1+0+2+3（不计入任何错误层）；kimi 该层 caps=false，其 99 必须被剔除"
+        );
+        assert_eq!(w.tool_calls, Some(7), "工具调用总数（kimi 全 0，不改变）");
+        assert_eq!(
+            w.tool_avg_ms,
+            Some(192),
+            "1350ms / 7 次 = 192（>0；只有**总**调用为 0 才算不可得）"
+        );
+        assert_eq!(w.sessions, Some(5), "五个父会话（含 kimi 的空回合会话）");
+        assert_eq!(w.turns_per_tool.get("claude"), Some(&Some(2)));
+        assert_eq!(
+            w.turns_per_tool.get("workbuddy"),
+            Some(&None),
+            "无回合概念 → null"
+        );
+        assert_eq!(w.turns_per_tool.get("zcode"), None, "无行的源不出条目");
+        // 前提断言：`Alpha` **确实**出现在两个源的行里（否则「跨源累加」根本没被考到）
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM usage_detail WHERE tool_stats LIKE '%Alpha%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 2, "前提：Alpha 分布在两个源的行里");
+        assert_eq!(
+            w.top_tool,
+            Some(TopTool {
+                name: "Zeta".into(),
+                count: 4
+            }),
+            "按次数第一名：Alpha(2+2=4) 与 Zeta(4) 并列 → 取 BTreeMap 序最后者（确定性；换规则必须是有意为之）"
+        );
+        assert_eq!(
+            w.top_tool_ms,
+            Some(TopToolMs {
+                name: "Alpha".into(),
+                ms: 510
+            }),
+            "按耗时第一名：Alpha 510ms（跨源累加 500+10）；**不得**取零次调用的 Weird(300)"
+        );
+        // 日档同口径：工作小结的窗口是**整日**（`from=首日 T00` / `to=末日 T23`）——两端都要锁：
+        // * 首日早期小时（09-27T01，dsh 的 error_model=10）→ 锁 `from = T00`（写成 `T23` 会丢掉它）；
+        // * 末日的小时（10-03T10 那批）→ 锁 `to = T23`（写成 `T00` 会把它们全丢掉）。
+        let dday = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert_eq!(
+            dday.work_summary.error_model,
+            Some(6 + 10),
+            "日档：工作小结按整日窗口取数（from=首日 T00；首日 01 时的 10 必须在窗内）"
+        );
+        assert_eq!(
+            dday.work_summary.error_tool,
+            Some(13),
+            "日档：末日 10 时的四行必须在窗内（to=末日的 T23）"
+        );
+        assert_eq!(dday.work_summary.tool_calls, Some(7));
+        assert_eq!(dday.work_summary.tool_avg_ms, Some(192));
+        assert_eq!(
+            dday.work_summary.sessions,
+            Some(6),
+            "日档六个父会话（含 09-27 的 dsh）"
+        );
+    }
+
+    /// 环比「无数据」判据的**边界**：上一周期**有量但 0 次请求**（累计型源的差值轮可能如此）
+    /// 仍算「有数据」→ 必须出 `Some`（否则 UI 会静默不显示环比段）。
+    /// 判据是 `requests == 0` **且** `total() == 0` **两个条件同时成立**，不是只看请求数。
+    #[test]
+    fn compare_distinguishes_zero_buckets_from_zero_requests() {
+        let conn = mem_empty();
+        // 昨日 08 时：7 token、0 次请求
+        add_spec(
+            &conn,
+            "codex",
+            "p1",
+            "proj",
+            "2026-10-02T08",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 7,
+                    ..Default::default()
+                },
+                request_total: 7,
+                requests: 0,
+                ..Default::default()
+            },
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        let c = d
+            .compare
+            .expect("上一周期有量（哪怕 0 次请求）→ 必须出对比段");
+        assert_eq!(c.prev_buckets.input_fresh, 7);
+        assert_eq!(c.prev_metrics.request_total, 7);
+        assert_eq!(c.prev_metrics.requests, 0);
+        // 对照：当期确实无数据 → 总量为 0（`compare` 的 None 语义只针对**上一周期**）
+        assert_eq!(d.totals_buckets.total(), 0);
+        assert_eq!(d.totals.requests, 0);
+    }
+
+    /// **真机账本冒烟**（`#[ignore]`，需开发机 `~/.mam/mam.db` 已有真机数据）：
+    /// `cargo test --lib -- --ignored --nocapture real_ledger_dashboard_smoke`
+    ///
+    /// 为什么值得单列：本文件其余用例都在**内存库**上跑（口径可断言、可复现），而真机数据的
+    /// **形状**（多源混存、空模型行、跨小时 `(0, ms>0)`、`user_est` 为 NULL）只有真库才有。
+    /// 本用例**只读**打开真库（`SQLITE_OPEN_READ_ONLY`，**绝不写**），只断言**与具体数字无关的
+    /// 不变量**；真机数字一律 `println!` 作报告证据，不钉死（否则换台机器就红）。
+    #[test]
+    #[ignore = "真机冒烟：需 ~/.mam/mam.db（只读打开）"]
+    fn real_ledger_dashboard_smoke() {
+        let home = std::env::var_os("MAM_HOME")
+            .filter(|v| !v.is_empty())
+            .map(std::path::PathBuf::from)
+            .or_else(dirs::home_dir)
+            .expect("无法定位用户目录");
+        let db = home.join(".mam").join("mam.db");
+        if !db.exists() {
+            eprintln!("跳过：真机账本 {} 不存在", db.display());
+            return;
+        }
+        let conn =
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .expect("只读打开真机账本失败（若 MAM 正在写，可能 SQLITE_BUSY）");
+        let enabled = crate::services::usage::settings::load_from_conn(&conn).enabled;
+        let now = crate::services::usage::now_ms();
+        println!(
+            "[real] db={} usage.enabled={enabled} now_ms={now}",
+            db.display()
+        );
+        for (name, r) in [
+            ("today", range(UsageRangePreset::Today)),
+            ("last7d", range(UsageRangePreset::Last7d)),
+        ] {
+            let d = dashboard_with_conn(&conn, &r, UsageGroupBy::Tool, now).unwrap();
+            // 与数据无关的不变量（真机数字只在下面打印）
+            assert_eq!(
+                d.hero,
+                d.totals.request_total + d.totals_buckets.output,
+                "hero = 请求输入 + 产出（说明书 P1 第 2 条）"
+            );
+            let row_rt: i64 = d.rows.iter().map(|r| r.metrics.request_total).sum();
+            assert_eq!(
+                row_rt, d.totals.request_total,
+                "分组行必须不重不漏地划分总量"
+            );
+            let row_b = d.rows.iter().fold(UsageBuckets::default(), |mut a, r| {
+                a.add(&r.buckets);
+                a
+            });
+            assert_eq!(row_b, d.totals_buckets, "四桶同样不重不漏");
+            let trend_b = d.trend.iter().fold(UsageBuckets::default(), |mut a, t| {
+                a.add(&t.buckets);
+                a
+            });
+            assert_eq!(
+                trend_b, d.totals_buckets,
+                "趋势各桶之和必须等于总量（当期窗口自洽）"
+            );
+            println!(
+                "[{name}] totals={:?} hero={} requests={} user_est={:?} rows={} trend={} \
+                 compare_prev_request_total={:?} sessions={:?} turns_per_tool={:?} \
+                 error_model={:?} error_turn={:?} error_tool={:?} interrupted={:?} \
+                 tool_calls={:?} tool_avg_ms={:?} top_tool={:?} top_tool_ms={:?} \
+                 recent_session={:?} collected_at={}",
+                d.totals_buckets,
+                d.hero,
+                d.totals.requests,
+                d.totals.user_est,
+                d.rows.len(),
+                d.trend.len(),
+                d.compare.as_ref().map(|c| c.prev_metrics.request_total),
+                d.work_summary.sessions,
+                d.work_summary.turns_per_tool,
+                d.work_summary.error_model,
+                d.work_summary.error_turn,
+                d.work_summary.error_tool,
+                d.work_summary.interrupted,
+                d.work_summary.tool_calls,
+                d.work_summary.tool_avg_ms,
+                d.work_summary.top_tool,
+                d.work_summary.top_tool_ms,
+                d.recent_session.as_ref().map(|r| (
+                    r.source_id.clone(),
+                    r.session_id.clone(),
+                    r.buckets
+                )),
+                d.collected_at,
+            );
+            // 逐工具明细（报告用）：按请求输入降序
+            for row in d.rows.iter().take(10) {
+                println!(
+                    "  - {} / {} : buckets={:?} request_total={} requests={} user_est={:?} \
+                     kind={:?} is_subagent={}",
+                    row.key,
+                    row.label,
+                    row.buckets,
+                    row.metrics.request_total,
+                    row.metrics.requests,
+                    row.metrics.user_est,
+                    row.source_kind,
+                    row.is_subagent
+                );
+            }
+        }
+    }
+}
