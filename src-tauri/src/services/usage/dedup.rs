@@ -65,6 +65,18 @@ impl AdjacentDrop {
         self.last = Some(b);
         true
     }
+
+    /// **跨轮续读（W-12）**：用上一轮最后一条四桶预置本比较器。否则每轮的第一条都会与
+    /// 「无上一条」比较（恒为 `true`）——**跨轮边界的那一对相邻重放会漏判**（静默多算）。
+    /// 本类型仍是**单文件 / 单轮**比较器：每个文件、每一轮各自新建（W-11）。
+    pub fn seed(&mut self, last: Option<UsageBuckets>) {
+        self.last = last;
+    }
+
+    /// 取本轮的「最后一条四桶」，供采集器写进游标 `state_json` 并**在下一轮 `seed` 回来**。
+    pub fn last(&self) -> Option<UsageBuckets> {
+        self.last
+    }
 }
 
 pub fn claude_request_key(session_id: &str, message_id: &str) -> DedupKey {

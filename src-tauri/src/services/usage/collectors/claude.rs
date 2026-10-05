@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{file_key_of, DeltaBuilder, PendingTools};
+use super::{file_key_of, file_read_failure_is_benign, DeltaBuilder, PendingTools};
 use crate::monitor::session_scan::SessionFileScan;
 use crate::services::usage::collect::{scan_namespace, CollectContext, UsageCollector};
 use crate::services::usage::dedup::claude_request_key;
@@ -217,28 +217,10 @@ fn tool_result_text(item: &Value) -> String {
     }
 }
 
-/// 单文件读取失败是否**可跳过**（W-06）：只有「文件已消失」这一种——它是**枚举与读取之间的
-/// 轮转竞态**（`SCAN.collect` 拿到清单之后、`read_incremental` 打开之前文件被轮转/删除），
-/// 该文件下一轮已不在清单里，跳过不会永久漏数。
-///
-/// **M-4（fix round 1/5）**：不能只看 `ErrorKind::NotFound`——`session_scan::collect_inner`
-/// 用 `DirEntry::metadata()`（**不跟随**符号链接）列文件，而 `read_incremental` 的 `stat_of`
-/// 用 `fs::metadata`（**跟随**）→ 一个**悬空符号链接** `x.jsonl` 会永远躺在清单里、每轮
-/// `NotFound`、每轮被「跳过」（**持久泄漏**：这个源永远读不完整，且没有任何信号）。
-/// 所以 `NotFound` 时**再核一次链接本身**：连链接都没了才算「已消失」，否则整源 `Err`。
-///
-/// 其余错误（mtime 不可得 → `InvalidData`、权限、IO 故障）都是「**这个源读不了**」的信号，
-/// 必须整源 `Err` 落进 `UsageSourceStatus.errorCode`，**不得**只 `log::warn!`——否则用户在
-/// UI 上看到的是「这个源没有用量」，而不是「这个源读不了」（W-06 补充条款；任务书 Step 4
-/// 原文是一律 `warn + continue`，与它冲突，见报告「偏差申报」）。
-fn file_read_failure_is_benign(path: &std::path::Path, e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::NotFound
-        && matches!(
-            std::fs::symlink_metadata(path),
-            Err(ref pe) if pe.kind() == std::io::ErrorKind::NotFound
-        )
-}
-
+/// 单文件读取失败是否**可跳过**（W-06 / D-24）：**已收进 `collectors/mod.rs` 共用**
+/// （Task 12 评审 Important #3 / 裁决 B——两份逐字拷贝的漂移会把「读不了」静默降级成
+/// 「这个源没有用量」，且不会有任何测试报红）。本文件经 `use super::file_read_failure_is_benign;`
+/// 共用同一份实现；行为与原来逐字相同（用例 `only_the_vanished_file_race_is_skipped` 仍锁着它）。
 impl UsageCollector for ClaudeCollector {
     fn source_id(&self) -> UsageSourceId {
         UsageSourceId::Claude

@@ -2,6 +2,7 @@
 //! 每个采集器都遵守同一条纪律：**每个文件只读一遍**（经 CollectContext::read_incremental），
 //! 在同一遍里把四桶/turn/工具/报错/时长一起算出来，只上报原始字段（口径计算在 semantics 等模块）。
 pub mod claude;
+pub mod codex;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -21,7 +22,10 @@ use super::provider::ProviderRule;
 /// 每个采集器文件里的 `collector_is_registered_in_all()` 就地锁住自己那一行，
 /// Task 17 另有一条 `all_seven_collectors_are_registered_in_order()` 锁全表。
 pub fn all() -> Vec<Box<dyn UsageCollector>> {
-    vec![Box::new(claude::ClaudeCollector)]
+    vec![
+        Box::new(claude::ClaudeCollector),
+        Box::new(codex::CodexCollector),
+    ]
 }
 
 /// 文件标识（游标键）：**路径派生、在源内唯一**（评审 B5）。
@@ -70,6 +74,33 @@ pub fn file_key_of(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 thread_local! {
     pub(crate) static RECORD_PROJECT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 单文件读取失败是否**可跳过**（W-06 / D-24；**采集器共用，只有这一份实现**）。
+///
+/// 只有「文件已消失」这一种——它是**枚举与读取之间的轮转竞态**（`SCAN.collect` 拿到清单之后、
+/// `read_incremental` 打开之前文件被轮转/删除），该文件下一轮已不在清单里，跳过不会永久漏数。
+///
+/// **不能只看 `ErrorKind::NotFound`**（Task 11 的 M-4）：`session_scan::collect_inner` 用
+/// `DirEntry::metadata()`（**不跟随**符号链接）列文件，而 `read_incremental` 的 `stat_of` 用
+/// `fs::metadata`（**跟随**）→ 一个**悬空符号链接** `x.jsonl` 会永远躺在清单里、每轮 `NotFound`、
+/// 每轮被「跳过」（**持久泄漏**：这个源永远读不完整，且没有任何信号）。
+/// 所以 `NotFound` 时**再核一次链接本身**：连链接都没了才算「已消失」，否则整源 `Err`。
+///
+/// 其余错误（mtime 不可得 → `InvalidData`、权限、IO 故障）都是「**这个源读不了**」的信号，
+/// 必须整源 `Err` 落进 `UsageSourceStatus.errorCode`，**不得**只 `log::warn!`——否则用户在
+/// UI 上看到的是「这个源没有用量」，而不是「这个源读不了」（W-06 补充条款）。
+///
+/// **为什么提到本模块**（Task 12 评审 Important #3，裁决 B）：这条判据决定「静默跳过 vs 整源
+/// 响亮失败」，claude / codex **各存一份逐字拷贝**的漂移（例如某侧将来补 EACCES、另一侧没补）
+/// 会把「读不了」重新降级成「这个源没有用量」，而且**不会有任何测试报红**——正是 GC 6
+/// 「口径层唯一」要防的。故收进采集器共用层，两个采集器共用同一份。
+pub(crate) fn file_read_failure_is_benign(path: &Path, e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::NotFound
+        && matches!(
+            std::fs::symlink_metadata(path),
+            Err(ref pe) if pe.kind() == std::io::ErrorKind::NotFound
+        )
 }
 
 /// 会话级项目归属的**唯一调用点**（W-13）：`record_project` 内含一次 `canonicalize`
