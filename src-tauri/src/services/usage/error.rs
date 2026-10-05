@@ -39,11 +39,15 @@ impl UsageError {
 /// 在生产代码里引用，否则「生产码字面量」这一侧根本没有锁——`#[cfg(test)]` 下新增一个
 /// 没进表的生产码，三处断言全绿（评审实测）。
 pub const USAGE_CODES: &[&str] = &[
-    "usage-db-failed",        // 账本库读写失败
-    "usage-source-io",        // 源文件读取失败（该源本轮判失败，其余源继续）
-    "usage-source-db-open",   // 源 SQLite 打不开（含 immutable 回退失败）
-    "usage-range-invalid",    // 时间范围非法（custom 缺 from/to 或 from > to）
-    "usage-groupby-invalid",  // 分组维度非法（usage_records 只接受 tool | project，见 D6/D7）
+    "usage-db-failed",       // 账本库读写失败
+    "usage-source-io",       // 源文件读取失败（该源本轮判失败，其余源继续）
+    "usage-source-db-open",  // 源 SQLite 打不开（含 immutable 回退失败）
+    "usage-range-invalid",   // 时间范围非法（custom 缺 from/to 或 from > to）
+    "usage-groupby-invalid", // 分组维度非法（usage_records 只接受 tool | project，见 D6/D7）
+    // 筛选条件在**当前档位算不出**（契约 §2 `UsageFilters` 通用条款 / §3 要点 4，第 9 个码）：
+    // 首个实例 = 日档 + `subagentMode="parentsOnly"`（日聚合行不带 session_id）。
+    // **不得**当作"没有子代理"或"全放行"——那是界面谎言（GC 7 / 说明书 §8.2）。
+    "usage-filter-unavailable",
     "usage-settings-invalid", // 设置补丁越界（负数 / 保留期 <1 / 间隔 <1）
     "usage-disabled",         // 用量统计总开关关闭（查询返回空态而不是报错）
     "usage-internal",         // 兜底

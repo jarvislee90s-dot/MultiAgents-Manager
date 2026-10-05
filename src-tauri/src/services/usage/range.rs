@@ -2,7 +2,10 @@
 //! 五档：近 5 小时（最近 5 个**完整整点桶**，不含当前小时，整点锚定不做秒级滚动）/
 //! 当日（0 时至当前，小时桶）/ 近 7 天 / 近 30 天（含今日滚动窗口，日桶）/
 //! 自定义（日桶，跨度 ≤31 天含首尾，超限截断为最近 31 天并常驻提示）。
-//! 跨源日界：优先各源自带时区（codex `turn_context.timezone`），缺失回退宿主本地。
+//! **跨源日界：一律以宿主本地时区为基准**（spec §P6 / 2026-10-05 用户裁决）——各源自带
+//! 时区**可读入备查但不得参与键计算**，因此本模块只提供宿主本地入口：`hour_key_of_host` /
+//! `day_key_of_host`。原先的 `SourceTz::Named(chrono_tz::Tz)` 生产消费点已随该裁决清零，
+//! `chrono-tz` 依赖一并移除（GC 13 当初加它的唯一理由即「优先用各源自带时区」，已作废）。
 use chrono::{Datelike, Local, TimeZone, Timelike};
 
 use super::error::UsageError;
@@ -13,73 +16,51 @@ pub const MAX_CUSTOM_SPAN_DAYS: i64 = 31;
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 86_400_000;
 
-/// 记录级时区：源自带 IANA 名（能解析则用）或宿主本地
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SourceTz {
-    HostLocal,
-    Named(chrono_tz::Tz),
-}
-
-impl SourceTz {
-    pub fn from_name(name: Option<&str>) -> Self {
-        match name.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(n) => n
-                .parse::<chrono_tz::Tz>()
-                .map(SourceTz::Named)
-                .unwrap_or(SourceTz::HostLocal),
-            None => SourceTz::HostLocal,
-        }
-    }
-}
-
-pub fn hour_key_of(ts_ms: i64, tz: &SourceTz) -> String {
-    match tz {
-        SourceTz::HostLocal => Local
-            .timestamp_millis_opt(ts_ms)
-            .single()
-            .map(|t| {
-                format!(
-                    "{:04}-{:02}-{:02}T{:02}",
-                    t.year(),
-                    t.month(),
-                    t.day(),
-                    t.hour()
-                )
-            })
-            .unwrap_or_default(),
-        SourceTz::Named(z) => z
-            .timestamp_millis_opt(ts_ms)
-            .single()
-            .map(|t| {
-                format!(
-                    "{:04}-{:02}-{:02}T{:02}",
-                    t.year(),
-                    t.month(),
-                    t.day(),
-                    t.hour()
-                )
-            })
-            .unwrap_or_default(),
-    }
-}
-
-pub fn day_key_of(ts_ms: i64, tz: &SourceTz) -> String {
-    let h = hour_key_of(ts_ms, tz);
-    h.chars().take(10).collect()
-}
-
+/// 小时键 `"YYYY-MM-DDTHH"`：**只由宿主本地时区**产生（spec §P6）。
+/// 时间戳超出可表示范围 → 空串（不 panic、不回落 0 或当日）。
 pub fn hour_key_of_host(ts_ms: i64) -> String {
-    hour_key_of(ts_ms, &SourceTz::HostLocal)
+    Local
+        .timestamp_millis_opt(ts_ms)
+        .single()
+        .map(|t| {
+            format!(
+                "{:04}-{:02}-{:02}T{:02}",
+                t.year(),
+                t.month(),
+                t.day(),
+                t.hour()
+            )
+        })
+        .unwrap_or_default()
 }
 
+/// 日键 `"YYYY-MM-DD"`：宿主本地小时键的日期前缀（两档**不得分叉**）
 pub fn day_key_of_host(ts_ms: i64) -> String {
-    day_key_of(ts_ms, &SourceTz::HostLocal)
+    let h = hour_key_of_host(ts_ms);
+    h.chars().take(10).collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RangeGranularity {
     Hour,
     Day,
+}
+
+/// **档位 → 桶粒度的单一判据**（A-2 的筛选守卫靠它判"这个档位算不算得出会话身份"）。
+///
+/// 为什么不直接用 `resolve_range(...).cur.granularity`：那会顺带做**区间合法性校验**
+/// （custom 缺 from/to 或 from > to → `usage-range-invalid`），而 A-2 的守卫必须与
+/// `usage-groupby-invalid` **同层、在总开关之前** ⇒ 提前调 `resolve_range` 会把
+/// 「关闭态 + 非法区间」从"空态"变成"报错"，属契约外的行为变更。故此函数**只做纯映射、
+/// 不校验**；它与 `resolve_range` 的一致性由 `granularity_of_matches_resolve_range` 对拍锁住
+/// （两处漂移即红）。
+pub fn granularity_of(preset: UsageRangePreset) -> RangeGranularity {
+    match preset {
+        UsageRangePreset::Last5h | UsageRangePreset::Today => RangeGranularity::Hour,
+        UsageRangePreset::Last7d | UsageRangePreset::Last30d | UsageRangePreset::Custom => {
+            RangeGranularity::Day
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -540,32 +521,21 @@ mod tests {
         }
     }
 
-    /// 跨源日界（§P6）：优先用各源自带时区（codex `turn_context.timezone`），
-    /// 缺失才回退宿主本地时区。测试用两个**显式**时区名，与宿主时区无关。
+    /// **A-1 / Q-4 裁决的登记（原 `day_key_follows_source_timezone` 用例已随能力废除移除）**：
+    /// 落库键**只由宿主本地算法**产生——`SourceTz` / `chrono-tz` 已从本仓删除，
+    /// 想「修回去」必须**重新引入依赖并改签名**（编译期即拦），而运行期的行为锁在
+    /// `collectors::codex::tests::detail_hour_key_is_host_local_even_when_source_timezone_is_present`
+    /// （两个源时区相差 26h 的夹具，与时区无关地可红）。
+    /// 这里只钉住「废除是彻底的」这条结构事实。
     #[test]
-    fn day_key_follows_source_timezone() {
+    fn hour_key_api_exposes_only_the_host_local_entry() {
         let ts = chrono::DateTime::parse_from_rfc3339("2026-10-03T16:30:00Z")
             .unwrap()
             .timestamp_millis();
-        assert_eq!(
-            day_key_of(ts, &SourceTz::from_name(Some("UTC"))),
-            "2026-10-03"
-        );
-        assert_eq!(
-            day_key_of(ts, &SourceTz::from_name(Some("Asia/Shanghai"))),
-            "2026-10-04",
-            "+8 时区下已跨日"
-        );
-        assert_eq!(
-            hour_key_of(ts, &SourceTz::from_name(Some("Asia/Shanghai"))),
-            "2026-10-04T00"
-        );
-        // 非法/缺失时区名 → 回退宿主本地（不 panic、不报错）
-        assert!(matches!(
-            SourceTz::from_name(Some("Not/AZone")),
-            SourceTz::HostLocal
-        ));
-        assert!(matches!(SourceTz::from_name(None), SourceTz::HostLocal));
+        // 宿主本地入口在场且自洽（日键 = 小时键的日期前缀）
+        let h = hour_key_of_host(ts);
+        assert_eq!(h.len(), 13, "小时键形态 = YYYY-MM-DDTHH：{h}");
+        assert_eq!(day_key_of_host(ts), h[..10].to_string());
     }
 
     /// 展示标签：小时档 "HH:00"、日档 "M/D"（契约 §2 TrendPoint.label）
@@ -713,80 +683,81 @@ mod tests {
         assert_eq!(d32.prev.unwrap().keys.len(), 31);
     }
 
-    /// 宿主键包装函数（`ledger.rs` 的 `cutoff_day` 回改后直接依赖这两个入口）：
-    /// ① 必须等于显式 `HostLocal` 分支 ② 日键 = 小时键的日期前缀（两档不得分叉）
+    /// 宿主键入口（`ledger.rs` 的 `cutoff_day` 直接依赖这两个入口）：
+    /// ① 日键 = 小时键的日期前缀（两档不得分叉）② 小时键形态恒为 `YYYY-MM-DDTHH`
     /// ③ 越界时间戳给空串（与 ledger 原内联实现同款降级，保证回改**行为不变**）。
+    ///
+    /// **A-1 追记**：原用例还断言「`hour_key_of_host` == 显式 `HostLocal` 分支」并遍历
+    /// 一组 `Named` 时区——`SourceTz` 随 Q-4 裁决删除后，前者成了同义反复、后者无所指；
+    /// 形态与降级这两组**与实现无关**的断言一条未减（跨时区的行为锁改由
+    /// `collectors::codex` 的 A-1 用例承担）。
     #[test]
-    fn host_key_helpers_delegate_to_host_local_and_degrade_out_of_range() {
+    fn host_key_helpers_keep_shape_and_degrade_out_of_range() {
         let ts = chrono::DateTime::parse_from_rfc3339("2026-10-03T16:30:00Z")
             .unwrap()
             .timestamp_millis();
-        assert_eq!(hour_key_of_host(ts), hour_key_of(ts, &SourceTz::HostLocal));
-        assert_eq!(day_key_of_host(ts), day_key_of(ts, &SourceTz::HostLocal));
-
-        for tz in [
-            SourceTz::HostLocal,
-            SourceTz::from_name(Some("Asia/Shanghai")),
-            SourceTz::from_name(Some("UTC")),
-            SourceTz::from_name(Some("America/Los_Angeles")),
-        ] {
-            let h = hour_key_of(ts, &tz);
-            assert_eq!(h.len(), 13, "小时键形态 = YYYY-MM-DDTHH：{h}");
-            assert_eq!(h.as_bytes()[10], b'T', "小时键第 11 位必须是 T：{h}");
-            assert_eq!(
-                day_key_of(ts, &tz),
-                h[..10].to_string(),
-                "日键必须是小时键的日期前缀"
-            );
-        }
-        // 越界时间戳：Local/Tz 换算均不可表示 → 空串（不得 panic、不得回落 0 或当日）
+        let h = hour_key_of_host(ts);
+        assert_eq!(h.len(), 13, "小时键形态 = YYYY-MM-DDTHH：{h}");
+        assert_eq!(h.as_bytes()[10], b'T', "小时键第 11 位必须是 T：{h}");
+        assert_eq!(
+            day_key_of_host(ts),
+            h[..10].to_string(),
+            "日键必须是小时键的日期前缀"
+        );
+        // 越界时间戳：Local 换算不可表示 → 空串（不得 panic、不得回落 0 或当日）
         assert_eq!(hour_key_of_host(i64::MAX), "");
         assert_eq!(day_key_of_host(i64::MAX), "");
-        assert_eq!(day_key_of(i64::MIN, &SourceTz::from_name(Some("UTC"))), "");
+        assert_eq!(hour_key_of_host(i64::MIN), "");
         assert_eq!(day_key_of_host(i64::MIN), "");
     }
 
-    /// 跨源日界必须是**各源 IANA 时区**，不得退化成宿主时区：同一瞬间在日界两侧的源
-    /// 必须落不同日键；非法/空/纯空白名一律回退 HostLocal（不 panic）。
+    /// **A-2 对拍锁**：`granularity_of`（纯映射，供筛选守卫在**总开关之前**判档）必须与
+    /// `resolve_range(...).cur.granularity`（真正决定读哪张表的判据）**逐档一致**——
+    /// 两处漂移会让"守卫判成小时档、实际读日聚合表"（或反之）成为静默错判的来源。
     #[test]
-    fn source_timezone_boundaries_are_iana_not_host() {
-        let ts = chrono::DateTime::parse_from_rfc3339("2026-10-03T16:30:00Z")
-            .unwrap()
-            .timestamp_millis();
-        let utc = SourceTz::from_name(Some("UTC"));
-        let shanghai = SourceTz::from_name(Some("Asia/Shanghai")); // UTC+8
-        let la = SourceTz::from_name(Some("America/Los_Angeles")); // UTC-7（2026-10-03 仍在 PDT）
-        let kiritimati = SourceTz::from_name(Some("Pacific/Kiritimati")); // UTC+14
-
-        assert_eq!(day_key_of(ts, &utc), "2026-10-03");
-        assert_eq!(day_key_of(ts, &la), "2026-10-03");
-        assert_eq!(hour_key_of(ts, &la), "2026-10-03T09");
-        assert_eq!(day_key_of(ts, &shanghai), "2026-10-04");
-        assert_eq!(hour_key_of(ts, &kiritimati), "2026-10-04T06");
-        assert_ne!(
-            day_key_of(ts, &la),
-            day_key_of(ts, &kiritimati),
-            "跨日界两侧的源必须落不同日键（退化用宿主时区就会相等）"
-        );
-
-        // IANA 名解析：合法名 = Named；首尾空白裁剪后仍可解析
+    fn granularity_of_matches_resolve_range() {
+        let now = local_ms(2026, 10, 3, 14, 37);
+        let cases = [
+            range(UsageRangePreset::Last5h),
+            range(UsageRangePreset::Today),
+            range(UsageRangePreset::Last7d),
+            range(UsageRangePreset::Last30d),
+            UsageRange {
+                preset: UsageRangePreset::Custom,
+                from: Some("2026-09-20".into()),
+                to: Some("2026-10-03".into()),
+            },
+        ];
+        for r in cases {
+            let got = granularity_of(r.preset);
+            let want = resolve_range(&r, now).unwrap().cur.granularity;
+            assert_eq!(
+                got, want,
+                "{:?}：granularity_of 与 resolve_range 漂移（筛选守卫会判错档位）",
+                r.preset
+            );
+        }
+        // 逐一钉死五档的取值本身（防两处**一起**改错：对拍锁抓不到同向漂移）
         assert_eq!(
-            SourceTz::from_name(Some("UTC")),
-            SourceTz::Named(chrono_tz::Tz::UTC)
+            granularity_of(UsageRangePreset::Last5h),
+            RangeGranularity::Hour
         );
-        assert_eq!(SourceTz::from_name(Some("  Asia/Shanghai  ")), shanghai);
-        assert_ne!(SourceTz::Named(chrono_tz::Tz::UTC), SourceTz::HostLocal);
-        // 非法 / 空串 / 纯空白 / 缺失 → HostLocal（回退，不是 panic、不是错误）
-        assert!(matches!(
-            SourceTz::from_name(Some("Not/AZone")),
-            SourceTz::HostLocal
-        ));
-        assert!(matches!(SourceTz::from_name(Some("")), SourceTz::HostLocal));
-        assert!(matches!(
-            SourceTz::from_name(Some("   ")),
-            SourceTz::HostLocal
-        ));
-        assert!(matches!(SourceTz::from_name(None), SourceTz::HostLocal));
+        assert_eq!(
+            granularity_of(UsageRangePreset::Today),
+            RangeGranularity::Hour
+        );
+        assert_eq!(
+            granularity_of(UsageRangePreset::Last7d),
+            RangeGranularity::Day
+        );
+        assert_eq!(
+            granularity_of(UsageRangePreset::Last30d),
+            RangeGranularity::Day
+        );
+        assert_eq!(
+            granularity_of(UsageRangePreset::Custom),
+            RangeGranularity::Day
+        );
     }
 
     /// 桶粒度逐档对齐契约 §C：`last5h` / `today` → 小时桶 `YYYY-MM-DDTHH`；

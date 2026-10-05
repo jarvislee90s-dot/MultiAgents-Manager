@@ -60,7 +60,7 @@ use crate::services::usage::delta::{DetailKey, SourceDelta};
 use crate::services::usage::error::UsageError;
 use crate::services::usage::model::UsageSourceId;
 use crate::services::usage::project::project_key_of;
-use crate::services::usage::range::{hour_key_of, SourceTz};
+use crate::services::usage::range::hour_key_of_host;
 use crate::services::usage::semantics::{default_policy, normalize, resolve_semantics, RawUsage};
 
 /// 本源 `SessionFileScan` 的 namespace（GC 5 / **W-19**）：**必须**由 `scan_namespace(sid)`
@@ -78,9 +78,52 @@ fn log_scan_namespace() -> &'static str {
     NS.get_or_init(|| format!("{SCAN_NAMESPACE}-log")).as_str()
 }
 
-const TZ: SourceTz = SourceTz::HostLocal;
-
 pub struct DshCollector;
+
+/// **A-4**：子代理身份的两个判据源（投影缓存 / 日志头）**收敛成单一决定性取值**的计数器。
+///
+/// `observe` 同时做两件事：① 返回**收敛后的取值**（单一决定性取值）；② 累加
+/// 「可比较数 / 不一致数（分方向）」。采集器在 B 段逐会话调用它，收尾时**一条带计数的
+/// `log::warn!`**——可观测，不是"一行 log 就完"（诊断就是触发条件：线上真观察到身份被
+/// 重写，再回头上 claude 式 latch，有数据再决定）。
+#[derive(Debug, Default)]
+struct JudgeTally {
+    /// 两源**同时在场**的比较次数（缺源不算"可比较"）
+    compared: u64,
+    /// 两源同时在场且取值不同的次数
+    conflicts: u64,
+    /// 冲突方向：投影=子代理 / 日志=父会话
+    proj_sub_log_parent: u64,
+    /// 冲突方向：投影=父会话 / 日志=子代理
+    proj_parent_log_sub: u64,
+}
+
+impl JudgeTally {
+    /// 记一次比较并返回**收敛后的取值**（A-4：单一决定性取值）。
+    ///
+    /// **优先级（明文）**：两源同时在场 → **投影缓存权威、日志兜底**；不一致时按优先级取
+    /// **投影缓存**取值并计入冲突（分方向）。只有一侧在场 → 取在场的那一侧。两源都缺 →
+    /// 保守按**父会话**（与 DAO 的 `COALESCE(s.is_subagent,0)` 同向：未知按父会话计）。
+    fn observe(&mut self, proj: Option<bool>, log: Option<bool>) -> bool {
+        match (proj, log) {
+            (Some(p), Some(l)) => {
+                self.compared += 1;
+                if p != l {
+                    self.conflicts += 1;
+                    if p {
+                        self.proj_sub_log_parent += 1;
+                    } else {
+                        self.proj_parent_log_sub += 1;
+                    }
+                }
+                p // ← **投影缓存权威**：兜底源不得否决权威源（旧的 `p && l` 就是那个缺陷）
+            }
+            (Some(p), None) => p,
+            (None, Some(l)) => l,
+            (None, None) => false,
+        }
+    }
+}
 
 /// 续读状态：投影缓存是**累计值**，必须记住上次快照才能算差值
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -144,6 +187,10 @@ impl DshCollector {
         // 「会话 → (模型, 供应商)」：投影缓存是唯一带这两个字段的一侧，
         // B 段（原始日志）靠它补位，免得报错/工具计数落进 `model=""` 的幽灵行
         let mut model_by_session: HashMap<String, (String, String)> = HashMap::new();
+        // **A-4**：投影缓存侧的**子代理判据**（权威源）——B 段据此收敛出单一决定性取值
+        let mut proj_judge: HashMap<String, bool> = HashMap::new();
+        // **A-4**：两源不一致的**计数**（收尾一条带计数的告警；可观测，不是一行 log 就完）
+        let mut judge_tally = JudgeTally::default();
         for e in entries.into_iter().flatten().flatten() {
             let path = e.path();
             if path.extension().map(|x| x != "json").unwrap_or(true) {
@@ -309,7 +356,7 @@ impl DshCollector {
                 diff(now_total.2, prev.total.2),
                 diff(now_total.3, prev.total.3),
             );
-            let hour = hour_key_of(ts, &TZ);
+            let hour = hour_key_of_host(ts);
             let key = DetailKey {
                 session_id: session_id.clone(),
                 hour_key: hour.clone(),
@@ -384,6 +431,8 @@ impl DshCollector {
             .unwrap_or_default();
             b.push_cursor(cur);
             model_by_session.insert(session_id.clone(), (model.to_string(), provider.clone()));
+            // **A-4 权威源登记**：本文件的子代理身份（B 段收敛时以它为准）
+            proj_judge.insert(session_id.clone(), is_sub);
         }
         if no_model_sessions > 0 {
             log::warn!(
@@ -392,7 +441,29 @@ impl DshCollector {
             );
         }
         // ---- B. 原始会话日志（报错三层 / 最长单 turn / 逐工具）----
-        scan_raw_logs(ctx, home, &mut b, &model_by_session)?;
+        scan_raw_logs(
+            ctx,
+            home,
+            &mut b,
+            &model_by_session,
+            &proj_judge,
+            &mut judge_tally,
+        )?;
+        // **A-4**：两源不一致 → **一条带计数**的告警（可观测）。诊断本身就是触发条件：
+        // 投影缓存是**会被宿主重写的缓存**，「identity 从非空变空」在原理上不是不可能
+        // ——若线上持续出现，再回头上 claude 式 latch（有数据再决定，不预先拍一个）。
+        if judge_tally.conflicts > 0 {
+            log::warn!(
+                "usage/dsh: 子代理身份两源判据不一致 {} / 可比较 {}（投影缓存**权威**、日志兜底，A-4）\
+                 —— 投影=子代理而日志=父会话 {} 条；投影=父会话而日志=子代理 {} 条。\
+                 已按优先级取**投影缓存**取值（旧实现是 AND 合并：兜底源会否决权威源）；\
+                 若持续出现，先看这两个计数再决定是否上 latch",
+                judge_tally.conflicts,
+                judge_tally.compared,
+                judge_tally.proj_sub_log_parent,
+                judge_tally.proj_parent_log_sub
+            );
+        }
         Ok(b.finish())
     }
 }
@@ -404,11 +475,16 @@ impl DshCollector {
 /// 这个**扫描产物整体**进 L2 缓存（`(mtime,size)` 未变 → 连解析都不做）：稳态下一份未变的日志
 /// 是**零解码、零解析**（GC 3/5），由 `parsed_files == 0` 的断言钉住
 ///（fix round 1 裁决 C：原来缓存的是解压后的**正文**，每轮仍要把全部事件重新 `parse_events` 一遍）。
+/// **A-4**：后两个参数是子代理判据的收敛输入——
+/// `proj_judge` = 投影缓存侧（**权威源**，会话不在表里 = 该侧缺源）；
+/// `judge_tally` 由 `observe` 顺带累计「可比较 / 不一致（分方向）」，收尾出一条带计数的告警。
 fn scan_raw_logs(
     ctx: &CollectContext<'_>,
     home: &std::path::Path,
     b: &mut DeltaBuilder,
     model_by_session: &HashMap<String, (String, String)>,
+    proj_judge: &HashMap<String, bool>,
+    judge_tally: &mut JudgeTally,
 ) -> Result<(), UsageError> {
     let sessions_root = home.join("sessions");
     // **M2（fix round 1）**：根目录读失败按 `ErrorKind` 区分 —— `NotFound` = 未装 dsh /
@@ -491,11 +567,18 @@ fn scan_raw_logs(
             let header = &digest.header;
             let facts = &digest.facts;
             let cwd = header.cwd.clone().unwrap_or_default();
+            // **A-4：两个判据源收敛成单一决定性取值**（投影缓存权威、日志兜底）。
+            // 旧实现在这里直接传日志头判据，再由 `DeltaBuilder::session` 的 AND 合并 ——
+            // 「投影=子代理、日志=父会话」会被兜底源推翻成父会话（权威源被否决）。
+            let is_sub = judge_tally.observe(
+                proj_judge.get(&header.id).copied(),
+                Some(crate::monitor::dsh::log::is_subagent(header)),
+            );
             b.session(
                 &header.id,
                 Some(&cwd),
                 None,
-                crate::monitor::dsh::log::is_subagent(header),
+                is_sub,
                 header.parent_session.clone(),
                 None,
                 // 会话维度的 last_seen_at 用日志自己的最后活动时间（裁决 B 同源），
@@ -612,7 +695,7 @@ fn scan_raw_logs(
                         ctx.now_ms
                     }
                 };
-                let hour = hour_key_of(ts, &TZ);
+                let hour = hour_key_of_host(ts);
                 if model.is_empty() {
                     no_model_rows += 1;
                 }
@@ -1321,6 +1404,136 @@ mod tests {
         );
     }
 
+    /// **A-4 锁（Q-3「部分同意」的落地）：两个判据源必须收敛成单一决定性取值。**
+    ///
+    /// dsh 的子代理身份有**两个**文件级判据源（每轮重新推导、不受增量窗口影响）：
+    /// ① **投影缓存** `record.rows.subagent.val.identity`（`dsh.rs` A 段，**权威**）；
+    /// ② **日志头** `monitor::dsh::log::is_subagent(header)`（B 段，**兜底**）。
+    ///
+    /// 修前两者各自 `b.session(...)` ⇒ `DeltaBuilder` 的 **AND** 合并会把
+    /// 「投影=子代理、日志=父会话」判成**父会话**（`true & false = false`）——
+    /// 即**兜底源悄悄推翻了权威源**。本用例钉住：两源同时在场且不一致时取**投影缓存**取值。
+    ///
+    /// **能变红**：把日志侧改回直接传 `is_subagent(header)`（或把优先级反过来）→ 第一段 FAILED。
+    #[test]
+    fn subagent_judges_from_cache_and_log_converge_with_cache_authoritative() {
+        let _serial = serial();
+        let dir = tempfile::tempdir().unwrap();
+        // ① 投影=子代理 / 日志头=父会话（不一致，且**没有** origin/delegationDepth）
+        projcache(
+            dir.path(),
+            "c-cache-wins",
+            "/p/A",
+            (20, 5, 0, 0),
+            1,
+            1,
+            0,
+            SubAgentRow::ChildIdentity,
+            None,
+        );
+        write_log(
+            dir.path(),
+            "proj-a",
+            "c-cache-wins",
+            &[json!({"type":"session","version":3,"id":"c-cache-wins","cwd":"/p/A"})],
+        );
+        // ② 投影=父会话 / 日志头=子代理（反方向：权威源说"父"，兜底源不得把它改成"子"）
+        projcache(
+            dir.path(),
+            "p-cache-wins",
+            "/p/A",
+            (10, 2, 0, 0),
+            1,
+            1,
+            0,
+            SubAgentRow::ParentEmpty,
+            None,
+        );
+        write_log(
+            dir.path(),
+            "proj-a",
+            "p-cache-wins",
+            &[
+                json!({"type":"session","version":3,"id":"p-cache-wins","cwd":"/p/A",
+                     "origin":"subagent","delegationDepth":1}),
+            ],
+        );
+        let no_cursors = HashMap::new();
+        let (d, _) = run(dir.path(), &no_cursors);
+        let sub = |id: &str| {
+            d.sessions
+                .iter()
+                .find(|s| s.session_id == id)
+                .unwrap_or_else(|| panic!("缺会话 {id}（两源的 session 维度必须合并到同一条）"))
+                .is_subagent
+        };
+        // 前提（防假绿）：两源**都真的在场**——否则本用例退化成"只有一侧"的旧覆盖
+        assert!(
+            d.cursors.iter().any(|c| c.session_id == "c-cache-wins"),
+            "前提：投影缓存侧在场（游标键 = 文件 stem）"
+        );
+        assert!(
+            d.cursors.iter().any(|c| c.session_id == "log:c-cache-wins"),
+            "前提：日志侧在场（游标键带 log: 前缀）"
+        );
+        assert!(
+            sub("c-cache-wins"),
+            "投影缓存权威：投影说子代理、日志头说父会话 → 必须判**子代理**\
+             （AND 合并会让兜底源推翻权威源，这里拿 false）"
+        );
+        assert!(
+            !sub("p-cache-wins"),
+            "反方向同理：投影说父会话 → 必须判**父会话**（日志头的 subagent 不得把它翻上去）"
+        );
+    }
+
+    /// **A-4 的计数锁**：两源不一致必须**带计数**（可观测，不是"一行 log 就完"）。
+    /// `JudgeTally::observe` 既是**收敛判据**（返回值 = 单一决定性取值）又是计数器。
+    ///
+    /// **能变红**：把 `observe` 的冲突分支改成不计数（或优先级反转）→ FAILED。
+    #[test]
+    fn judge_tally_counts_conflicts_and_returns_the_cache_value() {
+        // 纯函数用例也取串行锁：本文件有源码自省锁要求**每个** `#[test]` 都取
+        // （`every_test_in_this_file_takes_the_serial_lock`，漏一个即红）
+        let _serial = serial();
+        let mut t = JudgeTally::default();
+        // 两源都在场且一致 → 计一次比较、零冲突
+        assert!(t.observe(Some(true), Some(true)));
+        assert!(!t.observe(Some(false), Some(false)));
+        assert_eq!((t.compared, t.conflicts), (2, 0), "一致不计冲突");
+        // 不一致 ×2（两个方向）
+        assert!(
+            t.observe(Some(true), Some(false)),
+            "投影=子代理 权威 → 取 true"
+        );
+        assert!(
+            !t.observe(Some(false), Some(true)),
+            "投影=父会话 权威 → 取 false（不得被日志翻成 true）"
+        );
+        assert_eq!(
+            (
+                t.compared,
+                t.conflicts,
+                t.proj_sub_log_parent,
+                t.proj_parent_log_sub
+            ),
+            (4, 2, 1, 1),
+            "两个方向各计一条，可观测（这条计数就是告警文案里的数字）"
+        );
+        // 缺源：不比较、不冲突，按在场的那一侧取值
+        assert!(t.observe(Some(true), None), "只有投影 → 取投影");
+        assert!(t.observe(None, Some(true)), "只有日志 → 兜底取日志");
+        assert!(
+            !t.observe(None, None),
+            "两源都缺 → 保守按父会话（与 DAO 的 COALESCE(s.is_subagent,0) 同向）"
+        );
+        assert_eq!(
+            (t.compared, t.conflicts),
+            (4, 2),
+            "缺源不参与'可比较'计数（只有两源同时在场才比）"
+        );
+    }
+
     /// **GC 4 / W-15 锁**：投影缓存的文件读取**只经** `CollectContext::read_incremental`，
     /// 且「一遍扫描」不能只看结果对不对——把 `reads` / `bytes_read` 一起钉住：
     /// * 首轮：每文件各进一次读取入口，`bytes_read` = 各文件真实字节数之和；
@@ -1977,8 +2190,8 @@ mod tests {
         let _serial = serial();
         const CREATED: i64 = 1_690_000_000_000;
         const NOW: i64 = 1_700_000_000_000;
-        let h_created = hour_key_of(CREATED, &TZ);
-        let h_now = hour_key_of(NOW + 60_000, &TZ);
+        let h_created = hour_key_of_host(CREATED);
+        let h_now = hour_key_of_host(NOW + 60_000);
         // 前提断言（防假绿）：两个候选桶必须真的不同（否则本用例在任何时区都不可伪证）
         assert_ne!(
             h_created, h_now,
@@ -2078,10 +2291,10 @@ mod tests {
         let _serial = serial();
         const EVENT: i64 = 1_680_000_000_000;
         const NOW: i64 = 1_700_000_000_000;
-        let h_event = hour_key_of(EVENT, &TZ);
+        let h_event = hour_key_of_host(EVENT);
         assert_ne!(
             h_event,
-            hour_key_of(NOW, &TZ),
+            hour_key_of_host(NOW),
             "前提：事件时刻与采集时刻必须分处不同小时"
         );
         let dir = tempfile::tempdir().unwrap();
@@ -2110,7 +2323,7 @@ mod tests {
             row.key.hour_key,
             h_event,
             "日志侧事实必须归日志自己的时间（用采集时刻会落在 {}）",
-            hour_key_of(NOW, &TZ)
+            hour_key_of_host(NOW)
         );
     }
 

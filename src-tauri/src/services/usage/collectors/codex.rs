@@ -7,7 +7,12 @@
 //!    而 `task_complete` 的**时长样本**才按 (会话, turn_id) 去重（2,885 → 2,308）——两件事；
 //! 4. **stub 事件必须剔除**：四桶全 0 而 `total_tokens` 非 0（840 条 / 86 文件）→ semantics::normalize；
 //! 5. 模型靠前序 `turn_context.model` **有状态继承**（跨轮续读状态里保住）；
-//! 6. 时区取 `turn_context.timezone`（本机 Asia/Shanghai）→ 日界用它，缺失回退宿主本地。
+//! 6. **时区一律以宿主本地为基准**（spec §P6 / Q-4 用户裁决）：`turn_context.timezone`
+//!    （本机 `Asia/Shanghai`）**只读入续读状态备查**（`CodexFileState::tz_name`），
+//!    **绝不得参与键计算**——小时/日键一律由 `hour_key_of_host` 产生。
+//!    **W-14 随本次裁决消除**：本源曾是七源里唯一用命名时区落库键的采集器，而查询侧
+//!    `resolve_range` 一律按宿主本地生成窗口键 ⇒ 两者偏移不同时边界行会落到窗口外
+//!    （静默少算）。现在两侧同源，该分叉在结构上不可能发生（有 A-1 跨时区锁钉住）。
 //!
 //! ## 本文件要守住的三条跨任务纪律
 //! * **B1（`continue` 而非 `return`）**：行循环里有三处「跳过这一行」——stub 剔除、
@@ -40,7 +45,9 @@ use crate::services::usage::delta::{DetailKey, SourceDelta};
 use crate::services::usage::error::UsageError;
 use crate::services::usage::model::{UsageBuckets, UsageSourceId};
 use crate::services::usage::project::project_key_of;
-use crate::services::usage::range::{hour_key_of, SourceTz};
+// **Q-4 / A-1**：只留宿主本地键入口——`SourceTz` / `hour_key_of(ts, tz)` 已从本源退出
+// （键一律宿主本地），导进来就是 `unused_imports`，而门禁是 `-D warnings`。
+use crate::services::usage::range::hour_key_of_host;
 use crate::services::usage::semantics::{
     default_policy, normalize, resolve_semantics, user_est_of, RawUsage,
 };
@@ -161,47 +168,6 @@ fn mcp_duration_ms(payload: &Value) -> Option<i64> {
     Some(secs.unwrap_or(0) * 1000 + nanos.unwrap_or(0) / 1_000_000)
 }
 
-/// 某个 `SourceTz` 在 `ts_ms` 上的 UTC 偏移（秒）。时间戳无法表示 → `None`（不猜）。
-fn utc_offset_secs(ts_ms: i64, tz: &SourceTz) -> Option<i32> {
-    use chrono::{Local, Offset, TimeZone};
-    match tz {
-        SourceTz::HostLocal => Local
-            .timestamp_millis_opt(ts_ms)
-            .single()
-            .map(|t| t.offset().fix().local_minus_utc()),
-        SourceTz::Named(z) => z
-            .timestamp_millis_opt(ts_ms)
-            .single()
-            .map(|t| t.offset().fix().local_minus_utc()),
-    }
-}
-
-/// **W-14**：codex 是七源里**唯一**用命名时区落库键的采集器（`turn_context.timezone`，
-/// 本机 `Asia/Shanghai`），而查询侧的 `resolve_range` 一律按**宿主本地**生成窗口键
-/// （`hour_key_of_host`）——两者偏移不同时，边界附近的明细行会落到查询窗口之外（**静默少算**）。
-/// spec §P6 明确要求「优先用各源自带时区」，但把窗口侧也改成源时区**需要持久化 tz**
-/// （`usage_detail` / `usage_session` 都没有该列）= 契约 §4 变更，不在执行侧可自行决定的范围。
-/// 因此这里只做**可见化**：偏移真的不同时打一条 `log::warn!`，**每文件每轮最多一条**；
-/// **不**扩接口、**不**改落库键的算法。（本机 δ=0，不发作。）
-fn warn_tz_divergence_once(warned: &mut bool, tz: &SourceTz, ts_ms: i64) {
-    if *warned || !matches!(tz, SourceTz::Named(_)) {
-        return;
-    }
-    *warned = true; // 每文件每轮最多一条：无论是否分叉都不再检查
-    let (Some(src), Some(host)) = (
-        utc_offset_secs(ts_ms, tz),
-        utc_offset_secs(ts_ms, &SourceTz::HostLocal),
-    ) else {
-        return;
-    };
-    if src != host {
-        log::warn!(
-            "usage/codex: 源时区偏移 {src}s 与宿主本地 {host}s 不同（W-14）：小时/日键按源时区落库、\
-             查询窗口按宿主本地生成，窗口边界附近的行可能被漏掉（静默少算）；修法需持久化 tz（契约变更）"
-        );
-    }
-}
-
 impl UsageCollector for CodexCollector {
     fn source_id(&self) -> UsageSourceId {
         UsageSourceId::Codex
@@ -283,8 +249,6 @@ impl CodexCollector {
         for (sid, id) in &st.turn_seen {
             turn_dedup.admit(turn_key("codex", sid, id));
         }
-        // W-14：每文件每轮最多一条时区分叉告警
-        let mut tz_warned = false;
         // ---- 一遍扫描 ----
         for line in &read.lines {
             let Ok(v) = serde_json::from_str::<Value>(line) else {
@@ -324,15 +288,16 @@ impl CodexCollector {
                     if let Some(m) = payload.get("model").and_then(|v| v.as_str()) {
                         st.model = m.to_string();
                     }
+                    // **Q-4 裁决**：各源自带时区**只读入备查**（随 `state_json` 持久化），
+                    // **绝不参与键计算**——下面的 `hour` 一律走 `hour_key_of_host`。
                     if let Some(tz) = payload.get("timezone").and_then(|v| v.as_str()) {
                         st.tz_name = Some(tz.to_string());
                     }
                 }
                 "event_msg" => {
                     let etype = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    let tz = SourceTz::from_name(st.tz_name.as_deref());
-                    warn_tz_divergence_once(&mut tz_warned, &tz, ts);
-                    let hour = hour_key_of(ts, &tz);
+                    // 落库键只由**宿主本地**算法产生（spec §P6 / A-1 锁）
+                    let hour = hour_key_of_host(ts);
                     // **供应商唯一入口**（GC 6 / B6）：经 `provider_of` 记录三态
                     let (provider, _) = b.provider_of(None, &st.model);
                     // 记录级项目键：codex 的项目归属来自**当前线程**的 session_meta.cwd
@@ -486,9 +451,8 @@ impl CodexCollector {
                 }
                 "response_item" => {
                     let ptype = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    let tz = SourceTz::from_name(st.tz_name.as_deref());
-                    warn_tz_divergence_once(&mut tz_warned, &tz, ts);
-                    let hour = hour_key_of(ts, &tz);
+                    // 落库键只由**宿主本地**算法产生（spec §P6 / A-1 锁）
+                    let hour = hour_key_of_host(ts);
                     // **供应商唯一入口**（GC 6 / B6）
                     let (provider, _) = b.provider_of(None, &st.model);
                     let key = DetailKey {
@@ -1152,14 +1116,19 @@ mod tests {
     ///
     /// * `model` 掉了 → 第二轮新行落 `model=""`，而 **model 是明细行键的一部分**（GC 15）
     ///   → 同一小时的用量被**裂成两行**；
-    /// * `tz_name` 掉了 → 跨轮 `hour_key` 漂到**宿主本地**桶（换时区机器上才看得见；本机 δ=0 看不见），
-    ///   且 W-14 的时区分叉告警**再不触发**；
+    /// * `tz_name` 掉了 → 「各源自带时区**可读入备查**」（spec §P6 / Q-4 裁决）落空：
+    ///   键不受它影响（A-1 锁已单独钉死），所以这里改为**直接断言 `state_json` 里跨轮仍在**；
     /// * `tools` 掉了 → 跨轮边界那条**在飞的调用**静默丢 `tool_ms`（并留下「有次数无耗时」的条目）；
     /// * `turn_seen` 掉了 → 跨轮同 `turn_id` 的 `task_complete` **重复计入一次时长**。
     ///
     /// 本用例与上面那条 `cross_round_adjacent_replay_is_dropped_by_the_seeded_comparator` **分开**：
     /// 那条是 W-12 的**单一**锁（`seed` 缺失时必须只有它红），本用例是四字段的联合锁。
     /// （裁决原文建议「加在既有跨轮用例里」；我拆成独立用例以便失败点可归因，见 fix report 偏差 F-A。）
+    ///
+    /// **A-1 追记（Q-4 裁决）**：本用例原先靠「`hour_key` 漂到源时区桶」来间接观测 `tz_name`
+    /// 持久化，并会**主动挑一个与宿主不同小时的时区**——键改回宿主本地后那条判据不可能成立，
+    /// 故改为：① `hour_key` 一律断言宿主本地桶；② `tz_name` 改为直接读 `state_json` 断言。
+    /// 覆盖面（model / tz_name / tools / turn_seen 四项）一项未减。
     #[test]
     fn cross_round_state_carries_model_timezone_and_pending_tools() {
         let dir = tempfile::tempdir().unwrap();
@@ -1168,31 +1137,15 @@ mod tests {
         let ts_r2: i64 = 1_700_000_000_000;
         let ts_r1 = ts_r2 - 3_600_000;
         let ts3 = ts_r2 + 3_600_000;
-        // 挑一个在 ts3 上与宿主本地**不同小时**的命名时区（候选都是整点偏移；IANA 里必有落选不中的）
-        let candidates: [(&str, SourceTz); 4] = [
-            (
-                "Pacific/Kiritimati",
-                SourceTz::from_name(Some("Pacific/Kiritimati")),
-            ),
-            ("Etc/GMT+12", SourceTz::from_name(Some("Etc/GMT+12"))),
-            ("Asia/Shanghai", SourceTz::from_name(Some("Asia/Shanghai"))),
-            ("UTC", SourceTz::from_name(Some("UTC"))),
-        ];
-        let (tz_name, tz) = candidates
-            .into_iter()
-            .find(|(_, tz)| hour_key_of(ts3, tz) != hour_key_of(ts3, &SourceTz::HostLocal))
-            .expect("前提不成立：IANA 里找不到与宿主本地在该时间戳上不同小时的时区");
-        let hour_named3 = hour_key_of(ts3, &tz);
-        let hour_host3 = hour_key_of(ts3, &SourceTz::HostLocal);
-        assert_ne!(
-            hour_named3, hour_host3,
-            "前提：两者必须可区分（否则 tz 断言假绿）"
-        );
+        // **A-1**：源时区固定取与宿主本地偏移最大的候选之一（UTC+14），用来证明
+        // 「时区在场也不影响键」——若实现里还留着按源时区算键的血脉，本用例会当场红。
+        let tz_name = "Pacific/Kiritimati";
+        let hour_host3 = hour_key_of_host(ts3);
         // 前提：工具发起（ts_r2 - 10 s）与回执（ts_r2）必须同桶——否则「次数」与「耗时」会落两行
         assert_eq!(
-            hour_key_of(ts_r2 - 10_000, &tz),
-            hour_key_of(ts_r2, &tz),
-            "前提：跨轮配对的这一对必须同小时桶（候选时区都是整点偏移 → 成立）"
+            hour_key_of_host(ts_r2 - 10_000),
+            hour_key_of_host(ts_r2),
+            "前提：跨轮配对的这一对必须同小时桶"
         );
         let r1 = iso_ms(ts_r1);
         let r2 = iso_ms(ts_r2);
@@ -1226,14 +1179,14 @@ mod tests {
         let h1row = d1
             .details
             .iter()
-            .find(|d| d.key.hour_key == hour_key_of(ts_r1, &tz))
+            .find(|d| d.key.hour_key == hour_key_of_host(ts_r1))
             .unwrap();
         assert_eq!(h1row.key.model, "gpt-5-codex");
         assert_eq!(h1row.key.provider, "openai", "前提：供应商规则真的命中");
         let h2row = d1
             .details
             .iter()
-            .find(|d| d.key.hour_key == hour_key_of(ts_r2, &tz))
+            .find(|d| d.key.hour_key == hour_key_of_host(ts_r2))
             .unwrap();
         assert_eq!(
             h2row.counters.tool_calls, 1,
@@ -1265,14 +1218,27 @@ mod tests {
             "前提：三条追加行都被读入（否则本用例假绿）"
         );
 
-        // ① `model` + `tz_name`：第二轮新增的那条 token_count 落在**源时区**的 H3，且模型继承下来
+        // ⓪ `tz_name`（A-1 追记）：键不看它，但**备查**必须跨轮仍在 `state_json` 里
+        let st2 = d2
+            .cursors
+            .iter()
+            .map(|c| serde_json::from_str::<serde_json::Value>(&c.state_json).unwrap())
+            .find(|s| s["session_id"] == "sess-x")
+            .expect("第二轮必须带回 sess-x 的续读状态");
+        assert_eq!(
+            st2["tz_name"], tz_name,
+            "各源自带时区必须跨轮持久化备查（Q-4 裁决：可读入备查、不参与键计算）"
+        );
+
+        // ① `model` + `tz_name`：第二轮新增的那条 token_count 落在**宿主本地**的 H3（A-1：
+        //    源时区在场也不参与键），且模型继承下来
         let r3row = d2
             .details
             .iter()
-            .find(|d| d.key.hour_key == hour_named3)
+            .find(|d| d.key.hour_key == hour_host3)
             .unwrap_or_else(|| {
                 panic!(
-                    "第二轮的新行必须落在**源时区**的小时桶 {hour_named3}（tz_name 未持久化时会落宿主本地桶 {hour_host3}）；实际行键：{:?}",
+                    "第二轮的新行必须落在**宿主本地**的小时桶 {hour_host3}（键改回源时区时会落别的桶）；实际行键：{:?}",
                     d2.details.iter().map(|d| d.key.hour_key.clone()).collect::<Vec<_>>()
                 )
             });
@@ -1332,6 +1298,104 @@ mod tests {
             1,
             "第二轮只应有一条新请求（H3 那条 token_count）"
         );
+    }
+
+    /// **A-1 锁（Q-4 裁决 / W-14 的封棺钉）：落库键只由宿主本地算法产生。**
+    ///
+    /// 两个 rollout **除 `turn_context.timezone` 之外完全对称**，而这两个 IANA 名相差
+    /// **26 小时**（`Pacific/Kiritimati` UTC+14 与 `Etc/GMT+12` UTC−12）⇒ 只要键里还剩
+    /// 一丝「按源时区算」的血脉，同一时间戳上两行的 `hour_key` 就**在任何宿主上都绝不可能
+    /// 相等**。这条判据**与宿主时区无关**，正是本用例不假绿的根据（不依赖"本机恰好不等于
+    /// Kiritimati"，也不依赖 δ=0 的巧合）。
+    ///
+    /// 按裁决（spec §P6 改写后：一律以宿主本地时区为基准；**各源自带时区可读入备查但不得参与
+    /// 键计算**）两行必须落**同一个** `hour_key`，且逐字 == `hour_key_of_host(ts)`。
+    ///
+    /// **能变红**：把 codex 改回 `SourceTz::Named(...)`（或让 `turn_context.timezone` 重新回到
+    /// 键计算路径）→ 两键相差 26 小时 → 必红。
+    #[test]
+    fn detail_hour_key_is_host_local_even_when_source_timezone_is_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let ts: i64 = 1_700_000_000_000; // 2023-11-14T22:13:20Z（两源时区相差 26h）
+        let r = iso_ms(ts);
+        // 除 timezone 外逐字段对称：同模型、同桶、同时间戳、同结构
+        let mut paths = Vec::new();
+        for (sid, tz_name) in [
+            ("sess-tz-a", "Pacific/Kiritimati"), // UTC+14
+            ("sess-tz-b", "Etc/GMT+12"),         // UTC−12
+        ] {
+            paths.push(rollout(
+                dir.path(),
+                &format!("rollout-{sid}.jsonl"),
+                vec![
+                    meta(sid, "/p/TZ", "codex-tui", false),
+                    json!({"timestamp": r, "type":"turn_context",
+                           "payload":{"model":"gpt-5-codex","timezone": tz_name}}),
+                    token_count_at(&r, 100, 0, 0, 10, 110),
+                ],
+            ));
+        }
+        let no_cursors = HashMap::new();
+        let ctx = CollectContext::new(dir.path(), ts, &no_cursors);
+        let delta = CodexCollector.collect(&ctx).unwrap();
+        assert_eq!(
+            delta.details.len(),
+            2,
+            "前提：两个 rollout 各出一条明细行（否则本用例假绿）"
+        );
+        let row = |sid: &str| {
+            delta
+                .details
+                .iter()
+                .find(|d| d.key.session_id == sid)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{sid} 必须有明细行；实际：{:?}",
+                        delta
+                            .details
+                            .iter()
+                            .map(|d| (d.key.session_id.clone(), d.key.hour_key.clone()))
+                            .collect::<Vec<_>>()
+                    )
+                })
+        };
+        let (a, b) = (row("sess-tz-a"), row("sess-tz-b"));
+        let host = hour_key_of_host(ts);
+        assert_eq!(
+            a.key.hour_key, host,
+            "落库键必须**只由宿主本地算法**产生（源时区在场也不得参与键计算）"
+        );
+        assert_eq!(b.key.hour_key, host, "同上：另一源的时区也不得参与键计算");
+        assert_eq!(
+            a.key.hour_key, b.key.hour_key,
+            "两个源时区相差 26 小时（UTC+14 vs UTC−12）⇒ 按源时区算键时两键必不相等；\
+             按裁决两者必须落在同一个宿主本地桶（这是本用例与宿主时区无关的红/绿判据）"
+        );
+        assert_eq!(
+            a.key.day_key,
+            &host[..10],
+            "日键 = 宿主本地小时键的日期前缀（两档不得分叉）"
+        );
+        // **备查**（裁决原文：各源自带时区「可读入备查」）：时区名仍必须被读进续读状态，
+        // 只是**不得**回到键计算路径。这条与上面两条互为约束——防止后来者"修回去"时
+        // 顺手把读取也删掉（那会把「可读入备查」也一起做没）。
+        for (sid, tz_name) in [
+            ("sess-tz-a", "Pacific/Kiritimati"),
+            ("sess-tz-b", "Etc/GMT+12"),
+        ] {
+            let st = delta
+                .cursors
+                .iter()
+                .map(|c| serde_json::from_str::<serde_json::Value>(&c.state_json).unwrap())
+                .find(|s| s["session_id"] == sid)
+                .unwrap_or_else(|| panic!("{sid} 必须有一条续读状态（state_json）"));
+            assert_eq!(
+                st["tz_name"], tz_name,
+                "各源自带时区必须仍被读入备查（{sid}）"
+            );
+        }
+        // 前提：两份夹具真的被扫到了（文件路径在场）
+        assert_eq!(paths.len(), 2);
     }
 
     /// **W-06 / D-24 回归（响亮失败，不得只 `log::warn!`）**：`stat_of` 在 mtime 不可得 /

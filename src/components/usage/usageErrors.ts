@@ -6,6 +6,11 @@ export const KNOWN_USAGE_CODES = [
   "usage-source-db-open",
   "usage-range-invalid",
   "usage-groupby-invalid",
+  // 第 9 个码（契约 §2 通用条款 / §3 要点 4）：筛选条件在当前档位算不出
+  // （首个实例 = 日档 + parentsOnly）。**顺序必须与 Rust 的 USAGE_CODES 一致**
+  // —— `commands::usage` 的源码自省锁按「同序同集合」逐字比对；
+  // **本数组体内不得出现 ASCII 双引号注释**（那把锁按双引号切分取码，会被注释串味）。
+  "usage-filter-unavailable",
   "usage-settings-invalid",
   "usage-disabled",
   "usage-internal",

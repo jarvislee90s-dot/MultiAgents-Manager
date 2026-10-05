@@ -57,10 +57,8 @@ use crate::services::usage::delta::{CursorDelta, DetailKey, SourceDelta};
 use crate::services::usage::error::UsageError;
 use crate::services::usage::model::UsageSourceId;
 use crate::services::usage::project::project_key_of;
-use crate::services::usage::range::{hour_key_of, SourceTz};
+use crate::services::usage::range::hour_key_of_host;
 use crate::services::usage::semantics::{default_policy, normalize, resolve_semantics, RawUsage};
-
-const TZ: SourceTz = SourceTz::HostLocal;
 
 /// 僵尸 `running` 行的判定阈值（裁决 B 的**安全阀**，控制窗口追加要求）。
 ///
@@ -196,7 +194,7 @@ impl ZCodeCollector {
         for r in rows {
             max_rowid = max_rowid.max(r.rowid);
             let ts = started_at_or_now(r.started_at, ctx.now_ms, "model_usage");
-            let hour = hour_key_of(ts, &TZ);
+            let hour = hour_key_of_host(ts);
             // **供应商唯一入口**（GC 6 / B6）：zcode 有直接字段 provider_id → Measured
             let (provider, _) = b.provider_of(
                 if r.provider_id.is_empty() {
@@ -286,7 +284,7 @@ impl ZCodeCollector {
                 },
                 &raw_model,
             );
-            let hour = hour_key_of(ts, &TZ);
+            let hour = hour_key_of_host(ts);
             let key = DetailKey {
                 session_id: t.session_id.clone(),
                 hour_key: hour.clone(),
@@ -339,7 +337,7 @@ impl ZCodeCollector {
                 },
                 &raw_model,
             );
-            let hour = hour_key_of(ts, &TZ);
+            let hour = hour_key_of_host(ts);
             let key = DetailKey {
                 session_id: t.session_id.clone(),
                 hour_key: hour.clone(),
@@ -2003,7 +2001,7 @@ mod tests {
         let ctx = CollectContext::new(dir.path(), now, &no_cursors);
         let d =
             ZCodeCollector::collect_with_roots(&ctx, &ZcodeRoots::from_home(dir.path())).unwrap();
-        let day_now = crate::services::usage::range::day_key_of(now, &SourceTz::HostLocal);
+        let day_now = crate::services::usage::range::day_key_of_host(now);
         // ① model loader
         let m = d
             .details

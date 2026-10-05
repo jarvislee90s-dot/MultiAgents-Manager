@@ -18,7 +18,7 @@ use crate::services::usage::delta::{DetailKey, SourceDelta};
 use crate::services::usage::error::UsageError;
 use crate::services::usage::model::UsageSourceId;
 use crate::services::usage::project::project_key_of;
-use crate::services::usage::range::{hour_key_of, SourceTz};
+use crate::services::usage::range::hour_key_of_host;
 use crate::services::usage::semantics::{
     default_policy, normalize, resolve_semantics, user_est_of, RawUsage,
 };
@@ -29,8 +29,8 @@ use crate::services::usage::semantics::{
 const SCAN_NAMESPACE: &str = scan_namespace(UsageSourceId::Claude);
 const SCAN: SessionFileScan = SessionFileScan::new(SCAN_NAMESPACE);
 
-/// claude 无自带时区 → 宿主本地（说明书 §P6：缺失才回退宿主本地）
-const TZ: SourceTz = SourceTz::HostLocal;
+// **Q-4 / A-1**：claude 无自带时区；即便将来带了，也**只许读入备查**——键一律走
+// `hour_key_of_host`（spec §P6 改写后：一律以宿主本地时区为基准）。
 
 pub struct ClaudeCollector;
 
@@ -293,7 +293,7 @@ impl UsageCollector for ClaudeCollector {
                 };
                 b.new_records += 1;
                 let ts = ts_ms_of(&v).unwrap_or(ctx.now_ms);
-                let hour = hour_key_of(ts, &TZ);
+                let hour = hour_key_of_host(ts);
                 let session_id = v
                     .get("sessionId")
                     .and_then(|s| s.as_str())

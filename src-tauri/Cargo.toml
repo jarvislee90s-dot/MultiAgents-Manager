@@ -103,7 +103,10 @@ futures = "0.3"
 # M9R 灰1（Task 7）：CLI 版本探测的有界等待——`--version` 子进程挂死时 3s 超时
 # kill+收尸，不再无限等待拖垮端点（wait_timeout::ChildExt::wait_timeout）
 wait-timeout = "0.2"
-chrono-tz = "0.10"
+# **chrono-tz 已于阶段①终修（A-1 / Q-4 裁决）移除**：GC 13 当初加它的唯一理由是
+# 「跨源日界优先用各源自带时区」（codex `turn_context.timezone`）。用户裁定改为
+# **一律以宿主本地时区为基准**（各源时区可读入备查、不得参与键计算）后，
+# `SourceTz::Named` 的生产消费点清零 ⇒ 依赖与变体一并删除（回到「新增依赖仅 base64」）。
 # 契约 §3 的 export_save_bytes 以 base64 字符串收 PNG（GC 13 允许的第二项新依赖）：
 # 上游 rust-lang 维护、零传递依赖；宽松解码（data URL 前缀 / 折行）由本仓包一层
 base64 = "0.22"

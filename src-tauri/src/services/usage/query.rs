@@ -84,7 +84,9 @@ use super::caps::{caps_of, turn_semantics};
 use super::collect;
 use super::error::UsageError;
 use super::model::*;
-use super::range::{day_label, hour_label, resolve_range, RangeGranularity, ResolvedRange};
+use super::range::{
+    day_label, granularity_of, hour_label, resolve_range, RangeGranularity, ResolvedRange,
+};
 use super::semantics::{cache_hit_rate, hero_of};
 use crate::database::connection::DB;
 
@@ -222,6 +224,27 @@ pub(crate) fn session_subagent_flags(
 /// `parentsOnly` 把子代理会话的行**整体剔除**（含 token；页脚口径文案相应改「不含子代理」）；
 /// `include`（默认）只影响计数分层。
 /// 语义细节（**都有用例锁**）：**空列表 = 不过滤**（`Some(vec![])` 与 `None` 同义）、
+/// **A-2 的筛选位「算得出吗」判据（单一入口，两条命令共用）**。
+///
+/// `Some(code)` = 该筛选组合在**当前档位算不出**，命令必须报结构化错误；`None` = 可判。
+/// 目前**唯一**不可判的组合：**日档 + `subagentMode="parentsOnly"`**（日聚合行不带
+/// `session_id`）。同族扫描结论（详见 FINAL-FIX-report §B）：其余成员两档都可判——
+/// `toolIds` / `projects` / `providers` / `models` 在日档取 `usage_daily` 的**同名列**，
+/// `subagentMode="include"` 恒不过滤 ⇒ 它们**不得**走这条早退（否则是误报，有反向锁）。
+///
+/// 放在这里（而不是命令层）的原因：与 `usage-groupby-invalid` 的守卫**同层**——
+/// 两条命令共用同一判据，漏改一条必红（两条命令各有一条用例）。
+pub(crate) fn filter_unavailable_code(
+    preset: UsageRangePreset,
+    filters: &UsageFilters,
+) -> Option<&'static str> {
+    let parents_only = matches!(filters.subagent_mode, Some(SubagentMode::ParentsOnly));
+    if parents_only && granularity_of(preset) == RangeGranularity::Day {
+        return Some("usage-filter-unavailable");
+    }
+    None
+}
+
 /// 多维度之间是 **AND**、表里查不到的 `(源, 会话)` 对按**非子代理**处理（`unwrap_or(false)`）。
 /// 注：`projects` / `providers` / `models` 三个筛选**仅供 CSV 导出与内部查询**——
 /// 记录页 UI 不暴露它们（说明书 §6 P3【默认裁定】：维度已由卡片分组与卡内行直接可见）。
@@ -595,6 +618,20 @@ pub fn records_with_conn(
             format!("记录页的 groupBy 只接受 tool | project，收到 {group_by:?}"),
         ));
     }
+    // **A-2（契约 §2 `UsageFilters` 通用条款 / §3 要点 4，错误码第 9 个）**：筛选条件在
+    // **当前档位算不出**时必须报错，不得静默忽略。首个实例：**日档 + `parentsOnly`** ——
+    // 日聚合行（`usage_daily`）**不带 `session_id`** ⇒ 无从判断会话身份 ⇒
+    // `apply_filters` 的 `unwrap_or(false)` 会把**全部行放行**（"当没有子代理"），
+    // 于是合计含子代理、而页脚文案写「不含子代理」= **界面谎言**（GC 7 / 说明书 §8.2 不可得不得假装）。
+    // 与 `usage-groupby-invalid` **同层**：同样**在总开关之前**（关闭态也必须报该码）。
+    if let Some(code) = filter_unavailable_code(range.preset, filters) {
+        return Err(UsageError::new(
+            code,
+            "日档（last7d / last30d / custom）的行来自日聚合表、不带 session_id，\
+             无法判断会话身份 ⇒ subagentMode=\"parentsOnly\" 算不出，不得当作「没有子代理」放行"
+                .to_string(),
+        ));
+    }
     if !super::settings::load_from_conn(conn).enabled {
         // 总开关关闭：不采集不落库 → 查询出空态（零扫描、零行）。
         // 用连接注入版读设置：单测直连内存库时不触碰真实 `~/.mam/mam.db`（W-24：
@@ -733,6 +770,18 @@ pub fn csv_with_conn(
     filters: &UsageFilters,
     now_ms: i64,
 ) -> Result<String, UsageError> {
+    // **A-2（契约 §2 通用条款 / §3 要点 4）**：与 `records_with_conn` **同一判据**
+    // （`filter_unavailable_code`）——CSV 也吃 `filters`，日档 + `parentsOnly` 同样算不出，
+    // 不得导出一份"声称不含子代理、实则含"的账本。CSV 本就不判总开关（登记 ①→② 的不对称），
+    // 故这里没有"守卫在总开关之前"的问题，但判据必须与记录页**逐字同源**（漏改一条即红）。
+    if let Some(code) = filter_unavailable_code(range.preset, filters) {
+        return Err(UsageError::new(
+            code,
+            "日档（last7d / last30d / custom）的行来自日聚合表、不带 session_id，\
+             无法判断会话身份 ⇒ subagentMode=\"parentsOnly\" 算不出，不得当作「没有子代理」导出"
+                .to_string(),
+        ));
+    }
     let resolved = resolve_range(range, now_ms)?;
     let subs = session_subagent_flags(conn);
     let rows = apply_filters(load_ledger_rows_with(conn, &resolved), filters, &subs);
@@ -3991,6 +4040,225 @@ mod tests {
             .code,
             "usage-range-invalid",
             "CSV 必须上抛区间错误"
+        );
+    }
+
+    /// **A-2 锁（契约 §2 `UsageFilters` 通用条款 / §3 要点 4；错误码第 9 个
+    /// `usage-filter-unavailable`）**：**日档 + `subagentMode="parentsOnly"` 算不出**——
+    /// 日聚合行（`usage_daily`）**不带 `session_id`** ⇒ 无从判断会话身份 ⇒ 两条命令
+    /// **必须返回结构化错误**，不得把该条件当成"没有子代理"**放行**。
+    ///
+    /// 放行的后果是**界面谎言**：合计里仍含子代理，而页脚口径文案写着「不含子代理」
+    /// ——违反「不可得不得假装」（GC 7 / 说明书 §8.2）。本条款此前只约束展示位，
+    /// 2026-10-03 用户裁决把它扩展到**筛选位**。
+    ///
+    /// 三档日粒度（last7d / last30d / custom）**逐一**断言（`granularity_of` 单点判据
+    /// 若与 `resolve_range` 漂移，这里会红）+ 两条命令都断言 + **守卫在总开关之前**
+    /// （关闭态也必须报该码，与 `usage-groupby-invalid` 同纪律）。
+    #[test]
+    fn day_tier_with_parents_only_filter_reports_filter_unavailable() {
+        use crate::services::usage::settings::SETTINGS_KEY;
+        let conn = mem_with_rows();
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let parents_only = UsageFilters {
+            subagent_mode: Some(SubagentMode::ParentsOnly),
+            ..Default::default()
+        };
+        let day_ranges = [
+            range(UsageRangePreset::Last7d),
+            range(UsageRangePreset::Last30d),
+            UsageRange {
+                preset: UsageRangePreset::Custom,
+                from: Some("2026-09-20".into()),
+                to: Some("2026-10-03".into()),
+            },
+        ];
+        for r in &day_ranges {
+            let e = records_with_conn(&conn, r, UsageGroupBy::Tool, &parents_only, now)
+                .expect_err("日档 + parentsOnly 必须报错，不得静默放行");
+            assert_eq!(
+                e.code, "usage-filter-unavailable",
+                "{:?} 的行来自日聚合表（不带 session_id）→ 必须是第 9 个码",
+                r.preset
+            );
+            assert!(
+                e.detail.contains("parentsOnly"),
+                "错误详情要点名是哪个筛选算不出：{}",
+                e.detail
+            );
+            let e = csv_with_conn(&conn, r, UsageGroupBy::Tool, &parents_only, now)
+                .expect_err("CSV 同款：日档 + parentsOnly 必须报错");
+            assert_eq!(e.code, "usage-filter-unavailable", "CSV 侧的码必须一致");
+        }
+        // **守卫在总开关之前**（与 W6 的 `usage-groupby-invalid` 同一层语义）：
+        // 关闭态下也必须报该码——否则"关了采集就静默放行"会成为新的界面谎言入口。
+        let off = serde_json::to_string(&UsageSettings {
+            enabled: false,
+            ..Default::default()
+        })
+        .unwrap();
+        crate::database::dao::settings::set_setting_conn(&conn, SETTINGS_KEY, &off);
+        let e = records_with_conn(
+            &conn,
+            &day_ranges[0],
+            UsageGroupBy::Tool,
+            &parents_only,
+            now,
+        )
+        .expect_err("关闭态 + 日档 + parentsOnly：筛选守卫仍必须在总开关之前报错");
+        assert_eq!(e.code, "usage-filter-unavailable");
+    }
+
+    /// **A-2 反向锁（防误报）**：**小时档 + `parentsOnly` 必须正常返回**——
+    /// 小时档的行在明细表上、**带 `session_id`**，会话身份算得出 ⇒ 报错就是误报
+    /// （误报会让契约承诺的功能直接不可用，比静默更坏：用户看到"筛选不可用"却明明可用）。
+    ///
+    /// 同时钉住反向的另一半：**日档 + `include`（默认）必须正常**——只有
+    /// `parentsOnly` 这一种组合算不出，不得把整个日档打死。
+    #[test]
+    fn hour_tier_and_default_mode_still_return_normally_with_parents_only_available() {
+        let conn = mem_with_rows();
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let parents_only = UsageFilters {
+            subagent_mode: Some(SubagentMode::ParentsOnly),
+            ..Default::default()
+        };
+        for r in [
+            range(UsageRangePreset::Last5h),
+            range(UsageRangePreset::Today),
+        ] {
+            let rec = records_with_conn(&conn, &r, UsageGroupBy::Tool, &parents_only, now)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "{:?} 是小时档（明细表带 session_id），parentsOnly 算得出，误报即红：{}",
+                        r.preset, e.code
+                    )
+                });
+            assert!(
+                !rec.cards.is_empty(),
+                "{:?} 小时档 + parentsOnly 必须照常出卡（夹具里今日有 2 个源）",
+                r.preset
+            );
+            let csv = csv_with_conn(&conn, &r, UsageGroupBy::Tool, &parents_only, now)
+                .expect("CSV 的小时档 + parentsOnly 同样算得出");
+            assert!(
+                csv.lines().count() > 1,
+                "CSV 必须有数据行（只有表头 = 误伤）：{csv}"
+            );
+        }
+        // 日档 + 默认 include：必须正常（不得把整个日档打死）
+        let rec = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .expect("日档 + 默认 include 必须正常返回");
+        assert!(!rec.cards.is_empty(), "日档 + include 必须照常出卡");
+        assert!(csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Last7d),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now
+        )
+        .is_ok());
+    }
+
+    /// **A-2 同族穷尽扫描的运行期锁**：`UsageFilters` 的**每一个成员**都要"问一句算得出吗"。
+    /// 本轮扫描结论（详见 FINAL-FIX-report §B）：
+    /// * `toolIds` / `projects` / `providers` / `models` —— **两档都算得出**：小时档取
+    ///   `usage_detail` 的记录级列（`source_id` / `project_key` / `provider` / `model`），
+    ///   日档取 `usage_daily` 的**同名列**（`load_rows_for_keys` 两档都直接取列、不分叉）
+    ///   ⇒ `apply_filters` 的四个 `hit(...)` 在日档**不是**"空表恒不命中"，而是真过滤；
+    /// * `subagentMode="include"` —— 恒真（不过滤），两档都算得出；
+    /// * `subagentMode="parentsOnly"` —— **唯一算不出的组合**（只有它需要 `session_id`，
+    ///   而日聚合行没有该列）。
+    ///
+    /// 本用例把上面前四条**在日档上**逐条变红式验证（若哪天日档真丢了这些列，
+    /// `apply_filters` 会静默变成"全部滤掉/全部放行"，这里会红）。
+    #[test]
+    fn every_other_filter_member_is_decidable_in_both_tiers() {
+        let conn = mem_with_rows();
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let day = range(UsageRangePreset::Last7d);
+        let hour = range(UsageRangePreset::Today);
+        // 日档上四个"列筛选"都必须真命中（不是空结果、也不是全放行）
+        for (f, want_cards, what) in [
+            (
+                UsageFilters {
+                    tool_ids: Some(vec!["claude".into()]),
+                    ..Default::default()
+                },
+                1,
+                "toolIds",
+            ),
+            (
+                UsageFilters {
+                    projects: Some(vec!["proj".into()]),
+                    ..Default::default()
+                },
+                2,
+                "projects",
+            ),
+            (
+                UsageFilters {
+                    providers: Some(vec!["p".into()]),
+                    ..Default::default()
+                },
+                2,
+                "providers",
+            ),
+            (
+                UsageFilters {
+                    models: Some(vec!["m".into()]),
+                    ..Default::default()
+                },
+                2,
+                "models",
+            ),
+        ] {
+            let d =
+                records_with_conn(&conn, &day, UsageGroupBy::Tool, &f, now).unwrap_or_else(|e| {
+                    panic!(
+                        "日档下 {what} 算得出（日聚合表有同名列），不得报 {} ",
+                        e.code
+                    )
+                });
+            assert_eq!(
+                d.cards.len(),
+                want_cards,
+                "日档下 {what} 必须是**真过滤**（列在场 → 算得出）"
+            );
+            let h = records_with_conn(&conn, &hour, UsageGroupBy::Tool, &f, now)
+                .unwrap_or_else(|e| panic!("小时档下 {what} 算得出，不得报 {}", e.code));
+            assert_eq!(
+                h.cards.len(),
+                want_cards,
+                "小时档下 {what} 与日档同口径（两档不得分叉）"
+            );
+        }
+        // `subagentMode="include"`：两档都算得出（恒不过滤）
+        let inc = UsageFilters {
+            subagent_mode: Some(SubagentMode::Include),
+            ..Default::default()
+        };
+        assert_eq!(
+            records_with_conn(&conn, &day, UsageGroupBy::Tool, &inc, now)
+                .unwrap()
+                .cards
+                .len(),
+            2,
+            "日档 + include 不过滤"
+        );
+        assert_eq!(
+            records_with_conn(&conn, &hour, UsageGroupBy::Tool, &inc, now)
+                .unwrap()
+                .cards
+                .len(),
+            2,
+            "小时档 + include 不过滤"
         );
     }
 

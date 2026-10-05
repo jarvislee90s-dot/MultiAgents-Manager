@@ -907,6 +907,7 @@
       "usage-source-db-open": "Cannot open usage database read-only: {{err}}",
       "usage-range-invalid": "Invalid time range: {{err}}",
       "usage-groupby-invalid": "Invalid grouping dimension: the records page supports tool or project only",
+      "usage-filter-unavailable": "This filter cannot be evaluated for the current time range: {{err}}",
       "usage-settings-invalid": "Invalid usage settings: {{err}}",
       "usage-disabled": "Usage statistics is disabled",
       "usage-internal": "Usage operation failed: {{err}}"

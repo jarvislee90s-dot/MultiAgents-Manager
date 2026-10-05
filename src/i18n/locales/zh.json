@@ -907,6 +907,7 @@
       "usage-source-db-open": "无法只读打开用量数据库：{{err}}",
       "usage-range-invalid": "时间范围非法：{{err}}",
       "usage-groupby-invalid": "分组维度非法：记录页只支持按工具或按项目分组",
+      "usage-filter-unavailable": "该筛选在当前时间档位算不出：{{err}}",
       "usage-settings-invalid": "用量设置非法：{{err}}",
       "usage-disabled": "用量统计已关闭",
       "usage-internal": "用量操作失败：{{err}}"

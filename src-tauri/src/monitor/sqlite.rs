@@ -47,7 +47,12 @@ pub fn open_readonly_immutable(path: &Path) -> Option<Connection> {
 pub fn open_usage_db(path: &Path) -> Option<Connection> {
     open_readonly_with_timeout(path)
         .filter(probe_readable)
-        .or_else(|| open_readonly_immutable(path))
+        // **A-3**：immutable 回退分支**同样必须过探针**。漏掉这一句 = NOTADB / 损坏库在
+        // immutable 下**照样拿得到句柄**（`sqlite3_open_v2` 是惰性的），而用量采集器的每个
+        // 查询点都是软失败 ⇒ 该源**静默 0**（`ok=true, new_records=0`，UI 显示"这个源没有用量"）
+        // 而不是响亮失败（`ok=false` + `usage-source-db-open`）。有锁：
+        // `collectors::opencode::tests::notadb_file_is_a_loud_source_error_not_a_silent_zero`。
+        .or_else(|| open_readonly_immutable(path).filter(probe_readable))
 }
 
 /// 廉价可读性探针：摸一下 `sqlite_master` 就能逼出惰性打开期藏起来的致命错

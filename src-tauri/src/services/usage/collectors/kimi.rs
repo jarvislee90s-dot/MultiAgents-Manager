@@ -48,7 +48,7 @@ use crate::services::usage::error::UsageError;
 use crate::services::usage::model::UsageSourceId;
 use crate::services::usage::project::project_key_of;
 use crate::services::usage::provider::provider_from_model_prefix;
-use crate::services::usage::range::{hour_key_of, SourceTz};
+use crate::services::usage::range::hour_key_of_host;
 use crate::services::usage::semantics::{
     default_policy, normalize, resolve_semantics, user_est_of, RawUsage,
 };
@@ -65,7 +65,6 @@ use crate::services::usage::semantics::{
 /// 保留 `SCAN` 只为 `retain_existing` 的 ns 归属与 W-19 的机械落点——**不要**据此认为
 /// kimi 已经接上 L2 摘要缓存（那是 `monitor::kimi_parser` 的 `kimi-wire` ns 的事）。
 const SCAN: SessionFileScan = SessionFileScan::new(scan_namespace(UsageSourceId::Kimi));
-const TZ: SourceTz = SourceTz::HostLocal;
 
 /// 跨轮 turnId 去重集合的上限（有界：只防长寿命会话把 state_json 撑爆）
 const TURN_IDS_CAP: usize = 2048;
@@ -157,7 +156,7 @@ fn flush_one_turn(
         },
         &model,
     );
-    let hour = hour_key_of(end, &TZ);
+    let hour = hour_key_of_host(end);
     let key = DetailKey {
         session_id: session_id.to_string(),
         hour_key: hour.clone(),
@@ -476,7 +475,7 @@ fn handle_line(
     if state.model.is_empty() {
         return false; // 需要模型（含「连 model 字段都没有的 usage.record」）→ 交调用方缓存
     }
-    let hour = hour_key_of(ts, &TZ);
+    let hour = hour_key_of_host(ts);
     let model_raw = state.model.as_str();
     let (provider_prefix, model_rest) = provider_from_model_prefix(model_raw);
     // D9：模型名完全一致才同一模型（前缀是**结构性**的供应商，不是模糊归并）

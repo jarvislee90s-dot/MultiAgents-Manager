@@ -712,10 +712,8 @@ fn kimi_provider_kind_measured_is_persisted() {
     // 1700000000000，差 1 小时 → 键就不同），这里立刻红（§3.2.3 FIX-3）。
     assert_eq!(
         row.hour_key,
-        multi_agents_manager_lib::services::usage::range::hour_key_of(
-            1_699_996_400_000,
-            &multi_agents_manager_lib::services::usage::range::SourceTz::HostLocal,
-        ),
-        "明细小时桶必须由 fixture 的记录时间戳换算（不得取自 ctx.now_ms / 不得换时区口径）"
+        multi_agents_manager_lib::services::usage::range::hour_key_of_host(1_699_996_400_000),
+        "明细小时桶必须由 fixture 的记录时间戳换算（不得取自 ctx.now_ms / 不得换时区口径；\
+         A-1：键一律宿主本地）"
     );
 }

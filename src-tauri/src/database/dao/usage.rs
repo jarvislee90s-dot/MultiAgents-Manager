@@ -602,11 +602,16 @@ pub fn query_detail_conn(conn: &Connection, from_hour: &str, to_hour: &str) -> V
 /// 计数类聚合（工作小结区）：**按 (源, 会话) 分组**，is_subagent 由会话维度表带出。
 /// D17「计数类分层」= 会话数与 **turn 数都只计父会话**：过滤在调用方 `work_summary_with`
 /// （turns_per_tool 求和前剔 `is_subagent`）——本函数保留全部会话，好让 token 口径不受影响。
+///
+/// **A-4 诊断（不改变行为）**：调用前先跑一次**只读**的孤儿明细行计数（`warn_orphan_details_conn`）
+/// —— `COALESCE(s.is_subagent, 0)` 的语义与返回值**一字未动**，只是把「会话维度没跟上明细」
+/// 变成可观测的告警数字。
 pub fn query_counters_conn(
     conn: &Connection,
     from_hour: &str,
     to_hour: &str,
 ) -> Vec<CounterAggRow> {
+    warn_orphan_details_conn(conn, from_hour, to_hour);
     let Ok(mut stmt) = conn.prepare(
         "SELECT d.source_id, d.session_id, COALESCE(s.is_subagent, 0),
                 SUM(d.turns), SUM(d.error_model), SUM(d.error_turn), SUM(d.error_tool),
@@ -643,6 +648,30 @@ pub fn query_counters_conn(
     })
     .map(|rows| rows.filter_map(Result::ok).collect())
     .unwrap_or_default()
+}
+
+/// **A-4 诊断计数（只读、只告警、不改任何返回值）**：本轮窗口内「孤儿明细行」条数 ——
+/// 明细行在 `usage_session` 里查不到对应 (源, 会话) 的那些行。
+///
+/// 为什么值得一条告警：这类行会被 `COALESCE(s.is_subagent, 0)` **按父会话计**（保守方向，
+/// 用户裁决保持不变），于是 D17 的分层计数会**少算子代理**却**不报任何错**——用户看到的是
+/// 「子代理数偏少」，而不是「会话维度没跟上」。>0 即说明台账的两半不同步
+/// （会话登记失败 / 被保留期清理 / 明细先行落库），是本层唯一的探针。
+fn warn_orphan_details_conn(conn: &Connection, from_hour: &str, to_hour: &str) {
+    const SQL: &str = "SELECT COUNT(*)
+         FROM usage_detail d
+         LEFT JOIN usage_session s ON s.source_id = d.source_id AND s.session_id = d.session_id
+         WHERE d.hour_key BETWEEN ?1 AND ?2 AND s.session_id IS NULL";
+    match conn.query_row(SQL, [from_hour, to_hour], |r| r.get::<_, i64>(0)) {
+        Ok(0) => {}
+        Ok(n) => log::warn!(
+            "usage/dao: 窗口 {from_hour}..{to_hour} 内有 {n} 条孤儿明细行（(源, 会话) 在 \
+             usage_session 里查不到）→ COALESCE(s.is_subagent,0) 按父会话计（保守方向，行为不变，\
+             A-4 诊断计数）；子代理分层可能因此偏少"
+        ),
+        // 诊断本身失败**不得**影响主查询（也不得静默）：主查询照跑，这里留一条痕
+        Err(e) => log::warn!("usage/dao: 孤儿明细诊断查询失败（不影响主查询结果）：{e}"),
+    }
 }
 
 fn merge_stats_text(text: &str) -> BTreeMap<String, (i64, i64)> {
@@ -952,6 +981,18 @@ mod tests {
         let c = query_counters_conn(&conn, "2026-10-03T00", "2026-10-03T23");
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].turns, 4);
+        // **A-4 诊断的行为不变量**：本夹具**没有**写 `usage_session` 行 ⇒ 这就是一条
+        // 「孤儿明细行」（诊断会因此告警，但**不得**改变任何返回值）。
+        // 前提断言（防假绿）：会话维度表确实为空，否则下面就测不到孤儿分支。
+        assert_eq!(
+            load_sessions_conn(&conn, None).len(),
+            0,
+            "前提：本夹具是孤儿明细（无会话维度行）"
+        );
+        assert!(
+            !c[0].is_subagent,
+            "孤儿明细按**父会话**计（`COALESCE(s.is_subagent,0)` 的保守方向，A-4 行为不变）"
+        );
         assert_eq!(
             c[0].turn_ms,
             vec![1000, 3000, 1000, 3000],

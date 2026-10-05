@@ -79,12 +79,13 @@ const SOURCE_IDS: [&str; 7] = [
 /// 否则前端 `usageErrMsg` 会把它**静默收敛成通用错误**（用户看不到是哪一步失败）。
 /// （Rust 侧权威表 `USAGE_CODES` 是 `#[cfg(test)]`，集成构建拿不到，故在此镜像一份；
 /// 两侧的一致性由 `commands::usage` 的单测锁住。）
-const KNOWN_USAGE_CODES: [&str; 8] = [
+const KNOWN_USAGE_CODES: [&str; 9] = [
     "usage-db-failed",
     "usage-source-io",
     "usage-source-db-open",
     "usage-range-invalid",
     "usage-groupby-invalid",
+    "usage-filter-unavailable",
     "usage-settings-invalid",
     "usage-disabled",
     "usage-internal",
@@ -439,7 +440,9 @@ fn usage_export_csv_returns_header_text_for_all_four_groupby() {
 #[test]
 fn usage_settings_read_write_round_trip_through_ipc() {
     let _g = serial();
-    let s0 = ipc::usage_get_settings();
+    // **A-5**：两条设置命令改成 `async` + `spawn_blocking`（P2-3），
+    // 集成测试按仓内既有形式 `tauri::async_runtime::block_on` 驱动（与 usage_collect 同款）。
+    let s0 = tauri::async_runtime::block_on(ipc::usage_get_settings());
     let v0 = serde_json::to_value(&s0).unwrap();
     assert_eq!(
         obj_keys(&v0),
@@ -459,39 +462,42 @@ fn usage_settings_read_write_round_trip_through_ipc() {
     assert_eq!(s0.mini_bar_tool_rows, 3, "说明书 §P7：默认 3 条");
 
     // 合并 + 落库：patch 只带一个字段，其余保持原值（Partial<UsageSettings> 语义）
-    let s1 = ipc::usage_set_settings(UsageSettingsPatch {
+    let s1 = tauri::async_runtime::block_on(ipc::usage_set_settings(UsageSettingsPatch {
         detail_retention_days: Some(30),
         ..Default::default()
-    })
+    }))
     .expect("合法 patch 必须 Ok");
     assert_eq!(s1.detail_retention_days, 30);
     assert_eq!(
         s1.mini_bar_tool_rows, s0.mini_bar_tool_rows,
         "未出现在 patch 里的字段不得被清空"
     );
-    let s2 = ipc::usage_get_settings();
+    let s2 = tauri::async_runtime::block_on(ipc::usage_get_settings());
     assert_eq!(
         s2.detail_retention_days, 30,
         "patch 必须真的落库（读回第二次要看到新值；mock 两端各自独立，证明不了这条）"
     );
 
     // 越界 patch → 结构化错误（不是静默夹取）
-    let err = ipc::usage_set_settings(UsageSettingsPatch {
+    let err = tauri::async_runtime::block_on(ipc::usage_set_settings(UsageSettingsPatch {
         detail_retention_days: Some(0),
         ..Default::default()
-    })
+    }))
     .unwrap_err();
     assert_eq!(err.code, "usage-settings-invalid");
     assert!(!err.detail.trim().is_empty(), "W-28：detail 不得为空");
 
     // 复位（同文件其它用例依赖默认口径）
-    let back = ipc::usage_set_settings(UsageSettingsPatch {
+    let back = tauri::async_runtime::block_on(ipc::usage_set_settings(UsageSettingsPatch {
         detail_retention_days: Some(90),
         ..Default::default()
-    })
+    }))
     .expect("复位必须 Ok");
     assert_eq!(back.detail_retention_days, 90);
-    assert_eq!(ipc::usage_get_settings(), UsageSettings::default());
+    assert_eq!(
+        tauri::async_runtime::block_on(ipc::usage_get_settings()),
+        UsageSettings::default()
+    );
 }
 
 /// Task 18 的既有结论之一：**总开关关闭 → 查询出空态（零扫描、零行）**，`collectedAt` = 0 哨兵。
@@ -499,10 +505,10 @@ fn usage_settings_read_write_round_trip_through_ipc() {
 #[test]
 fn master_switch_off_yields_empty_state_with_zero_collected_at() {
     let _g = serial();
-    let off = ipc::usage_set_settings(UsageSettingsPatch {
+    let off = tauri::async_runtime::block_on(ipc::usage_set_settings(UsageSettingsPatch {
         enabled: Some(false),
         ..Default::default()
-    })
+    }))
     .expect("关闭总开关必须 Ok");
     assert!(!off.enabled, "前提：总开关确已关闭");
 
@@ -526,10 +532,10 @@ fn master_switch_off_yields_empty_state_with_zero_collected_at() {
         "非法维度守卫必须**先于**总开关（关闭态也要报码）"
     );
 
-    let restored = ipc::usage_set_settings(UsageSettingsPatch {
+    let restored = tauri::async_runtime::block_on(ipc::usage_set_settings(UsageSettingsPatch {
         enabled: Some(true),
         ..Default::default()
-    })
+    }))
     .expect("恢复总开关必须 Ok");
     assert!(
         restored.enabled,
@@ -553,7 +559,7 @@ fn set_settings_reports_persist_failure_instead_of_success() {
         db_path.display()
     );
 
-    let before = ipc::usage_get_settings().detail_retention_days;
+    let before = tauri::async_runtime::block_on(ipc::usage_get_settings()).detail_retention_days;
     let blocker = rusqlite::Connection::open(&db_path).expect("第二条连接（造触发器）必须成功");
     blocker
         .execute_batch(
@@ -566,10 +572,10 @@ fn set_settings_reports_persist_failure_instead_of_success() {
         )
         .expect("建触发器必须成功（前提：settings 表存在）");
 
-    let result = ipc::usage_set_settings(UsageSettingsPatch {
+    let result = tauri::async_runtime::block_on(ipc::usage_set_settings(UsageSettingsPatch {
         detail_retention_days: Some(before + 7),
         ..Default::default()
-    });
+    }));
 
     // 先撤触发器再断言：否则用例一旦失败会把触发器留给同二进制后面的用例（串味）
     blocker
@@ -590,7 +596,7 @@ fn set_settings_reports_persist_failure_instead_of_success() {
         "detail 要能定位（写后回读不一致）"
     );
     assert_eq!(
-        ipc::usage_get_settings().detail_retention_days,
+        tauri::async_runtime::block_on(ipc::usage_get_settings()).detail_retention_days,
         before,
         "前提：写真的没落库（回读仍是旧值）"
     );

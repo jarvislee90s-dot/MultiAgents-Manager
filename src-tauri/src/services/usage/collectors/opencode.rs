@@ -28,10 +28,8 @@ use crate::services::usage::delta::{DetailKey, SourceDelta};
 use crate::services::usage::error::UsageError;
 use crate::services::usage::model::UsageSourceId;
 use crate::services::usage::project::project_key_of;
-use crate::services::usage::range::{hour_key_of, SourceTz};
+use crate::services::usage::range::hour_key_of_host;
 use crate::services::usage::semantics::{default_policy, normalize, resolve_semantics, RawUsage};
-
-const TZ: SourceTz = SourceTz::HostLocal;
 
 pub struct OpenCodeCollector;
 
@@ -121,7 +119,7 @@ impl OpenCodeCollector {
                     ctx.now_ms
                 }
             };
-            let hour = hour_key_of(ts, &TZ);
+            let hour = hour_key_of_host(ts);
             let (model_id, provider_id) = parse_model(&s.model);
             // **供应商唯一入口**（GC 6 / B6）：opencode 有直接字段 providerID → Measured
             let (provider, _) = b.provider_of(
@@ -248,13 +246,58 @@ struct SessionRow {
     cache_write: i64,
 }
 
-fn table_exists(conn: &Connection, name: &str) -> bool {
-    conn.query_row(
+/// 表探测的**三态**（**A-3 连带修复 / P2-1 的"不可能触发的守卫"**）：
+/// * `Present` —— 表在场；
+/// * `Absent` —— **确定不存在**：V2-only 安装里试 V1 表就是这一支，**预期**、不告警；
+/// * `ProbeFailed(e)` —— **探测本身失败**（NOTADB / 库损坏 / 锁死 / 权限）。
+///   这是本轮修掉的盲区：原先 `.unwrap_or(false)` 把这一支伪装成 `Absent`
+///   ⇒ `load_sessions` 里那条「表在场却查不动」的 `log::warn!` **永远不会响**。
+#[derive(Debug)]
+enum TableState {
+    Present,
+    Absent,
+    ProbeFailed(rusqlite::Error),
+}
+
+/// 表探测（三态）。**调用方必须显式处理 `ProbeFailed`**（响亮），不得再压回 bool。
+fn table_state(conn: &Connection, name: &str) -> TableState {
+    match conn.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
         [name],
         |r| r.get::<_, bool>(0),
-    )
-    .unwrap_or(false)
+    ) {
+        Ok(true) => TableState::Present,
+        Ok(false) => TableState::Absent,
+        // **A-3**：探测本身失败**必须原样带出来**（响亮），不得压回 `false`
+        // —— 那会让下面的告警与"表不存在"不可区分（不可能触发的守卫）。
+        Err(e) => TableState::ProbeFailed(e),
+    }
+}
+
+/// 布尔便捷形态（**只给"在场才继续"的调用点**）：`Present` 才算在场。
+/// `ProbeFailed` 也返回 `false` 是刻意的——**入口已由 `open_usage_db` 的探针挡住**
+/// 不可读的库（A-3 步②），走到这里的连接必定可读；此处再压成 bool 不会造成新的静默。
+fn table_exists(conn: &Connection, name: &str) -> bool {
+    matches!(table_state(conn, name), TableState::Present)
+}
+
+/// **A-3 推广**：`prepare()` 失败时统一留痕（把 fix round 1 在 `load_sessions` 里做的
+/// 「区分」模式推广到**本文件其余三处**同款调用点——`message` / `part` / `session_message`）。
+///
+/// 三态各走各的话术：`Present` = 表在场却查不动（列名不符 / 库被锁）；
+/// `ProbeFailed` = **探测本身失败**（库损坏 / 锁死 / 权限）——旧 `.unwrap_or(false)` 形态下
+/// 这一支被伪装成「表不存在」，于是这些告警**全部不可能触发**（A-3 的根因类）；
+/// `Absent` = 预期的代际分支，不告警。
+fn warn_if_table_unreadable(conn: &Connection, table: &str, consequence: &str) {
+    match table_state(conn, table) {
+        TableState::Present => log::warn!(
+            "usage/opencode: `{table}` 表在场但查询准备失败（列名不符 / 库不可读？）→ {consequence}"
+        ),
+        TableState::ProbeFailed(e) => log::warn!(
+            "usage/opencode: `{table}` 表探测本身失败（库损坏 / 锁死 / 权限？）：{e} → {consequence}"
+        ),
+        TableState::Absent => {}
+    }
 }
 
 /// 读会话行（表名来自本文件的常量，无注入面）——`project_id` **刻意不读**（禁用）
@@ -272,15 +315,12 @@ fn load_sessions(conn: &Connection, table: &str, out: &mut Vec<SessionRow>) -> H
     // 表现为该源安静地少一批会话。要收紧就得先 `table_exists` 再区分"表不存在"与"列不符"，
     // 属可选加固、不在本轮范围（现有 fixture 四表合法，不会红）。
     let Ok(mut stmt) = conn.prepare(&sql) else {
-        // **Minor #3（fix round 1，不静默）**：区分两种失败——`table_exists` 为假 = V2-only 安装的
-        // **预期**分支（不告警）；为真 = **表在场却查不动**（列名不符 / 库被锁 / 损坏），
-        // 后者会让该源安静地少一批会话，必须留痕。
-        if table_exists(conn, table) {
-            log::warn!(
-                "usage/opencode: `{table}` 表在场但查询准备失败（列名不符 / 库不可读？）→ \
-                 本表会话本轮全部跳过"
-            );
-        }
+        // **Minor #3（fix round 1，不静默）+ A-3（三态）**：三种情况必须分开——
+        // 表在场 = **表在场却查不动**（列名不符 / 库被锁 / 损坏）→ 留痕；
+        // 探测本身失败 = 库损坏 / 锁死 / 权限 → **同样必须响亮**（原先 `.unwrap_or(false)`
+        // 把它伪装成"表不存在"，这条告警因此**永不触发**）；
+        // 确定不存在 = V2-only 安装的**预期**分支（不告警）。
+        warn_if_table_unreadable(conn, table, "本表会话本轮全部跳过");
         return HashSet::new();
     };
     let rows = stmt.query_map([], |row| {
@@ -343,12 +383,11 @@ fn scan_v1_messages(
         "SELECT rowid, data FROM message WHERE session_id = ?1 AND rowid > ?2 ORDER BY rowid",
     ) else {
         // **Minor #3**：表在场却查不动 → 留痕（缺表的一次性告警在 `collect_with_db`）
-        if table_exists(conn, "message") {
-            log::warn!(
-                "usage/opencode: `message` 表在场但查询准备失败 → 会话 {} 的 turn/请求本轮为 0",
-                s.id
-            );
-        }
+        warn_if_table_unreadable(
+            conn,
+            "message",
+            &format!("会话 {} 的 turn/请求本轮为 0", s.id),
+        );
         return 0;
     };
     let rows: Vec<(i64, String)> = stmt
@@ -370,7 +409,7 @@ fn scan_v1_messages(
             .pointer("/time/created")
             .and_then(|x| x.as_i64())
             .unwrap_or(ts_fallback);
-        let hour = hour_key_of(ts, &TZ);
+        let hour = hour_key_of_host(ts);
         let k = DetailKey {
             hour_key: hour.clone(),
             day_key: hour.chars().take(10).collect(),
@@ -410,12 +449,7 @@ fn scan_v1_messages(
         "SELECT rowid, data FROM part WHERE session_id = ?1 AND rowid > ?2 ORDER BY rowid",
     ) else {
         // **Minor #3**：同上（V1 的工具行在 `part`）
-        if table_exists(conn, "part") {
-            log::warn!(
-                "usage/opencode: `part` 表在场但查询准备失败 → 会话 {} 的工具耗时本轮为 0",
-                s.id
-            );
-        }
+        warn_if_table_unreadable(conn, "part", &format!("会话 {} 的工具耗时本轮为 0", s.id));
         return new_rows;
     };
     let parts: Vec<(i64, String)> = stmt
@@ -439,7 +473,7 @@ fn scan_v1_messages(
         let start = v.pointer("/state/time/start").and_then(|x| x.as_i64());
         let end = v.pointer("/state/time/end").and_then(|x| x.as_i64());
         let ts = start.or(end).unwrap_or(ts_fallback);
-        let hour = hour_key_of(ts, &TZ);
+        let hour = hour_key_of_host(ts);
         let k = DetailKey {
             hour_key: hour.clone(),
             day_key: hour.chars().take(10).collect(),
@@ -488,13 +522,11 @@ fn scan_v2_messages(
     ) else {
         // **Minor #3**：`session_v2` 在场不代表 `session_message` 可查——表在场却查不动要留痕
         // （表**不存在**的一次性告警在 `collect_with_db`，避免逐会话刷屏）
-        if table_exists(conn, "session_message") {
-            log::warn!(
-                "usage/opencode: `session_message` 表在场但查询准备失败 → \
-                 会话 {} 的 turn/请求/工具本轮为 0（四桶仍出数）",
-                s.id
-            );
-        }
+        warn_if_table_unreadable(
+            conn,
+            "session_message",
+            &format!("会话 {} 的 turn/请求/工具本轮为 0（四桶仍出数）", s.id),
+        );
         return 0;
     };
     let rows: Vec<(i64, String, String)> = stmt
@@ -517,7 +549,7 @@ fn scan_v2_messages(
             .pointer("/time/created")
             .and_then(|x| x.as_i64())
             .unwrap_or(ts_fallback);
-        let hour = hour_key_of(ts, &TZ);
+        let hour = hour_key_of_host(ts);
         let k = DetailKey {
             hour_key: hour.clone(),
             day_key: hour.chars().take(10).collect(),
@@ -558,7 +590,7 @@ fn scan_v2_messages(
                         let start = item.pointer("/time/created").and_then(|x| x.as_i64());
                         let end = item.pointer("/time/completed").and_then(|x| x.as_i64());
                         let tts = start.unwrap_or(ts);
-                        let ihour = hour_key_of(tts, &TZ);
+                        let ihour = hour_key_of_host(tts);
                         let ik = DetailKey {
                             hour_key: ihour.clone(),
                             day_key: ihour.chars().take(10).collect(),
@@ -608,9 +640,9 @@ mod tests {
     // UsageCollector}` 会留一个 `unused_imports`（`-D warnings` 下即 error）。
     use crate::services::usage::collect::CollectContext;
     use crate::services::usage::model::{SourceKind, UsageSourceId};
-    // `day_key_of` 只在用例里用（现算期望值，跨宿主时区无关，fix round 2 / 裁决 A）——
+    // `day_key_of_host` 只在用例里用（现算期望值，跨宿主时区无关，fix round 2 / 裁决 A）——
     // 故**不能**提到模块级 `use`（生产路径会 `unused_imports`）
-    use crate::services::usage::range::day_key_of;
+    use crate::services::usage::range::day_key_of_host;
     use rusqlite::Connection;
     use serde_json::json;
     use std::collections::HashMap;
@@ -1063,6 +1095,159 @@ mod tests {
         assert!(OpenCodeCollector::collect_with_db(&ctx3, &db).is_ok());
     }
 
+    /// **A-3 锁（P2-1 的根因；宿主已核实）**：**NOTADB / 损坏库**必须让该源**响亮失败**
+    /// —— `ok=false` + `errorCode = "usage-source-db-open"`，**不得** `ok=true, new_records=0`
+    /// （后者在 UI 上表现为「这个源没有用量」，用户永远看不到「这个源读不了」）。
+    ///
+    /// 根因：`open_usage_db` 的 **immutable 回退分支**原先**没有探针**——`sqlite3_open_v2` 是
+    /// 惰性的，NOTADB 文件在 `?immutable=1` 下**照样拿得到句柄**（第一句 SQL 才抛 NOTADB）；
+    /// 而 opencode 的每个查询点都是软失败（`unwrap_or(false)` / `let ... else`）⇒ 静默 0。
+    ///
+    /// **能变红**（已实测）：去掉 immutable 分支的 `.filter(probe_readable)` → 本用例 FAILED。
+    #[test]
+    fn notadb_file_is_a_loud_source_error_not_a_silent_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("opencode.db");
+        std::fs::write(&db, b"this file is definitely not a sqlite database\n").unwrap();
+        // 前提（防假绿）：ro 句柄是**惰性**开的，但第一句 SQL 必须失败——否则测不到 NOTADB
+        let ro = crate::monitor::sqlite::open_readonly_with_timeout(&db)
+            .expect("惰性句柄一定开得出来（这正是 A-3 的根因）");
+        let e = ro
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            })
+            .expect_err("构造失效：该文件居然是可读的 SQLite 库");
+        assert_eq!(
+            e.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::NotADatabase),
+            "构造失效：本用例要的是 NOTADB，实际 {e:?}"
+        );
+        drop(ro);
+        // 前提②：immutable 回退分支同样**能开出句柄**（惰性）——修好之后它必须被探针挡掉
+        assert!(
+            crate::monitor::sqlite::open_readonly_immutable(&db).is_some(),
+            "构造失效：immutable 分支若连句柄都开不出来，本用例就测不到那条漏掉探针的路径"
+        );
+        let no_cursors = HashMap::new();
+        let ctx = CollectContext::new(dir.path(), 1_700_000_000_000, &no_cursors);
+        let e = OpenCodeCollector::collect_with_db(&ctx, &db)
+            .expect_err("NOTADB 必须整源 Err（ok=false），不得静默 ok=true / new_records=0");
+        assert_eq!(
+            e.code, "usage-source-db-open",
+            "损坏库的错误码必须是 usage-source-db-open（错误详情：{}）",
+            e.detail
+        );
+    }
+
+    /// **A-3 连带锁（「不可能触发的守卫」）**：表探测必须能区分
+    /// 「**表不存在**」（V2-only 安装里试 V1 表 = **预期**分支，不告警）与
+    /// 「**探测本身失败**」（NOTADB / 损坏 / 锁死 / 权限 —— **必须响亮**）。
+    ///
+    /// 修前 `table_exists` 是 `.unwrap_or(false)`：NOTADB 连接上它恒 `false`
+    /// ⇒ `load_sessions` 里那条「表在场却查不动」的 `log::warn!` **永远不会响**
+    /// （告警条件 `table_exists(..) == true` 与触发前提「探测失败」在 NOTADB 上互斥
+    /// = 一个**不可能触发**的守卫）。
+    ///
+    /// **能变红**：把 `table_state` 的 `Err` 分支改回 `Absent`（旧的 `.unwrap_or(false)` 语义）
+    /// → 第二段断言 FAILED（已实测）。
+    #[test]
+    fn table_probe_distinguishes_absent_from_probe_failure() {
+        // ① 合法库：在场 / 确定不存在两态分得开（V2-only 安装的预期分支）
+        let v2_only = Connection::open_in_memory().unwrap();
+        v2_only
+            .execute_batch("CREATE TABLE session_v2 (id TEXT PRIMARY KEY);")
+            .unwrap();
+        assert!(
+            matches!(table_state(&v2_only, "session_v2"), TableState::Present),
+            "前提：V2 表必须在场"
+        );
+        assert!(
+            matches!(table_state(&v2_only, "session"), TableState::Absent),
+            "V2-only 安装里 V1 的 `session` 表**确定不存在** = 预期分支（不告警）"
+        );
+        assert!(!table_exists(&v2_only, "session"), "布尔便捷形态同义");
+        // ② NOTADB：探测**本身失败** → 必须是 ProbeFailed（响亮），不得伪装成「表不存在」
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.db");
+        std::fs::write(&bad, b"not a database at all\n").unwrap();
+        let conn = crate::monitor::sqlite::open_readonly_immutable(&bad)
+            .expect("immutable 惰性句柄（A-3 的根因构造）");
+        match table_state(&conn, "session") {
+            TableState::ProbeFailed(e) => assert_eq!(
+                e.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::NotADatabase),
+                "损坏库的探测失败原因必须原样带出来（不能只给一个 bool）"
+            ),
+            other => panic!(
+                "NOTADB 上探测本身失败 → 必须是 ProbeFailed（响亮），实际 {other:?} \
+                 —— 退回 `.unwrap_or(false)` 语义则那条告警永不触发"
+            ),
+        }
+    }
+
+    /// **A-3 复核锁（宿主点名的取舍复核，写进提交信息的那一条）**：
+    /// 给 immutable 分支补 `.filter(probe_readable)` **不会**破坏既定的
+    /// 「**BUSY → immutable 读旧值**」取舍 —— 理由：`immutable=1` **跳过全部加锁**，
+    /// 另一连接持写锁时它的 `sqlite_master` 探针**照样通过**。
+    ///
+    /// 本用例把这条论证变成可执行断言（否则后来者会以为加探针改了行为）：
+    /// ① 造一把**真**写锁（另一连接 `BEGIN EXCLUSIVE` 未提交）——
+    ///    **前提断言**：此时 mode=ro + `busy_timeout(1000)` 的探针必须失败（回退的触发条件）；
+    /// ② `open_usage_db` 仍必须**成功**（走 immutable），且拿到的是**能读**的连接。
+    ///
+    /// **能变红**：把 `open_usage_db` 的 immutable 回退去掉（或改成再走一次 mode=ro）
+    /// → ② 断言 FAILED（该源会在别进程写入期间整轮 `ok=false`，正是取舍要避免的代价）。
+    #[test]
+    fn busy_write_lock_still_falls_back_to_immutable_with_the_probe_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("busy.db");
+        {
+            let c = Connection::open(&p).unwrap();
+            c.execute_batch("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1);")
+                .unwrap();
+        }
+        // 另一连接持**排他**写锁且不提交（rollback-journal 模式下 EXCLUSIVE 会挡住读者）
+        let writer = Connection::open(&p).unwrap();
+        writer
+            .execute_batch("BEGIN EXCLUSIVE; INSERT INTO t VALUES (2);")
+            .unwrap();
+        // 前提（防假绿）：ro 探针必须**失败**——否则本用例根本没测到 BUSY 那条路
+        let ro_ok = crate::monitor::sqlite::open_readonly_with_timeout(&p)
+            .map(|c| {
+                c.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .is_ok()
+            })
+            .unwrap_or(false);
+        assert!(
+            !ro_ok,
+            "构造失效：写锁期间 ro 探针竟然通过 → 本用例没走到 BUSY 回退那条路（必须重造场景）"
+        );
+        // ① immutable 探针**照样通过**（immutable=1 不加锁）——这是"加探针不改行为"的关键
+        let imm_probe = crate::monitor::sqlite::open_readonly_immutable(&p)
+            .expect("immutable 句柄（惰性）")
+            .query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+                r.get::<_, i64>(0)
+            });
+        assert!(
+            imm_probe.is_ok(),
+            "immutable=1 跳过加锁 ⇒ 写锁期间探针必须照样通过；若这里失败，\
+             说明探针把 immutable 分支也打死了（取舍被破坏）：{imm_probe:?}"
+        );
+        // ② 组合入口仍必须成功（BUSY → immutable 读旧值的取舍被保住）
+        let conn = crate::monitor::sqlite::open_usage_db(&p)
+            .expect("写锁期间必须仍能回退到 immutable（否则该源整轮 ok=false）");
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM t", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "immutable 读到的是 checkpoint 之前的旧值（**这是既定取舍**，不是回归）"
+        );
+        drop(conn);
+        writer.execute_batch("ROLLBACK").unwrap();
+    }
+
     /// **只读纪律锁**：用量采集打开的是**他人的库**（opencode.db），两条路径（`mode=ro` 与
     /// `immutable=1`）都必须拒写。
     ///
@@ -1324,13 +1509,13 @@ mod tests {
             .find(|d| d.key.session_id == "ses_nots")
             .expect("缺 time_updated 的会话仍要出明细行（不得整条丢掉）");
         // **fix round 2（裁决 A）**：期望值一律**现算**，不得写死 `"1970-01-01"`——
-        // `hour_key_of` 走 `SourceTz::HostLocal`，epoch 0 在 UTC 以西的宿主上落的是
+        // `hour_key_of_host` 走宿主本地时区，epoch 0 在 UTC 以西的宿主上落的是
         // **前一天的本地日**（`1969-12-31`）。写死它会让：① 那些机器上全量测试变红（把「零新增失败」
         // 这条门禁口径变成机器相关）；② 更糟——`assert_ne!(…, "1970-01-01")` 在那些机器上
         // **对错误实现也是绿的**（epoch 0 的键恰好不等于写死的那个值 → 假绿）。
         let now_ts = 1_700_000_000_000i64;
-        let now_day = day_key_of(now_ts, &TZ);
-        let epoch_zero_day = day_key_of(0, &TZ);
+        let now_day = day_key_of_host(now_ts);
+        let epoch_zero_day = day_key_of_host(0);
         assert_ne!(
             now_day, epoch_zero_day,
             "前提（防假绿）：本用例的两个候选本地日必须不同，否则下面的断言不可伪证"
@@ -1345,7 +1530,7 @@ mod tests {
         );
         assert_eq!(
             nots.key.hour_key,
-            hour_key_of(now_ts, &TZ),
+            hour_key_of_host(now_ts),
             "缺字段按本轮采集时刻归桶"
         );
         let s_nots = delta

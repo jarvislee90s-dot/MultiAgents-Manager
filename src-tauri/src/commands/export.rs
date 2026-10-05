@@ -26,7 +26,8 @@
 //! ## ⚠️ 写失败必须响亮（Task 20 裁决 F）
 //! 落盘失败一律 `Err`（静态中文文案，含失败原因），**绝不 `let _ =` 吞错**、绝不返回成功
 //! （否则前端会显示"导出成功"而磁盘上没有文件）。契约 §3 未给这两条命令定义结构化错误码
-//! （8 个 `USAGE_CODES` 全属采集/查询域）→ 本层不新造码，按计划用 `Result<_, String>`。
+//! （9 个 `USAGE_CODES` 全属采集/查询域，含 A-2 的 `usage-filter-unavailable`）
+//! → 本层不新造码，按计划用 `Result<_, String>`。
 use base64::Engine;
 
 use crate::commands::resource::ensure_reveal_allowed;

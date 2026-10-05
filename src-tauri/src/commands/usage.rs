@@ -66,18 +66,41 @@ pub async fn usage_export_csv(
     .map_err(|e| UsageError::internal(format!("导出任务异常: {e}")))?
 }
 
+/// 读用量设置。
+///
+/// **A-5（P2-3）**：改成 `async` + `spawn_blocking` —— `settings::load()` 会取全局
+/// `DB.lock()` 并读 `mam.db`，同步命令在**主线程**上执行 ⇒ 最坏 0.5s UI 冻结
+/// （与 `commands/session.rs:10-12` 同一个坑）。**JS 侧签名与返回形状一字未动**
+/// （命令名 / 入参 / 返回都不变），契约 §3 冻结的是这三样、不含 sync/async。
 #[tauri::command]
-pub fn usage_get_settings() -> UsageSettings {
-    settings::load()
+pub async fn usage_get_settings() -> UsageSettings {
+    tauri::async_runtime::spawn_blocking(settings::load)
+        .await
+        .unwrap_or_else(|e| {
+            // 任务 panic：不得让命令静默无返回。设置是**可空态友好**的读路径（前端有默认值
+            // 兜底），这里响亮记一笔后回落 `Default` —— 与 `commands/session.rs` 的
+            // `get_all_sessions` 同款取舍。
+            ::log::error!("用量设置读取任务异常: {e}");
+            Default::default()
+        })
 }
 
+/// 写用量设置。
+///
+/// **A-5（P2-3）**：同 `usage_get_settings` —— `merge_patch` + `save`（写后回读）整段都在
+/// `spawn_blocking` 里，主线程只 await。错误语义不变：补丁越界 →
+/// `usage-settings-invalid`、写失败 → `usage-db-failed`（裁决 F）。
 #[tauri::command]
-pub fn usage_set_settings(patch: UsageSettingsPatch) -> Result<UsageSettings, UsageError> {
-    let merged = settings::merge_patch(&settings::load(), &patch)?;
-    // 裁决 F：写失败**不得**报成成功（DAO 的 `let _ =` 会吞掉 execute 错误 →
-    // `settings::save` 做写后回读，不一致即以 `usage-db-failed` 报错）。
-    settings::save(&merged)?;
-    Ok(merged)
+pub async fn usage_set_settings(patch: UsageSettingsPatch) -> Result<UsageSettings, UsageError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let merged = settings::merge_patch(&settings::load(), &patch)?;
+        // 裁决 F：写失败**不得**报成成功（DAO 的 `let _ =` 会吞掉 execute 错误 →
+        // `settings::save` 做写后回读，不一致即以 `usage-db-failed` 报错）。
+        settings::save(&merged)?;
+        Ok(merged)
+    })
+    .await
+    .map_err(|e| UsageError::internal(format!("设置写入任务异常: {e}")))?
 }
 
 #[cfg(test)]
@@ -123,13 +146,18 @@ mod tests {
     /// 契约 §3 的 6 条命令签名（**逐字冻结**）。参数名即 Tauri 的 JS 侧键名
     /// （默认 camelCase 映射）：`group_by` → `groupBy`、`patch` → `patch`……改一个字母，
     /// 前端 `invoke` 就会静默 reject（只有 mock 会掩盖它）。
+    ///
+    /// **A-5 追记**：末两行由 `pub fn` 改为 `pub async fn`（P2-3：同步命令在主线程等
+    /// `DB.lock()`）。契约 §3 冻结的是**命令名 + 入参 + 返回形状**（不含 sync/async），
+    /// ⇒ 本改动**不违约**，属**计划级冻结签名的显式偏离**（plan:11659-11660），
+    /// 已在 FINAL-FIX-report 的「偏离申报」点名；前端键名/参数/返回一字未动。
     const FROZEN_SIGNATURES: [&str; 6] = [
         "pub async fn usage_collect(force: bool) -> Result<UsageCollectResult, UsageError>",
         "pub async fn usage_dashboard(range: UsageRange, group_by: UsageGroupBy) -> Result<UsageDashboard, UsageError>",
         "pub async fn usage_records(range: UsageRange, group_by: UsageGroupBy, filters: UsageFilters) -> Result<UsageRecords, UsageError>",
         "pub async fn usage_export_csv(range: UsageRange, group_by: UsageGroupBy, filters: UsageFilters) -> Result<String, UsageError>",
-        "pub fn usage_get_settings() -> UsageSettings",
-        "pub fn usage_set_settings(patch: UsageSettingsPatch) -> Result<UsageSettings, UsageError>",
+        "pub async fn usage_get_settings() -> UsageSettings",
+        "pub async fn usage_set_settings(patch: UsageSettingsPatch) -> Result<UsageSettings, UsageError>",
     ];
 
     const COMMAND_NAMES: [&str; 6] = [
@@ -178,6 +206,51 @@ mod tests {
             !code.contains("rename_all"),
             "6 条命令不得使用 `rename_all`：前端按默认 camelCase 传 groupBy/filters/patch，改了就是静默 reject（契约 §1）"
         );
+    }
+
+    /// **A-5 结构锁（P2-3）**：两条设置命令必须是 **`pub async fn` + `spawn_blocking`**
+    /// —— 同步命令在**主线程**上执行，会等全局 `DB.lock()`（最坏 0.5s UI 冻结）；
+    /// 仓内 `commands/session.rs:10-12` 正是踩过这个坑才把轮询命令改成 async。
+    ///
+    /// **JS 侧签名与返回形状不变**（本次只动 Rust 侧），契约 §3 冻结的是**命令名 + 入参 + 返回**
+    /// —— 不含 sync/async ⇒ 本改动**不违约**，属**计划级冻结签名的显式偏离**（plan:11659-11660），
+    /// 已在 FINAL-FIX-report 的「偏离申报」里点名。
+    ///
+    /// 断言方式（沿用本文件既有自省锁模式）：
+    /// ① 两条命令的声明必须是 `pubasyncfn<name>(`（`code_only` 去掉全部空白）；
+    /// ② 函数体内必须出现 `spawn_blocking`（阻塞工作已移出主线程）；
+    /// ③ **`spawn_blocking` 之前不得出现 `settings::`** —— 否则阻塞调用仍在主线程上跑，
+    ///    ② 就成了装样子（"把 await 写在后面"骗不过这一条）；
+    /// ④ `settings::load` / `settings::save` 必须都在函数体里（别为了过锁把逻辑删了）。
+    ///
+    /// **能变红**：把命令改回同步（或把 `settings::load()` 提到 `spawn_blocking` 之外）→ 红。
+    #[test]
+    fn settings_commands_are_async_and_do_not_block_the_main_thread() {
+        let code = code_only(&prod_only(SELF_SRC));
+        for name in ["usage_get_settings", "usage_set_settings"] {
+            let sig = format!("pubasyncfn{name}(");
+            assert!(
+                code.contains(&sig),
+                "`{name}` 必须是 `pub async fn`（同步命令在主线程等 DB 锁 → UI 冻结，P2-3）"
+            );
+            // 取函数体：从签名起到下一个 `#[tauri::command]`（或文件末尾）
+            let start = code.find(&sig).expect("签名在场（上一条已断言）");
+            let rest = &code[start..];
+            let end = rest.find("#[tauri::command").unwrap_or(rest.len());
+            let body = &rest[..end];
+            let Some(off) = body.find("spawn_blocking") else {
+                panic!("`{name}` 必须把阻塞工作放进 `spawn_blocking`（否则仍在主线程上跑）");
+            };
+            assert!(
+                !body[..off].contains("settings::"),
+                "`{name}` 在 `spawn_blocking` **之前**就碰了 `settings::` —— \
+                 阻塞调用仍在主线程上执行（把 load/save 移进闭包）"
+            );
+            assert!(
+                body[off..].contains("settings::"),
+                "`{name}` 的 `spawn_blocking` 闭包里必须真的做设置读写（别为了过锁掏空逻辑）"
+            );
+        }
     }
 
     /// 三处登记之一：`lib.rs` 的 `generate_handler!` 必须逐条登记 6 条命令**各一次**。

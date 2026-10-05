@@ -22,12 +22,11 @@ use crate::services::usage::delta::{DetailKey, SourceDelta};
 use crate::services::usage::error::UsageError;
 use crate::services::usage::model::UsageSourceId;
 use crate::services::usage::project::project_key_of;
-use crate::services::usage::range::{hour_key_of, SourceTz};
+use crate::services::usage::range::hour_key_of_host;
 use crate::services::usage::semantics::{default_policy, normalize, resolve_semantics, RawUsage};
 
-/// workbuddy 的 jsonl 没有自带时区字段 → 宿主本地（说明书 §P6：缺失才回退宿主本地）
-const TZ: SourceTz = SourceTz::HostLocal;
-
+// **Q-4 / A-1**：workbuddy 的 jsonl 没有自带时区字段；即便将来带了，也**只许读入备查**
+// ——键一律走 `hour_key_of_host`（spec §P6 改写后：一律以宿主本地时区为基准）。
 pub struct WorkBuddyCollector;
 
 impl UsageCollector for WorkBuddyCollector {
@@ -122,7 +121,7 @@ fn process_line(
         .get("timestamp")
         .and_then(|x| x.as_i64())
         .unwrap_or(now_ms);
-    let hour = hour_key_of(ts, &TZ);
+    let hour = hour_key_of_host(ts);
     let mut model = v
         .pointer("/providerData/model")
         .and_then(|x| x.as_str())
