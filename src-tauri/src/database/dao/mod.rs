@@ -14,4 +14,5 @@ pub mod settings;
 pub mod stash;
 pub mod tool_resident;
 pub mod unread;
+pub mod usage;
 pub mod write_audit;

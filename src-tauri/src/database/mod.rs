@@ -52,6 +52,12 @@ pub use dao::unread::UnreadSessionRecord;
 pub use dao::unread::{
     clear_tool as clear_unread_tool, delete as delete_unread, list as list_unread_sessions,
 };
+pub use dao::usage::{
+    count_rows_conn, load_cursors_conn, load_sessions_conn, purge_detail_before_conn,
+    query_counters_conn, query_daily_conn, query_detail_conn, save_cursors_conn, upsert_daily_conn,
+    upsert_detail_conn, upsert_session_conn, CounterAggRow, DailyAggRow, DetailAggRow,
+    SessionDimRow,
+};
 
 /// 初始化数据库（兼容旧 store::init() 调用）
 pub fn init() {
