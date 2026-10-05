@@ -3,6 +3,7 @@
 //! 在同一遍里把四桶/turn/工具/报错/时长一起算出来，只上报原始字段（口径计算在 semantics 等模块）。
 pub mod claude;
 pub mod codex;
+pub mod dsh;
 pub mod kimi;
 pub mod opencode;
 pub mod workbuddy;
@@ -33,6 +34,7 @@ pub fn all() -> Vec<Box<dyn UsageCollector>> {
         Box::new(opencode::OpenCodeCollector),
         Box::new(workbuddy::WorkBuddyCollector),
         Box::new(zcode::ZCodeCollector),
+        Box::new(dsh::DshCollector),
     ]
 }
 
