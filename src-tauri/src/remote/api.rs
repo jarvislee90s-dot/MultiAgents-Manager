@@ -337,11 +337,7 @@ pub async fn ui_config(State(st): State<Arc<RemoteState>>) -> impl IntoResponse 
         .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
         .filter(|v| v.is_object())
         .unwrap_or_else(ui_config_defaults);
-    (
-        [(axum::http::header::CACHE_CONTROL, "no-store")],
-        Json(cfg),
-    )
-        .into_response()
+    ([(axum::http::header::CACHE_CONTROL, "no-store")], Json(cfg)).into_response()
 }
 
 /// 外观配置默认值（单一来源）：白天/夜间各纸感、标准字体、12px 圆角、左彩檐。
