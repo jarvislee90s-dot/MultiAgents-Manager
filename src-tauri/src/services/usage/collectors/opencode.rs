@@ -1216,9 +1216,14 @@ mod tests {
     }
 
     /// 生产半边的代码行：`(源码行号, 去注释去行内空白的行)`，截到**真正的测试模块**之前
-    /// —— 与 `collect::tests::prod_code_lines` **同款判据**（第三轮复审后收尾修正：旧判据「先按
-    /// **字面量** `#[cfg(test)]` 截断」会被注释里的 `#[cfg(test)]` 骗过、也会被中段的测试专用
-    /// 项截短；本文件当时恰好无盲区，但判据本身是同一个漏洞面，故一并收紧）。
+    /// —— 与 `collect::tests::prod_code_lines` **同款判据**（两个**复制件**，改一处必须改另一处）。
+    /// 判据要点（最后一批复审 P1-1 后收紧，逐条与 `collect.rs` 对齐）：
+    /// ① 先剥**整行**注释，再定锚点（注释里的 `#[cfg(test)]` 不得截断扫描面）；
+    /// ② 锚点 = **真的测试模块**（`#[cfg(test)]` + **精确** `mod tests` / `mod tests {`）：
+    ///    不是任意 `#[cfg(test)]` 项，也**不是前缀**（`mod tests_of_line_splitting` 不算）；
+    /// ③ 锚点必须**收口于文件末尾**（大括号首次回到 0 之后不得再有代码行）；
+    /// ④ 不满足 → 继续找，全不满足 → **整文件扫描**（多扫、不漏扫）。
+    /// 本文件实测落点：锚点 = `#[cfg(test)] mod tests`（源码 `:661/:662`）⇒ **生产半边 100%**。
     /// 这里多带**源码行号**，好让失败信息指向源码行，而不是"第 N 条代码行"。
     fn prod_code_lines(src: &str) -> Vec<(usize, String)> {
         let lines: Vec<(usize, String)> = src
@@ -1233,15 +1238,49 @@ mod tests {
             })
             .collect();
         for i in 0..lines.len() {
-            if !lines[i].1.starts_with(concat!("mod", "tests")) {
+            // ② 精确匹配（**不是前缀**）；开括号用**字节值 123** 而非字面量——同款判据的源码
+            //    自身也在扫描面内，裸 `{` 字符串会污染 `closes_at_eof` 的计数（见 collect.rs 注释）
+            if !(lines[i].1 == concat!("mod", "tests")
+                || (lines[i].1.starts_with(concat!("mod", "tests"))
+                    && lines[i].1.as_bytes().get(8) == Some(&123)))
+            {
                 continue;
             }
             let prev = lines[..i].iter().rev().find(|(_, l)| !l.is_empty());
-            if prev.is_some_and(|(_, l)| l.starts_with(concat!("#[cfg", "(test)]"))) {
+            if !prev.is_some_and(|(_, l)| l.starts_with(concat!("#[cfg", "(test)]"))) {
+                continue;
+            }
+            // ③ 收口于文件末尾（启发式：只看大括号；字符串里的裸 `{` 会让深度永不归零 ⇒ 整文件扫描）
+            if closes_at_eof(&lines[i..]) {
                 return lines[..i].to_vec();
             }
         }
         lines
+    }
+
+    /// 该块是否**收口于文件末尾**：大括号深度首次回到 0 之后不得再有代码行（跌破 0 亦判否）。
+    /// 与 `collect::tests::closes_at_eof` 同款（复制件）。
+    fn closes_at_eof(lines: &[(usize, String)]) -> bool {
+        let mut depth: i64 = 0;
+        let mut closed: Option<usize> = None;
+        for (i, (_, l)) in lines.iter().enumerate() {
+            for c in l.chars() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth < 0 {
+                            return false;
+                        }
+                        if depth == 0 && closed.is_none() {
+                            closed = Some(i);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        closed.is_some_and(|i| lines[i + 1..].iter().all(|(_, l)| l.is_empty()))
     }
 
     /// **第三轮评审必改 P1 的源码级自省锁**：本文件的**生产半边**不得再把三态表探测压回 bool。
@@ -1251,26 +1290,41 @@ mod tests {
     /// ⇒ 那条要求当时只是**纸面纪律**（P1 复核实证：`!table_exists(..)` 在探测失败时会误报
     /// 「表不存在」，把库损坏/锁死/权限说成该代际的预期缺表）。本锁把它变成机械纪律。
     ///
-    /// **判据（第三轮复审后收尾修正：由名字级升级为形态级）**：
+    /// **判据（第三轮复审后收尾修正：由名字级升级为形态级；最后一批复审 P2-1：全称补严）**：
     /// ① 名字级：生产半边不得出现 `table_exists(`（布尔便捷形态的名字）；
-    /// ② **形态级（本批新增）**：**每一个 `table_state(` 调用点**（排除它自己的定义行）
-    ///    的 **5 行窗口**内必须出现 `TableState::ProbeFailed`。只钉名字时，
-    ///    `let has_v2 = matches!(table_state(&conn, "session_v2"), TableState::Present);`
+    /// ② **形态级**：**每一个 `table_state` 名字出现处**（**不带括号**的全名 + **词边界**，
+    ///    排除它自己的定义行）的 **5 行窗口**内必须出现 `TableState::ProbeFailed`。
+    ///    只钉名字时，`let has_v2 = matches!(table_state(&conn, "session_v2"), TableState::Present);`
     ///    这种**无告警折叠**照样全绿（第三轮评审的**变异 D** 实测假绿），`ProbeFailed` 重新静默；
-    ///    形态级判据把它打红（本批已实测，见 `FINAL-FIX-report.md`「第三轮复审后收尾修正」）。
+    ///    形态级判据把它打红（已实测，见 `FINAL-FIX-report.md`）。
+    ///    **最后一批复审 P2-1（别名绕过，EXP-7 实测）**：旧针是**字面量** `table_state(`，
+    ///    于是 `let probe = table_state; matches!(probe(&conn, "session_v2"), TableState::Present)`
+    ///    **不进普查**（而 `sites >= 3` 仍被其余合法调用点满足）⇒「每一个调用点」这个**全称失效**。
+    ///    改扫**不带括号的名字** + 词边界后，别名形态同样进普查（改名/取引用都绕不过「名字在场」）。
     /// ③ 正向：两种"不在场"话术、三态臂、以及**调用点数 ≥ 3** 必须仍在场——
     ///    防「零调用点 / 只留一个」时 ② 退化成恒真。
     ///
-    /// **扫描面 / 判据层级 / 反例**（台账 C-【Important-1】的登记原文，此处保留指针）：
-    /// * 扫描面 = 本文件的**生产半边**（`prod_code_lines`：先剥整行注释，再截到真测试模块
-    ///   `#[cfg(test)] mod tests` 之前）；
-    /// * 判据层级 = **形态级**（调用点附近必须**指名** `ProbeFailed`；**不校验**该分支真的告警）；
-    /// * 反例（抓不到的回归）= ①写一个**点名 `ProbeFailed` 却不告警**的包装（如
-    ///   `TableState::ProbeFailed(_) => false` 静默折叠）——本锁抓不到，它需要**行为锁 / 日志
-    ///   捕获设施**（仓内没有 ⇒ 与 W-37 同族，见台账【B-5】登记）；
-    ///   ②把折叠搬进 `mod tests` / `#[cfg(test)]` 项；③行尾注释里写针的字符串字面量形态
-    ///   （`code_lines` 只剥整行注释）。反向地，`_ => false` 这类 catch-all 折叠在本判据下
-    ///   **是红的**（窗口里没有 `ProbeFailed` 这个名字）。
+    /// **扫描面 / 判据层级 / 反例**（台账 C-【Important-1】的登记原文；最后一批复审后补全）：
+    /// * **扫描面** = 本文件的**生产半边**（`prod_code_lines`：先剥整行注释 → 精确 `mod tests` /
+    ///   `mod tests {` 且**收口于文件末尾** → 取锚点之前）。实测锚点 = 源码 `:661/:662`
+    ///   ⇒ 生产半边 **100%**（本文件不属"整文件扫描"的 8 个文件）。
+    /// * **判据层级** = **形态级但非语义级**：只要求调用点附近**指名** `ProbeFailed`；
+    ///   **不校验**该分支真的告警、也**不校验** 5 行窗口里的 `ProbeFailed` 属于同一个 match。
+    /// * **反例（抓不到的回归）** = ①写一个**点名 `ProbeFailed` 却不告警**的包装（如
+    ///   `TableState::ProbeFailed(_) => false` 静默折叠，或窗口内另有一处无关的 `ProbeFailed`
+    ///   文本）——本锁抓不到，它需要**行为锁 / 日志捕获设施**（仓内没有 ⇒ 与 W-37 同族，
+    ///   见台账【B-5】登记）；②把折叠搬进 `mod tests` / 真测试模块**之后**；
+    ///   ③**行尾注释**或字符串里写字面量形态（`code_lines` 只剥**整行**注释）；
+    ///   ④在 5 行窗口**之外**（>5 行）另起折叠逻辑。反向地，`_ => false` 这类 catch-all 折叠
+    ///   在本判据下**是红的**（窗口里没有 `ProbeFailed` 这个名字）。
+    /// * **反例（会误报的情形）** = ⑤窗口里出现 `ProbeFailed` 但与之无关（名字在场即算数）；
+    ///   ⑥**名字级普查的过计**：任何含 `table_state` 字样、后一个字符又不是标识符字符的**非调用
+    ///   形态**（`use …::table_state;`、类型别名、非整行注释里的说明）都会被当成一户 ⇒ 它附近
+    ///   5 行内没有 `ProbeFailed` 就**假红**（响亮、安全方向；`x_table_state` / `table_stateful`
+    ///   由词边界挡住，不算户）；
+    ///   ⑦**边界事实**：窗口 = `prod[i..(i+5)]`，**整行注释不占槽**（已被剥掉）、**空行占槽**
+    ///   ⇒ 源码 `:320` 的调用点距 `ProbeFailed` 是 **4/5**，**在其后插一个空行即假红**——
+    ///   **刻意不改窗口大小**（改大只会更松、改小会误报现状）。
     ///
     /// 针一律 `concat!` 拆开写（否则本用例自己的字面量命中自己）；只看**生产半边 + 去注释**
     /// ——注释里为说明历史确实写了旧形态的名字，不看注释才谈得上机械纪律。
@@ -1286,15 +1340,20 @@ mod tests {
              压回 bool 会让 `ProbeFailed`（库损坏 / 锁死 / 权限）伪装成「表不存在」（误报），\
              正是 A-3 三态要消灭的那类静默"
         );
-        // ② 形态级：每个 `table_state(` 调用点的 5 行窗口内必须**指名** `ProbeFailed`
-        let call = concat!("table_state", "(");
+        // ② 形态级：**每一个 `table_state` 名字出现处**（不带括号 + 词边界）的 5 行窗口内
+        //    必须**指名** `ProbeFailed`——扫名字而非字面量 `table_state(`，别名形态才绕不过去
+        let needle = concat!("table_", "state");
         let failed = concat!("TableState::", "ProbeFailed");
         let mut sites = 0usize;
         for (i, (ln, text)) in prod.iter().enumerate() {
-            let mut from = 0usize;
-            while let Some(pos) = text[from..].find(call) {
-                let at = from + pos;
-                from = at + 1;
+            for (at, _) in text.match_indices(needle) {
+                // 词边界：**只看后一个字符**（`code_lines` 已去掉全部空白，所以 `match table_state(`
+                // 会变成 `matchtable_state(`——前一个字符永远是标识符字符，不可用作边界判据；
+                // 后一个字符则稳定：调用/取用时是 `(` `,` `;` `)`，而 `table_stateful` 是 `f`）
+                let after = text[(at + needle.len())..].chars().next();
+                if after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    continue;
+                }
                 // 定义行（`fn table_state(`）不是调用点
                 if text[..at].ends_with("fn") {
                     continue;
@@ -1306,16 +1365,17 @@ mod tests {
                     .collect();
                 assert!(
                     window.contains(failed),
-                    "`opencode.rs:{ln}`（源码行号）的 `{call}` 调用点附近（5 行内）没有 \
-                     `{failed}`：三态探测的任何调用点都不得**无告警折叠**（`matches!(…)` / \
-                     `_ => false` / 再包一个返回 bool 的便捷形态）——那会让「探测本身失败」\
-                     重新静默，正是 A-3 三态与第三轮评审变异 D 的失败模式"
+                    "`opencode.rs:{ln}`（源码行号）的 `{needle}` 出现处附近（5 行内）没有 \
+                     `{failed}`：三态探测的任何调用点 / 别名（`let probe = table_state;`）都不得\
+                     **无告警折叠**（`matches!(…)` / `_ => false` / 再包一个返回 bool 的便捷形态）\
+                     ——那会让「探测本身失败」重新静默，正是 A-3 三态、第三轮评审变异 D 与\
+                     最后一批复审 EXP-7（别名绕过普查）的失败模式"
                 );
             }
         }
         assert!(
             sites >= 3,
-            "生产半边只找到 {sites} 个 `{call}` 调用点（应 ≥ 3：`has_v2` gate、\
+            "生产半边只找到 {sites} 处 `{needle}`（应 ≥ 3：`has_v2` gate、\
              `warn_if_table_missing`、`warn_if_table_unreadable`）——调用点被删空时上面的\
              形态级断言会退化成恒真"
         );
