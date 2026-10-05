@@ -804,16 +804,10 @@ export default function MessageComposer({ session }: MessageComposerProps) {
     !attachments.some((a) => a.status === "uploading");
 
   return (
-    <div
-      data-testid="message-composer"
-      className="shrink-0 border-t border-slate-200 px-3 py-2 dark:border-slate-800"
-    >
+    <div data-testid="message-composer" className="shrink-0 border-t border-[var(--cb)] px-3 py-2">
       {/* 不可注入：输入区整体禁用，仅留 reason 展示（输入行保留占位但不可用） */}
       {!injectable && (
-        <p
-          data-testid="send-disabled-reason"
-          className="mb-2 text-xs text-slate-500 dark:text-slate-400"
-        >
+        <p data-testid="send-disabled-reason" className="mb-2 text-xs text-[var(--mut)]">
           无法发送：{sendInfo.reason ?? "该会话不支持远程注入"}
           {sendInfo.reasonCode ? `（${sendInfo.reasonCode}）` : ""}
         </p>
@@ -842,11 +836,11 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <span
             data-testid="send-receipt-delivering"
-            className="rounded-full bg-sky-500/10 px-2 py-0.5 text-xs text-sky-700 dark:bg-sky-400/10 dark:text-sky-300"
+            className="rounded-full bg-[var(--btnp)]/10 px-2 py-0.5 text-xs text-[var(--tx)]"
           >
-            <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500 align-middle" />
+            <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--btnp)] align-middle" />
             投递中…
-            <span className="ml-1 text-slate-500 dark:text-slate-400">长文投递可能需要几分钟</span>
+            <span className="ml-1 text-[var(--mut)]">长文投递可能需要几分钟</span>
           </span>
         </div>
       )}
@@ -871,7 +865,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             // 「（可重试）」——该语义仅属于 failed 态，出现在此会诱导双发
             <span
               data-testid="send-receipt-submitted"
-              className="rounded-full bg-slate-200/70 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-700/60 dark:text-slate-300"
+              className="rounded-full bg-[var(--cb)]/70 px-2 py-0.5 text-xs text-[var(--mut)]"
             >
               已投递至终端输入，agent 空闲后处理（未确认落盘）
             </span>
@@ -889,7 +883,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             // 不标失败红色、不带「（可重试）」，防重复注入
             <span
               data-testid="send-receipt-gone"
-              className="rounded-full bg-slate-200/70 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-700/60 dark:text-slate-300"
+              className="rounded-full bg-[var(--cb)]/70 px-2 py-0.5 text-xs text-[var(--mut)]"
             >
               {receipt.message}
             </span>
@@ -900,7 +894,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             // 侧的正确行为**（终端在等对话框，此刻直发会误触选项）
             <span
               data-testid="send-receipt-blocked"
-              className="rounded-full bg-slate-200/70 px-2 py-0.5 text-xs text-slate-600 dark:bg-slate-700/60 dark:text-slate-300"
+              className="rounded-full bg-[var(--cb)]/70 px-2 py-0.5 text-xs text-[var(--mut)]"
             >
               {receipt.message}
             </span>
@@ -927,7 +921,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
                   {item.position >= 1 ? `第${item.position}位` : "排队中"}
                 </span>
                 <span
-                  className="min-w-0 flex-1 truncate text-xs text-slate-700 dark:text-slate-300"
+                  className="min-w-0 flex-1 truncate text-xs text-[var(--tx)]"
                   title={item.content}
                 >
                   {queueItemPreview(item.content)}
@@ -961,17 +955,14 @@ export default function MessageComposer({ session }: MessageComposerProps) {
                   onClick={() => {
                     void handleRetract(item);
                   }}
-                  className="rounded-full bg-slate-200 px-2 py-0.5 text-xs text-slate-600 disabled:opacity-40 dark:bg-slate-800 dark:text-slate-300"
+                  className="rounded-full bg-[var(--cb)] px-2 py-0.5 text-xs text-[var(--mut)] disabled:opacity-40"
                 >
                   撤回
                 </button>
               </li>
             ))}
           </ul>
-          <p
-            data-testid="queue-hint"
-            className="mt-1 text-[11px] text-slate-400 dark:text-slate-500"
-          >
+          <p data-testid="queue-hint" className="mt-1 text-[11px] text-[var(--mut)]">
             空闲时将按序自动发送
           </p>
         </div>
@@ -986,7 +977,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
               className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
                 a.status === "failed"
                   ? "bg-rose-500/10 text-rose-700 dark:bg-rose-400/10 dark:text-rose-400"
-                  : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+                  : "bg-[var(--cb)] text-[var(--mut)]"
               }`}
             >
               {a.status === "uploading"
@@ -999,7 +990,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
                 data-testid={`attach-remove-${a.id}`}
                 aria-label={`移除附件 ${a.name}`}
                 onClick={() => removeAttachment(a.id)}
-                className="text-slate-400 hover:text-slate-600 dark:text-slate-500"
+                className="text-[var(--mut)] hover:text-[var(--mut)]"
               >
                 ×
               </button>
@@ -1034,7 +1025,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
                 : "添加附件（保存到项目目录 .mam-attachments/）"
             }
             onClick={() => fileInputRef.current?.click()}
-            className="shrink-0 rounded-full p-1 text-slate-500 hover:bg-slate-200 disabled:opacity-40 dark:text-slate-400 dark:hover:bg-slate-800"
+            className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] disabled:opacity-40 dark:hover:bg-[var(--btnp)]"
           >
             <Plus size={16} />
           </button>
@@ -1044,7 +1035,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             aria-label="附件存储说明"
             aria-expanded={attachHintOpen}
             onClick={() => setAttachHintOpen((v) => !v)}
-            className="shrink-0 rounded-full p-0.5 text-[10px] leading-none text-slate-400 hover:bg-slate-200 dark:text-slate-500 dark:hover:bg-slate-800"
+            className="shrink-0 rounded-full p-0.5 text-[10px] leading-none text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
           >
             <CircleHelp size={12} />
           </button>
@@ -1070,14 +1061,14 @@ export default function MessageComposer({ session }: MessageComposerProps) {
                     ? "终端等待审批，请用卡片按钮"
                     : "输入消息发送到终端…"
           }
-          className="min-h-0 flex-1 resize-none rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-sky-500/40 focus:outline-none disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+          className="min-h-0 flex-1 resize-none rounded-lg border border-[var(--cb)] px-3 py-2 text-sm text-[var(--tx)] placeholder:text-[var(--mut)] focus:ring-2 focus:ring-[var(--btnp)] focus:outline-none disabled:opacity-50"
         />
         <button
           type="button"
           data-testid="composer-send"
           disabled={!canSend}
           onClick={handleSend}
-          className="shrink-0 rounded-full bg-sky-500/10 px-4 py-2 text-sm text-sky-700 disabled:opacity-40 dark:bg-sky-400/10 dark:text-sky-300"
+          className="shrink-0 rounded-full bg-[var(--btnp)]/10 px-4 py-2 text-sm text-[var(--tx)] disabled:opacity-40"
         >
           {sending ? "发送中…" : "发送"}
         </button>
@@ -1087,7 +1078,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
       {attachHintOpen && (
         <p
           data-testid="attach-hint"
-          className="mt-1 rounded-lg bg-slate-100 px-2 py-1.5 text-[11px] leading-4 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
+          className="mt-1 rounded-lg bg-[var(--cbg)] px-2 py-1.5 text-[11px] leading-4 text-[var(--mut)]"
         >
           附件将保存到用户项目目录 .mam-attachments/&lt;会话&gt;/（已在本地 git
           排除，不会提交）；项目收尾时可整目录清理。

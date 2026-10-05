@@ -84,14 +84,14 @@ export default function ArchiveBoard({
           <button
             type="button"
             onClick={onBack}
-            className="text-sm text-slate-500"
+            className="text-sm text-[var(--mut)]"
             aria-label="返回看板"
           >
             ‹ 返回
           </button>
           <h1 className="text-lg font-semibold">历史会话</h1>
         </div>
-        <span className="flex items-center gap-2 text-xs text-slate-400">
+        <span className="flex items-center gap-2 text-xs text-[var(--mut)]">
           <button
             type="button"
             data-testid="archive-refresh"
@@ -134,7 +134,7 @@ export default function ArchiveBoard({
             key={t}
             type="button"
             onClick={() => setTool(t)}
-            className={`rounded-full px-3 py-1 text-xs ${t === tool ? "bg-blue-600 text-white" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"}`}
+            className={`rounded-full px-3 py-1 text-xs ${t === tool ? "bg-[var(--btnp)] text-[var(--btnpt)]" : "bg-[var(--cb)] text-[var(--tx)]"}`}
           >
             {chipLabel(t)}
           </button>
@@ -146,7 +146,7 @@ export default function ArchiveBoard({
         <select
           value={project}
           onChange={(e) => setProject(e.target.value)}
-          className="min-w-0 flex-1 rounded-lg border border-slate-200 px-2 py-1.5 text-sm dark:border-slate-800"
+          className="min-w-0 flex-1 rounded-lg border border-[var(--cb)] px-2 py-1.5 text-sm"
           aria-label="按项目筛选"
         >
           <option value="all">项目：全部</option>
@@ -163,7 +163,7 @@ export default function ArchiveBoard({
               type="button"
               data-testid={`archive-days-${d}`}
               onClick={() => setDays(d)}
-              className={`rounded-lg px-2.5 py-1.5 text-xs ${d === days ? "bg-blue-600 text-white" : "bg-slate-200 text-slate-700 dark:bg-slate-800 dark:text-slate-300"}`}
+              className={`rounded-lg px-2.5 py-1.5 text-xs ${d === days ? "bg-[var(--btnp)] text-[var(--btnpt)]" : "bg-[var(--cb)] text-[var(--tx)]"}`}
             >
               {d}天
             </button>
@@ -172,7 +172,7 @@ export default function ArchiveBoard({
       </div>
 
       {error && (
-        <div className="py-8 text-center text-sm text-slate-500">
+        <div className="py-8 text-center text-sm text-[var(--mut)]">
           加载失败
           <button
             type="button"
@@ -185,10 +185,10 @@ export default function ArchiveBoard({
         </div>
       )}
       {!error && data === null && (
-        <p className="py-8 text-center text-sm text-slate-400">加载中…</p>
+        <p className="py-8 text-center text-sm text-[var(--mut)]">加载中…</p>
       )}
       {!error && data && rows.length === 0 && (
-        <p className="py-8 text-center text-sm text-slate-400">
+        <p className="py-8 text-center text-sm text-[var(--mut)]">
           {emptyStateText(days, tool, project)}
         </p>
       )}
@@ -198,7 +198,7 @@ export default function ArchiveBoard({
             key={s.sessionId}
             type="button"
             onClick={() => onOpenCard(s)}
-            className="rounded-xl border border-slate-200 px-3 py-2.5 text-left enabled:hover:bg-slate-50 dark:border-slate-800"
+            className="rounded-xl border border-[var(--cb)] px-3 py-2.5 text-left enabled:hover:bg-[var(--cbg)]"
           >
             <div className="flex items-baseline justify-between">
               <span className="flex min-w-0 items-center gap-1.5">
@@ -213,12 +213,12 @@ export default function ArchiveBoard({
                 )}
                 <span className="truncate text-sm font-medium">{s.projectName}</span>
               </span>
-              <span className="shrink-0 text-xs text-slate-400">
+              <span className="shrink-0 text-xs text-[var(--mut)]">
                 {formatRelativeTime(s.lastSeenAt, now)}
                 {s.hiddenAlive ? "活跃" : "结束"}
               </span>
             </div>
-            <div className="mt-0.5 text-xs text-slate-500">
+            <div className="mt-0.5 text-xs text-[var(--mut)]">
               {chipLabel(s.agentType)} · {s.title ?? "（无标题）"}
             </div>
           </button>

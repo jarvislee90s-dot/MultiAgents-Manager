@@ -221,14 +221,14 @@ export default function ArchiveDetail({
         <button
           type="button"
           onClick={onBack}
-          className="text-sm text-slate-500"
+          className="text-sm text-[var(--mut)]"
           aria-label="返回历史页"
         >
           ‹ 返回
         </button>
         <h1 className="text-lg font-semibold">{session.projectName}</h1>
       </header>
-      <p className="mt-1 shrink-0 text-xs text-slate-500">
+      <p className="mt-1 shrink-0 text-xs text-[var(--mut)]">
         {chipLabel(session.agentType)} · {session.projectPath} · {statusLabel} ·{" "}
         {formatRelativeTime(session.lastSeenAt, now)}
         {session.hiddenAlive ? "活跃" : "结束"}{" "}
@@ -257,7 +257,7 @@ export default function ArchiveDetail({
       {toggleableMessages.length > 0 && (
         <div
           data-testid="archive-fold-banner"
-          className="mt-2 flex shrink-0 items-center justify-between rounded-lg bg-slate-50 px-3 py-1.5 text-xs text-slate-500 dark:bg-slate-900"
+          className="mt-2 flex shrink-0 items-center justify-between rounded-lg bg-[var(--cbg)] px-3 py-1.5 text-xs text-[var(--mut)]"
         >
           <span>{collapsedCount} 条过程内容已折叠</span>
           <span className="flex gap-2">
@@ -291,15 +291,15 @@ export default function ArchiveDetail({
           onScroll={handleAreaScroll}
         >
           {contentError && (
-            <p className="py-6 text-center text-sm text-slate-400">
+            <p className="py-6 text-center text-sm text-[var(--mut)]">
               内容暂不可读（会话文件可能已被工具清理）
             </p>
           )}
           {messages === null && !contentError && (
-            <p className="py-6 text-center text-sm text-slate-400">加载中…</p>
+            <p className="py-6 text-center text-sm text-[var(--mut)]">加载中…</p>
           )}
           {messages?.length === 0 && (
-            <p className="py-6 text-center text-sm text-slate-400">（无历史消息）</p>
+            <p className="py-6 text-center text-sm text-[var(--mut)]">（无历史消息）</p>
           )}
           {/* 加载更早消息（体验批二，活会话同款）：条数达 limit 或 truncated 即提供 */}
           {hasLoadMore && (
@@ -307,7 +307,7 @@ export default function ArchiveDetail({
               type="button"
               data-testid="load-more"
               onClick={loadMore}
-              className="mx-auto mb-2 block rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+              className="mx-auto mb-2 block rounded-lg border border-[var(--cb)] px-3 py-1.5 text-xs text-[var(--mut)] hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
             >
               加载更早消息
             </button>
@@ -321,7 +321,7 @@ export default function ArchiveDetail({
                   key={m.seq}
                   data-testid={`msg-${m.seq}`}
                   data-kind={m.kind}
-                  className="rounded-lg bg-slate-100 px-3 py-2 text-sm dark:bg-slate-900"
+                  className="rounded-lg bg-[var(--cbg)] px-3 py-2 text-sm"
                 >
                   {toggleable ? (
                     <>
@@ -330,7 +330,7 @@ export default function ArchiveDetail({
                         data-testid={`msg-${m.seq}-toggle`}
                         aria-expanded={!collapsed}
                         onClick={() => toggleCollapsed(m)}
-                        className="-mx-1 flex w-[calc(100%+8px)] items-center gap-1 rounded-lg px-1 py-0.5 text-left text-xs text-slate-500 hover:bg-slate-200/60 dark:text-slate-400 dark:hover:bg-slate-800"
+                        className="-mx-1 flex w-[calc(100%+8px)] items-center gap-1 rounded-lg px-1 py-0.5 text-left text-xs text-[var(--mut)] hover:bg-[var(--cb)]/60 dark:hover:bg-[var(--btnp)]"
                       >
                         {collapsed ? <ChevronRight size={13} /> : <ChevronDown size={13} />}
                         <span className="truncate">{collapsedLabel(m)}</span>
@@ -341,7 +341,7 @@ export default function ArchiveDetail({
                     </>
                   ) : (
                     <div className="break-words whitespace-pre-wrap">
-                      <span className="mr-2 text-xs text-slate-400">{m.role}</span>
+                      <span className="mr-2 text-xs text-[var(--mut)]">{m.role}</span>
                       {m.content}
                     </div>
                   )}
@@ -357,7 +357,7 @@ export default function ArchiveDetail({
             aria-label="跳到顶部"
             title="跳到顶部"
             onClick={jumpToTop}
-            className="absolute top-2 right-2 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="absolute top-2 right-2 z-10 rounded-full border border-[var(--cb)] bg-[var(--cbg)] p-2 text-[var(--mut)] shadow-md hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
           >
             <ArrowUpToLine size={16} />
           </button>
@@ -369,7 +369,7 @@ export default function ArchiveDetail({
             aria-label="跳到底部"
             title="跳到底部"
             onClick={jumpToBottom}
-            className="absolute right-2 bottom-2 z-10 rounded-full border border-slate-200 bg-white p-2 text-slate-600 shadow-md hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="absolute right-2 bottom-2 z-10 rounded-full border border-[var(--cb)] bg-[var(--cbg)] p-2 text-[var(--mut)] shadow-md hover:bg-[var(--cbg)] dark:hover:bg-[var(--btnp)]"
           >
             <ArrowDownToLine size={16} />
           </button>
@@ -390,7 +390,7 @@ export default function ArchiveDetail({
                   .then(onBack)
                   .catch(() => setUnhideError(true));
               }}
-              className="w-full rounded-lg bg-blue-600 px-3 py-2 text-sm text-white hover:bg-blue-700"
+              className="w-full rounded-lg bg-[var(--btnp)] px-3 py-2 text-sm text-[var(--btnpt)]"
             >
               移回看板
             </button>
@@ -410,7 +410,7 @@ export default function ArchiveDetail({
             >
               {opening ? "正在电脑上打开终端…" : "在桌面端打开"}
             </button>
-            {reason && <p className="mt-1 text-center text-xs text-slate-400">{reason}</p>}
+            {reason && <p className="mt-1 text-center text-xs text-[var(--mut)]">{reason}</p>}
             {openError && (
               <p data-testid="session-open-error" className="mt-1 text-center text-xs text-red-600">
                 {openError}
@@ -439,7 +439,7 @@ export default function ArchiveDetail({
               </button>
               <button
                 type="button"
-                className="flex-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs"
+                className="flex-1 rounded-lg border border-[var(--cb)] px-3 py-1.5 text-xs"
                 onClick={() => setConfirmRemove(false)}
               >
                 取消

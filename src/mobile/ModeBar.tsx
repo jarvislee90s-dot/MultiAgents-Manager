@@ -271,16 +271,14 @@ function ModeGroupRow({
   const hasBypass = group.tiers.some((t) => t.mode === "bypass" && t.selectable);
   return (
     <span data-testid={`mode-group-${group.id}`} className="flex flex-wrap items-center gap-2">
-      {showGroupLabel && (
-        <span className="text-[11px] text-slate-400 dark:text-slate-500">{group.label}</span>
-      )}
+      {showGroupLabel && <span className="text-[11px] text-[var(--mut)]">{group.label}</span>}
       {/* 单组（无组标题）时给当前档一个「当前」前缀；二维两行组已有组标题
           （模式/权限），再叠「模式」二字会读成「模式 模式 …」（用户 2026-09-23） */}
-      {!showGroupLabel && <span className="text-xs text-slate-500 dark:text-slate-400">当前</span>}
+      {!showGroupLabel && <span className="text-xs text-[var(--mut)]">当前</span>}
       <span
         data-testid={`mode-current-${group.id}`}
         className={`text-xs font-semibold ${
-          unknown ? "text-amber-700 dark:text-amber-400" : "text-slate-800 dark:text-slate-200"
+          unknown ? "text-amber-700 dark:text-amber-400" : "text-[var(--tx)]"
         }`}
       >
         {currentText}
@@ -288,7 +286,7 @@ function ModeGroupRow({
       {!unknown && group.id === "permission" && group.readback === false && (
         <span
           data-testid={`mode-current-source-${group.id}`}
-          className="text-[10px] text-slate-400 dark:text-slate-500"
+          className="text-[10px] text-[var(--mut)]"
         >
           （上次切换）
         </span>
@@ -322,7 +320,7 @@ function ModeGroupRow({
                   : "向终端发送 shift+tab，在计划/操作间切换"
               }
               onClick={() => onSwitch(toggleTarget)}
-              className="rounded-full bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white disabled:opacity-40 dark:bg-blue-500"
+              className="rounded-full bg-[var(--btnp)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--btnpt)] disabled:opacity-40"
             >
               计划 ⇄ 操作
             </button>
@@ -336,7 +334,7 @@ function ModeGroupRow({
           data-testid={`mode-switch-next-${group.id}`}
           disabled={busy}
           onClick={() => onSwitch("default")}
-          className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+          className="rounded-full bg-[var(--cb)] px-2 py-0.5 text-[11px] text-[var(--tx)] disabled:opacity-40"
         >
           切换模式
         </button>
@@ -364,8 +362,8 @@ function ModeGroupRow({
                 }}
                 className={`rounded-full px-2 py-0.5 text-[11px] disabled:opacity-40 ${
                   isCurrent
-                    ? "bg-slate-700 font-semibold text-white dark:bg-slate-200 dark:text-slate-900"
-                    : "bg-slate-500/15 text-slate-700 dark:bg-slate-400/15 dark:text-slate-300"
+                    ? "bg-[var(--cb)] font-semibold text-[var(--tx)]"
+                    : "bg-[var(--cb)] text-[var(--tx)]"
                 }`}
               >
                 {t.label}
@@ -376,7 +374,7 @@ function ModeGroupRow({
                 key={t.mode}
                 data-testid={`mode-tier-disabled-${group.id}-${t.mode}`}
                 title={t.reason ?? undefined}
-                className="rounded-full border border-dashed border-slate-400/40 px-2 py-0.5 text-[11px] text-slate-400 dark:text-slate-500"
+                className="rounded-full border border-dashed border-[var(--cb)]/40 px-2 py-0.5 text-[11px] text-[var(--mut)]"
               >
                 {t.label}（不可用）
               </span>
@@ -386,10 +384,7 @@ function ModeGroupRow({
       )}
       {/* 裁7：退役旧档**只作说明**，不渲染为可点按钮 */}
       {group.legacy !== undefined && group.legacy.length > 0 && (
-        <span
-          data-testid={`mode-legacy-${group.id}`}
-          className="text-[11px] text-slate-400 dark:text-slate-500"
-        >
+        <span data-testid={`mode-legacy-${group.id}`} className="text-[11px] text-[var(--mut)]">
           已退役：{group.legacy.map((l) => l.label).join(" / ")}
         </span>
       )}
@@ -417,7 +412,7 @@ function ModeGroupRow({
             data-testid="mode-bypass-confirm-no"
             disabled={busy}
             onClick={() => setBypassArmed(false)}
-            className="rounded-full bg-slate-500/15 px-2 py-0.5 text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+            className="rounded-full bg-[var(--cb)] px-2 py-0.5 text-[var(--tx)] disabled:opacity-40"
           >
             取消
           </button>
@@ -555,7 +550,7 @@ function PermissionPicker({
         disabled={disabled || busy}
         title="向终端发送 /permissions 打开权限菜单，然后由你点选档位"
         onClick={() => void runOpen()}
-        className="rounded-full bg-blue-600 px-2.5 py-0.5 text-[11px] font-semibold text-white disabled:opacity-40 dark:bg-blue-500"
+        className="rounded-full bg-[var(--btnp)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--btnpt)] disabled:opacity-40"
       >
         {busy && panel === null ? "读取终端菜单…" : "切换权限"}
       </button>
@@ -566,7 +561,7 @@ function PermissionPicker({
           className={`mt-1 w-full rounded-lg px-2 py-1.5 ${t.box}`}
         >
           <div className="mb-1 flex items-center justify-between gap-2">
-            <span className="text-[11px] font-semibold text-sky-700 dark:text-sky-300">
+            <span className="text-[11px] font-semibold text-[var(--tx)]">
               {isConfirm ? "终端二次确认" : "终端权限菜单"}
             </span>
             <span className="flex gap-1">
@@ -575,7 +570,7 @@ function PermissionPicker({
                 data-testid="mode-menu-reload"
                 disabled={busy}
                 onClick={() => void runReload()}
-                className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+                className="rounded-full bg-[var(--cb)] px-2 py-0.5 text-[11px] text-[var(--tx)] disabled:opacity-40"
               >
                 重新读取
               </button>
@@ -588,13 +583,13 @@ function PermissionPicker({
                   setOptions([]);
                   setNote(null);
                 }}
-                className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] text-slate-700 disabled:opacity-40 dark:bg-slate-400/15 dark:text-slate-300"
+                className="rounded-full bg-[var(--cb)] px-2 py-0.5 text-[11px] text-[var(--tx)] disabled:opacity-40"
               >
                 关闭
               </button>
             </span>
           </div>
-          <p className="mb-1 text-[11px] text-sky-700/80 dark:text-sky-400/80">
+          <p className="mb-1 text-[11px] text-[var(--tx)]/80">
             {isConfirm
               ? "以下选项读自终端的风险确认框，点按即代你按对应数字键"
               : "以下选项读自终端，点按即代你按对应数字键（编号 = 屏幕上那个数字）"}

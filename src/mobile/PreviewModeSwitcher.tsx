@@ -21,16 +21,12 @@ export default function PreviewModeSwitcher({
   testIdPrefix,
 }: PreviewModeSwitcherProps) {
   const cls = (active: boolean) =>
-    `rounded-full p-1 ${
-      active
-        ? "bg-white text-slate-900 dark:bg-slate-950 dark:text-slate-100"
-        : "text-slate-500 dark:text-slate-400"
-    }`;
+    `rounded-full p-1 ${active ? "bg-[var(--cbg)] text-[var(--tx)]" : "text-[var(--mut)]"}`;
   return (
     <span
       role="group"
       aria-label="预览布局"
-      className="flex shrink-0 items-center rounded-full bg-slate-200 p-0.5 dark:bg-slate-800"
+      className="flex shrink-0 items-center rounded-full bg-[var(--cb)] p-0.5"
     >
       <button
         type="button"

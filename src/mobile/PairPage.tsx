@@ -68,25 +68,25 @@ export default function PairPage({ onPaired, probing = false }: PairPageProps) {
   }, [submit]);
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-white px-6 text-slate-800 dark:bg-slate-950 dark:text-slate-200">
+    <div className="flex min-h-screen flex-col items-center justify-center bg-[var(--pg)] px-6 text-[var(--tx)]">
       <div className="w-full max-w-xs">
-        <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100">MAM 远程接入</h1>
+        <h1 className="text-xl font-semibold text-[var(--tx)]">MAM 远程接入</h1>
         {/* M5 P3-b：探测期（paired===null）渲染连接指示器而非密码表单——区分
             「探测中」与「未配对」，隧道场景探测可达一二十秒；副标题随态切换 */}
         {probing ? (
           <>
-            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">正在确认配对状态…</p>
+            <p className="mt-1 text-sm text-[var(--mut)]">正在确认配对状态…</p>
             <div
               data-testid="probe-indicator"
               className="mt-8 flex items-center justify-center gap-2"
             >
-              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-slate-400 dark:bg-slate-500" />
-              <span className="text-sm text-slate-500 dark:text-slate-400">正在连接看板…</span>
+              <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-[var(--cb)]" />
+              <span className="text-sm text-[var(--mut)]">正在连接看板…</span>
             </div>
           </>
         ) : (
           <>
-            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+            <p className="mt-1 text-sm text-[var(--mut)]">
               输入访问密码，绑定此设备（180 天免输入）
             </p>
             <form
@@ -109,7 +109,7 @@ export default function PairPage({ onPaired, probing = false }: PairPageProps) {
                 autoCapitalize="off"
                 spellCheck={false}
                 data-testid="pin-input"
-                className="mt-5 w-full rounded-lg border border-slate-300 bg-white py-2.5 text-center font-mono text-xl tracking-[10px] text-slate-900 focus:border-slate-500 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
+                className="mt-5 w-full rounded-lg border border-[var(--cb)] bg-[var(--cbg)] py-2.5 text-center font-mono text-xl tracking-[10px] text-[var(--tx)] focus:border-[var(--cb)] focus:outline-none"
               />
               {autoFill && status === "pairing" && (
                 <p
@@ -122,7 +122,7 @@ export default function PairPage({ onPaired, probing = false }: PairPageProps) {
               <button
                 type="submit"
                 disabled={pin.trim().length !== 4 || status === "pairing"}
-                className="mt-4 w-full rounded-lg bg-slate-800 py-2.5 text-sm font-medium text-white disabled:opacity-50 dark:bg-slate-100 dark:text-slate-900"
+                className="mt-4 w-full rounded-lg bg-[var(--btnp)] py-2.5 text-sm font-medium text-[var(--btnpt)] disabled:opacity-50"
               >
                 {status === "pairing" ? "进入中…" : "进入看板"}
               </button>
@@ -139,9 +139,7 @@ export default function PairPage({ onPaired, probing = false }: PairPageProps) {
             接入成功，正在进入看板…
           </p>
         )}
-        <p className="mt-10 text-center text-xs text-slate-500 dark:text-slate-400">
-          扫码进入时无需手动输入
-        </p>
+        <p className="mt-10 text-center text-xs text-[var(--mut)]">扫码进入时无需手动输入</p>
       </div>
     </div>
   );

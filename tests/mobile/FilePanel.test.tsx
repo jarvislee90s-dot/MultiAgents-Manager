@@ -183,7 +183,7 @@ describe("FilePanel 档位卡片（用户裁决 3）", () => {
 });
 
 describe("FilePanel 已改写 / 仅读过 的视觉区分（2026-09-16 用户裁决）", () => {
-  it("已改写的文件名保持强调色；仅读过的用常规文字色（两者都是超链接）", () => {
+  it("已改写的文件名保持强调（主文字+加粗）；仅读过的用弱化文字色（两者都是超链接）", () => {
     renderPanel([
       entry("/p/edited.rs", { lastSeq: 9, modified: true }),
       entry("/p/readonly.rs", { lastSeq: 5, modified: false }),
@@ -193,10 +193,12 @@ describe("FilePanel 已改写 / 仅读过 的视觉区分（2026-09-16 用户裁
     // 两者都是可点按钮（超链接语义一致）
     expect(edited.tagName).toBe("BUTTON");
     expect(readonly.tagName).toBe("BUTTON");
-    // 已改写：强调色（sky）；仅读过：常规文字色（slate），不带 sky
-    expect(edited.className).toContain("text-sky-700");
-    expect(readonly.className).not.toContain("text-sky-700");
-    expect(readonly.className).toMatch(/text-slate-/);
+    // 已改写：主文字 + 加粗强调；仅读过：弱化文字色，不加粗（2026-10-05 Token 化：
+    // 强调/弱化改由 --tx/--mut 表达，不再使用 sky/slate 双态类）
+    expect(edited.className).toContain("font-semibold");
+    expect(edited.className).toContain("text-[var(--tx)]");
+    expect(readonly.className).toContain("text-[var(--mut)]");
+    expect(readonly.className).not.toContain("font-semibold");
   });
 
   it("档位卡片带单位注释：说明 200/500/1000 是消息条数", () => {

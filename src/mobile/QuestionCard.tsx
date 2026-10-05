@@ -605,12 +605,12 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         {q0.header && (
           <div
             data-testid="question-header"
-            className="mt-1.5 inline-block rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400"
+            className="mt-1.5 inline-block rounded bg-[var(--btnp)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--tx)]"
           >
             {q0.header}
           </div>
         )}
-        <p data-testid="question-text" className="mt-1 text-sm text-slate-800 dark:text-slate-200">
+        <p data-testid="question-text" className="mt-1 text-sm text-[var(--tx)]">
           {q0.question}
         </p>
         <ol className="mt-1.5 space-y-0.5">
@@ -618,20 +618,15 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             <li
               key={`question-ro-opt-${i}`}
               data-testid={`question-readonly-option-${i}`}
-              className="text-xs text-slate-700 dark:text-slate-300"
+              className="text-xs text-[var(--tx)]"
             >
-              <span className="mr-1 font-mono text-slate-500 dark:text-slate-400">{i + 1}.</span>
+              <span className="mr-1 font-mono text-[var(--mut)]">{i + 1}.</span>
               {o.label}
-              {o.description && (
-                <span className="ml-1 text-slate-500 dark:text-slate-400">— {o.description}</span>
-              )}
+              {o.description && <span className="ml-1 text-[var(--mut)]">— {o.description}</span>}
             </li>
           ))}
         </ol>
-        <p
-          data-testid="question-tool-readonly-hint"
-          className="mt-1.5 text-xs text-sky-700 dark:text-sky-400"
-        >
+        <p data-testid="question-tool-readonly-hint" className="mt-1.5 text-xs text-[var(--tx)]">
           该工具的远程作答尚未实测，请在终端完成作答
         </p>
       </InteractiveCard>
@@ -652,7 +647,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
     <div className="mt-2" data-testid="question-multi-freetext">
       <label
         htmlFor="question-multi-freetext-input"
-        className="mb-1 block text-xs text-slate-600 dark:text-slate-400"
+        className="mb-1 block text-xs text-[var(--mut)]"
       >
         自由作答（直接输入，切题时自动保存）
       </label>
@@ -665,7 +660,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           disabled={busy}
           readOnly={mqFreeText[qi] !== undefined && !editingFreeText}
           onChange={(e) => setFreeText(e.target.value.slice(0, MAX_FREE_TEXT_CHARS))}
-          className="min-w-0 flex-1 rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-xs text-slate-900 placeholder:text-slate-400 focus:border-sky-500 focus:outline-none disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+          className="min-w-0 flex-1 rounded-lg border border-[var(--cb)] bg-[var(--cbg)] px-2 py-1.5 text-xs text-[var(--tx)] placeholder:text-[var(--mut)] focus:border-[var(--btnp)] focus:outline-none disabled:opacity-60"
           placeholder="输入内容后点发送（勿在终端按回车）"
         />
         {mqFreeText[qi] !== undefined && !editingFreeText ? (
@@ -677,7 +672,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               setFreeText(mqFreeText[qi] ?? "");
               setEditingFreeText(true);
             }}
-            className="rounded-full bg-sky-500/10 px-3 py-1.5 text-xs text-sky-800 hover:bg-sky-500/20 disabled:opacity-40 dark:bg-sky-400/10 dark:text-sky-200"
+            className="rounded-full bg-[var(--btnp)]/10 px-3 py-1.5 text-xs text-[var(--tx)] hover:bg-[var(--btnp)]/20 disabled:opacity-40"
           >
             编辑
           </button>
@@ -696,7 +691,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 mqFreeText[qi] !== undefined ? true : undefined
               )
             }
-            className="rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
+            className="rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
           >
             {mqFreeText[qi] !== undefined ? "覆盖写入" : "发送"}
           </button>
@@ -741,10 +736,10 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               <li
                 key={`question-readonly-${i}`}
                 data-testid={`question-readonly-${i}`}
-                className="text-xs text-slate-700 dark:text-slate-300"
+                className="text-xs text-[var(--tx)]"
               >
                 {q.header && (
-                  <span className="mr-1 rounded bg-sky-500/10 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400">
+                  <span className="mr-1 rounded bg-[var(--btnp)]/10 px-1 py-0.5 text-[10px] font-medium text-[var(--tx)]">
                     {q.header}
                   </span>
                 )}
@@ -752,10 +747,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               </li>
             ))}
           </ol>
-          <p
-            data-testid="question-readonly-hint"
-            className="mt-1.5 text-xs text-sky-700 dark:text-sky-400"
-          >
+          <p data-testid="question-readonly-hint" className="mt-1.5 text-xs text-[var(--tx)]">
             请在终端完成作答
           </p>
         </InteractiveCard>
@@ -799,10 +791,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           title={`有 ${questions.length} 个问题等待回答（确认提交）`}
           footer={multiFooter}
         >
-          <p
-            data-testid="question-confirm-hint"
-            className="mt-1 text-xs text-slate-700 dark:text-slate-300"
-          >
+          <p data-testid="question-confirm-hint" className="mt-1 text-xs text-[var(--tx)]">
             全部题目已翻页完毕，终端应已停在 Confirm（Review）页——提交后模型会收到全部答案。
           </p>
           {/* **已选答案清单**（2026-10-02）：本地记忆渲染（多选=勾选项 / 单选=选中项 /
@@ -829,7 +818,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               }
               return (
                 <div key={idx} className="text-xs">
-                  <span className="text-slate-700 dark:text-slate-300">
+                  <span className="text-[var(--tx)]">
                     {idx + 1}. {qi.question}
                   </span>
                   <span
@@ -837,7 +826,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                     className={
                       parts.length > 0
                         ? "ml-1 font-medium text-emerald-600 dark:text-emerald-400"
-                        : "ml-1 text-slate-400 dark:text-slate-500"
+                        : "ml-1 text-[var(--mut)]"
                     }
                   >
                     → {parts.length > 0 ? parts.join("；") : "（未作答）"}
@@ -845,7 +834,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 </div>
               );
             })}
-            <p className="text-xs text-slate-400 dark:text-slate-500">以终端 Review 页为准</p>
+            <p className="text-xs text-[var(--mut)]">以终端 Review 页为准</p>
           </div>
           {!sent && (
             <div className="mt-2 space-y-1.5">
@@ -854,7 +843,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 data-testid="question-confirm-submit"
                 disabled={busy}
                 onClick={() => handleAnswer("submit")}
-                className="w-full rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
+                className="w-full rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
               >
                 提交答案
               </button>
@@ -867,7 +856,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                     ? handleAnswer("advance", undefined, undefined, undefined, "prev")
                     : handleAnswer("advance")
                 }
-                className="w-full rounded-full bg-sky-500/10 px-3 py-1.5 text-xs text-sky-800 hover:bg-sky-500/20 disabled:opacity-40 dark:bg-sky-400/10 dark:text-sky-200"
+                className="w-full rounded-full bg-[var(--btnp)]/10 px-3 py-1.5 text-xs text-[var(--tx)] hover:bg-[var(--btnp)]/20 disabled:opacity-40"
               >
                 {info.navBoth === true ? "◀ 返回上一题修改" : "返回题目修改"}
               </button>
@@ -876,7 +865,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 data-testid="question-confirm-cancel"
                 disabled={busy}
                 onClick={() => handleAnswer("cancel")}
-                className="w-full rounded-full bg-slate-500/10 px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-500/20 disabled:opacity-40 dark:bg-slate-400/10 dark:text-slate-300"
+                className="w-full rounded-full bg-[var(--cb)] px-3 py-1.5 text-xs text-[var(--mut)] hover:bg-[var(--cb)] disabled:opacity-40"
               >
                 取消回答
               </button>
@@ -899,12 +888,9 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         title={`有 ${questions.length} 个问题等待回答（第 ${mqIndex + 1} 题）`}
         footer={multiFooter}
       >
-        <p
-          data-testid="question-multi-current"
-          className="mt-1 text-xs text-slate-700 dark:text-slate-300"
-        >
+        <p data-testid="question-multi-current" className="mt-1 text-xs text-[var(--tx)]">
           {q.header && (
-            <span className="mr-1 rounded bg-sky-500/10 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400">
+            <span className="mr-1 rounded bg-[var(--btnp)]/10 px-1 py-0.5 text-[10px] font-medium text-[var(--tx)]">
               {q.header}
             </span>
           )}
@@ -912,7 +898,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           {q.multiSelect && (
             <span
               data-testid="question-multi-multiselect-badge"
-              className="ml-1 rounded bg-sky-500/10 px-1 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-400/10 dark:text-sky-400"
+              className="ml-1 rounded bg-[var(--btnp)]/10 px-1 py-0.5 text-[10px] font-medium text-[var(--tx)]"
             >
               多选
             </span>
@@ -932,13 +918,13 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 onClick={() =>
                   handleAnswer(q.multiSelect ? "toggle" : "select", i, undefined, mqIndex)
                 }
-                className={`w-full rounded-lg px-2 py-1.5 text-left text-xs hover:bg-sky-500/20 disabled:opacity-40 dark:hover:bg-sky-400/20 ${
+                className={`w-full rounded-lg px-2 py-1.5 text-left text-xs hover:bg-[var(--btnp)]/20 disabled:opacity-40 dark:hover:bg-[var(--btnp)] ${
                   checkedHere
-                    ? "bg-sky-500/25 text-sky-900 dark:bg-sky-400/25 dark:text-sky-100"
-                    : "bg-sky-500/10 text-sky-800 dark:bg-sky-400/10 dark:text-sky-200"
+                    ? "bg-[var(--btnp)]/25 text-[var(--tx)]"
+                    : "bg-[var(--btnp)]/10 text-[var(--tx)]"
                 }`}
               >
-                <span className="mr-1.5 rounded bg-sky-600 px-1 py-0.5 font-mono text-[10px] font-semibold text-white">
+                <span className="mr-1.5 rounded bg-[var(--btnp)] px-1 py-0.5 font-mono text-[10px] font-semibold text-[var(--btnpt)]">
                   {i + 1}
                 </span>
                 {q.multiSelect && (
@@ -946,9 +932,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 )}
                 {o.label}
                 {o.description !== "" && (
-                  <span className="ml-1 text-[10px] text-slate-500 dark:text-slate-400">
-                    {o.description}
-                  </span>
+                  <span className="ml-1 text-[10px] text-[var(--mut)]">{o.description}</span>
                 )}
               </button>
             );
@@ -967,7 +951,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 data-testid="question-nav-prev"
                 disabled={busy}
                 onClick={() => handleAnswer("advance", undefined, undefined, undefined, "prev")}
-                className="flex-1 rounded-full bg-sky-500/10 px-3 py-1.5 text-xs text-sky-800 hover:bg-sky-500/20 disabled:opacity-40 dark:bg-sky-400/10 dark:text-sky-200"
+                className="flex-1 rounded-full bg-[var(--btnp)]/10 px-3 py-1.5 text-xs text-[var(--tx)] hover:bg-[var(--btnp)]/20 disabled:opacity-40"
               >
                 ◀ 上一题
               </button>
@@ -977,7 +961,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               data-testid="question-multi-advance"
               disabled={busy}
               onClick={() => handleAnswer("advance", undefined, undefined, undefined, "next")}
-              className="flex-1 rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
+              className="flex-1 rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
             >
               下一题 ▶{mqIndex < questions.length - 1 ? "" : "（进入确认页）"}
             </button>
@@ -992,7 +976,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             data-testid="question-multi-advance"
             disabled={busy}
             onClick={() => handleAnswer("advance")}
-            className="mt-2 w-full rounded-full bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700 disabled:opacity-40"
+            className="mt-2 w-full rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
           >
             切换题目{mqIndex < questions.length - 1 ? "" : "（进入确认页）"}
           </button>
@@ -1000,7 +984,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         {!sent && info.advance !== true && (
           <p
             data-testid="question-multi-advance-unavailable"
-            className="mt-2 text-xs text-slate-500 dark:text-slate-400"
+            className="mt-2 text-xs text-[var(--mut)]"
           >
             {q.multiSelect ? "多选题勾选后请到终端切换下一题并提交" : "请到终端切换题目"}
           </p>
@@ -1043,7 +1027,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         ) : null
       }
     >
-      <p data-testid="question-text" className="mt-1 text-sm text-slate-800 dark:text-slate-200">
+      <p data-testid="question-text" className="mt-1 text-sm text-[var(--tx)]">
         {q.question}
       </p>
       {/* **进行中态**（丁T5 §2.3）——替代「已发送按键」：提交/自由作答的整条闭环是
@@ -1052,9 +1036,9 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         <p
           data-testid="question-progress"
           data-stage={inProgress}
-          className="mt-1.5 text-xs font-medium text-sky-700 dark:text-sky-400"
+          className="mt-1.5 text-xs font-medium text-[var(--tx)]"
         >
-          <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500 align-middle" />
+          <span className="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-[var(--btnp)] align-middle" />
           {QUESTION_STAGE_PROGRESS[inProgress]}
         </p>
       )}
@@ -1108,26 +1092,24 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 onClick={() => handleAnswer(q.multiSelect ? "toggle" : "select", i)}
                 className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm disabled:opacity-40 ${
                   q.multiSelect && checked.has(i)
-                    ? "bg-sky-500/20 text-sky-800 dark:bg-sky-400/20 dark:text-sky-300"
-                    : "bg-sky-500/5 text-slate-700 hover:bg-sky-500/10 dark:bg-sky-400/5 dark:text-slate-300 dark:hover:bg-sky-400/10"
+                    ? "bg-[var(--btnp)]/15 text-[var(--tx)] ring-1 ring-[var(--btnp)]"
+                    : "bg-[var(--btnp)]/5 text-[var(--tx)] hover:bg-[var(--btnp)]/10 dark:hover:bg-[var(--bub)]"
                 }`}
               >
-                <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-sky-500/15 text-[10px] font-semibold text-sky-700 dark:bg-sky-400/15 dark:text-sky-400">
+                <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-[var(--btnp)]/15 text-[10px] font-semibold text-[var(--tx)]">
                   {i + 1}
                 </span>
                 {/* 多选：勾选框字形（与终端 `[ ]`/`[✓]` 同形——2026-09-24「手机端
                     同步终端操作逻辑」；与多题卡的 checkedHere 字形同一形态） */}
                 {q.multiSelect && (
-                  <span className="mt-0.5 mr-0.5 font-mono text-xs text-sky-700 dark:text-sky-400">
+                  <span className="mt-0.5 mr-0.5 font-mono text-xs text-[var(--tx)]">
                     {checked.has(i) ? "[✓]" : "[ ]"}
                   </span>
                 )}
                 <span className="min-w-0">
                   <span className="block font-medium">{o.label}</span>
                   {o.description && (
-                    <span className="mt-0.5 block text-xs text-slate-500 dark:text-slate-400">
-                      {o.description}
-                    </span>
+                    <span className="mt-0.5 block text-xs text-[var(--mut)]">{o.description}</span>
                   )}
                 </span>
               </button>
@@ -1139,7 +1121,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               data-testid="question-submit"
               disabled={busy || checked.size === 0}
               onClick={() => handleAnswer("submit")}
-              className="mt-2 w-full rounded-full bg-sky-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40 dark:bg-sky-500"
+              className="mt-2 w-full rounded-full bg-[var(--btnp)] px-3 py-1.5 text-sm font-medium text-[var(--btnpt)] disabled:opacity-40"
             >
               提交勾选
             </button>
@@ -1149,17 +1131,14 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             data-testid="question-cancel"
             disabled={busy}
             onClick={() => handleAnswer("cancel")}
-            className="mt-1.5 w-full rounded-full bg-slate-500/10 px-3 py-1.5 text-sm text-slate-600 disabled:opacity-40 dark:bg-slate-400/10 dark:text-slate-300"
+            className="mt-1.5 w-full rounded-full bg-[var(--cb)] px-3 py-1.5 text-sm text-[var(--mut)] disabled:opacity-40"
           >
             取消回答
           </button>
           {/* ===== 丁T5 §2.4：卡内自由作答输入框（入口 1；仅单题卡，本分支恒单题）===== */}
           {freeTextEnabled ? (
             <div className="mt-2" data-testid="question-freetext">
-              <p
-                data-testid="question-freetext-label"
-                className="mb-1 text-xs text-slate-500 dark:text-slate-400"
-              >
+              <p data-testid="question-freetext-label" className="mb-1 text-xs text-[var(--mut)]">
                 或直接输入回答（将作为本题的答案发送到终端）
               </p>
               <div className="flex gap-1.5">
@@ -1172,14 +1151,14 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                   disabled={busy}
                   onChange={(e) => setFreeText(e.target.value.slice(0, MAX_FREE_TEXT_CHARS))}
                   placeholder="输入你的回答…"
-                  className="min-w-0 flex-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-sm text-slate-800 placeholder:text-slate-400 focus:ring-2 focus:ring-sky-500/40 focus:outline-none disabled:opacity-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  className="min-w-0 flex-1 rounded-lg border border-[var(--cb)] px-2.5 py-1.5 text-sm text-[var(--tx)] placeholder:text-[var(--mut)] focus:ring-2 focus:ring-[var(--btnp)] focus:outline-none disabled:opacity-50"
                 />
                 <button
                   type="button"
                   data-testid="question-freetext-send"
                   disabled={busy || freeText.trim() === ""}
                   onClick={() => handleAnswer("freeText", undefined, freeText)}
-                  className="shrink-0 rounded-full bg-sky-600 px-3 py-1.5 text-sm font-medium text-white disabled:opacity-40 dark:bg-sky-500"
+                  className="shrink-0 rounded-full bg-[var(--btnp)] px-3 py-1.5 text-sm font-medium text-[var(--btnpt)] disabled:opacity-40"
                 >
                   作为回答发送
                 </button>
@@ -1188,10 +1167,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           ) : multiFreeTextEnabled ? (
             renderMultiFreeText(0)
           ) : (
-            <p
-              data-testid="question-freeform-hint"
-              className="mt-1.5 text-xs text-slate-500 dark:text-slate-400"
-            >
+            <p data-testid="question-freeform-hint" className="mt-1.5 text-xs text-[var(--mut)]">
               {/* 降级文案**说清是哪种限制**（两种成因用户动作相同——都去终端——但原因
                   不同，写清楚能少一次困惑）：① 多选题 → 「多选卡」限制（复评 F6-3，
                   题目形态维度）；② 工具未定案 → 「该工具尚未实测」（§2.8，工具维度）。 */}
