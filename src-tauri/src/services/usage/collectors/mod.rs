@@ -4,6 +4,7 @@
 pub mod claude;
 pub mod codex;
 pub mod kimi;
+pub mod opencode;
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -27,6 +28,7 @@ pub fn all() -> Vec<Box<dyn UsageCollector>> {
         Box::new(claude::ClaudeCollector),
         Box::new(codex::CodexCollector),
         Box::new(kimi::KimiCollector),
+        Box::new(opencode::OpenCodeCollector),
     ]
 }
 
