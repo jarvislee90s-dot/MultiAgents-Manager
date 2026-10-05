@@ -7,6 +7,9 @@
 use rusqlite::{params, Connection};
 use std::collections::{BTreeMap, HashMap};
 
+// 全局连接包装（Task 10 追加的 `load_cursors` / `load_sessions`）用：调度与查询层零锁代码。
+use crate::database::connection::DB;
+
 // `SourceKind` 必须显式导入：`DailyAggRow.provider_kind` / `DetailAggRow.provider_kind` 两个行类型
 // 都用它，`SourceKind::from_db` 也在两处查询里调用——只导 `UsageBuckets` 会 4×E0425/E0433（照抄计划即失败）。
 // 同理 `SessionCounters` **不在**本文件作用域里出现（只在 `delta.rs` 的类型定义与测试里用到），
@@ -707,6 +710,37 @@ pub fn count_rows_conn(conn: &Connection, table: &str) -> i64 {
     // 表名来自 crate 内常量（非用户输入），无注入面
     conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
         .unwrap_or(0)
+}
+
+// ---- 全局连接包装（调度与查询层用；Task 10 追加） ----
+
+/// 全局连接包装（调度/查询层零锁代码；采集落库**不走这里**——它必须走 ledger 的分批事务）
+/// 返回类型 = `HashMap<String, CursorDelta>`：**与 `collect_source` 的第 4 参同型**，
+/// 调度侧零转换直通（独立验证复核 §3.2.2 阻塞 1）。
+/// 锁中毒 → 空表。**但绝不静默**（评审 M-5）：空游标表 = 整源全量重读，而本域是**增量累加**账
+/// （DAO 的 upsert 一律 `col = col + excluded.col`）→ 重复计入。这一族是 W-05/D-23 点名的
+/// 「把失败伪装成合法值」，至少必须留下痕迹。
+pub fn load_cursors(source_id: &str) -> HashMap<String, CursorDelta> {
+    match DB.lock() {
+        Ok(conn) => load_cursors_conn(&conn, source_id),
+        Err(_) => {
+            log::warn!(
+                "usage: DB 锁中毒，源 {source_id} 本轮读不到游标（将回退全量重读，增量账可能重复计入）"
+            );
+            HashMap::new()
+        }
+    }
+}
+
+pub fn load_sessions(source_id: Option<&str>) -> Vec<SessionDimRow> {
+    match DB.lock() {
+        Ok(conn) => load_sessions_conn(&conn, source_id),
+        Err(_) => {
+            // 同 M-5：空表会把「读不到」伪装成「没有会话」——查询侧看到的是空态而不是故障。
+            log::warn!("usage: DB 锁中毒，会话维度表本轮读不到（查询侧会显示空态）");
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]
