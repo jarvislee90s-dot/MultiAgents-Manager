@@ -33,6 +33,7 @@ import {
   RadioTower,
   Smartphone,
   ScrollText,
+  Activity,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -65,6 +66,7 @@ import { RemoteSection } from "@/components/settings/RemoteSection";
 import { AuditLogSection } from "@/components/settings/AuditLogSection";
 import { SignalHealthSection } from "@/components/settings/SignalHealthSection";
 import { DataManagementSection } from "@/components/settings/DataManagementSection";
+import { UsageStatusSection } from "@/components/settings/UsageStatusSection";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { ToolIcon } from "@/components/common/ToolIcon";
@@ -154,7 +156,8 @@ type SettingSection =
   | "signal"
   | "remote"
   | "audit"
-  | "data";
+  | "data"
+  | "usageStatus";
 
 // 工具管理行（后端 ToolSetting，serde camelCase）
 type ToolRow = {
@@ -481,6 +484,13 @@ export default function SettingsPage() {
       id: "data" as SettingSection,
       label: t("settings.dataManagement.title"),
       icon: Database,
+    },
+    {
+      // 计划① Task 24：最小可见验收面（② 的正式用量设置分组用 id "usage" + 组件 UsageSection
+      // + 图标 BarChart3，勿与本节撞名——见契约 §5「设置页的分工」）
+      id: "usageStatus" as SettingSection,
+      label: t("settings.usageStatus.title"),
+      icon: Activity,
     },
   ];
 
@@ -891,6 +901,8 @@ export default function SettingsPage() {
           {activeSection === "audit" && <AuditLogSection />}
           {/* 2026-09-20：数据管理首版（移动端附件占用列出/清理，C5） */}
           {activeSection === "data" && <DataManagementSection />}
+          {/* 计划① Task 24：用量采集状态（最小可见验收面；② 上线后可保留为调试入口或删除） */}
+          {activeSection === "usageStatus" && <UsageStatusSection />}
         </div>
       </div>
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />
