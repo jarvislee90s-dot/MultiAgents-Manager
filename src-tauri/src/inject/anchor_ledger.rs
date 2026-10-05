@@ -111,6 +111,10 @@ pub mod slot {
     pub const PRESENT: &str = "present";
     /// **确认项行锚**（Review 确认屏上的提交选项行，如 claude `1. Submit answers`）
     pub const CONFIRM: &str = "confirm";
+    /// **反馈选项行锚**（claude 计划批准框的「Tell Claude what to change/differently」
+    /// 选项行）——计划批准卡批（2026-10-04）：命中即认定该对话框为计划批准框，
+    /// 同时锁定反馈入口的目标编号（dialog.rs `plan_feedback_option_number` 消费）
+    pub const FEEDBACK_OPTION: &str = "feedback_option";
 }
 
 /// 账本单行：一条**屏读文案**及其取证元数据。
@@ -212,6 +216,24 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "claude has written up a plan",
         observed_version: "2.1.251",
         evidence: "戊探E 2026-09-22 claude 对话框选项锚点底料（夹具 claude-approve-dialog-e1.txt）",
+    },
+    // ===== claude 计划批准框反馈选项行（2026-10-04 计划批准卡批入账）=====
+    // 两变体各有实机夹具；命中任一即认定计划批准框 + 锁定反馈目标编号
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::PLAN_APPROVE,
+        slot: slot::FEEDBACK_OPTION,
+        text: "tell claude what to change",
+        observed_version: "2.1.251",
+        evidence: "实机屏幕原文（dialog.rs parses_claude_dialog_with_cursor_markers 夹具，2026-09-21 实机探测；2026-10-04 用户验收截图同文）",
+    },
+    AnchorRow {
+        tool: "claude",
+        scenario: scenario::PLAN_APPROVE,
+        slot: slot::FEEDBACK_OPTION,
+        text: "tell claude what to do differently",
+        observed_version: "2.1.251",
+        evidence: "计划书 §1 列举的选项文本（dialog.rs parses_three_real_dialog_shapes 夹具）",
     },
     // ===== 回合忙态标记（confirm.rs TURN_BUSY_MARKER，2026-09-23 起入账本）=====
     AnchorRow {

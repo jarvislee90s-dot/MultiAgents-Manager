@@ -1052,7 +1052,49 @@ pub async fn session_send(
     //    提前释放守卫，detached 投递期间新触发经 INFLIGHT 互斥让位。
     //    D6：queueOnly=true 时整个分支不触达（in-flight 守卫取用、五态回执映射、
     //    send/unconfirmed/failed 直发审计全部跳过），直接落 ⑦ 入队路径
-    if !queue_only && crate::inject::queue::is_input_ready(&session.status) {
+    //
+    //    2026-10-04 屏读兜底（仅 claude）：黄态（Thinking/Processing）一律入队，但
+    //    文件推导状态可能落后于真实终端（实测形态：回合以「工具被拒+中断标记」收尾后
+    //    终端已空闲，看板仍黄 → 消息误入队且 flush 等不到可输入态，队首滞留）。兜底 =
+    //    复用插队路径的稳定闸 `poll_turn_stopped`（`esc to interrupt` 忙锚连续 2 拍
+    //    缺席 = 回合真停）：屏上真空闲 → 视为可直发；真忙 / 屏读不可用 → 维持入队
+    //    （保守）。仅 claude——忙锚是 claude 账本槽（TURN_STATE），其他工具未取证
+    //    不出手。对话框在场的危险性由 flush_one 既有的 dialog_probe 守卫兜住（在场
+    //    即 Suspend），不会把字打进对话框。
+    let mut input_ready = crate::inject::queue::is_input_ready(&session.status);
+    if !queue_only && !input_ready && tool == "claude" {
+        let probe_st = st.clone();
+        let probe_tool = tool.clone();
+        let probe_pid = session.pid;
+        input_ready = tokio::task::spawn_blocking(move || {
+            matches!(
+                crate::inject::confirm::poll_turn_stopped(
+                    crate::inject::timing::poll_rounds(
+                        crate::inject::timing::TURN_STOP_POLL_TOTAL_MS,
+                    ),
+                    || (probe_st.screen_probe)(&probe_tool, probe_pid),
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::timing::POLL_STEP_MS,
+                        ));
+                    },
+                ),
+                crate::inject::confirm::TurnStopPoll::Stopped { .. },
+            )
+        })
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("session-send 屏读兜底任务异常: {e}");
+            false
+        });
+        if input_ready {
+            log::info!(
+                "session-send 屏读兜底：状态 {:?} 非可输入但屏上回合已停（忙锚连续缺席）→ 直发（pid={probe_pid}）",
+                session.status
+            );
+        }
+    }
+    if !queue_only && input_ready {
         let flush_st = st.clone();
         let flush_sid = sid.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1713,6 +1755,19 @@ fn approve_dialog_keys(tool: &str) -> ApproveDialogKeys {
     }
 }
 
+/// 投递后**验证计划**（2026-10-04 从 `digit_verify: Option<u32>` 扩展）：
+/// 主键序发出后的屏读验证段与回退路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApproveVerifyPlan {
+    /// 不验证（导航确认恒定档 kimi 等——既有行为）
+    None,
+    /// 主键 = 数字（E2①）：验证窗内对话框未消失 → 导航回退
+    DigitFirst(u32),
+    /// 主键 = 导航（2026-10-04 计划批准框，用户要求方向键优先）：验证窗内对话框
+    /// 未消失 → 数字回退（CL-3：数字在计划框直接选中，渲染等待消除假阴性）
+    NavFirst(u32),
+}
+
 /// 审批选项扫描产物（映射存在时的载荷；available=false 时 options 恒空）
 struct ApproveScanHit {
     available: bool,
@@ -1738,6 +1793,12 @@ struct ApproveScanHit {
     /// 二元/空选项组）——codex 的 `Implement this plan?` 不落状态、不落标记，这是它
     /// 唯一的入口。
     plan_pending: bool,
+    /// 2026-10-04 计划批准卡：屏上选项簇带账本 FEEDBACK_OPTION 锚 → **计划批准
+    /// 对话框**（前端据此渲染「计划批准」标题与反馈入口）。
+    plan_dialog: bool,
+    /// 反馈选项的屏上编号（Some(n) → 前端把 `dialog:n` 渲染为「告诉 Claude 要改
+    /// 什么」入口而非直发按键；None = 非计划批准框或未读到反馈选项）。
+    feedback_number: Option<u32>,
 }
 
 /// R1-3 降级警示文案（前端 `degrade-hint` 脚注原文；中文，与既有 reason 提示同风格）
@@ -2106,6 +2167,29 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             }
         }
     }
+    // ===== 2026-10-04 审批卡不出修复：claude 计划预期态（第三信号）=====
+    //
+    // 实况取证（用户会话 bb92857b，Windows 真机）：计划批准等待时——
+    // ① 钩子标记 0 行（`approval_wait_marks` / `question_wait_marks` 实测均空，
+    //    claude 的 Notification/Permission 钩子不为 ExitPlanMode 落审批标记）；
+    // ② 「Claude has written up a plan…」是终端**原生 UI 文案**，不落会话文件，
+    //    detect（对 last_message 文本匹配 marker）恒 miss——last_message 是中文
+    //    计划 prose，与 marker 无交集；
+    // ③ plan_pending 此前被 [`plan_dialog_family`] 排除 claude（丁T2 的依据
+    //    「claude 走既有 Waiting + detect 门就够」——该前提对计划批准不成立）。
+    // 三信号全灭 → 扫描器从未走到屏读 → available=false → 审批卡自隐（手机上
+    // 没有任何批准入口）。
+    //
+    // 修法：状态层（`monitor::status::is_waiting_for_user_input` 增 ExitPlanMode）
+    // 已让该形态落 Waiting 过门；此处从**已取到的** tail_page（claude 本就因
+    // plan 聚合读页，零额外 IO）补算 claude 的尾部计划挂起——与
+    // [`plan_pending_tail_index`] 同一份判据，claude 不并入 [`plan_dialog_family`]
+    // （那是「门前提早读页」的族：并入会让所有非 Waiting 的 claude 会话在门后
+    // 白付一次读页；claude 靠状态层保证过门，门后消费已读页即可）。
+    let claude_plan_pending = tool == "claude"
+        && tail_page
+            .as_ref()
+            .is_some_and(|p| plan_pending_tail_index(&p.messages).is_some());
     // 严格档（M9R Task 10 裁决：未取证不出键）：probe-pending 映射即使 Waiting+detect
     // 命中也压为不可批——选项不下发，只给降级原因（前端提示条）；drift 判定照常
     // （probe-pending 恒判漂移，提示条与 drift 提示并存不冲突）。
@@ -2133,6 +2217,8 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             // 影响面：仅「KV 定制把映射改成 probe-pending ∧ codex/kimi 有计划提案」
             // 这一组合——此时用户看到的是键位未取证提示，而不是计划待确认条。
             plan_pending: false,
+            plan_dialog: false,
+            feedback_number: None,
         });
     }
     // T4：标记路径跳过 marker detect（钩子是一等信号，提示文本不落会话文件的
@@ -2143,9 +2229,11 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     // 等这个计划确认」，跳过 detect（codex 计划提案的最后一轮消息是计划本体，审批
     // 框标题文本根本不落会话文件，detect 对它恒 miss——这与 macOS 上标记的必要性
     // 同构）。kimi 的计划框同理：wire 落 `interaction.request`，屏上标题
-    // "Ready to build with this plan?" 不落任何文件。
+    // "Ready to build with this plan?" 不落任何文件。claude 的计划批准框同病同源
+    // （原生 UI 文案不落 JSONL），由上方 `claude_plan_pending` 补位。
     let hit = marked
         || plan_pending
+        || claude_plan_pending
         || session
             .last_message
             .as_deref()
@@ -2201,6 +2289,8 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             degraded_hint: None,
             // 无预期态的降级路径（上面条件已排除 plan_pending）
             plan_pending: false,
+            plan_dialog: false,
+            feedback_number: None,
         });
     }
     // ===== R1-3：降级态必须**明确警示**（终审 Important）=====
@@ -2216,16 +2306,29 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     // 形态前端**零按钮**（没有可点错的二元键），警示文案「二元键可能错位」在那里是
     // 无的放矢；该形态自己的降级表达是「点检查未命中 → 脚注提示」（前端
     // `approve-plan-check-miss`）。两处提示不重复。
-    let plan_pending_without_keys = plan_pending && dialog_options.is_none();
+    // plan_pending_effective = 家族预期态（codex/kimi，门前的 early_page 判据）
+    // ∨ claude 计划预期态（2026-10-04 补位，门后消费已读页）——两处消费（本行与
+    // 载荷 planPending 字段）必须同用合成值，防「hit 算了、载荷漏发」的口径漂移。
+    let plan_pending_effective = plan_pending || claude_plan_pending;
+    let plan_pending_without_keys = plan_pending_effective && dialog_options.is_none();
     let degraded = hit && dialog_options.is_none() && !plan_pending_without_keys;
+    // ===== 2026-10-04 计划批准卡：反馈选项识别 =====
+    // 屏上选项带账本 FEEDBACK_OPTION 锚（"tell claude what to change/differently"）
+    // → 本对话框是 claude 计划批准框 → 下发 planDialog + feedbackOption 供前端把
+    // 该选项渲染为「告诉 Claude 要改什么」反馈入口（POST 侧同判据走导航优先键序）。
+    // 在 `match dialog_options`（值移动）之前算好。
+    let feedback_number = dialog_options
+        .as_ref()
+        .and_then(|opts| crate::inject::dialog::plan_feedback_option_number(opts));
     // 选项序列化只取 id+label（key 是投递层机密，不进任何 UI 载荷）；未命中 → options 空
     // （契约：available=false 一律不给选项，移动端据此不渲染审批卡）
     //
     // 丁T2 第三档：**计划预期态 ∧ 无对话框选项 ∧ kimi** 已在上面短路掉；剩下
     // 「计划预期态 ∧ 无对话框选项 ∧ codex」→ 映射表的 y/esc 是**补丁审批**键位
     // （M8R 0.154.0 实证），对计划框未取证 → 也不能拿它顶（见 [`plan_dialog_family`]）。
-    // 该形态下发 available=true + 空 options + `planPending=true`：前端渲染「计划待确认」
-    // 条 +「检查终端对话框」按钮（不是二元键）。
+    // claude 的计划批准（2026-10-04 补位）同落本形态：二元「允许='1'」对计划框是
+    // 无效键（R1 实证），宁可零按钮也不给可能错位的键 → available=true + 空 options
+    // + `planPending=true`：前端渲染「计划待确认」条 +「检查终端对话框」按钮。
     let (options, dialog) = match dialog_options {
         Some(opts) => (
             opts.iter()
@@ -2283,7 +2386,9 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         } else {
             None
         },
-        plan_pending,
+        plan_pending: plan_pending_effective,
+        plan_dialog: feedback_number.is_some(),
+        feedback_number,
     })
 }
 
@@ -2379,6 +2484,8 @@ pub async fn session_approve_options(
         plan_body,
         degraded_hint,
         plan_pending,
+        plan_dialog,
+        feedback_number,
     ) = match scan {
         Some(hit) => (
             hit.available,
@@ -2390,6 +2497,8 @@ pub async fn session_approve_options(
             hit.plan_body,
             hit.degraded_hint,
             hit.plan_pending,
+            hit.plan_dialog,
+            hit.feedback_number,
         ),
         // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
         // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
@@ -2403,6 +2512,8 @@ pub async fn session_approve_options(
             None,
             None,
             false,
+            false,
+            None,
         ),
     };
     // CLI 版本探测（仅映射存在时；进程级缓存，首调一次 spawn）：5s 超时保护
@@ -2468,6 +2579,12 @@ pub async fn session_approve_options(
             // 对话框」按钮（`available=true` 且此字段 true 且 `dialog=false` → 空 options
             // 不是错误，是「还没读到选项，点检查重试」）。
             "planPending": plan_pending,
+            // 2026-10-04 计划批准卡：屏上选项带 FEEDBACK_OPTION 锚 → claude 计划批准框
+            // （前端渲染「计划批准」标题与反馈入口）
+            "planDialog": plan_dialog,
+            // 反馈选项的屏上编号（如 "dialog:3"；null = 非计划批准框）——前端把该
+            // 选项渲染为反馈入口，点击走 /session-plan-feedback 的 start 动作
+            "feedbackOption": feedback_number.map(|n| serde_json::json!(format!("dialog:{n}"))),
         }),
     )
 }
@@ -2626,8 +2743,6 @@ pub async fn session_approve(
                 approve_dialog_keys(&tool),
                 ApproveDialogKeys::DigitFirstWithVerify
             );
-            // E2① 验证信号：数字档 → Some(n)（投递后屏读验证 + 导航回退）；其余档 None
-            let digit_verify = if digit_first { Some(n) } else { None };
             let opts = if digit_first {
                 read_dialog_options_render_wait(&probe_st, &session)
             } else {
@@ -2637,19 +2752,43 @@ pub async fn session_approve(
             if !opts.iter().any(|o| o.number == n) {
                 return Err("no_mapping");
             }
-            // R1-1/R1-2：按对话框模型选键序档——claude/kimi 的计划批准类对话框
-            // 数字键无效或不可依赖（可能误批准）→ 走导航确认；codex 数字有效 → 直选
-            let keys = match approve_dialog_keys(&tool) {
-                ApproveDialogKeys::DigitDirect => vec![n.to_string()],
-                // E2① 数字优先：首段发数字（生效与否由投递段屏读验证 + 导航回退）
-                ApproveDialogKeys::DigitFirstWithVerify => vec![n.to_string()],
-                ApproveDialogKeys::NavigateConfirm => {
-                    crate::inject::dialog::navigation_sequence(&opts, n).map_err(|e| {
-                        log::debug!("R1 导航序列构造失败（{tool}）: {e}");
-                        "no_mapping"
-                    })?
-                }
-            };
+            // ===== 2026-10-04 计划批准卡：计划批准框 → **导航优先** =====
+            // 用户明确要求「方向键切过去再选」；R1 实证 ↓×k+Enter 在计划框三样本
+            // 全效。判据 = 屏上选项带账本 FEEDBACK_OPTION 锚
+            // （[`crate::inject::dialog::plan_feedback_option_number`] 单点）。
+            // 构造失败（无唯一高亮——不猜起点）→ 保守回落数字直选（E2① CL-3：
+            // 数字在计划框直接选中，渲染等待已消除「数字无效」假阴性）。
+            // 非计划框维持 R1-2/E2① 键序档，一字不动。
+            let (keys, verify_plan) =
+                if crate::inject::dialog::plan_feedback_option_number(&opts).is_some() {
+                    match crate::inject::dialog::navigation_sequence(&opts, n) {
+                        Ok(seq) => (seq, ApproveVerifyPlan::NavFirst(n)),
+                        Err(e) => {
+                            log::debug!("计划批准框导航构造失败（{e}）→ 回落数字直选（CL-3）");
+                            (vec![n.to_string()], ApproveVerifyPlan::DigitFirst(n))
+                        }
+                    }
+                } else {
+                    // R1-1/R1-2：按对话框模型选键序档——kimi 的计划批准框数字不可依赖
+                    // （可能误批准）→ 走导航确认；codex 数字有效 → 直选
+                    let keys = match approve_dialog_keys(&tool) {
+                        ApproveDialogKeys::DigitDirect => vec![n.to_string()],
+                        // E2① 数字优先：首段发数字（生效与否由投递段屏读验证 + 导航回退）
+                        ApproveDialogKeys::DigitFirstWithVerify => vec![n.to_string()],
+                        ApproveDialogKeys::NavigateConfirm => {
+                            crate::inject::dialog::navigation_sequence(&opts, n).map_err(|e| {
+                                log::debug!("R1 导航序列构造失败（{tool}）: {e}");
+                                "no_mapping"
+                            })?
+                        }
+                    };
+                    let verify_plan = if digit_first {
+                        ApproveVerifyPlan::DigitFirst(n)
+                    } else {
+                        ApproveVerifyPlan::None
+                    };
+                    (keys, verify_plan)
+                };
             return Ok((
                 session,
                 tool,
@@ -2661,7 +2800,7 @@ pub async fn session_approve(
                     key: keys.join(","),
                 },
                 keys,
-                digit_verify,
+                verify_plan,
             ));
         }
         let Some(option) =
@@ -2694,7 +2833,7 @@ pub async fn session_approve(
             return Err("no_mapping");
         }
         let keys = vec![option.key.clone()];
-        Ok((session, tool, option, keys, None))
+        Ok((session, tool, option, keys, ApproveVerifyPlan::None))
     })
     .await
     {
@@ -2707,7 +2846,7 @@ pub async fn session_approve(
             );
         }
     };
-    let (session, tool, option, keys, digit_verify) = match lookup {
+    let (session, tool, option, keys, verify_plan) = match lookup {
         Ok(v) => v,
         Err(code) => {
             let status = if code == "not_waiting" {
@@ -2726,9 +2865,8 @@ pub async fn session_approve(
     let injector = st.injector.clone();
     let pid = session.pid;
     let approve_sid = sid.clone();
-    // E2①：数字优先验证信号（Some(n) = claude 数字档——发数字后屏读验证，未生效
-    // 导航回退；来源=lookup 的 dialog 分支，非数字档恒 None）
-    let digit_verify: Option<u32> = digit_verify;
+    // 投递后验证计划（E2① 数字档 / 2026-10-04 计划框导航档；来源=lookup 的 dialog
+    // 分支，非对话框路径恒 None）——变量已在上方解携带出
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush 循环事件臂同款，F1
     // 断连双投修复）：handler 断连（弱网/隧道掐断慢投递）不再提前释放守卫——detached
     // 投递全程占位，新触发取不到名额即让位。忙 → None 哨兵：让位不投递亦不落审计
@@ -2749,49 +2887,99 @@ pub async fn session_approve(
                 crate::inject::families::SUBMIT_DELAY_MS,
             ));
         }
-        // ===== E2① 屏读验证 + 导航回退（仅 claude 数字档，且首段投递成功）=====
-        if let (Some(n), true) = (digit_verify, result.is_ok()) {
-            let (fallback_keys, send_err) = verify_digit_then_fallback(
-                n,
-                || crate::inject::dialog::probe_screen_dialog(pid),
-                |key| injector.locate_and_send_key_spec(pid, key, &spec),
-                || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::timing::POLL_STEP_MS,
-                    ));
-                },
-                || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                },
-                crate::inject::timing::poll_rounds(
-                    crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
-                ),
-            );
-            match (fallback_keys, send_err) {
-                (DigitVerifyOutcome::FellBack { keys }, Some(e)) => {
-                    result = Err(e);
-                    log::warn!(
-                        "E2 导航回退中途发送失败（已发 {keys:?}）——请人工核对终端（pid={pid}）"
-                    );
-                }
-                (DigitVerifyOutcome::Confirmed, None) => {
-                    log::debug!("E2 数字直选生效（对话框已消失，pid={pid}）")
-                }
-                (DigitVerifyOutcome::FellBack { keys }, None) => {
-                    log::info!("E2 数字直选未生效（对话框仍在），导航回退 {keys:?}（pid={pid}）")
-                }
-                (DigitVerifyOutcome::NavigationRefused(why), None) => {
-                    log::warn!("E2 导航回退未出手（{why}）——请人工核对终端（pid={pid}）")
-                }
-                // 不可达组合（Confirmed/NavigationRefused 不发回退键→无 send_err）
-                // ——穷尽性防御臂，出现即说明内核被误改
-                (outcome, Some(e)) => {
-                    log::warn!("E2 验证结论异常（{outcome:?}，{e}）——请人工核对终端（pid={pid}）");
-                    result = Err(e);
+        // ===== 投递后屏读验证（E2① 数字档 / 2026-10-04 计划框导航档；仅首段投递
+        // 成功才验证——半途失败已置 Err，前端按 failed 提示核对终端）=====
+        match verify_plan {
+            ApproveVerifyPlan::None => {}
+            ApproveVerifyPlan::DigitFirst(n) if result.is_ok() => {
+                let (fallback_keys, send_err) = verify_digit_then_fallback(
+                    n,
+                    || crate::inject::dialog::probe_screen_dialog(pid),
+                    |key| injector.locate_and_send_key_spec(pid, key, &spec),
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::timing::POLL_STEP_MS,
+                        ));
+                    },
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    },
+                    crate::inject::timing::poll_rounds(
+                        crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                    ),
+                );
+                match (fallback_keys, send_err) {
+                    (DigitVerifyOutcome::FellBack { keys }, Some(e)) => {
+                        result = Err(e);
+                        log::warn!(
+                            "E2 导航回退中途发送失败（已发 {keys:?}）——请人工核对终端（pid={pid}）"
+                        );
+                    }
+                    (DigitVerifyOutcome::Confirmed, None) => {
+                        log::debug!("E2 数字直选生效（对话框已消失，pid={pid}）")
+                    }
+                    (DigitVerifyOutcome::FellBack { keys }, None) => {
+                        log::info!("E2 数字直选未生效（对话框仍在），导航回退 {keys:?}（pid={pid}）")
+                    }
+                    (DigitVerifyOutcome::NavigationRefused(why), None) => {
+                        log::warn!("E2 导航回退未出手（{why}）——请人工核对终端（pid={pid}）")
+                    }
+                    // 不可达组合（Confirmed/NavigationRefused 不发回退键→无 send_err）
+                    // ——穷尽性防御臂，出现即说明内核被误改
+                    (outcome, Some(e)) => {
+                        log::warn!("E2 验证结论异常（{outcome:?}，{e}）——请人工核对终端（pid={pid}）");
+                        result = Err(e);
+                    }
                 }
             }
+            ApproveVerifyPlan::NavFirst(n) if result.is_ok() => {
+                // 计划批准框（2026-10-04）：主键 = 导航（↓×k+Enter，从现场高亮位算步进）
+                // → 验证窗内对话框未消失 → **数字回退**（CL-3：数字在计划框直接选中）。
+                // 验证骨架与数字档同源（verify_primary_then_fallback 泛化形）。
+                let (fallback_keys, send_err) = verify_primary_then_fallback(
+                    || crate::inject::dialog::probe_screen_dialog(pid),
+                    |key| injector.locate_and_send_key_spec(pid, key, &spec),
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::timing::POLL_STEP_MS,
+                        ));
+                    },
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    },
+                    crate::inject::timing::poll_rounds(
+                        crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                    ),
+                    move |_opts| Ok(vec![n.to_string()]),
+                );
+                match (fallback_keys, send_err) {
+                    (DigitVerifyOutcome::FellBack { keys }, Some(e)) => {
+                        result = Err(e);
+                        log::warn!(
+                            "计划框数字回退中途发送失败（已发 {keys:?}）——请人工核对终端（pid={pid}）"
+                        );
+                    }
+                    (DigitVerifyOutcome::Confirmed, None) => {
+                        log::debug!("计划框导航生效（对话框已消失，pid={pid}）")
+                    }
+                    (DigitVerifyOutcome::FellBack { keys }, None) => {
+                        log::info!("计划框导航未生效（对话框仍在），数字回退 {keys:?}（pid={pid}）")
+                    }
+                    (DigitVerifyOutcome::NavigationRefused(why), None) => {
+                        log::warn!("计划框数字回退未出手（{why}）——请人工核对终端（pid={pid}）")
+                    }
+                    (outcome, Some(e)) => {
+                        log::warn!("计划框验证结论异常（{outcome:?}，{e}）——请人工核对终端（pid={pid}）");
+                        result = Err(e);
+                    }
+                }
+            }
+            // 首段投递已失败：不验证（前端按 failed 提示核对终端）
+            _ => {}
         }
         Some(result)
     })
@@ -2861,6 +3049,326 @@ pub async fn session_approve(
                 serde_json::json!({ "status": "failed", "error": e }),
             )
         }
+    }
+}
+
+// ==== 2026-10-04 计划批准卡：计划反馈通道（claude 计划批准框选项 3）====
+
+/// POST /m/api/v1/session-plan-feedback 请求体（camelCase；字段全 default）
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPlanFeedbackReq {
+    #[serde(default)]
+    pub session_id: String,
+    /// 动作：`type`（清空[有内容时]→打字→[submit]回车提交）| `clear`（退格清空）
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub text: String,
+    /// type 动作是否尾随回车提交（true=Claude 留在计划模式开新一轮修改）
+    #[serde(default)]
+    pub submit: bool,
+}
+
+/// 计划反馈 composer 行的**内容长度**（纯函数；探测定案 2026-10-04 §S3/S4）：
+/// 实屏形态 = composer 行夹在**最后两条**全分隔线（≥6 个 `─`）之间——
+/// `[sep][❯ content][sep][footer]`。内容 = 首行剥提示符（`❯`/`›`/`>`）后的文本
+/// + 区域内后续折行整行；末条分隔线之后无闭合线时回落取「最后一条分隔线之后」
+///   的区域。返回总字符数（**封顶 500**——超长内容清空不保证，如实登记）。
+///   找不到分隔线/提示符行 → `None`（形态不符，调用方拒发）。
+fn composer_content_len(lines: &[String]) -> Option<usize> {
+    const MAX_COMPOSER_CHARS: usize = 500;
+    let is_sep = |l: &str| l.chars().count() >= 6 && l.chars().all(|c| c == '─');
+    let prompt_at = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with('❯') || t.starts_with('›') || t.starts_with('>')
+    };
+    let last_sep = lines.iter().rposition(|l| is_sep(l))?;
+    // 区域起点：优先「倒数第二条分隔线之后」（content 夹在两线之间——实屏主形态）；
+    // 倒数第二条不存在（屏上只有一条分隔线）→ 回落「最后一条分隔线之后」
+    let region_start = lines[..last_sep]
+        .iter()
+        .rposition(|l| is_sep(l))
+        .map(|prev| prev + 1)
+        .unwrap_or(last_sep + 1);
+    let read_region = |region: &[String]| -> Option<usize> {
+        let first = region.first()?;
+        if !prompt_at(first) {
+            return None;
+        }
+        // 剥提示符字符 + 其后的**单个**分隔空格（composer 渲染恒为 `❯ 内容`——
+        // 内容自带的额外前导空格保留，属退格计量范围）
+        let stripped = first.trim_start().chars().skip(1).collect::<String>();
+        let stripped = stripped.strip_prefix(' ').unwrap_or(&stripped);
+        let mut total = stripped.chars().count();
+        for l in &region[1..] {
+            if is_sep(l) {
+                break;
+            }
+            total += l.chars().count();
+        }
+        Some(total.min(MAX_COMPOSER_CHARS))
+    };
+    if region_start >= last_sep {
+        // 回落形态：末分隔线之后没有闭合线——内容区到屏底为止
+        return read_region(&lines[region_start..]);
+    }
+    read_region(&lines[region_start..last_sep])
+}
+
+/// 计划反馈终端缝（[`run_plan_feedback_stages`] 的可注入内核面）：读屏 / 批量退格 /
+/// 文本通道（**不带提交回车**）/ 单发回车 / 步进等待。
+pub(crate) trait PlanFeedbackTerminal {
+    fn read(&mut self) -> Option<Vec<String>>;
+    /// 批量退格 `count` 个字符（批量原语见
+    /// [`crate::inject::windows_console::inject_backspaces_spec`]）
+    fn clear_chars(&mut self, count: usize) -> Result<(), String>;
+    fn send_text(&mut self, text: &str) -> Result<(), String>;
+    fn send_enter(&mut self) -> Result<(), String>;
+    fn settle(&mut self);
+}
+
+/// 计划反馈编排内核（闭包注入可测，`verify_digit_then_fallback` 同款抽取理由）。
+/// 序列（探测定案 2026-10-04）：
+/// 1. **定位段**：屏读找 composer 行（3 拍轮询防重绘瞬间）——找不到 → **中止零按键**
+///    （形态不符不出手，与问答阶段机同纪律）；
+/// 2. **清空段**（内容非空时）：批量退格 ×内容长度；
+/// 3. **文本段**（type 且 text 非空）：字符通道打字（草稿口径，不带回车）；
+/// 4. **提交段**（type 且 submit）：回车提交——Claude 留在计划模式开新一轮
+///    （探测定案 §S5 实锤）。
+pub(crate) fn run_plan_feedback_stages<T: PlanFeedbackTerminal>(
+    op: &PlanFeedbackOp,
+    t: &mut T,
+) -> Result<(), String> {
+    let mut content_len: Option<usize> = None;
+    for _ in 0..3 {
+        if let Some(lines) = t.read() {
+            content_len =
+                Some(composer_content_len(&lines).ok_or_else(|| {
+                    "未识别到终端输入行（形态不符）——已中止，未发任何键".to_string()
+                })?);
+            break;
+        }
+        t.settle();
+    }
+    let len = content_len.ok_or_else(|| "读不到终端屏——已中止，未发任何键".to_string())?;
+    match op {
+        PlanFeedbackOp::Clear => {
+            if len > 0 {
+                t.clear_chars(len)?;
+                t.settle();
+            }
+            Ok(())
+        }
+        PlanFeedbackOp::Type { text, submit } => {
+            // 打字前清空只在**有新文本**时做——空文本 + submit = 提交终端里已有的
+            // 暂存内容（先清空就把它毁了，语义即错）
+            if !text.is_empty() {
+                if len > 0 {
+                    t.clear_chars(len)?;
+                    t.settle();
+                }
+                t.send_text(text)?;
+                t.settle();
+            }
+            if *submit {
+                if text.is_empty() && len == 0 {
+                    return Err("没有可提交的内容（输入为空且终端行无暂存）".to_string());
+                }
+                t.send_enter()?;
+                t.settle();
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 计划反馈动作（端点层解析产物）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanFeedbackOp {
+    Clear,
+    Type { text: String, submit: bool },
+}
+
+/// POST /m/api/v1/session-plan-feedback（2026-10-04 计划批准卡 T4c）：
+/// claude 计划批准框选「Tell Claude what to change」后的打字/清空通道。前置 =
+/// 审批卡反馈入口 start（即 `session-approve {optionId:"dialog:3"}`，探测定案
+/// §S3：选 3 = 计划被拒回**空 composer**，plan 模式保持——本端点操作对象就是它）。
+///
+/// - 会话不存在 → 404 `no_session`；工具非 claude → 404 `no_mapping`（composer 行
+///   形态与反馈锚均为 claude 专属）；
+/// - 屏读不可用 / composer 形态不符 → 200 failed（**零按键**中止，带中文原因）；
+/// - in-flight 守卫忙 → 200 failed 提示重试（同 session-approve 口径）；
+/// - 审计：action="approve"，content=`plan-feedback:{动作}`（**正文不落审计**——
+///   用户反馈内容与问答自由作答同纪律，只记字符数占位）。
+pub async fn session_plan_feedback(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionPlanFeedbackReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    let action = req.action.trim().to_string();
+    if sid.is_empty() || action.is_empty() {
+        return bad_request();
+    }
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // 动作解析（端点层判参，内核吃枚举）
+    let op = match action.as_str() {
+        "clear" => PlanFeedbackOp::Clear,
+        "type" => PlanFeedbackOp::Type {
+            text: req.text.clone(),
+            submit: req.submit,
+        },
+        _ => return bad_request(),
+    };
+    if matches!(&op, PlanFeedbackOp::Type { text, submit: false } if text.trim().is_empty()) {
+        return bad_request(); // 覆盖写入空文本无意义（前端已禁用，防御）
+    }
+    // 会话查找（同 session_approve 的复合键契约：快照按 id 找第一个匹配）
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let lookup = match tokio::task::spawn_blocking(move || {
+        let Some(session) = (probe_st.session_source)()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == probe_sid)
+        else {
+            return Err("no_session");
+        };
+        let tool = session.agent_type.tool_id().to_string();
+        if tool != "claude" {
+            return Err("no_mapping");
+        }
+        Ok(session)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-plan-feedback 会话扫描任务异常: {e}");
+            return json_no_store(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "internal" }),
+            );
+        }
+    };
+    let session = match lookup {
+        Ok(v) => v,
+        Err(code) => {
+            let status = StatusCode::NOT_FOUND;
+            return json_no_store(status, serde_json::json!({ "error": code }));
+        }
+    };
+    let tool = session.agent_type.tool_id().to_string();
+    let spec = crate::inject::families::family_for(&tool)
+        .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+    let injector = st.injector.clone();
+    let pid = session.pid;
+    let fb_sid = sid.clone();
+    // 审计段与闭包共用 op/st/tool——克隆拆分（闭包内 move，外层留审计用）
+    let op_for_audit = op.clone();
+    let closure_st = st.clone();
+    let closure_tool = tool.clone();
+    let attempt = tokio::task::spawn_blocking(move || -> Option<Result<(), String>> {
+        // 守卫忙 → None 哨兵：让位不投递（同 session-approve）
+        let _guard = crate::inject::queue::try_acquire_inflight(&fb_sid)?;
+        let mut terminal = PlanFeedbackClosures {
+            pid,
+            spec: &spec,
+            injector: &*injector,
+            screen_probe: &closure_st.screen_probe,
+            tool: &closure_tool,
+        };
+        Some(run_plan_feedback_stages(&op, &mut terminal))
+    })
+    .await;
+    let sent = match attempt {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "failed",
+                    "error": "投递进行中，请稍后重试"
+                }),
+            );
+        }
+        Err(e) => {
+            log::error!("session-plan-feedback 投递任务异常: {e}");
+            Err("内部任务异常".to_string())
+        }
+    };
+    let audit_content = match &op_for_audit {
+        PlanFeedbackOp::Clear => "plan-feedback:clear".to_string(),
+        PlanFeedbackOp::Type { text, .. } => {
+            format!("plan-feedback:type <text:{} chars>", text.chars().count())
+        }
+    };
+    match sent {
+        Ok(()) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &audit_content,
+                "approve",
+                "ok",
+            );
+            json_no_store(StatusCode::OK, serde_json::json!({ "status": "done" }))
+        }
+        Err(e) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &audit_content,
+                "approve",
+                &format!("failed:{e}"),
+            );
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({ "status": "failed", "error": e }),
+            )
+        }
+    }
+}
+
+/// [`PlanFeedbackTerminal`] 的生产实现（闭包三件套 + 注入器 + 屏读缝装配）。
+struct PlanFeedbackClosures<'a> {
+    pid: u32,
+    spec: &'a crate::inject::families::FamilySpec,
+    injector: &'a dyn crate::inject::engine::Injector,
+    screen_probe: &'a std::sync::Arc<crate::remote::server::ScreenProbeFn>,
+    tool: &'a str,
+}
+
+impl PlanFeedbackTerminal for PlanFeedbackClosures<'_> {
+    fn read(&mut self) -> Option<Vec<String>> {
+        (self.screen_probe)(self.tool, self.pid)
+    }
+    fn clear_chars(&mut self, count: usize) -> Result<(), String> {
+        crate::inject::windows_console::inject_backspaces_spec(self.pid, count, self.spec)
+    }
+    fn send_text(&mut self, text: &str) -> Result<(), String> {
+        // 草稿口径（不带提交回车——回车只在 submit 段显式发）
+        self.injector
+            .locate_and_inject_spec(self.pid, text, self.spec)?;
+        Ok(())
+    }
+    fn send_enter(&mut self) -> Result<(), String> {
+        self.injector
+            .locate_and_send_key_spec(self.pid, "enter", self.spec)
+    }
+    fn settle(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::inject::families::SUBMIT_DELAY_MS,
+        ));
     }
 }
 
@@ -4320,10 +4828,10 @@ enum DigitVerifyOutcome {
 #[allow(clippy::too_many_arguments)]
 fn verify_digit_then_fallback<Rd, Snd, PollSettle, KeySettle>(
     target: u32,
-    mut read: Rd,
-    mut send_key: Snd,
-    mut poll_settle: PollSettle,
-    mut key_settle: KeySettle,
+    read: Rd,
+    send_key: Snd,
+    poll_settle: PollSettle,
+    key_settle: KeySettle,
     poll_rounds: u32,
 ) -> (DigitVerifyOutcome, Option<String>)
 where
@@ -4332,17 +4840,51 @@ where
     PollSettle: FnMut(),
     KeySettle: FnMut(),
 {
+    // 数字档特化：主键 = 数字已发；回退 = 导航序列（从最后一份选项表算步进，
+    // 不猜起点）。2026-10-04 泛化出 [`verify_primary_then_fallback`]——计划批准框
+    // 的导航优先档（回退 = 数字）共用同一验证骨架。
+    verify_primary_then_fallback(
+        read,
+        send_key,
+        poll_settle,
+        key_settle,
+        poll_rounds,
+        move |opts| crate::inject::dialog::navigation_sequence(opts, target),
+    )
+}
+
+/// 验证内核的**通用形**（2026-10-04 计划批准卡批从 [`verify_digit_then_fallback`]
+/// 泛化）：主键序（数字或导航）已发出 → 验证窗内屏读「对话框消失」= 生效；
+/// 窗尽仍在场 → `fallback(last_opts)` 构造回退键序并逐键发出（回退后不再二次验证，
+/// 首键失败即停）。`fallback` 构造失败（如导航档无高亮/目标越界）→
+/// [`DigitVerifyOutcome::NavigationRefused`]（不猜、不盲发）。
+#[allow(clippy::too_many_arguments)]
+fn verify_primary_then_fallback<Rd, Snd, PollSettle, KeySettle, Fb>(
+    mut read: Rd,
+    mut send_key: Snd,
+    mut poll_settle: PollSettle,
+    mut key_settle: KeySettle,
+    poll_rounds: u32,
+    fallback: Fb,
+) -> (DigitVerifyOutcome, Option<String>)
+where
+    Rd: FnMut() -> Option<Vec<crate::inject::dialog::DialogOption>>,
+    Snd: FnMut(&str) -> Result<(), String>,
+    PollSettle: FnMut(),
+    KeySettle: FnMut(),
+    Fb: FnOnce(&[crate::inject::dialog::DialogOption]) -> Result<Vec<String>, String>,
+{
     let rounds = poll_rounds.max(1);
     let mut last_opts: Option<Vec<crate::inject::dialog::DialogOption>> = None;
     for _ in 0..rounds {
         poll_settle();
         match read() {
-            // 对话框已消失 = 数字已生效（提交完成）
+            // 对话框已消失 = 主键序已生效（提交完成）
             None => return (DigitVerifyOutcome::Confirmed, None),
             Some(opts) => last_opts = Some(opts),
         }
     }
-    // 窗尽仍在场 → 导航回退
+    // 窗尽仍在场 → 回退
     let Some(opts) = last_opts else {
         // 全窗屏读不可用：无回退起点（不猜位置）——调用方按「无法回退」如实记 warn
         return (
@@ -4350,7 +4892,7 @@ where
             None,
         );
     };
-    match crate::inject::dialog::navigation_sequence(&opts, target) {
+    match fallback(&opts) {
         Ok(seq) => {
             let mut sent = Vec::new();
             for key in &seq {
@@ -8105,6 +8647,68 @@ mod tests {
         );
     }
 
+    /// **②-b 计划框导航档的验证**（2026-10-04）：主键 = 导航（已发出）→ 验证窗内
+    /// 对话框仍在场 → **数字回退**（CL-3：数字在计划框直接选中）——回退键 = 单个数字，
+    /// 不再依赖高亮（导航构造时已消费过一次高亮位）。
+    #[test]
+    fn e2_plan_nav_verify_falls_back_to_digit_when_still_present() {
+        let sent: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = sent.clone();
+        let (outcome, send_err) = verify_primary_then_fallback(
+            || Some(three_options_highlight_first()), // 恒在场
+            |k: &str| {
+                captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(k.to_string());
+                Ok(())
+            },
+            || {},
+            || {},
+            2,
+            // 计划框导航档的回退 = 单个数字（导航已发 2 → 回退 '2'……本例目标 3）
+            move |_opts| Ok(vec!["3".to_string()]),
+        );
+        assert_eq!(send_err, None);
+        match outcome {
+            DigitVerifyOutcome::FellBack { keys } => {
+                assert_eq!(keys, vec!["3"], "回退键序 = 单个数字")
+            }
+            other => panic!("窗尽仍在场必须转数字回退：{other:?}"),
+        }
+        assert_eq!(
+            sent.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["3"],
+            "回退数字真实发出"
+        );
+    }
+
+    /// **②-c 计划框导航档验证：对话框消失 = 生效**（零回退键）。
+    #[test]
+    fn e2_plan_nav_verify_confirmed_when_dialog_gone() {
+        let sent: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = sent.clone();
+        let (outcome, send_err) = verify_primary_then_fallback(
+            || None, // 对话框已消失
+            |k: &str| {
+                captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(k.to_string());
+                Ok(())
+            },
+            || {},
+            || {},
+            3,
+            move |_opts| Ok(vec!["3".to_string()]),
+        );
+        assert_eq!(outcome, DigitVerifyOutcome::Confirmed);
+        assert_eq!(send_err, None);
+        assert!(sent.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+    }
+
     /// **③ 未渲染不注入**：渲染等待窗内 probe 恒 `None`（选项簇未画出）→ 返回
     /// `None` → 端点 `no_mapping` 409 → **零注入**（数字档的假阴性防线——注入早于
     /// 渲染正是丁复审「数字无效 ×5」的根因）；中途画出的（None→Some）→ 命中即返回。
@@ -8423,7 +9027,8 @@ mod tests {
             "两档分叉面（孤立 plan-file）必须恰有一例（防分叉逻辑被静默删掉）"
         );
 
-        // 工具族收窄：非 codex/kimi 一律不参与（两侧同名单）
+        // 工具族收窄：非计划族一律不参与（两侧同名单；claude 2026-10-04 起有专属
+        // 补位路径 claude_plan_pending，已出列本名单）
         let tools = root
             .get("non_plan_tools")
             .and_then(|t| t.as_array())
@@ -9142,5 +9747,179 @@ mod t4_live_probe_tests {
             crate::inject::approve::cached_cli_version("kimi"),
             crate::inject::approve::cached_cli_version("opencode"),
         );
+    }
+}
+
+// ==== 2026-10-04 计划批准卡：计划反馈内核测试（探测定案 2026-10-04 驱动）====
+#[cfg(test)]
+mod plan_feedback_tests {
+    use super::*;
+
+    /// 探测实屏形态（evidence/plan-feedback/probe-scr-pf-20261004-165110.log t7 段）：
+    /// composer 行夹在两条全分隔线之间，`❯ ` 前缀，内容 "fb-probe-1657: make it
+    /// shorter"（29 字符）。
+    fn probe_like_lines(content: &str) -> Vec<String> {
+        let sep = "─".repeat(100);
+        vec![
+            " ✻ Cogitated for 10s ·done 16:55".to_string(),
+            sep.clone(),
+            format!("❯ {content}"),
+            sep,
+            "  ⏸ plan mode on (shift+tab to cycle) · ← for agents".to_string(),
+        ]
+    }
+
+    #[test]
+    fn composer_len_reads_probe_screen_shape() {
+        let lines = probe_like_lines("fb-probe-1657: make it shorter");
+        assert_eq!(
+            composer_content_len(&lines),
+            Some(30),
+            "分隔线之间 ❯ 行的内容长度（fb-probe-1657: make it shorter = 30 字符）"
+        );
+        // 空 composer（裸 ❯）→ 0
+        assert_eq!(composer_content_len(&probe_like_lines("")), Some(0));
+    }
+
+    #[test]
+    fn composer_len_rejects_unknown_shapes() {
+        // 无分隔线 → None（形态不符，调用方拒发）
+        assert_eq!(composer_content_len(&["❯ hi".to_string()]), None);
+        // 分隔线之后不是提示符行（异常形态，如对话框还在场）→ None
+        let sep = "─".repeat(50);
+        let lines = vec![sep.clone(), "Claude has written up a plan".to_string(), sep];
+        assert_eq!(composer_content_len(&lines), None);
+        // 空屏 → None
+        assert_eq!(composer_content_len(&[]), None);
+    }
+
+    /// 终端假体：记录 clear_chars / send_text / send_enter 的调用序列
+    struct FakeFbTerminal {
+        lines: Option<Vec<String>>,
+        clears: Vec<usize>,
+        texts: Vec<String>,
+        enters: usize,
+    }
+    impl PlanFeedbackTerminal for FakeFbTerminal {
+        fn read(&mut self) -> Option<Vec<String>> {
+            self.lines.clone()
+        }
+        fn clear_chars(&mut self, count: usize) -> Result<(), String> {
+            self.clears.push(count);
+            Ok(())
+        }
+        fn send_text(&mut self, text: &str) -> Result<(), String> {
+            self.texts.push(text.to_string());
+            Ok(())
+        }
+        fn send_enter(&mut self) -> Result<(), String> {
+            self.enters += 1;
+            Ok(())
+        }
+        fn settle(&mut self) {}
+    }
+
+    #[test]
+    fn type_with_content_clears_types_then_enters() {
+        let mut t = FakeFbTerminal {
+            lines: Some(probe_like_lines("旧内容")),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        run_plan_feedback_stages(
+            &PlanFeedbackOp::Type {
+                text: "新反馈".to_string(),
+                submit: true,
+            },
+            &mut t,
+        )
+        .expect("type 全链必须成功");
+        assert_eq!(t.clears, vec![3], "先退格清空旧内容（3 字）");
+        assert_eq!(t.texts, vec!["新反馈"]);
+        assert_eq!(t.enters, 1, "submit=true → 尾随回车提交");
+    }
+
+    #[test]
+    fn overwrite_without_submit_never_enters() {
+        let mut t = FakeFbTerminal {
+            lines: Some(probe_like_lines("")),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        run_plan_feedback_stages(
+            &PlanFeedbackOp::Type {
+                text: "暂存".to_string(),
+                submit: false,
+            },
+            &mut t,
+        )
+        .expect("覆盖写入必须成功");
+        assert!(t.clears.is_empty(), "空 composer 无需清空");
+        assert_eq!(t.texts, vec!["暂存"]);
+        assert_eq!(t.enters, 0, "submit=false 绝不回车");
+    }
+
+    #[test]
+    fn clear_on_empty_screen_line_is_noop_and_submit_empty_staged_enters_only() {
+        // 清空：composer 本来就空 → 零按键
+        let mut t = FakeFbTerminal {
+            lines: Some(probe_like_lines("")),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        run_plan_feedback_stages(&PlanFeedbackOp::Clear, &mut t).expect("清空必须成功");
+        assert!(t.clears.is_empty() && t.texts.is_empty() && t.enters == 0);
+        // 提交暂存（text 空 + 终端有暂存）：只发回车（不清空！——清了就白暂存）
+        let mut t2 = FakeFbTerminal {
+            lines: Some(probe_like_lines("用户手打的暂存内容")),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        run_plan_feedback_stages(
+            &PlanFeedbackOp::Type {
+                text: String::new(),
+                submit: true,
+            },
+            &mut t2,
+        )
+        .expect("提交暂存必须成功");
+        assert!(t2.clears.is_empty(), "暂存提交绝不先清空");
+        assert!(t2.texts.is_empty());
+        assert_eq!(t2.enters, 1);
+    }
+
+    #[test]
+    fn unparseable_screen_aborts_with_zero_keys() {
+        let mut t = FakeFbTerminal {
+            lines: Some(vec!["❯ 没有分隔线的裸屏".to_string()]),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        let r = run_plan_feedback_stages(
+            &PlanFeedbackOp::Type {
+                text: "x".to_string(),
+                submit: true,
+            },
+            &mut t,
+        );
+        assert!(r.is_err(), "形态不符必须中止");
+        assert!(
+            t.clears.is_empty() && t.texts.is_empty() && t.enters == 0,
+            "中止 = 零按键（不出手纪律）"
+        );
+        // 屏读恒不可用 → 同样零按键
+        let mut t2 = FakeFbTerminal {
+            lines: None,
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        assert!(run_plan_feedback_stages(&PlanFeedbackOp::Clear, &mut t2).is_err());
+        assert!(t2.clears.is_empty());
     }
 }

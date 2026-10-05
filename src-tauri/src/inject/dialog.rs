@@ -278,6 +278,36 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
     Some(best.clone())
 }
 
+/// claude 计划批准框的「告诉 Claude 要改什么」**反馈选项编号**（2026-10-04 计划批准卡批）。
+///
+/// # 判据（账本单点）
+///
+/// 选项 label（小写化）包含账本 `claude/PLAN_APPROVE/FEEDBACK_OPTION` 任一候选
+/// （"tell claude what to change" / "…do differently"，两变体各有实机夹具）→
+/// 该选项即反馈入口。它同时是「本对话框是计划批准框」的判据——只有计划批准框
+/// 带这个选项。三处消费同一份判据（防口径漂移，`navigation_anchors` 同款纪律）：
+/// - GET `/session-approve-options` 载荷的 `planDialog` / `feedbackOption`；
+/// - POST `/session-approve` 对计划批准框的**导航优先**键序档（用户 2026-10-04
+///   明确要求「方向键切过去再选」；R1 实证方向键有效）；
+/// - POST `/session-plan-feedback` 的 start 动作（定位反馈选项）。
+///
+/// 多个选项同时命中（异常形态）→ 取**编号最小**者（首匹配；正常对话框只可能一个）。
+pub fn plan_feedback_option_number(options: &[DialogOption]) -> Option<u32> {
+    let anchors = crate::inject::anchor_ledger::candidates(
+        "claude",
+        crate::inject::anchor_ledger::scenario::PLAN_APPROVE,
+        crate::inject::anchor_ledger::slot::FEEDBACK_OPTION,
+    );
+    options
+        .iter()
+        .filter(|o| {
+            let label = o.label.to_lowercase();
+            anchors.iter().any(|a| label.contains(a.text))
+        })
+        .map(|o| o.number)
+        .min()
+}
+
 /// **对话框在场 = 控制类注入红线**（丁T3 §2.7，裁8/9）——判据的**单点实现**。
 ///
 /// # 是什么、为什么要在这一层
@@ -520,6 +550,87 @@ mod tests {
         // ASCII 兜底形态
         let ascii = lines(&["> 1. First", "  2. Second"]);
         assert_eq!(parse_dialog_options(&ascii).unwrap().len(), 2);
+    }
+
+    /// 2026-10-04 计划批准卡：反馈选项识别（账本 FEEDBACK_OPTION 锚）
+    #[test]
+    fn plan_feedback_option_number_matches_ledger_anchors() {
+        // 实机形态（claude 计划批准框）：选项 3 = Tell Claude what to change → 编号 3
+        let plan = vec![
+            crate::inject::dialog::DialogOption {
+                number: 1,
+                label: "Yes, and use auto mode".into(),
+                highlighted: true,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 2,
+                label: "Yes, manually approve edits".into(),
+                highlighted: false,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 3,
+                label: "Tell Claude what to change".into(),
+                highlighted: false,
+            },
+        ];
+        assert_eq!(plan_feedback_option_number(&plan), Some(3));
+        // 变体文案（do differently）同样命中——账本 append-only 双行
+        let variant = vec![crate::inject::dialog::DialogOption {
+            number: 3,
+            label: "Tell Claude what to do differently".into(),
+            highlighted: false,
+        }];
+        assert_eq!(plan_feedback_option_number(&variant), Some(3));
+        // 非计划框（codex Implement this plan / kimi Ready to build）→ None
+        let codex = vec![crate::inject::dialog::DialogOption {
+            number: 1,
+            label: "Yes, implement this plan".into(),
+            highlighted: false,
+        }];
+        assert_eq!(plan_feedback_option_number(&codex), None);
+        let empty: Vec<crate::inject::dialog::DialogOption> = Vec::new();
+        assert_eq!(plan_feedback_option_number(&empty), None);
+    }
+
+    /// 2026-10-04 计划批准卡：**活体 dump 判据**（四闸门 1——解析判据改动前必有活体
+    /// dump；本夹具 = run-id pf-20261004-165110 的 t4 段实屏原文，claude 2.1.287，
+    /// 归档 research/refs/phase2-消息注入/evidence/plan-feedback/）。锁三件事：
+    /// 计划批准框整屏可解析出 1/2/3、反馈锚命中选项 3、计划正文编号列表（1./2.）
+    /// 不被误纳为选项簇。
+    #[test]
+    fn parses_live_plan_dialog_dump_2026_10_04() {
+        let dump = vec![
+            " User wants a minimal task done: create a file a.txt containing hi, then print its contents.".to_string(),
+            String::new(),
+            " Steps".to_string(),
+            String::new(),
+            " 1. Create the file —Use the Write tool to create".to_string(),
+            "    C:\\Users\\bunny\\mam-probe-m6r\\evidence\\sessions\\plan-fb-pf\\a.txt with content:".to_string(),
+            " hi".to_string(),
+            " 2. Print it —Use the Read tool to read a.txt and display its contents in the response.".to_string(),
+            String::new(),
+            " Verification".to_string(),
+            String::new(),
+            " - Read confirms the file exists and contains hi; the content is shown to the user.".to_string(),
+            "╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌".to_string(),
+            "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────".to_string(),
+            " Claude has written up a plan and is ready to execute. Would you like to proceed?".to_string(),
+            String::new(),
+            " ❯ 1. Yes, and use auto mode".to_string(),
+            "   2. Yes, manually approve edits".to_string(),
+            "   3. Tell Claude what to change".to_string(),
+            "      shift+tab to approve with this feedback".to_string(),
+            String::new(),
+            " ctrl+g to edit in Notepad ·~\\.claude\\plans\\give-me-a-minimal-dynamic-twilight.md".to_string(),
+        ];
+        let opts = parse_dialog_options(&dump).expect("活体计划批准框 dump 必须解析");
+        assert_eq!(opts.len(), 3, "真选项簇 = 1/2/3（标题锚之下最后合格簇）");
+        assert_eq!(opts[0].number, 1);
+        assert_eq!(opts[0].label, "Yes, and use auto mode");
+        assert_eq!(opts[2].label, "Tell Claude what to change");
+        assert!(opts[0].highlighted, "❯ 高亮在选项 1（实屏原文形态）");
+        // 反馈锚命中选项 3（GET planDialog/feedbackOption 与 POST 导航档的判据源）
+        assert_eq!(plan_feedback_option_number(&opts), Some(3));
     }
 
     /// 2026-09-21 实机探测第二例：kimi `Ready to build?` 用 `▶`（U+25B6）作光标标记

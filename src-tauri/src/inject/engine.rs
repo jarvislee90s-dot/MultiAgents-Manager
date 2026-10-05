@@ -59,7 +59,7 @@ pub trait KeyLayout {
 
 /// 单键 **down/up 成对**事件（M9R 纪律：字符/键事件一律成对构造，keyup 由各家执行层
 /// 过滤/忽略——本模块五个构造函数共用的最小拼装单元，成对纪律只此一份）。
-fn key_pair(vk: u16, scan: u16, ch: u16) -> [KeyRecordSpec; 2] {
+pub(crate) fn key_pair(vk: u16, scan: u16, ch: u16) -> [KeyRecordSpec; 2] {
     [
         KeyRecordSpec {
             vk,

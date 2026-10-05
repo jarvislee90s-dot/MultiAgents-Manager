@@ -673,6 +673,13 @@ export interface ApproveOptionsView {
    *  N 选项）；此形态下 options 恒空**不是错误**，是「还没读到选项，点检查重试」。
    *  缺省/false → 既有渲染（前向兼容旧后端） */
   planPending?: boolean;
+  /** 2026-10-04 计划批准卡：屏上选项带「告诉 Claude 要改什么」锚 → claude 计划
+   *  批准框（前端渲染「计划批准」标题与反馈入口）。缺省/false → 普通审批对话框。 */
+  planDialog?: boolean;
+  /** 反馈选项 id（如 "dialog:3"；null/缺省 = 非计划批准框）——前端把该选项渲染为
+   *  「告诉 Claude 要改什么」入口，点击走 /session-plan-feedback 的 start 动作
+   *  （选中该选项进入反馈编辑态），而非直发按键。 */
+  feedbackOption?: string | null;
 }
 
 /** 拉取审批选项卡数据源（红卡挂载时一次）。非 2xx → 抛 ApiError（调用方静默
@@ -720,6 +727,51 @@ export async function sessionApprove(sessionId: string, optionId: string): Promi
     throw new ApiError(r.status, `session-approve ${r.status}`, data);
   }
   return (await r.json()) as ApproveResult;
+}
+
+// ==== 2026-10-04 计划批准卡：计划反馈通道（claude 计划批准框选项 3）====
+
+/** 计划反馈动作（claude 计划批准框选 3 之后的 composer 通道；「选 3」本身走
+ *  session-approve 的 dialog:3——探测定案 2026-10-04 §S3）：
+ *  - `type`：清空编辑行（有内容时）后打字（`submit=true` 尾随 Enter 提交——Claude
+ *    留在计划模式开启新一轮修改；`submit=false` 仅暂存，供「覆盖写入」改错字）；
+ *    text 为空且 submit=true = 仅回车（提交终端里已暂存的内容）；
+ *  - `clear`：退格清空编辑行（放弃暂存内容）。 */
+export type PlanFeedbackAction = "type" | "clear";
+
+/** 计划反馈回执：editor_ready = 反馈编辑态已进入（start）；done = 动作已投递
+ *  （type/clear）；failed = 投递失败 / 状态不符（error 为后端中文文案，可重试） */
+export type PlanFeedbackResult =
+  | { status: "editor_ready" | "done" }
+  | { status: "failed"; error: string };
+
+/** 计划反馈（POST /session-plan-feedback）。非 2xx 抛 ApiError（错误码在 data.error，
+ *  调用方分診中文文案——not_waiting / no_session 等，与 sessionApprove 同惯例） */
+export async function sessionPlanFeedback(
+  sessionId: string,
+  action: PlanFeedbackAction,
+  opts: { text?: string; submit?: boolean } = {},
+): Promise<PlanFeedbackResult> {
+  let r: Response;
+  try {
+    r = await fetch("/m/api/v1/session-plan-feedback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId, action, text: opts.text, submit: opts.submit }),
+    });
+  } catch (e) {
+    throw new ApiError(null, `session-plan-feedback 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) {
+    let data: Record<string, unknown> | null = null;
+    try {
+      data = (await r.json()) as Record<string, unknown>;
+    } catch {
+      /* 非 JSON 错误体（代理注入页等）：data 保持 null，按 message 兜底 */
+    }
+    throw new ApiError(r.status, `session-plan-feedback ${r.status}`, data);
+  }
+  return (await r.json()) as PlanFeedbackResult;
 }
 
 // ==== 批次乙 T8：问答卡（AskUserQuestion，claude 先行）====

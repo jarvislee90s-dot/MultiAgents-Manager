@@ -615,6 +615,7 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
             get(api::session_approve_options),
         )
         .route("/session-approve", post(api::session_approve))
+        .route("/session-plan-feedback", post(api::session_plan_feedback))
         // 批次乙 T8：问答端点（AskUserQuestion 问答卡——可用性/题目结构 + 应答注入
         // 序列；PIN 门禁内层 gate 结构性覆盖，新端点不需要各自鉴权代码）
         .route("/session-question", get(api::session_question))
@@ -4221,16 +4222,26 @@ mod tests {
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         sess_a_last: Option<&str>,
     ) -> Arc<RemoteState> {
-        approve_state_with_dialog(injector, sess_a_last, std::sync::Arc::new(|_, _| None))
+        approve_state_with_dialog(
+            injector,
+            sess_a_last,
+            std::sync::Arc::new(|_, _| None),
+            None,
+        )
     }
 
     /// 丁T3 F4-2：approve_state + 可注入对话框探针（审批侧 `read_dialog_options` 经
     /// 该缝取屏读结论——补上 T5 的 dialog 分支在门禁内的自动化证据：真实屏读需要
     /// conhost，CI 恒 None 时那两条断言只在有窗口的机器上才走得到）。
+    #[allow(clippy::too_many_arguments)]
     fn approve_state_with_dialog(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         sess_a_last: Option<&str>,
         dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
+        // 2026-10-04 审批卡不出修复：可选的消息尾页桩——Some(page) 时 message_source
+        // 返回它（驱动 claude 计划预期态/plan 聚合判据）；None 保持既有 Err 桩
+        // （既有用例零感知）
+        tail_page: Option<Vec<crate::remote::content::SessionMessage>>,
     ) -> Arc<RemoteState> {
         let sessions = vec![
             {
@@ -4374,7 +4385,13 @@ mod tests {
             dialog_probe,
             screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
-            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            message_source: Box::new(move |_, _, _| match &tail_page {
+                Some(p) => Ok(crate::remote::content::MessagesPage {
+                    messages: p.clone(),
+                    truncated: false,
+                }),
+                None => Err("测试桩：未注入内容源".to_string()),
+            }),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             board_hidden_ids: Box::new(Vec::new),
@@ -11613,6 +11630,7 @@ mod tests {
             fake.clone(),
             Some(APPROVE_HIT_MSG),
             std::sync::Arc::new(move |_, _| Some(opts.clone())),
+            None,
         );
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
@@ -11656,6 +11674,223 @@ mod tests {
         );
     }
 
+    /// 2026-10-04 计划批准卡：缝返回 **claude 计划批准框**选项表（带账本
+    /// FEEDBACK_OPTION 锚的 "Tell Claude what to change"）→ GET 载荷必须下发
+    /// `planDialog=true` + `feedbackOption="dialog:3"`（前端把该选项渲染为
+    /// 「告诉 Claude 要改什么」反馈入口的依据）。
+    #[tokio::test]
+    async fn approve_dialog_plan_payload_flags_feedback_option() {
+        let fake = FakeInjector::ok();
+        let opts = vec![
+            crate::inject::dialog::DialogOption {
+                number: 1,
+                label: "Yes, and use auto mode".into(),
+                highlighted: true,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 2,
+                label: "Yes, manually approve edits".into(),
+                highlighted: false,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 3,
+                label: "Tell Claude what to change".into(),
+                highlighted: false,
+            },
+        ];
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some(APPROVE_HIT_MSG),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+            None,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["dialog"], true);
+        assert_eq!(v["planDialog"], true, "带反馈锚的对话框 = 计划批准框");
+        assert_eq!(
+            v["feedbackOption"], "dialog:3",
+            "反馈选项 id = 账本锚命中的屏上编号"
+        );
+    }
+
+    /// 反向锁：缝给**非计划框**的普通对话框选项（无 FEEDBACK_OPTION 锚）→
+    /// `planDialog=false` + `feedbackOption=null`（普通审批卡的渲染不受影响）。
+    #[tokio::test]
+    async fn approve_dialog_non_plan_payload_has_no_feedback_flags() {
+        let fake = FakeInjector::ok();
+        let opts = vec![
+            crate::inject::dialog::DialogOption {
+                number: 1,
+                label: "允许".into(),
+                highlighted: false,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 2,
+                label: "拒绝".into(),
+                highlighted: false,
+            },
+        ];
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some(APPROVE_HIT_MSG),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+            None,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["dialog"], true);
+        assert_eq!(v["planDialog"], false);
+        assert_eq!(v["feedbackOption"], serde_json::Value::Null);
+    }
+
+    /// 2026-10-04 审批卡不出修复：**claude 计划预期态 → 屏读出 1/2/3**。
+    /// 实况取证（用户会话 bb92857b）：钩子标记 0 行、last_message 中文 prose
+    /// （detect 恒 miss）、原生对话框标题不落 JSONL——三信号全灭致卡自隐。
+    /// 修法后：尾部计划挂起（message_source 桩给 kind="plan" 尾页）即视为等审批
+    /// → 屏读命中计划批准框 → available=true + dialog 选项 + planDialog/feedbackOption。
+    #[tokio::test]
+    async fn approve_card_appears_via_claude_plan_pending_with_dialog() {
+        let fake = FakeInjector::ok();
+        let opts = vec![
+            crate::inject::dialog::DialogOption {
+                number: 1,
+                label: "Yes, and use auto mode".into(),
+                highlighted: true,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 2,
+                label: "Yes, manually approve edits".into(),
+                highlighted: false,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 3,
+                label: "Tell Claude what to change".into(),
+                highlighted: false,
+            },
+        ];
+        // last_message = 中文计划 prose（detect 不命中——实况形态）；标记表空
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some("我已经读完了《末班车》的全部版本。下面问你两道多选题，来确定优化方向："),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+            Some(vec![
+                crate::remote::content::SessionMessage {
+                    seq: 0,
+                    role: "assistant".into(),
+                    kind: "user".into(),
+                    content: "继续优化计划".into(),
+                    ts: Some(1000),
+                    tool_name: None,
+                    tool_args: None,
+                    collapsed: false,
+                },
+                crate::remote::content::SessionMessage {
+                    seq: 1,
+                    role: "assistant".into(),
+                    kind: "plan".into(),
+                    content: "# 计划：创建 a.txt".into(),
+                    ts: Some(2000),
+                    tool_name: Some("ExitPlanMode".into()),
+                    tool_args: None,
+                    collapsed: false,
+                },
+            ]),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], true,
+            "计划预期态 = 等审批（修复前 false，卡自隐）"
+        );
+        assert_eq!(v["dialog"], true, "屏读命中计划批准框");
+        assert_eq!(v["planDialog"], true);
+        assert_eq!(v["feedbackOption"], "dialog:3");
+        assert!(v["plan"].is_object(), "计划正文随卡聚合");
+        let options = v["options"].as_array().unwrap();
+        assert_eq!(options.len(), 3, "1/2/3 三个选项（用户诉求的选项卡）");
+    }
+
+    /// 反向档：计划预期态在场但**对话框没读到**（未绘制/非 Windows）→ 不给二元键
+    /// （「允许='1'」对计划框是无效键，R1 实证），落「计划待确认」形态
+    /// （available=true + planPending=true + 空 options + 计划正文）。
+    #[tokio::test]
+    async fn approve_card_claude_plan_pending_without_dialog_shows_pending_bar() {
+        let fake = FakeInjector::ok();
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some("我已经读完了《末班车》的全部版本。"),
+            std::sync::Arc::new(|_, _| None),
+            Some(vec![crate::remote::content::SessionMessage {
+                seq: 0,
+                role: "assistant".into(),
+                kind: "plan".into(),
+                content: "# 计划：创建 a.txt".into(),
+                ts: Some(2000),
+                tool_name: Some("ExitPlanMode".into()),
+                tool_args: None,
+                collapsed: false,
+            }]),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["planPending"], true);
+        assert_eq!(v["dialog"], false);
+        assert_eq!(
+            v["degradedHint"],
+            serde_json::Value::Null,
+            "计划待确认形态不叠加二元错位警示"
+        );
+        let options = v["options"].as_array().unwrap();
+        assert!(options.is_empty(), "零按钮——不给可能错位的二元键");
+        assert!(v["plan"].is_object());
+    }
+
     /// F4-2 格②：缝返回 `None`（CI/非 Windows/对话框未绘制）→ 降级二元卡 +
     /// `degradedHint`（R1-3 防重警示：二元键可能错位命中非预期选项）。
     /// 与格①成对：同一夹具、同一会话，只换探针结论。
@@ -11666,6 +11901,7 @@ mod tests {
             fake.clone(),
             Some(APPROVE_HIT_MSG),
             std::sync::Arc::new(|_, _| None),
+            None,
         );
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());

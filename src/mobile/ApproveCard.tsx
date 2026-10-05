@@ -22,12 +22,24 @@
 import { useCallback, useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import InteractiveCard, { toneTokens, type InteractiveCardTone } from "./InteractiveCard";
-import { ApiError, fetchApproveOptions, sessionApprove, type ApproveOptionsView } from "./api";
+import InteractiveCard, { type InteractiveCardTone } from "./InteractiveCard";
+import {
+  ApiError,
+  fetchApproveOptions,
+  sessionApprove,
+  type ApproveOptionsView,
+} from "./api";
 
 interface ApproveCardProps {
-  /** 会话（本组件只消费 id；结构化类型，完整 Session 可直接传入） */
-  session: { id: string };
+  /** 会话（本组件消费 id 与 status；结构化类型，完整 Session 可直接传入）。
+   *  status = 会话当前状态（2026-10-04 使命完成自隐用）：按键已投递（sent）且
+   *  会话已离开 waiting（执行已开始）→ 本卡自隐——终端在跑新回合时挂着
+   *  「已发送按键」会被误读为卡死（用户裁决 2026-10-04）。status 缺省（旧调用方）
+   *  → 不启用该规则（行为同旧版）。 */
+  session: { id: string; status?: string };
+  /** 2026-10-04 计划批准卡：反馈入口 start 成功（终端已进反馈编辑态）→ 上报父级
+   *  换渲染 PlanFeedbackBar（本卡随状态转黄自然卸载，反馈条独立存活） */
+  onPlanFeedbackReady?: () => void;
 }
 
 /** 计划待确认条的脚注文案（丁T2）：预期态在场但后端没读到终端对话框选项——
@@ -89,7 +101,7 @@ function PlanBody({ plan }: { plan: { content: string; isFile: boolean } }) {
   );
 }
 
-export default function ApproveCard({ session }: ApproveCardProps) {
+export default function ApproveCard({ session, onPlanFeedbackReady }: ApproveCardProps) {
   // 选项可用性：ready=false（加载中 / 拉取失败）→ 不渲染（available/reason 分诊在渲染侧）
   const [options, setOptions] = useState<ApproveOptionsView | null>(null);
   const [ready, setReady] = useState(false);
@@ -177,6 +189,39 @@ export default function ApproveCard({ session }: ApproveCardProps) {
     [busy, sent, session.id]
   );
 
+  /** 2026-10-04 计划批准卡：反馈入口（feedbackOption 行）——**就是点选项 3 本身**
+   *  （POST /session-approve {optionId:"dialog:3"}，后端计划框导航优先键序；探测定
+   *  案 2026-10-04 §S3：选 3 = 计划被拒回空 composer、plan 模式保持）。成功即上报
+   *  父级换渲染 PlanFeedbackBar；失败文案复用 error 态（按钮保持可点可重试）。 */
+  const handleFeedbackStart = useCallback(async () => {
+    if (busy || sent) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await sessionApprove(session.id, "dialog:3");
+      if (res.status === "key_sent") {
+        onPlanFeedbackReady?.();
+      } else {
+        setError(res.error);
+      }
+    } catch (e) {
+      if (e instanceof ApiError) {
+        const code = typeof e.data?.error === "string" ? e.data.error : null;
+        if (code === "not_waiting") {
+          setError("会话不在等待状态");
+        } else if (code === "no_session") {
+          setError("会话已结束，请返回看板刷新");
+        } else {
+          setError(e.message);
+        }
+      } else {
+        setError(String(e));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [busy, sent, session.id, onPlanFeedbackReady]);
+
   // 加载中 / 拉取失败 / options 未落地：不渲染
   if (!ready || options === null) return null;
   // 严格档（M9R）：available=false 且后端给出 reason → 只渲染提示条不渲染按键；
@@ -199,6 +244,13 @@ export default function ApproveCard({ session }: ApproveCardProps) {
         </p>
       </div>
     );
+  }
+
+  // 使命完成自隐（2026-10-04 用户裁决）：按键已投递（sent）且会话已离开 waiting
+  // （终端执行已开始）→ 本卡收起——「已发送按键」卡长期挂在运行中的会话上会被
+  // 误读为卡死。status 缺省（旧调用方/状态未知）→ 不启用（行为同旧版）。
+  if (sent && session.status !== undefined && session.status !== "waiting") {
+    return null;
   }
 
   // ===== 丁T2：计划待确认条（codex/kimi 的计划确认框）=====
@@ -270,8 +322,14 @@ export default function ApproveCard({ session }: ApproveCardProps) {
     <InteractiveCard
       tone={cardTone}
       testId="approve-card"
-      mode={options.dialog ? "dialog" : "binary"}
-      title={options.dialog ? "等待批准（终端对话框）" : "等待批准"}
+      mode={options.dialog ? (options.planDialog ? "plan-dialog" : "dialog") : "binary"}
+      title={
+        options.dialog
+          ? options.planDialog
+            ? "计划批准"
+            : "等待批准（终端对话框）"
+          : "等待批准"
+      }
       footer={
         <>
           {error !== null && (
@@ -299,31 +357,46 @@ export default function ApproveCard({ session }: ApproveCardProps) {
               二元分支的键位不外泄给 UI（载荷只有 id/label——契约锚点），且各家键位
               不同（claude 允许='1' / codex 允许='y' / 拒绝=esc），编造序号或硬编码
               键名都会谎报「将按什么」——评审 I2：不渲染徽标是唯一不撒谎的形态 */}
-          {options.options.map((o, i) => (
-            <button
-              key={o.id}
-              type="button"
-              data-testid={`approve-option-${o.id}`}
-              disabled={busy || sent}
-              onClick={() => handleAnswer(o.id)}
-              className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-40 ${toneTokens(cardTone).action}`}
-            >
-              {options.dialog && (
-                <span
-                  className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${toneTokens(cardTone).badge}`}
-                >
-                  {i + 1}
-                </span>
-              )}
-              <span className="min-w-0 flex-1 break-words">{o.label}</span>
-            </button>
-          ))}
+          {options.options.map((o, i) => {
+            // 2026-10-04 计划批准卡：反馈选项（feedbackOption 命中行）→ 渲染为
+            // 「告诉 Claude 要改什么」入口——点击 start 进反馈编辑态（换渲染
+            // PlanFeedbackBar），**不**直发按键。其余选项照常代按。
+            const isFeedback = options.planDialog === true && o.id === options.feedbackOption;
+            return (
+              <button
+                key={o.id}
+                type="button"
+                data-testid={isFeedback ? "approve-option-feedback" : `approve-option-${o.id}`}
+                disabled={busy || sent}
+                onClick={() => (isFeedback ? handleFeedbackStart() : handleAnswer(o.id))}
+                className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm disabled:opacity-40 ${
+                  // 行形态与问答卡选项行同款（2026-10-04 蓝系统一批：同内距/字号/
+                  // 中性底+hover——「一套，只差选项数目」的视觉收口）
+                  "bg-sky-500/5 text-slate-700 hover:bg-sky-500/10 dark:bg-sky-400/5 dark:text-slate-300 dark:hover:bg-sky-400/10"
+                }`}
+              >
+                {options.dialog && (
+                  <span className="mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded bg-sky-500/15 text-[10px] font-semibold text-sky-700 dark:bg-sky-400/15 dark:text-sky-400">
+                    {i + 1}
+                  </span>
+                )}
+                <span className="min-w-0 flex-1 break-words">{o.label}</span>
+                {isFeedback && (
+                  <span className="mt-0.5 shrink-0 text-[11px] text-sky-700/70 dark:text-sky-400/70">
+                    输入修改意见 →
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
       }
     >
       {options.dialog && (
         <p data-testid="approve-dialog-label" className="mt-1 text-xs text-[var(--tx)]/80">
-          以下选项读自终端对话框，点按即代你按对应数字键
+          {options.planDialog
+            ? "以下选项读自终端对话框——点按即代你用方向键选择；反馈项会打开意见输入框"
+            : "以下选项读自终端对话框，点按即代你按对应数字键"}
         </p>
       )}
       {/* T8：审批点 plan 聚合——计划确认类审批卡主体即见计划全文（不再要用户去

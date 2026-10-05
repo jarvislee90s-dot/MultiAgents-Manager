@@ -615,6 +615,34 @@ pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), Str
     })
 }
 
+/// 批量退格（2026-10-04 计划反馈通道）：`count` 个 VK_BACK 成对事件按小步进批量
+/// 写入。退格是**纯删除键、无逐键重绘耦合**——不等 SUBMIT_DELAY（探测定案
+/// 2026-10-04 §S4：claude 2.1.287 composer 上批量 backspace×30 全清实证，日志
+/// `evidence/plan-feedback/probe-type-pf-20261004-165110.log`）。分块/背压/预算
+/// 沿用长文本口径（事件对数 ≈ 字符数）。crate 内生产可见，唯一消费者 =
+/// `remote::api` 的计划反馈编排。
+pub(crate) fn inject_backspaces_spec(
+    pid: u32,
+    count: usize,
+    spec: &FamilySpec,
+) -> Result<(), String> {
+    if count == 0 {
+        return Ok(());
+    }
+    let scan = WinKeyLayout.scan_of(0x08u16); // VK_BACK
+    let records: Vec<KeyRecordSpec> = (0..count)
+        .flat_map(|_| super::engine::key_pair(0x08u16, scan, 0x08u16))
+        .collect();
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    let chars = count; // 事件对数 ≈ 字符数（预算/背压同长文口径）
+    let bp = families::use_backpressure(spec, chars);
+    let deadline = Instant::now() + Duration::from_millis(families::inject_budget_ms(spec, chars));
+    inject_via(pid, move |handle| {
+        paced_write(handle, &records, bp, deadline)?;
+        Ok(())
+    })
+}
+
 /// 输入行尾部屏读（Task 4，M6R/§8.1：注入后读屏可判定「文本滞留输入行」）。
 /// 契约签名 `read_input_tail(pid, n)`：CONOUT$ + `ReadConsoleOutputCharacterW`
 /// 从光标处**同行向前**读 `min(n, cursor_x+1)` 个 UTF-16 unit，

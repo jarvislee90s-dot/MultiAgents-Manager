@@ -29,6 +29,7 @@ import {
   RotateCw,
 } from "lucide-react";
 import ApproveCard from "./ApproveCard";
+import PlanFeedbackBar from "./PlanFeedbackBar";
 import { collapsedLabel, isProcessKind } from "./message-fold";
 import ModeBar from "./ModeBar";
 import QuestionCard from "./QuestionCard";
@@ -224,8 +225,12 @@ export function extractPlanBody(toolArgs: string): string | null {
  *  （`available` / `planPending` 载荷）；两者同源同判据，前端**只放宽门，不做可用性裁决**
  *  ——`available=false`（非码族工具 / 计划已消费 / 后端判定不同）时卡片照常自隐。
  *
- *  `tool` 收窄到计划对话框族（codex/kimi——镜像后端 `plan_dialog_family`）：claude 的计划
- *  批准走既有 waiting 门（有实证键位与标记通道），放宽它的门等于改既有行为。
+ *  `tool` 收窄到计划对话框族（codex/kimi——镜像后端 `plan_dialog_family`）；**claude
+ *  2026-10-04 起纳入**：其计划批准等待经状态层修复已落 Waiting（红灯门本就开），纳入
+ *  纯为与后端判据同源（后端扫描器的 claude 计划预期态补位见 `remote::api` 同日注），
+ *  并覆盖「终端对话框未绘制、载荷走 planPending 形态」时的挂载面。当年排除 claude 的
+ *  依据「走既有 waiting 门（Waiting + detect）就够」已被实况证伪：detect 对原生 UI
+ *  文案恒 miss（详见后端注释的取证链）。
  *
  *  **未覆盖面（丁T2 复审 N4，与后端判据同款，如实申报）**：三条清除信号（user /
  *  tool-call / tool-result）并非穷尽——codex 选「No, stay in Plan mode」后既不注入用户
@@ -236,7 +241,7 @@ export function isPlanPending(
   tool: string | null | undefined
 ): boolean {
   if (messages === null || messages.length === 0) return false;
-  if (tool !== "codex" && tool !== "kimi") return false;
+  if (tool !== "codex" && tool !== "kimi" && tool !== "claude") return false;
   let last = -1;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const k = messages[i].kind;
@@ -307,6 +312,19 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const [refreshTick, setRefreshTick] = useState(0);
   // 折叠覆盖表：seq → 强制折叠/展开；缺省走默认折叠语义（见 isCollapsed）
   const [expandedOverride, setExpandedOverride] = useState<Map<number, boolean>>(new Map());
+  // 过程一键折叠模式位（2026-10-04 修复「点了没反应」）：true = 全部过程消息
+  // （thinking/tool-call/tool-result）**默认收起**——包括折叠之后新到达的消息
+  // （sticky，不随 10s 轮询翻回）。单条 override 优先级仍最高。
+  const [processAllCollapsed, setProcessAllCollapsed] = useState(false);
+  // 计划反馈态（2026-10-04 计划批准卡）：审批卡反馈入口 start 成功（终端已进
+  // 反馈编辑态）→ 置位，dock 里换渲染 PlanFeedbackBar（审批卡随状态转黄自然
+  // 卸载，反馈条独立存活；发送成功/收起即复位）。仅前端持有——会话切换即清，
+  // 刷新后不恢复（终端直接打字即可，如实登记的已知边界）。
+  const [planFeedbackActive, setPlanFeedbackActive] = useState(false);
+  // 计划反馈态随会话切换复位（跨会话串态防线——与卡片 key 重挂同口径）
+  useEffect(() => {
+    setPlanFeedbackActive(false);
+  }, [session.id]);
   // 该会话涉及的文件（/session-files 提取结果，M3+）：一份数据两用——
   // fileEntries 驱动文件面板列表，派生 Set 驱动正文路径链接化
   const [fileEntries, setFileEntries] = useState<SessionFileEntry[]>([]);
@@ -481,6 +499,10 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     (m: SessionMessage): boolean => {
       const forced = expandedOverride.get(m.seq);
       if (forced !== undefined) return forced; // 手动展开/再折叠优先
+      // 过程一键折叠模式位（2026-10-04）：开着时过程消息一律收起——含折叠后
+      // 新到达的条目（wire 默认 tool-result 展开，缺这层「过程折叠」永远够不到
+      // 它们，按钮在运行态是 no-op，见 collapseAll 注释）
+      if (processAllCollapsed && isProcessKind(m.kind)) return true;
       // T1：plan 一等卡片恒展开——运行态与总结态都不折叠（豁免总结模式折叠）
       // T7：plan-file 计划文件卡同为入口卡，恒展开（与 plan 同款豁免）
       if (m.kind === "plan" || m.kind === "plan-file") return false;
@@ -493,7 +515,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       // 运行中：保持 wire collapsed 字段语义（thinking / tool-call 恒折叠）
       return m.collapsed;
     },
-    [expandedOverride, isSummary, lastAssistantSeq]
+    [expandedOverride, processAllCollapsed, isSummary, lastAssistantSeq]
   );
 
   const toggleCollapsed = useCallback(
@@ -930,6 +952,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   const collapsedCount = toggleableMessages.filter((m) => isCollapsed(m)).length;
 
   const expandAll = useCallback(() => {
+    // 模式位复位 + 覆盖表强制展开（false = 强制展开）：只复位模式位不够——
+    // wire 默认 thinking/tool-call 是折叠的，复位后它们会缩回去
+    setProcessAllCollapsed(false);
     setExpandedOverride((prev) => {
       const next = new Map(prev);
       // 覆盖表值语义 = 强制折叠与否（false = 强制展开，见 isCollapsed）
@@ -939,7 +964,11 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, [toggleableMessages]);
 
   const collapseAll = useCallback(() => {
-    // 清空覆盖表 = 回到默认折叠语义（总结模式折叠规则的单点来源仍是 isCollapsed）
+    // 修复（2026-10-04）：旧实现只清空覆盖表 = 回落 wire 默认，而运行态默认
+    // tool-result 展开 → 未手动折叠过任何条时点击是 no-op，且「全折叠」在运行态
+    // 不可达。改为**置模式位**（isCollapsed 消费）：覆盖既有条目与后续新条目
+    // （sticky）；同时清覆盖表，甩掉历史单条展开的残留。
+    setProcessAllCollapsed(true);
     setExpandedOverride(new Map());
   }, []);
 
@@ -980,6 +1009,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 书签条（两个布局分支共用同一份 JSX）。processToggle：过程一键折叠开关
   // （2026-09-20）——运行态与总结态都可用（与 summary-banner 的差别就在不看 isSummary）；
   // 无可折叠过程消息时不渲染。allCollapsed = 当前全部折叠 → 按钮动作变为全部展开
+  // （2026-10-04 起运行态真正可达：collapseAll 置模式位，见其注释）
   const bookmarkBar = (
     <BookmarkBar
       bookmarks={bookmarks}
@@ -997,6 +1027,47 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           : undefined
       }
     />
+  );
+
+  // ===== 卡片停靠区（2026-10-04 用户裁决「问答弹窗出现在页面下半部」）=====
+  // 审批/问答/模式三卡从「消息区上方」移到「消息区下方、composer 之上」——
+  // InteractiveCard 的设计注释本就写明「交互只发生在底部交互卡，消息流只读」，
+  // 顶部挂载是历史偏差，本批归位。长卡 max-h 内滚不把消息区挤没；composer 的
+  // presence 提示（「请用上方卡片按钮应答」）与卡的相对位置保持成立。
+  //
+  // 挂载语义原样保留（只挪位置不改门）：
+  // - ApproveCard：waiting ∨ 计划预期态（`approveMounted`，丁T1/T2 双门）；刷新
+  //   靠 App 的 selected 同步（SSE/轮询），status 翻转即挂/卸，不重进页面；
+  // - QuestionCard：**非结束态**挂载（丁T1 放宽），可用性由卡内 available 自隐兜底；
+  // - ModeBar：常驻信息，不依赖 waiting 态。
+  //
+  // 组件钥匙防线（T1 活状态流）：三卡与 composer 同层且都按会话强制重挂
+  // （M9R P3），key 必须互异（approve-/question-/mode-/composer- 前缀）——同 key
+  // 兄弟在红卡「停留期间插入/卸载」时会让 React 同 key 复用错乱（duplicate key
+  // 警告 + 红卡卸不掉）。
+  const cardDock = (
+    <div
+      data-testid="card-dock"
+      className="flex max-h-[55vh] shrink-0 flex-col gap-2 overflow-y-auto"
+    >
+      {approveMounted &&
+        (planFeedbackActive ? null : (
+          <ApproveCard
+            key={`approve-${session.id}`}
+            session={session}
+            onPlanFeedbackReady={() => setPlanFeedbackActive(true)}
+          />
+        ))}
+      {planFeedbackActive && (
+        <PlanFeedbackBar
+          key={`plan-fb-${session.id}`}
+          sessionId={session.id}
+          onDismiss={() => setPlanFeedbackActive(false)}
+        />
+      )}
+      {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
+      <ModeBar key={`mode-${session.id}`} session={session} />
+    </div>
   );
 
   // 消息区（split 布局复用同一份 JSX）
@@ -1248,26 +1319,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             style={preview.mode === "split" ? { minHeight: SPLIT_CONVERSATION_MIN_PX } : undefined}
           >
             {bookmarkBar}
-            {/* 组件钥匙前缀区分（T1 活状态流修正）：红卡与 composer 同层且都按会话
-                强制重挂（M9R P3 语义保留），但 key 必须互异——同 key 兄弟在红卡
-                「停留期间插入/卸载」（活状态流下的常态）时会让 React 同 key 复用
-                错乱（duplicate key 警告 + 红卡卸不掉） */}
-            {approveMounted && <ApproveCard key={`approve-${session.id}`} session={session} />}
-            {/* 问答卡（批次乙 T8；丁T1 挂载放宽）：**非结束态**（!isSummary）挂载——
-                问答端点不看会话状态（可用性由数据形态门决定：双通道未命中/审批标记
-                隔离 → available=false），故挂载门只需排除「已结束」的 idle/finished
-                （那是既已聊完的会话，重进详情不必每次再打一发 GET）。成本 = 详情页
-                每轮一 GET；QuestionCard 内部已有「拉取失败/available=false → 静默
-                自隐」（src/mobile/QuestionCard.tsx 的 `!ready || info === null ||
-                !info.available → return null`），所以放宽不会闪出空卡。
-                ApproveCard 丁T2 挂载门 = waiting ∨ 计划预期态（`approveMounted`；
-                两个并列门见其定义——waiting 门是 T1 的刻意红灯门，未拆）。
-                key 前缀 question-* 防同 key 兄弟复用错乱（上方注释同款 T1 防线） */}
-            {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
-            {/* 模式栏（批次丙 T6）：显示当前模式 + 切档入口。与审批/问答卡同层但
-                **不依赖 waiting 态**——模式是常驻信息（计划批准后切档可见性正是诉求）；
-                key 前缀 mode-* 互异（同 key 兄弟复用错乱防线，T1 活状态流同款） */}
-            <ModeBar key={`mode-${session.id}`} session={session} />
+            {/* 审批/问答/模式三卡 2026-10-04 起停靠在消息区下方（cardDock）——
+                原「消息区上方」挂载位置连同挂载门语义注释一并迁移至 cardDock 定义处 */}
             <MessageScrollArea
               fontScale={fontScale}
               showJump={showJump}
@@ -1279,6 +1332,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             >
               {messageArea}
             </MessageScrollArea>
+            {cardDock}
             <MessageComposer key={`composer-${session.id}`} session={session} />
           </div>
           <SplitHandle
@@ -1337,26 +1391,9 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
       ) : (
         <div className="flex min-h-0 flex-1 flex-col">
           {bookmarkBar}
-          {/* 审批红卡（M8 Task 12）：waiting 态挂载；紧贴 messageArea 上方；
-              available=false 时卡自身自隐（组件内部判定）。
-              刷新机制（T1 活状态流更新口径）：App 的 selected 按 (agentType,id)
-              从 Board 既有轮询数据（SSE 跃迁/快照 + 降级 3s 轮询）保持同步，
-              停留详情期间 status 变 waiting 红卡即出现、转非 waiting 自动卸载，
-              无需重进页面；组件钥匙 key={`approve-${session.id}`} 不随数据刷新变化 →
-              卡内 receipt/选项态不被误清。极端时序下点按钮收到 409 not_waiting 的
-              中文降级文案仍是兜底（不误发键）。
-              **分屏分支（split/split-h）挂载同一份**（2026-09-19 用户裁决） */}
-          {/* 组件钥匙（M9R P3）：按会话强制重挂，清掉上一会话的陈旧 receipt /
-              选项态（跨会话串卡的防线）；前缀区分见分屏分支注释（同 key 兄弟复用
-              错乱防线，T1 活状态流） */}
-          {approveMounted && <ApproveCard key={`approve-${session.id}`} session={session} />}
-          {/* 问答卡（批次乙 T8；丁T1 挂载放宽）：正文视图同一挂载口径
-              （**非结束态** + question- 前缀），语义见分屏分支注释
-              （可用性自隐兜底 + key 前缀防线）。ApproveCard 丁T2 门 = waiting ∨
-              计划预期态（`approveMounted`，与分屏分支同源） */}
-          {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
-          {/* 模式栏（T6）：正文视图同一挂载口径，语义见分屏分支注释 */}
-          <ModeBar key={`mode-${session.id}`} session={session} />
+          {/* 审批/问答/模式三卡 2026-10-04 起停靠在消息区下方（cardDock，与分屏
+              分支同构）——原「紧贴 messageArea 上方」的挂载注释（M8 Task 12 红卡
+              刷新机制 / M9R P3 钥匙防线 / 丁T1-T2 挂载门）一并迁移至 cardDock 定义处 */}
           <MessageScrollArea
             fontScale={fontScale}
             showJump={showJump}
@@ -1368,6 +1405,7 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           >
             {messageArea}
           </MessageScrollArea>
+          {cardDock}
           {/* 发送输入区（M7 Task 7，W4）：**全布局态挂载**（正文 / split / split-h，
               2026-09-19 用户裁决）——分屏时对话列同样可发消息；
               send-info 拉取失败时组件自静默，不影响对话渲染；钥匙口径同上 */}
