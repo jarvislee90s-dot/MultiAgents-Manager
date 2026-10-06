@@ -140,7 +140,7 @@ fn base64_may_exceed_binary_limit(s: &str) -> bool {
 
 /// 落盘核心（**目录注入版**）：建目录 → 写文件 → 返回绝对路径。
 /// `dir` 由调用方给——生产传 `exports_dir()`，单测传 `tempfile::tempdir()`：
-/// **这是为了不让 `cargo test`（lib 单测）往开发机真实 `~/.mam/exports/` 写文件**
+/// **这是为了不让 `cargo test`（lib 单测）往开发机真实导出目录（下载文件夹）写文件**
 /// （§3.2.3 FIX-6 同类）。与全域 `*_conn` 形态同一个思路：依赖显式注入，不做隐式全局。
 /// 为什么不用 `MAM_HOME` 环境变量重定向：env 是**进程级**的，lib 单测并行跑，
 /// 一个用例 set/remove 会踩到同二进制里的其它用例（导出目录只在 `debug_assertions` 下认它）。
@@ -178,7 +178,7 @@ pub fn save_bytes_file_in(
     Ok(path.to_string_lossy().to_string())
 }
 
-/// 生产入口（目录 = `~/.mam/exports/`）：薄包装，签名与既有调用方（`export_save_*`）不变
+/// 生产入口（目录 = 导出目录，A2 起 = 系统下载目录）：薄包装，签名与既有调用方（`export_save_*`）不变
 pub fn save_text_file(name: &str, content: &str) -> Result<String, String> {
     save_text_file_in(&exports_dir(), name, content)
 }

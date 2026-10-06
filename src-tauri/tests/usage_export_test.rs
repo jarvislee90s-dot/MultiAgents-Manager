@@ -5,13 +5,15 @@
 //! `#[tauri::command]`（真正的生产路径）当时**零调用**。评审给出的存活变异：
 //! ① 把 `export_save_text` 改调 `save_bytes_file`（类型合法、可编译）→ 生产路径**丢 BOM**，
 //! 13 条 lib 用例**全绿**；② 把 `save_text_file` 的目录由 `exports_dir()` 换成 `/tmp` → 同样全绿。
-//! 而本任务第一个可观测事实正是「写进 `~/.mam/exports`」。
+//! 而本任务第一个可观测事实正是「写进导出目录」。**2026-10-07 裁决 A2 后该目录 = 系统「下载」文件夹**
+//! （原 `~/.mam/exports/`；本文件随之把期望值从 `<home>/.mam/exports` 改为 `<home>/Downloads`）。
 //!
 //! 本文件用 `support::setup()` 把 `HOME` / `MAM_HOME` 指到 tempdir
-//! （**绝不写用户真实 `~/.mam/exports/`**，与 GC 19 同一条纪律），再调**生产入口**，
+//! （**绝不写用户真实下载目录**，与 GC 19 同一条纪律），再调**生产入口**，
 //! 断言的是**磁盘事实**（路径形状 / 绝对性 / 真存在 / BOM 三字节 / 字节数 / 逐字节相等）。
 //!
-//! 顺带锁上 **reveal 覆盖退让的一半**：白名单根是 `dirs::home_dir()/.mam`，`setup()` 重定向后
+//! 顺带锁上 **reveal 覆盖退让的一半**：白名单根含**导出目录本身**（A2 后 = 下载目录；
+//! 见 `resource.rs::reveal_allowed_roots()`），`setup()` 重定向后
 //! 落盘路径**存在** ⇒ `ensure_reveal_allowed` 可判定（不再依赖开发机真实 `~/.mam` 状态）。
 //! 仍**不**断言 `reveal_dir` 的真实系统打开（那属 Task 24 的人工目验）。
 //!
@@ -25,7 +27,7 @@ use multi_agents_manager_lib::commands::export::{
 };
 use std::path::PathBuf;
 
-/// 生产导出目录 `exports_dir()` 的形状：`<home>/.mam/exports`。
+/// 生产导出目录 `exports_dir()` 的形状：`<home>/Downloads`（A2 后的系统下载目录；原 `.mam/exports`）。
 /// `support::setup()` 把 `HOME` 与 `MAM_HOME` 同时指到同一个 tempdir；生产代码在 debug/test
 /// 构建下认 `MAM_HOME`（Windows 的 `dirs::home_dir()` 会忽略 `HOME`，故必须两者都看）。
 fn expected_exports_dir() -> PathBuf {
@@ -34,14 +36,14 @@ fn expected_exports_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
         .expect("support::setup() 之后家目录必须可得");
-    home.join(".mam").join("exports")
+    home.join("Downloads")
 }
 
-/// 文本生产入口：`export_save_text` → 落 `<home>/.mam/exports/<name>`、返回**绝对路径**、
+/// 文本生产入口：`export_save_text` → 落 `<home>/Downloads/<name>`、返回**绝对路径**、
 /// 磁盘内容是 **BOM + 入参**。
 /// 存活变异①（改调 `save_bytes_file`）→ 第 3 行字节断言必红；存活变异②（目录换 `/tmp`）→ 父目录断言必红。
 #[test]
-fn production_text_entry_writes_bom_file_into_mam_exports() {
+fn production_text_entry_writes_bom_file_into_downloads() {
     support::setup();
     let dir = expected_exports_dir();
     let name = "fix-r1-text.csv";
@@ -60,7 +62,7 @@ fn production_text_entry_writes_bom_file_into_mam_exports() {
     assert_eq!(
         p.parent(),
         Some(dir.as_path()),
-        "必须落进 <home>/.mam/exports（生产目录），实际 {path}"
+        "必须落进 <home>/Downloads（生产目录，A2），实际 {path}"
     );
     assert!(dir.is_dir(), "导出目录必须被自动创建");
     assert!(p.exists(), "文件必须真的落盘（不是只返回了字符串）");
@@ -81,7 +83,7 @@ fn production_text_entry_writes_bom_file_into_mam_exports() {
 /// 二进制生产入口：`export_save_bytes` → 绝对路径 + 落进同目录 + **逐字节等于解码结果且不加 BOM**。
 /// 入参用真实 canvas 形态 `data:image/png;base64,…`，顺带在生产链条上验一次前缀容忍。
 #[test]
-fn production_bytes_entry_writes_exact_bytes_into_mam_exports() {
+fn production_bytes_entry_writes_exact_bytes_into_downloads() {
     support::setup();
     let dir = expected_exports_dir();
     let name = "fix-r1-bytes.png";
@@ -100,7 +102,7 @@ fn production_bytes_entry_writes_exact_bytes_into_mam_exports() {
     assert_eq!(
         p.parent(),
         Some(dir.as_path()),
-        "必须落进 <home>/.mam/exports，实际 {path}"
+        "必须落进 <home>/Downloads（A2），实际 {path}"
     );
     assert!(p.exists(), "文件必须真的落盘");
     let raw = std::fs::read(p).expect("读回磁盘字节");
