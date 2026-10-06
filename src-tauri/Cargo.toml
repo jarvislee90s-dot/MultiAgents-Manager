@@ -57,7 +57,6 @@ tauri-build = { version = "2", features = [] }
 # 该 feature 在 tauri 内部由 cfg(target_os = "macos") 门控，非 macOS 平台为空操作
 tauri = { version = "2", features = ["tray-icon", "image-png", "devtools", "macos-private-api", "protocol-asset"] }
 tauri-plugin-opener = "2"
-tauri-plugin-global-shortcut = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 # preserve_order（issue #36-5）：Map 用 IndexMap 保序——写回 ~/.claude.json 等
