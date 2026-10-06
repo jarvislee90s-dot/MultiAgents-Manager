@@ -1,8 +1,9 @@
-import { Moon, Sun, Info, Settings } from "lucide-react";
+import { Moon, Sun, Info, Settings, ChartLine } from "lucide-react";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "@/components/common/theme-provider";
 import { createWindow } from "@/lib/window";
+import { openUsageDashboard } from "@/lib/usage/openWindow";
 import { TitleBar } from "@/components/common/title-bar";
 import { LanguageToggle } from "@/components/common/language-toggle";
 import { useTranslation } from "react-i18next";
@@ -82,6 +83,18 @@ export function MainTitleBar() {
       title={`${t("app.title")} v${packageJson.version}`}
       rightActions={
         <>
+          {/* 用量看板入口（计划② Task 6 步骤 9）：图表键 → 独立窗口 usage-dashboard。
+              主题经 openUsageDashboard 的 `theme` 传入（`system` 传 undefined 跟随系统） */}
+          <button
+            onClick={() => void openUsageDashboard({ title: t("usage.title"), theme: tauriTheme })}
+            className="title-bar-btn mr-1"
+            aria-label={t("usage.title")}
+            title={t("usage.title")}
+            tabIndex={-1}
+          >
+            <ChartLine className="h-4 w-4" />
+          </button>
+
           <button
             onClick={handleOpenSettings}
             className="title-bar-btn mr-1"

@@ -48,6 +48,14 @@
   --ring: oklch(0.708 0 0);
   --radius: 0.625rem;
 
+  /* 用量图表三变量（计划② Task 4，浅色档）：趋势图与占比条**唯一**取色来源
+   * （计划 §3 第 19/20 条：图表取色只认这三个变量，浅深各一套，禁止硬编码参考实现色值）。
+   * ⚠️ 分享图导出（`src/lib/usage/exportLayout.ts` / `exportImage.ts`）**刻意不消费**它们：
+   * 分享图是固定浅色版式、给外部看的图片，不跟随应用主题（计划 §3 第 21 条）。 */
+  --usage-accent-a: #3b82f6;
+  --usage-accent-b: #8b5cf6;
+  --usage-track: oklch(0.922 0 0);
+
   /* 工具品牌图标双态变量（2026-10-05 台账重映射，docs/design/tool-color-ledger.md）：
    * ToolIcon SVG 经 style var() 引用，桌面+移动共用一份语义 */
   --tool-claude-bg: #d97757;
@@ -86,6 +94,12 @@
   --border: oklch(0.269 0 0);
   --input: oklch(0.269 0 0);
   --ring: oklch(0.439 0 0);
+
+  /* 用量图表三变量（计划② Task 4，深色档）：与 `:root` 同键、取值不同（夜间可读性）；
+   * 取色纪律与「分享图不消费」的例外见上一条注释。 */
+  --usage-accent-a: #60a5fa;
+  --usage-accent-b: #a78bfa;
+  --usage-track: oklch(0.269 0 0);
 
   /* 工具品牌图标夜间表（2026-10-05 台账夜间规则）：黑系图标反形/亮描边，
    * 彩色系提亮至夜卡底对比达标；数值与 mobile.css 同源 */
