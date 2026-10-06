@@ -414,7 +414,7 @@ pub fn availability_table() -> Vec<UsageAvailability> {
     out.push(mk(
         UsageMetric::LongestTurn,
         |c| c.longest_turn,
-        "逐工具 p50 + 最长，不跨工具合计；**含挂机、未剔 idle**（D19）；dsh 仅覆盖有原始日志的会话（本机 19/99）、workbuddy 无 duration 字段",
+        "逐工具 p50 + 最长，不跨工具合计；**含挂机、未剔 idle**（D19）；dsh 仅覆盖有原始日志的会话（覆盖率随机器与清理策略变化，2026-10-06 实测账本口径已接近全量）、workbuddy 无 duration 字段",
     ));
     out.push(mk(
         UsageMetric::ToolCalls,
@@ -841,27 +841,59 @@ pub fn csv_with_conn(
     Ok(out)
 }
 
-/// CSV 字段转义（RFC 4180）：含 `,` `"` `\n` `\r` 时用双引号包裹，并把 `"` 翻倍。
+/// CSV 字段转义（RFC 4180）+ **公式注入中和**。两件事都要做，**顺序**如下：
+/// ① **先中和**：内容以 `=` `+` `-` `@` `\t` `\r` `\n` 开头 ⇒ 最前面补一个单引号 `'`（Excel /
+///    Sheets / LibreOffice 通用的「当作文本」前缀，不会被显示成内容的一部分）。`groupKey` /
+///    `label` 两列直接写原始文本，而**项目维度下 `label` 就是项目文件夹名** ⇒ 不中和时，一个
+///    clone 到 `=cmd|'/C calc'!A0` 的仓库目录名会让打开导出 CSV 的人**执行命令**。
+///    只处理 `=` 不够：`+` `-` `@` 同样触发公式；**`\t` / `\r` / `\n` 是「隐形前缀」**——Excel /
+///    Sheets 会先剥掉行首空白（含换行）再判公式，故它们等价于把公式藏在第二个字符。
+///    中和只按**首字符**判 ⇒ 加 `\n` 的代价为零：`a\nb` 这类「换行不在首位」的内容逐字不变。
+/// ② **再按 RFC 4180 包裹**：含 `,` `"` `\n` `\r` 时用双引号包裹，并把 `"` 翻倍。
+///    顺序不可颠倒：**加完前缀的串才是要被包裹的内容**（`'` 本身不是特殊字符，两件事互不干扰，
+///    但先包裹后加前缀会产出 `"'…"` 之外的错形态）。
+///
+/// **防过度转义**：不含上述任何字符的内容（正常项目名 / 模型名 / 空串）**逐字不变**。
 ///
 /// **对任务书代码的最小偏离（F-1，已申报）**：多判一个 `\r`。RFC 4180 里 **CR 也是记录分隔符**，
 /// 只判 `\n` 时「含孤立 CR 的字段」会以裸形态导出 → 一条记录被 Excel 劈成两条（静默错行）。
 /// `\r\n` 本就会因 `\n` 命中，所以这条只影响孤立 CR；判据与期望值**一字未改**，回退面 1 行。
 pub(crate) fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('"', "\"\""))
+    // ① 公式注入中和（**先**做）：`chars().next()` 而不是 `starts_with` × 7——一次取首字符即可
+    let neutralize = matches!(
+        s.chars().next(),
+        Some('=') | Some('+') | Some('-') | Some('@') | Some('\t') | Some('\r') | Some('\n')
+    );
+    let body = if neutralize {
+        format!("'{s}")
     } else {
         s.to_string()
+    };
+    // ② RFC 4180 引号包裹（**后**做，判的是加完前缀的串）
+    if body.contains(',') || body.contains('"') || body.contains('\n') || body.contains('\r') {
+        format!("\"{}\"", body.replace('"', "\"\""))
+    } else {
+        body
     }
 }
 
-/// 浮窗第 4 行「本会话 X」= **最近有活动的会话**（`lastSeenAt` 最大者，
-/// **不是**当前打开的会话），其用量按**当前 range** 统计；无会话 → `None`。
+/// 浮窗第 4 行「本会话 X」= **最近有活动的会话**（`lastSeenAt` 最大者，**且本期窗口内真的量到过
+/// 请求输入**；**不是**当前打开的会话），其用量按**当前 range** 统计；无这种会话 → `None`。
 ///
 /// **日档一律 `None`**（GC 7 / 评审判决 A）：日聚合行**不带 `session_id`**（见 `LedgerRow::session_id`），
 /// 日档无法按会话取数。若照旧让它在空集上聚合，UI 会拿到一个 `buckets` 全 0 的 `recentSession`，
 /// 显示成「**本会话 0**」——一个**看起来像真实测量值的 0**；正确语义是「不可得」。
 /// 契约里该块本身可空（`RecentSessionUsage | null`），故日档给 `null` 是契约内的正确表达。
-/// 小时档（浮窗默认「今日 / 近 5 小时」）不受影响；`miniBarRange = last7d` 时由 UI 显示空态。
+/// `miniBarRange = last7d` 时由 UI 显示空态。
+///
+/// **小时档同样要防这个形状（2026-10-06 评审 C1 修复）**：候选必须**限定在「本期窗口内真的
+/// 量到过请求输入（`request_total > 0`）」的会话**里 ——注意是「**有量**」、不是仅仅「有行」：
+/// 四桶全零的**真空回合**行同样不算量（见下）。旧实现取**全时全量**会话里 `last_seen_at`
+/// 最大者、再拿窗口内的行去过滤它 ——
+/// 那个会话在窗口内一行都没有时，`aggregate(&[])` 给出**全 0**，而 `Some` 照样返回 ⇒ 浮窗
+/// 显示「本会话 X 0」，与日档被禁掉的**是同一个假测量值**。真机高频可达：`miniBarRange`
+/// 默认 `today`，而「最近被看到的会话」完全可以是昨天的（`last_seen_at` 由会话板上板刷新，
+/// 与「本期有没有用量」无关）。
 fn recent_session_with(
     conn: &rusqlite::Connection,
     rows: &[LedgerRow],
@@ -870,8 +902,25 @@ fn recent_session_with(
     if granularity == RangeGranularity::Day {
         return None;
     }
+    // **候选只认「真的量到过请求输入」的行**（2026-10-06 修复轮①；只判「有行」是不够的）。
+    // 这一层同时挡住三种形状：
+    //  ① 窗口内一行都没有（`rows` 空 ⇒ 候选空 ⇒ 下面的 `?` 给 `None`）；
+    //  ② 孤儿明细行（会话维度表里查不到 ⇒ 拿不到 title）；
+    //  ③ **真空回合**：四桶全零、但 `requests ≥ 1` 的行（claude / opencode / zcode 都会落这种行，
+    //     真机账本实测 **15 行 / 50 requests**；`semantics.rs` 刻意保留它并计一次请求）。
+    //     它不是「本会话有用量」—— 只看「有行」的话仍会选中它，第④行照样印「本会话 X 0」，
+    //     而那正是本方法要根除的假测量值。
+    let present: std::collections::HashSet<(&str, &str)> = rows
+        .iter()
+        .filter(|r| r.request_total > 0)
+        .map(|r| (r.source_id.as_str(), r.session_id.as_str()))
+        .collect();
     let sessions = crate::database::dao::usage::load_sessions_conn(conn, None);
-    let latest = sessions.iter().max_by_key(|s| s.last_seen_at)?;
+    // `?`：候选为空（窗口内没有任何会话量到过请求输入）或在会话维度表里都查不到 ⇒ 如实给 `None`。
+    let latest = sessions
+        .iter()
+        .filter(|s| present.contains(&(s.source_id.as_str(), s.session_id.as_str())))
+        .max_by_key(|s| s.last_seen_at)?;
     let mine: Vec<LedgerRow> = rows
         .iter()
         .filter(|r| r.source_id == latest.source_id && r.session_id == latest.session_id)
@@ -2195,6 +2244,226 @@ mod tests {
         );
     }
 
+    /// **C1 回归（2026-10-06 评审）**：小时档里 `last_seen_at` 最大的那个会话**在窗口内一行都没有**
+    /// 时，**不得**返回 `Some(全 0)`——那是与日档被禁掉的**同一个假测量值**（UI 会显示「本会话 X 0」）。
+    /// 判据两条：① 退到「窗口内**真的有行**」的会话里最新的那个；② 窗口内一个会话都没有 ⇒ 整体 `null`。
+    ///
+    /// 真机可达且高频：`miniBarRange` 默认 `today`，而「最近被看到的会话」完全可以是昨天的
+    /// （`last_seen_at` 由会话板上板刷新，与「本期有没有用量」无关）。
+    #[test]
+    fn recent_session_never_fakes_a_zero_for_a_session_outside_the_window() {
+        let conn = mem_empty();
+        // ① 窗口内**有**行的会话（被看到的时刻更早）
+        add_session_at(
+            &conn,
+            "claude",
+            "s-in-window",
+            "proj",
+            "Proj",
+            1_000,
+            Some("窗口内".into()),
+            false,
+        );
+        add_spec(
+            &conn,
+            "claude",
+            "s-in-window",
+            "proj",
+            "2026-10-03T11",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 42,
+                    output: 8,
+                    ..Default::default()
+                },
+                request_total: 42,
+                user_est: Some(1),
+                ..Default::default()
+            },
+        );
+        // ② 被看到得**更晚**、但只发生在窗口**之外**（另一个月）的会话 —— 它就是旧实现会选中的那个
+        add_session_at(
+            &conn,
+            "codex",
+            "s-outside",
+            "proj",
+            "Proj",
+            9_999,
+            Some("窗口外".into()),
+            false,
+        );
+        add_spec(
+            &conn,
+            "codex",
+            "s-outside",
+            "proj",
+            "2026-09-01T11",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 999,
+                    ..Default::default()
+                },
+                request_total: 999,
+                ..Default::default()
+            },
+        );
+
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        let rs = d
+            .recent_session
+            .expect("窗口内有会话（claude/s-in-window）⇒ 必须有值");
+        assert_eq!(
+            (rs.source_id.as_str(), rs.session_id.as_str()),
+            ("claude", "s-in-window"),
+            "必须退到**窗口内有行**的会话，而不是 `last_seen_at` 更大但窗口内一行为空的那个 \
+             （旧实现会选 codex/s-outside 并返回全 0 ⇒ 浮窗印「本会话 Codex 0」）"
+        );
+        assert_eq!(
+            rs.buckets.input_fresh, 42,
+            "且绝不能是全 0 的假测量值（假 0 正是本条要防的形状）"
+        );
+        assert_eq!(rs.title.as_deref(), Some("窗口内"));
+
+        // ③ 窗口内**一个会话都没有**（只有窗口外的会话）⇒ 整体 `null`，而不是 `Some(全 0)`
+        let later = local_ms(2026, 10, 20, 12, 0);
+        let d2 = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            later,
+        )
+        .unwrap();
+        assert!(
+            d2.recent_session.is_none(),
+            "窗口内没有任何会话行 ⇒ `null`（不得给 `Some(全 0)`，那会被浮窗显示成「本会话 0」）"
+        );
+    }
+
+    /// **真空回合不算「本会话有用量」**（2026-10-06 修复轮①）。
+    ///
+    /// 「窗口内**有行**」不足以排除假零：claude / opencode / zcode 都会落「四桶全零、但 `requests ≥ 1`」
+    /// 的**真空回合**行（`semantics.rs` 刻意保留并计一次请求；真机账本实测 **15 行 / 50 requests**）。
+    /// 只按「有行」选候选，仍会选中一个四桶全零的会话 ⇒ 浮窗第④行印「本会话 X **0**」——
+    /// 与本次要根除的假测量值是**同一个形状**。故候选必须限定在「`request_total > 0`」的行上。
+    #[test]
+    fn vacuum_turn_rows_do_not_count_as_in_window_usage() {
+        let conn = mem_empty();
+        // ① 只有**真空回合**的会话，且 `last_seen_at` 最新（只判「有行」的实现会选中它）
+        add_session_at(
+            &conn,
+            "claude",
+            "s-vacuum",
+            "proj",
+            "Proj",
+            9_999,
+            Some("真空".into()),
+            false,
+        );
+        add_spec(
+            &conn,
+            "claude",
+            "s-vacuum",
+            "proj",
+            "2026-10-03T11",
+            RowSpec {
+                buckets: UsageBuckets::default(), // 四桶全零
+                request_total: 0,
+                requests: 3, // 但确实计了 3 次请求（这就是真空回合）
+                ..Default::default()
+            },
+        );
+        // ② 窗口内**真有**请求输入的另一个会话（被看到的时刻更早）
+        add_session_at(
+            &conn,
+            "codex",
+            "s-real",
+            "proj",
+            "Proj",
+            1_000,
+            Some("真用量".into()),
+            false,
+        );
+        add_spec(
+            &conn,
+            "codex",
+            "s-real",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 500,
+                    ..Default::default()
+                },
+                request_total: 500,
+                ..Default::default()
+            },
+        );
+
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert!(
+            d.totals.requests >= 3 && !d.rows.is_empty(),
+            "前提：真空回合把窗口撑成「非空」⇒ 看板不判空、浮窗 `live` 为真（假零正是在这个面上现形）"
+        );
+        let rs = d.recent_session.expect("窗口内有真有量的会话 ⇒ 必须有值");
+        assert_eq!(
+            (rs.source_id.as_str(), rs.session_id.as_str()),
+            ("codex", "s-real"),
+            "**真空回合不算用量**：不得因 `last_seen_at` 更大就选中 `s-vacuum`（那样第④行印「本会话 Claude 0」）"
+        );
+        assert_eq!(rs.buckets.input_fresh, 500);
+
+        // ③ 整窗**只有**真空回合 ⇒ 整体 `null`，而不是 `Some(全 0)`
+        let only_vacuum = mem_empty();
+        add_session_at(
+            &only_vacuum,
+            "claude",
+            "s-vacuum",
+            "proj",
+            "Proj",
+            9_999,
+            Some("真空".into()),
+            false,
+        );
+        add_spec(
+            &only_vacuum,
+            "claude",
+            "s-vacuum",
+            "proj",
+            "2026-10-03T11",
+            RowSpec {
+                buckets: UsageBuckets::default(),
+                request_total: 0,
+                requests: 3,
+                ..Default::default()
+            },
+        );
+        let d3 = dashboard_with_conn(
+            &only_vacuum,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            now,
+        )
+        .unwrap();
+        assert!(
+            d3.recent_session.is_none(),
+            "整窗只有真空回合 ⇒ `null`（`requests ≥ 1` 会让它看起来「有数据」，但对「本会话」而言没有量）"
+        );
+    }
+
     /// 取数辅助的边界：**空键集 → 零行**（不查表）；**非连续键集 → 只回键集内的行**
     /// （`keys.contains` 过滤不能省：区间查询按 `BETWEEN first..last` 取数，键集中间缺桶时
     /// 那些桶的行**必须**被剔掉，否则环比/趋势会混入窗口外的数据）。
@@ -3056,7 +3325,92 @@ mod tests {
         );
     }
 
-    /// `apply_filters` 的**逐维度**锁（任务书只通过 records 间接考到 `tool_ids` 与 `parentsOnly`）：
+    /// **CSV 公式注入中和（2026-10-06 第三轮安全修复）**：导出的 `groupKey` / `label` 两列直接写原始
+    /// 文本，而**项目维度下 `label` 就是项目文件夹名** ⇒ 一个 clone 到 `=cmd|'/C calc'!A0` 的仓库
+    /// 目录名会让用 Excel / Sheets / LibreOffice 打开 CSV 的人**执行命令**（以 `=` `+` `-` `@`
+    /// 开头的单元格都被当公式；`\t` / `\r` 是「隐形前缀」——Excel 先剥前导空白再判公式）。
+    ///
+    /// 修法 = 最前面加一个**单引号** `'`（三家用通用的「当作文本」前缀，不会显示成内容的一部分），
+    /// **然后**再按 RFC 4180 判要不要双引号包裹——**两件事都要做**且顺序如此（加完前缀的串才是
+    /// 被包裹的内容）。**能变红**：去掉中和那几行 → 本用例红（见报告「变异验证」）。
+    #[test]
+    fn csv_neutralizes_formula_prefixes_so_names_are_not_executed() {
+        // ① 单测：五种前缀**逐个**中和（`=` 不是唯一触发字符；只处理 `=` 的实现会在②那一组红）
+        assert_eq!(csv_escape("=1+1"), "'=1+1");
+        assert_eq!(csv_escape("+A1"), "'+A1", "`+` 同样触发公式");
+        assert_eq!(csv_escape("-A1"), "'-A1", "`-` 同样触发公式");
+        assert_eq!(csv_escape("@SUM(A1)"), "'@SUM(A1)", "`@` 同样触发公式");
+        assert_eq!(
+            csv_escape("=cmd|'/C calc'!A0"),
+            "'=cmd|'/C calc'!A0",
+            "真机形态的目录名"
+        );
+        assert_eq!(
+            csv_escape("\tTAB"),
+            "'\tTAB",
+            "制表符是「隐形前缀」：Excel 剥掉它之后照样判公式"
+        );
+        // **`\n` 同属「隐形前缀」**（2026-10-06 第四轮补）：加它的**代价为零** —— 中和判据只看
+        // **首字符**，故既有 `a\nb`（首字符是 `a`）逐字不变（下一组的回归锚），只有**以 `\n` 开头**
+        // 的标签才多一个 `'`。同时它自己又是 RFC 4180 的记录分隔符 ⇒ 这一例**两种处理同时生效**
+        // （先加 `'`、再双引号包裹）。
+        assert_eq!(csv_escape("\n=1+1"), "\"'\n=1+1\"");
+        assert_eq!(csv_escape("\nPLAIN"), "\"'\nPLAIN\"");
+        // ③ 两种处理**同时生效**：先加 `'`，再按 RFC 4180 包裹（`'=a,b` → `"'=a,b"`）
+        assert_eq!(csv_escape("=a,b"), "\"'=a,b\"");
+        assert_eq!(csv_escape("=a\"b"), "\"'=a\"\"b\"");
+        assert_eq!(
+            csv_escape("\rCR"),
+            "\"'\rCR\"",
+            "CR 既是隐形前缀又是记录分隔符"
+        );
+        // ④⑤ **防过度转义**：不含特殊字符的正常标签、以及空串，逐字不变
+        assert_eq!(csv_escape("multiagents-manager"), "multiagents-manager");
+        assert_eq!(csv_escape("DeepSeek-plugins"), "DeepSeek-plugins");
+        assert_eq!(csv_escape(""), "");
+        // ⑥ 既有边界（逗号 / 引号 / 换行）不带前缀时仍是老形态（回归锚）
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
+        assert_eq!(csv_escape("a\nb"), "\"a\nb\"");
+        assert_eq!(csv_escape("a\rb"), "\"a\rb\"");
+
+        // ② 端到端：真机路径（`csv_with_conn` 的 `groupKey` / `label` 两列）里必须是中和后的形态
+        let conn = mem_empty();
+        add_spec(
+            &conn,
+            "claude",
+            "evil",
+            "evil",
+            "2026-10-03T10",
+            RowSpec {
+                buckets: UsageBuckets {
+                    input_fresh: 30,
+                    ..Default::default()
+                },
+                request_total: 30,
+                ..Default::default()
+            },
+        );
+        add_session(&conn, "claude", "evil", "evil", "=cmd|'/C calc'!A0");
+        let now = local_ms(2026, 10, 3, 12, 0);
+        let csv = csv_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Project,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        assert!(
+            csv.contains("evil,'=cmd|'/C calc'!A0,30,"),
+            "项目目录名以 `=` 开头时必须被中和成 `'=…`：{csv}"
+        );
+        assert!(
+            !csv.contains("\nevil,=cmd") && !csv.starts_with("evil,=cmd"),
+            "裸的公式前缀不得出现在 label 列：{csv}"
+        );
+    }
+
     /// 五个维度逐个可断言、组合是 AND、**空列表 = 不过滤**（不是「全滤掉」）、
     /// `parentsOnly` 只剔**真为子代理**的 `(源, 会话)` 对（表里查不到的一律按 false 保留）。
     #[test]
@@ -4613,6 +4967,17 @@ mod tests {
     /// **形状**（多源混存、空模型行、跨小时 `(0, ms>0)`、`user_est` 为 NULL）只有真库才有。
     /// 本用例**只读**打开真库（`SQLITE_OPEN_READ_ONLY`，**绝不写**），只断言**与具体数字无关的
     /// 不变量**；真机数字一律 `println!` 作报告证据，不钉死（否则换台机器就红）。
+    ///
+    /// **⚠️ 本用例是「刻意的只读例外」（Task 16 / 2026-10-03 真机数据隔离守卫：勿改、勿删、勿"统一"）**：
+    /// 它是全仓**唯一**需要真机数据**形状**的用例，天然安全——因为它**绕开了全部三条真机可达路径**：
+    /// ① 用**显式路径**自开连接（`MAM_HOME` 优先、否则 `dirs::home_dir()`）——**不走**
+    ///    `database::connection::app_data_home()`（Step 2 那个 `cfg(test)` 重定向分支在它这里
+    ///    **根本不存在**，它也没被重定向影响）；
+    /// ② **不走** `database::open()`、也**不碰**进程级 `DB`（设置读的是 `settings::load_from_conn`）；
+    /// ③ 连接以 `SQLITE_OPEN_READ_ONLY` 打开，物理上写不进去。
+    /// 再加 `#[ignore]`（不在常规门禁里），它既不会被 `cargo test` 顺带跑到，也不可能写账本。
+    /// 后来者**不要**「顺手统一」成 `app_data_home()`——那会把它变成 Step 2 的测试对象，
+    /// 同时毁掉它存在的唯一理由（读真机数据的**形状**）。
     #[test]
     #[ignore = "真机冒烟：需 ~/.mam/mam.db（只读打开）"]
     fn real_ledger_dashboard_smoke() {

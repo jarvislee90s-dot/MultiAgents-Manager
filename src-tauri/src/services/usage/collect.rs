@@ -320,8 +320,35 @@ fn collect_sources(
 
 /// 一轮完整采集（7 源串行；单源失败不影响其他源）
 pub fn run_collection(now_ms: i64) -> UsageCollectResult {
+    // ── Task 16 Step 3：lib 单测构建下的**采集拒绝闸**（写在生产函数体内）──────────────
+    // 事故事实（唯一需要记住的因果）：lib 测试是**独立 crate**、不经 `tests/support.rs::setup()`
+    // ⇒ 本函数既用 `dirs::home_dir()` 解析**真实**扫描根，又会经 `load_cursors` / `apply_delta`
+    // 取**进程级 `DB`**（那时也绑在真实 `~/.mam/mam.db`）。`MAM_HOME=$(mktemp -d)` **只保账本、
+    // 不保读源** ⇒ 2026-10-03 00:11 一轮真实采集落进用户账本（四表被写入、游标含真实路径）。
+    //
+    // 判据：`cfg(test)` 下**未显式设置 fixture 根（源目录覆盖）**时**响亮拒绝**——
+    // **不是**静默 0、**不是**扫真实目录。位置必须在 `settings::load()` **之前**：
+    // 那是本函数第一个全局 DB 入口（会取 `DB` 锁）。
+    // 生产构建、以及本仓集成测试（链接的是**非 test** 构建）里本闸不存在。
+    #[cfg(test)]
+    {
+        if tests::fixture_home().is_none() {
+            panic!(
+                "usage 采集在 lib 单测构建里被拒绝：未显式设置 fixture 根（源目录覆盖）。\
+                 lib 测试不经 tests/support.rs::setup()，本函数会用 dirs::home_dir() 扫**真实**\
+                 源目录、并把结果写进进程级 DB（2026-10-03 00:11 事故）。\
+                 需要真跑的用例请先调 tests::set_fixture_home(Some(<tempdir>))。"
+            );
+        }
+    }
+
     let started = std::time::Instant::now();
     let settings = super::settings::load();
+    // 扫描根：生产一半逐字不变（`dirs::home_dir()`）；lib 单测一半只认 fixture 根
+    // ——`MAM_HOME` 保账本，fixture 根保**读源**，两半都要在。
+    #[cfg(test)]
+    let home = tests::fixture_home().expect("上面那道拒绝闸已断言 fixture 根存在");
+    #[cfg(not(test))]
     let home = dirs::home_dir().unwrap_or_default();
     let load_cursors = |sid: &str| crate::database::dao::usage::load_cursors(sid);
     // 落库走 `ledger::apply_delta`（分批短事务 + 批间让出，GC 2）；返回值只用于成败判定
@@ -438,6 +465,21 @@ pub fn collect_with(
 }
 
 pub fn collect(force: bool) -> UsageCollectResult {
+    // ── Task 16 Step 3：同一道**采集拒绝闸**（`collect()` 正是 2026-10-03 被注入生产文件的
+    // 那一句）。它比 `run_collection()` 更早一步：`collect_with` 会先经 `settings::load()`
+    // 取全局 `DB` 锁，所以拒绝必须发生在进入 `collect_with` **之前**。
+    // 判据与文案与 `run_collection()` 的同名守卫**同源**（`tests::fixture_home()`）。
+    #[cfg(test)]
+    {
+        if tests::fixture_home().is_none() {
+            panic!(
+                "usage 采集在 lib 单测构建里被拒绝：未显式设置 fixture 根（源目录覆盖）。\
+                 lib 测试不经 tests/support.rs::setup()，采集会用 dirs::home_dir() 扫**真实**\
+                 源目录、并把结果写进进程级 DB（2026-10-03 00:11 事故）。\
+                 需要真跑的用例请先调 tests::set_fixture_home(Some(<tempdir>))。"
+            );
+        }
+    }
     collect_with(force, super::now_ms(), &run_collection)
 }
 
@@ -523,6 +565,157 @@ mod tests {
             sources: Vec::new(),
             total_new_records: 0,
         }
+    }
+
+    /// **Task 16 Step 3 的 fixture 根（源目录覆盖）**：`cfg(test)` 下 `collect()` /
+    /// `run_collection()` 只认它——没设置就**响亮拒绝**（见两处生产函数体里的拒绝闸）。
+    ///
+    /// **为什么放在排除区里**（自省锁的落点纪律）：它是**测试辅助顶层项的存储**，
+    /// 不是生产代码；放 BEGIN 之前会落进「生产半边」判据面。守卫本身（`if …panic!`）
+    /// 按纪律写在 `collect()` / `run_collection()` 的**生产函数体内**，只经这对
+    /// `pub(super)` 存取口读它——两边都在 `cfg(test)` 之下，生产构建里一个字都不存在。
+    static FIXTURE_HOME: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+    /// 当前 fixture 根（`None` = 没设置过 ⇒ 采集入口一律拒绝）。
+    pub(super) fn fixture_home() -> Option<PathBuf> {
+        FIXTURE_HOME
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// 设置 / 复位 fixture 根。要真跑采集的用例必须先调它（传一个**临时目录**）。
+    pub(super) fn set_fixture_home(home: Option<PathBuf>) {
+        *FIXTURE_HOME.lock().unwrap_or_else(|e| e.into_inner()) = home;
+    }
+
+    /// **fixture 根的 Drop 守卫**（Task 16 修复轮 1 / Minor 3）：把它从「手工复位的纪律」变成
+    /// **无条件不变量**。
+    ///
+    /// 为什么必须这样：`FIXTURE_HOME` 是**进程级全局**，靠用例体末尾 `set_fixture_home(None)`
+    /// 复位属于「只要中间 panic 就失效」的纪律 —— 一旦某个用例在设位与复位之间 panic
+    /// （断言失败、或被测代码把 panic 传染出来），**后续每个用例**都会一直拿到这个
+    /// 「指向（可能已不存在的）临时路径的根」：采集不会被拒绝，而是安静地去扫一个空目录
+    /// ⇒ **响亮锁被悄悄降级成静默绿**。RAII 后 panic 展开也会走 `Drop`，复位无条件成立。
+    /// 声明顺序也有讲究：`_g`（串行锁）必须先声明 ⇒ 后析构 ⇒ 复位发生在**仍持锁时**。
+    struct FixtureHomeGuard;
+
+    impl FixtureHomeGuard {
+        fn pin(home: Option<PathBuf>) -> Self {
+            set_fixture_home(home);
+            Self
+        }
+    }
+
+    impl Drop for FixtureHomeGuard {
+        fn drop(&mut self) {
+            set_fixture_home(None);
+        }
+    }
+
+    /// **锁表第 2 条「采集拒绝」**：`cfg(test)` 下**没有** fixture 根时调采集入口 ⇒
+    /// **响亮失败**（panic），不是静默 0、更不是扫真实目录。
+    ///
+    /// 为什么用 `catch_unwind` 而不是「让它直接炸」：本用例要**断言那个 panic 存在**——
+    /// 不 catch 的话 panic 会让本用例自己变红，红灯不能当锁。panic 文案照常经**默认 panic
+    /// hook** 打到测试输出（本用例不替换 hook）⇒「响亮」这一半是真可观测的；
+    /// 而任何**真实**触发（例如把 `collect(false)` 注入生产文件，见 Step 5 重演）都会让
+    /// **被注入的那个用例**失败并把这段文案打进 failures 段。
+    #[test]
+    fn collection_is_refused_without_an_explicit_fixture_root() {
+        let _g = exclusive();
+        reset_state_for_test();
+        let _fixture = FixtureHomeGuard::pin(None); // 「没设置过」（Drop 会无条件复位）
+
+        fn message_of(e: &(dyn std::any::Any + Send)) -> String {
+            e.downcast_ref::<String>()
+                .cloned()
+                .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_else(|| "（非字符串 panic 载荷）".to_string())
+        }
+
+        let calls_before = collect_calls();
+
+        // ① `collect(false)` —— 事故里被注入生产文件的正是这一句
+        let payload = std::panic::catch_unwind(|| collect(false)).expect_err(
+            "cfg(test) 下未设置 fixture 根时 `collect(false)` 必须**响亮失败**：\
+             静默返回一个 0 结果、或照旧扫真实源目录，都等于事故复现",
+        );
+        let msg = message_of(payload.as_ref());
+        assert!(
+            msg.contains("fixture 根") && msg.contains("被拒绝"),
+            "拒绝文案必须点明原因（否则下次真红又要花一轮定位），实际：{msg}"
+        );
+
+        // ② `collect(true)`（强制轮，绕过最小间隔窗口）同样拒绝——不得有「force 就放行」的后门
+        assert!(
+            std::panic::catch_unwind(|| collect(true)).is_err(),
+            "`collect(true)` 也必须被拒绝（force 不得成为绕过拒绝闸的后门）"
+        );
+
+        // ③ `run_collection()` 直调同样拒绝——它才是真正碰 `dirs::home_dir()` 与进程级 `DB` 的那个
+        assert!(
+            std::panic::catch_unwind(|| run_collection(1_700_000_000_000)).is_err(),
+            "`run_collection()` 也必须被拒绝（`collect()` 之外还有它这一个入口）"
+        );
+
+        // ④ 拒绝必须是「**没开始**」：连采集轮次都不许计入（否则「响亮」就只是事后响）
+        assert_eq!(
+            collect_calls(),
+            calls_before,
+            "被拒绝的采集调用不得计入 `COLLECT_CALLS`（一轮都没开始跑）"
+        );
+
+        reset_state_for_test();
+    }
+
+    /// **Minor 3 的锁**：fixture 根的复位必须是**无条件不变量**（panic 展开也走 `Drop`），
+    /// 而不是「用例体末尾手工调一次」的纪律。
+    ///
+    /// 为什么值得单列成用例：靠手工复位时，只要**任何一个**用例在「设位 → 复位」之间 panic
+    /// （断言失败、或被测代码把 panic 传染出来），进程级 `FIXTURE_HOME` 就会一直留着那个根
+    /// ⇒ 后续用例的 `collect()` / `run_collection()` **不再被拒绝**，而是安静地去扫一个
+    /// 空目录 ⇒ **响亮锁被静默降级**（正是本任务要防的那一类「假绿」）。
+    /// 判据三条：① 守卫存活期间根已设；② 正常离开作用域后回 `None`；
+    /// ③ **panic 展开后同样回 `None`**，且此后 `collect(false)` 重新回到「响亮拒绝」。
+    #[test]
+    fn fixture_home_guard_resets_even_on_panic() {
+        let _g = exclusive();
+        reset_state_for_test();
+        let probe = PathBuf::from("/tmp/mam-fixture-guard-probe");
+
+        // ①② 正常作用域
+        {
+            let _f = FixtureHomeGuard::pin(Some(probe.clone()));
+            assert_eq!(
+                fixture_home(),
+                Some(probe.clone()),
+                "守卫存活期间 fixture 根必须已设"
+            );
+        }
+        assert_eq!(fixture_home(), None, "守卫离开作用域后必须复位");
+
+        // ③ panic 展开路径
+        let caught = std::panic::catch_unwind(|| {
+            let _f = FixtureHomeGuard::pin(Some(PathBuf::from("/tmp/mam-fixture-guard-probe")));
+            panic!("模拟用例中途 panic（断言失败 / 被测代码把 panic 传染出来）");
+        });
+        assert!(
+            caught.is_err(),
+            "本腿必须真的 panic（否则测的不是展开路径）"
+        );
+        assert_eq!(
+            fixture_home(),
+            None,
+            "**panic 展开后也必须复位**——否则后续用例会一直拿到这个根，\
+             「无 fixture 根 ⇒ 响亮拒绝」的锁就被静默降级成「安静扫空目录」"
+        );
+        assert!(
+            std::panic::catch_unwind(|| collect(false)).is_err(),
+            "复位后 `collect(false)` 必须重新回到「响亮拒绝」（锁没有被降级）"
+        );
+
+        reset_state_for_test();
     }
 
     /// 契约 §3：`force=false` 且距上次采集小于 `collectIntervalMin` → **直接返回上次结果（不扫描）**
@@ -775,6 +968,11 @@ mod tests {
     /// 总开关关闭 → 不采集、不落库（说明书 §P7）
     /// **零 DB**：设置走内存注入；关闭后 `run_collection` 在读设置之后立即返回，
     /// 连 `load_cursors` 都不会走到（旧版会写开发机真实库）。
+    ///
+    /// **Task 16 追加**：`run_collection` 在 `cfg(test)` 下要求**显式** fixture 根（源目录覆盖）。
+    /// 本用例断言的是「总开关关闭 → 一个源都不跑」，故给一个**固定不存在的空根**：
+    /// 即便总开关判断被删掉，采集也只会在这个空目录里一无所获——**不会**碰真实源目录。
+    /// 断言一字未松。
     #[test]
     fn disabled_switch_skips_all_sources() {
         let _g = exclusive();
@@ -783,10 +981,16 @@ mod tests {
             enabled: false,
             ..Default::default()
         }));
+        // fixture 根走 **Drop 守卫**（Minor 3）：即便本用例中途 panic（断言失败 / 被测代码
+        // 把 panic 传染出来），复位也无条件发生 —— 否则后续用例会一直拿到这个空根，
+        // 把「无 fixture 根 ⇒ 响亮拒绝」的锁**悄悄降级**成「有根 ⇒ 安静扫空目录」。
+        let _fixture = FixtureHomeGuard::pin(Some(
+            std::env::temp_dir().join("mam-usage-fixture-must-not-exist"),
+        ));
         let r = run_collection(1_700_000_000_000);
         assert!(r.sources.is_empty(), "关闭后不得跑任何源");
         assert_eq!(r.total_new_records, 0);
-        settings::set_override_for_test(None); // 复位：不得影响其他用例
+        settings::set_override_for_test(None); // 复位：不得影响其他用例（`_fixture` 由 Drop 复位）
         reset_state_for_test();
     }
 
@@ -875,7 +1079,9 @@ mod tests {
             "zcode 读不到用户文本"
         );
         for s in UsageSourceId::ALL {
-            // §9.5（本轮更新）：dsh 的工具调用/逐工具为**部分覆盖**（原始日志仅 19/99 会话）
+            // §9.5（2026-10-06 更新）：dsh 的工具调用/逐工具为**部分覆盖**（原始日志并非每个会话
+            // 都还在——**比例不写死**，覆盖率随机器与清理策略变化；探测期的「19/99」已作废，
+            // 2026-10-06 实测账本口径已接近全量）
             // → 仍记 available=true，缺失会话显示空态，reason 里写明覆盖范围（不得当作全量、不得填 0）
             assert!(
                 caps_of(s).tool_calls,
@@ -1357,7 +1563,8 @@ mod tests {
     ///   文件头 → BEGIN 之前 **∪** END 之后 → 文件尾；去行内空白、剥**整行** `//` 注释）。
     ///   **实测（24 个文件逐一对账）**：20 个有测试模块的文件 = **生产半边**（标记包住测试模块）、
     ///   4 个无测试模块的文件 = **整文件**（两行标记相邻于末尾 ⇒ 排除区为空）；
-    ///   判据面合计 = **6870 行 / 148415 字符**（第 4 轮口径曾报 191434 字符：那 8 个「整文件扫描」
+    ///   判据面合计 = **6913 行 / 149440 字符**（第 12 轮同步，见 `scan_face_size_is_pinned`；
+    ///   第 4 轮口径曾报 191434 字符：那 8 个「整文件扫描」
     ///   的文件把测试代码也算进去了。本轮的"面"更小但**更准**——20 个文件 = 生产半边、4 个无测试
     ///   模块的文件 = 整文件，且 **END 之后追加的生产代码也在面内**。数字同步写进本批 commit
     ///   message 与 `FINAL-FIX-report.md`，并由 `scan_face_size_is_pinned` **逐字钉住**）。
@@ -1556,6 +1763,51 @@ mod tests {
     /// `self_lock` 就陈旧了，且**没有任何用例会发现**）。数字变了 = **判据面变了**，
     /// 必须同步本常量、锁注释、台账与报告 —— 这是「**声明 = 实际**」的机械版。
     /// 口径：`chars().count()`（**Unicode 标量 / 字符**，不是字节；与历次报告口径一致）。
+    ///
+    /// **第 8 轮同步（Task 16 Step 3，2026-10-03 真机数据隔离守卫）**：6870/148415 →
+    /// **6896/149006**（+26 行 / +591 字符）。变化**全部来自 `collect()` 与 `run_collection()`
+    /// 生产函数体内的两处 `#[cfg(test)]` **采集拒绝闸**（无 fixture 根 ⇒ 响亮拒绝）；
+    /// 新增的 fixture 根存取口与用例落在 BEGIN..END 排除区内 ⇒ **不进面**。
+    /// 钉子只同步、不放宽：本用例的断言仍是逐字相等。
+    ///
+    /// **第 9 轮同步（2026-10-06 用户裁决变更波）**：6896/149006 → **6904/149235**
+    /// （+8 行 / +229 字符）。变化**全部来自 `query.rs` 的生产半边**：`recent_session_with` 的
+    /// 文档注释与函数体内的说明改写了（「候选必须限定在**本期量到过请求输入**的会话」——即
+    /// `request_total > 0`，并写明真空回合的成因）；新增的两条用例落在 BEGIN..END 排除区内 ⇒
+    /// **不进面**。面**没有新增文件**、排除区标记未动、其余 23 个文件逐字未改。
+    ///
+    /// **第 10 轮同步（2026-10-06 清理过期「19/99」）**：6904/149235 → **6904/149263**
+    /// （**+0 行 / +28 字符**）。行数**没变**是预期：本轮的 `caps.rs` / `dsh.rs` 改动**全是整行
+    /// `//` 注释**（判据面**剥整行注释** ⇒ 既不计行也不计字符），而 `collect.rs` 自己那处改在
+    /// BEGIN..END 排除区内；**字符 +28 全部来自 `query.rs` 生产半边里那条 `LongestTurn` 的
+    /// `reason` 字符串**（把「覆盖率写死成一个比例」改成「覆盖率随机器与清理策略变化，
+    /// 2026-10-06 实测账本口径已接近全量」）。面**没有新增文件**、
+    /// 排除区标记未动、其余 22 个文件逐字未改。
+    ///
+    /// **第 11 轮同步（2026-10-06 CSV 公式注入中和）**：6904/149263 → **6913/149429**
+    /// （**+9 行 / +166 字符**）。变化**全部来自 `query.rs` 生产半边里的 `csv_escape` 一个函数体**
+    /// （**7 行 → 16 行**，与实测 **+9 行**逐字对上）：
+    ///   * 新增 `let neutralize = matches!(…四种前缀…)` —— **4 行**（`matches!` 的多行参数表
+    ///     由 rustfmt 固定成 4 行）；
+    ///   * 新增 `let body = if neutralize { … } else { … };` —— **5 行**（其中 **4 行是
+    ///     `cargo fmt` 的规范化产物**：手写时它是一行、`cargo fmt --check` 要求把它展开成块；
+    ///     这也是「先 6909、后 6913」的原因，**字符数两次都是 149429** —— 面按 `!is_whitespace`
+    ///     过滤，换行/缩进不进字符数）；
+    ///   * 原来的两处 `s.contains(…)` / `s.replace(…)` 改成 `body.…`（**0 行**，只换字符）。
+    ///
+    /// **归属已实证**：把 `csv_escape` 的函数体单独还原成旧版（7 行原样）后，本钉子**回到
+    /// 6904/149263 且通过**——即这 +9/+166 **没有第二处来源**（§8 的 `error.rs` 改动只有**整行
+    /// `//` 注释**与**行尾注释的对齐空白**变化——判据面剥空白 ⇒ 面尺寸不变；本轮新增的用例全在
+    /// BEGIN..END 排除区内）。面**没有新增文件**、
+    /// 排除区标记未动、其余 23 个文件逐字未改。
+    ///
+    /// **第 12 轮同步（2026-10-06 `csv_escape` 中和集补 `\n`）**：6913/149429 → **6913/149440**
+    /// （**+0 行 / +11 字符**）。变化**全部来自 `query.rs` 生产半边里 `csv_escape` 的
+    /// `matches!(…)` 多一个分支 `| Some('\n')`**（**11 字符**逐字对上，行数不变是因为该参数表
+    /// 本来就是一行的多行调用、加一个分支仍在同一行内 ⇒ rustfmt 不重排）。**归属**：第 12 轮
+    /// 改的另外三处（`commands/usage.rs` 的锁与辅助函数、两处文字计数）**都不在面内**
+    /// （前者在 `#[cfg(test)] mod tests` 里；`collect.rs` 的机制句在 BEGIN..END 排除区内；
+    /// 前端测试文件根本不在面内）。面**没有新增文件**、排除区标记未动、其余 23 个文件逐字未改。
     #[test]
     fn scan_face_size_is_pinned() {
         let (mut lines, mut chars) = (0usize, 0usize);
@@ -1566,7 +1818,7 @@ mod tests {
         }
         assert_eq!(
             (lines, chars),
-            (6870, 148415),
+            (6913, 149440),
             "判据面尺寸变了（实测 {lines} 行 / {chars} 字符）：本用例是**声明 = 实际**的钉子——\
              先弄清面为什么变（新增文件？改了排除区标记？动了生产代码？），再同步本常量、\
              `no_source_timezone_is_fed_into_any_key_function` 的锁注释、`KNOWN-PLAN-DEFECTS.md` \

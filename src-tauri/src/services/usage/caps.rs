@@ -87,7 +87,12 @@ pub fn caps_of(source: UsageSourceId) -> SourceCaps {
             user_est: false,
         },
         // dsh：报错与最长 turn **必须读原始 .zstd 会话日志**（投影缓存拿不到），
-        // 覆盖率受限于「本机仅 19/99 会话存在原始日志」——available=true 但 reason 说明覆盖范围
+        // 覆盖率受限于「原始日志并非每个会话都还在」——available=true 但 reason 说明覆盖范围。
+        // ⚠️ **不写死比例**（2026-10-06 起）：覆盖率随机器与清理策略变化，旧注释里的「19/99」是
+        // spec 探测期的矩阵口径，**已作废**；2026-10-06 实测账本口径已接近全量。
+        // ⚠️ 这一档**不在界面表达**（用户 2026-10-06 裁决）：可得性模型是**布尔两态**
+        // （`available` + `perSource`），没有「部分」这一档，界面只按「有值 / `EM_DASH`」呈现
+        // ——「能显示哪些就显示哪些，不能显示的就用横杠表示没有这个数据」。
         UsageSourceId::Dsh => SourceCaps {
             turn: true,
             error_model: true,

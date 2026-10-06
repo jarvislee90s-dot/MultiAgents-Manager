@@ -53,8 +53,22 @@ pub const USAGE_CODES: &[&str] = &[
     // **不得**当作"没有子代理"或"全放行"——那是界面谎言（GC 7 / 说明书 §8.2）。
     "usage-filter-unavailable",
     "usage-settings-invalid", // 设置补丁越界（负数 / 保留期 <1 / 间隔 <1）
-    "usage-disabled",         // 用量统计总开关关闭（查询返回空态而不是报错）
-    "usage-internal",         // 兜底
+    // **`usage-disabled` 是预留码：当前没有任何发射点**（2026-10-06 第三轮裁决，**刻意不改实现**）。
+    // 总开关关闭时后端返回的是**空结果**（`query.rs::empty_dashboard` / `empty_records`）而不是错误
+    // ⇒ 这个码只存在于**三处登记**里（本表 / 前端 `KNOWN_USAGE_CODES` / zh+en 的 `usage.rpc.*`），
+    // 真机上**不可达**。源码级证据 =
+    // `commands::usage::usage_disabled_stays_reserved_with_no_production_emitter`。
+    //
+    // 为什么不去「真发出来」：那会把**冻结契约**（§3）里「总开关关闭」的语义从「空结果」改成
+    // 「错误」，并打红既有用例 `master_switch_off_yields_empty_state_with_zero_collected_at`；
+    // 且该码当前**没有消费方**。
+    // **将来若要启用，需同步四处**：① 契约 §3 的返回语义；② `master_switch_off_*` 系列用例；
+    // ③ 前端 `usageErrMsg` 的展示路径（白名单与 locale 键都已就位 ⇒ **不需**新增第 4 处登记）；
+    // ④ 上面那条源码级锁（它会把新增的发射点判红，届时连同它的文档一起更新）。
+    // ⚠️ 本条注释是**整行** `//` 注释（判据面会剥掉它）⇒ 不动自省锁的面尺寸；**不要**把它改成
+    // 下面那行的行尾注释（那样会进面）。
+    "usage-disabled", // 用量统计总开关关闭（查询返回空态而不是报错）
+    "usage-internal", // 兜底
 ];
 
 // ==== usage 自省锁：以下为排除区（测试代码），勿删勿复制 ====
