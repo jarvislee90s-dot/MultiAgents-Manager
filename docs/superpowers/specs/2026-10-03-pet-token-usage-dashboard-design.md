@@ -72,7 +72,7 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 | D17 | **token 总量含子代理，但「计数类」（会话数 / turn 数）去重分层** | dsh 47/99 个投影文件本身是子代理会话、kimi 有 40 个子代理目录、codex 25 个 rollout 内含父子双线程——不分层会把一次对话算成多次。【默认裁定】本次只显示**分层后的单值 + hover 说明**，不做「展开子代理层」的交互（要展开需扩契约增 `sessionsSubagent`） |
 | D18 | **报错次数三层分列 + 用户主动打断单列** | 实测三层的「错误」互不包含：claude 的 29 条 `is_error` **全是工具被拒/退出码、零条 API 错误**，而 zcode 的 21 条是 provider 错误、工具错误另在 `tool_usage` 计 343 条——相加不表示任何含义。且「用户打断」口径各源不一（codex 那 280 条 `turn_aborted` 全是用户中断），算进故障是错的 |
 | D19 | **最长单 turn 只在「按工具」维度显示，每工具给「p50 + 最长」两个数，不做跨工具合计** | 实测跨源 max 排名实质是「谁挂机最久」（zcode 最长那轮 13h58min 竟 `status=completed`、纯挂机；codex 9.34h 同样含挂机）。且只有 opencode 有 `time_idle`/`idle_outcome`，其余六源无 idle 字段 → **无法统一剔除 idle**，故必须标注「含挂机」 |
-| D20 | **浮窗固定 5 行**：分工具明细**压成 1 行汇总**（`Codex 123.4万 · Claude 45.6万 · Kimi 12.3万`，超出折「等N」），不再是「每工具一行、最多 4 个」（**修订 D4**） | 容量统一按实现公式 `round((行数 × 17.4 + 16) × scale)` 估算（**含外沿估算**，不再保留旧的实测外沿数字）：单行高 17.4px，8 行容器 @1× = **155px**、@1.25× = **194px**；最坏组合（3 张状态卡片 + 8 行浮窗 + 1.25 倍缩放）= **738px**，而 800 逻辑高笔记本可用区仅 **≈705px** → `clampToWorkArea` 退化为顶边出屏、浮窗被裁。5 行版同口径 = 738 −（194 − 129）= **673px**（余量 ≈32px） |
+| D20 | **浮窗固定 5 行**：分工具明细**压成 1 行汇总**（`Codex 123.46万 · Claude 45.60万 · Kimi 12.35万`，超出折「等N」；样例按 2026-10-06 裁决的 2 位小数），不再是「每工具一行、最多 4 个」（**修订 D4**） | 容量统一按实现公式 `round((行数 × 17.4 + 16) × scale)` 估算（**含外沿估算**，不再保留旧的实测外沿数字）：单行高 17.4px，8 行容器 @1× = **155px**、@1.25× = **194px**；最坏组合（3 张状态卡片 + 8 行浮窗 + 1.25 倍缩放）= **738px**，而 800 逻辑高笔记本可用区仅 **≈705px** → `clampToWorkArea` 退化为顶边出屏、浮窗被裁。5 行版同口径 = 738 −（194 − 129）= **673px**（余量 ≈32px） |
 | D21 | **「按项目」分组对齐首页口径**：分组键 = `projectName.toLowerCase()`，显示名 = `projectName` 原文；**另存 realpath 规范化路径备用** | MAM 全仓只有一个命名函数 `monitor/project.rs:10 project_name_from_path`（basename，**不做** realpath / 大小写规范化 / trim / 软链解析）；若看板自行 realpath 会造出第二套「项目」概念、与首页卡片叫两个名字。已知代价：Windows 上 claude 路径被转小写而 zcode/workbuddy 保留原文，同目录可能裂组；无 cwd 的落 `Unknown` 桶 |
 
 ---
@@ -141,7 +141,7 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 | **opencode** | `~/.local/share/opencode/opencode.db` | 会话级扁平列 `tokens_input / tokens_output / tokens_reasoning / tokens_cache_read / tokens_cache_write`；逐消息 `tokens`（**无 total**） | `session.directory`（**V1/V2 同名同值**） | **直接字段**：`session.model` 与逐消息 model 均含 `providerID` | 逐消息 + 会话级 | **V1/V2 双 schema**（见 §9.1）；`cost` 恒为 0；**assistant 消息 33.9%(V1)/36.7%(V2) 四桶全 0**；工具耗时字段路径两代不同（V1 `state.time.{start,end}`、**V2 在顶层** `time.{created,completed}`，V2 的 `state` 无 time，不分支会静默拿 0）；项目**禁用 `project_id`**（`global` 哨兵吞掉 4 个不同目录） |
 | **workbuddy** | `~/.workbuddy/workbuddy.db` + `~/.workbuddy/projects/**/*.jsonl` | **逐消息 `message.usage`（在 jsonl）**——61 条中 59 条带 `cache_read_input_tokens`，**有四桶、可进命中率**；⚠️ DB 的 `session_usage.used/size` 是**上下文填充量、不是 token 桶** | DB `sessions.cwd`（精确；目录名编码不可反解） | **不可得**（DB 全表 + jsonl 全键三路搜索均空） | 逐消息 | **模型必须取 jsonl `providerData.model`**——DB 的 `sessions.model` 会过期（本机实例：DB=`hy3`、jsonl 全程 `deepseek-v4.1-flash`）；**无回合概念**（计数类不可用）；工具耗时无原生字段，靠时间戳配对（本机 69/71） |
 | **zcode** | `~/.zcode/cli/db/db.sqlite`（**762 MB 且无 `-wal/-shm` → 必须 `?immutable=1`**） | `model_usage`（逐请求）/ `turn_usage`（逐回合）/ **`tool_usage`（逐工具，31,098 行、`duration_ms` 非空率 100%——七个源里唯一有原生单工具耗时的）**；`session_target.tokens_used / token_budget` | `session.directory`（精确；`project_id` 是有损 slug，**不可反解**） | **直接字段** `provider_id` + `model_id`（本机 6 provider × 6 model） | 逐请求（最细） | 665 会话中 **118 个无 turn 行**（须左连补 0）；`status` 与 `error_type` **非一一对应**；`time_to_first_token_ms` 有 **29.2%** 为 NULL |
-| **dsh** | `~/.dsh/storages/session_projcache/sessions/*.json`（**目录是扁平的，不含项目编码**） | `record.rows.tokenUsage.val.totals.{uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`（**99/99 恒存在**） | `record.identity.cwd`（99/99 存在，9 个去重值） | **部分实测**：`rows.modelSelection.val.lastUsed.{provider,model}` 同一对象里同时有供应商与模型，但该 row **仅 36/99 存在（有值 28/99 = 28.3%）** | 会话级累计 | 四桶**无 reasoningTokens**；`val.last == null` 有 10/99（等价于「无逐轮」）；**99 个文件里 47 个本身是子代理会话**（计数类须分层，见 D17）。⚠️ **投影缓存只有 token 四桶与聚合耗时**：逐工具耗时、**报错次数、最长单 turn 都拿不到**，必须读原始 `~/.dsh/sessions/<proj>/<dir>/session[.vN].jsonl.zstd`（101 个会话目录 / 107 文件是**含全部版本文件**的口径，其中 **仅 19/99 会话存在**——报错次数 / 最长单 turn / 逐工具三类的可得性都受此约束，见 §9.5；需 zstd 解压，**复用既有 `monitor/dsh/decode.rs` 多帧 zstd 解码器**） |
+| **dsh** | `~/.dsh/storages/session_projcache/sessions/*.json`（**目录是扁平的，不含项目编码**） | `record.rows.tokenUsage.val.totals.{uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`（**99/99 恒存在**） | `record.identity.cwd`（99/99 存在，9 个去重值） | **部分实测**：`rows.modelSelection.val.lastUsed.{provider,model}` 同一对象里同时有供应商与模型，但该 row **仅 36/99 存在（有值 28/99 = 28.3%）** | 会话级累计 | 四桶**无 reasoningTokens**；`val.last == null` 有 10/99（等价于「无逐轮」）；**99 个文件里 47 个本身是子代理会话**（计数类须分层，见 D17）。⚠️ **投影缓存只有 token 四桶与聚合耗时**：逐工具耗时、**报错次数、最长单 turn 都拿不到**，必须读原始 `~/.dsh/sessions/<proj>/<dir>/session[.vN].jsonl.zstd`（101 个会话目录 / 107 文件是**含全部版本文件**的口径，其中**只有一部分会话仍留有原始日志**——**比例不写死**：覆盖率随机器与清理策略变化，探测期的「19/99」已作废（2026-10-06 实测账本口径已接近全量），见 §9.5 末的登记——报错次数 / 最长单 turn / 逐工具三类的可得性都受此约束，见 §9.5；需 zstd 解压，**复用既有 `monitor/dsh/decode.rs` 多帧 zstd 解码器**） |
 
 ### 5.2 源与工具的映射
 
@@ -186,7 +186,7 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 
 1. `请求输入 X · 命中率 Y%`（所有工具 + 所有会话加总）；
 2. `缓存命中 X · 产出 Y`；
-3. **分工具汇总（1 行）**：`Codex 123.4万 · Claude 45.6万 · Kimi 12.3万`，超出折「等N」（见 D20）；
+3. **分工具汇总（1 行）**：`Codex 123.46万 · Claude 45.60万 · Kimi 12.35万`，超出折「等N」（见 D20；样例按 2026-10-06 裁决的 2 位小数）；
 4. `本会话 X` —— 「本会话」= **最近有活动的会话**，**不是**当前打开的会话（沿用原插件轮 6 的明示定义）；数据由契约的 `recentSession` 提供（该会话在**当前时间范围**内的用量）；
 5. 尾部 `详情 »` —— **唯一可点元素**，点击直达大看板并关闭浮窗。
 
@@ -282,15 +282,22 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 
 ### P8 · 显示规范与状态（横切）
 
-**数字格式化（沿用参考实现、已被其测试钉死的规则）**：
+**数字格式化**（2026-10-06 **用户裁决修订**：精度只按「有没有单位」分两档，对**所有工具**一律生效）：
 
 | 场景 | 规则 |
 |---|---|
-| 常规 token 数值 | <1 万显示原值；<1 亿显示「万」保留 1 位小数并剥掉末尾 `.0`；≥1 亿显示「亿」保留 2 位小数并去尾零 |
+| 常规 token 数值 · **不带单位**（<1 万） | 显示原值，**小数点后 0 位**（完全整数，如 `8462`） |
+| 常规 token 数值 · 带单位「**万**」（<1 亿） | **恒 2 位小数**（如 `1.00万` / `85.00万` / `123.46万`），不再剥末尾 `.0` |
+| 常规 token 数值 · 带单位「**亿**」（≥1 亿） | **恒 2 位小数**（如 `1.00亿` / `20.00亿`），不再去尾零 |
 | hero 大数字 | **完整千分位**，不用万/亿（与常规数值刻意区分） |
 | 命中率 | 保留 1 位小数 + `%` |
 | 时长 | ≥60 秒 → 分钟（1 位小数）；≥1 秒 → 秒（1 位小数）；否则毫秒 |
 | 精确值 | 所有缩写数值都必须在 hover 时给出精确值 |
+
+> **修订说明（2026-10-06 用户裁决）**：原表为「万档 1 位小数 + 剥 `.0`、亿档 2 位小数 + 去尾零」，与
+> 「万/亿两档小数位不一致」的现象直接相关（同一个工具在两个面上因档位不同而位数不同）。用户裁决
+> 统一为「不带单位 → 0 位；带单位 → 恒 2 位」，**两档一律不再剥尾零**。唯一出处仍是
+> `src/lib/usage/format.ts` 的 `fmtTokens`（`fmtInt` 管 hero 与 hover 精确值，本就是 0 位 + 千分位）。
 
 **环比（与上一等长周期对比，见 D14）**：指标网格各项与趋势区都显示对比值。**「上一周期」= 紧邻当前区间之前的等长区间**：
 
@@ -366,7 +373,7 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 3. **供应商归因三态**：ZCode / OpenCode / Kimi 为实测，**dsh 为部分实测（28.3% 有值）**；Codex / Claude Code 等靠配置与映射推断；**WorkBuddy 完全不可得**；推断不到则只按模型维度呈现。
 4. **Codex 的 `model_provider` 无区分度**（全 `custom`）；真身靠 `config.toml` 的 `base_url`，而它只有当前值 → 需按时间采样配置快照，否则历史归因会漂移。
 5. **明细保留期之外只有日聚合**：区间越长、粒度越粗，UI 必须明示。
-6. **「工作小结」区各指标数据源已逐个源实测定案**（会话数 / turn 数 / 报错次数 / 最长单 turn / 工具调用）：参考实现取自运行时事件流，MAM 走磁盘采集，逐源结论见 §9.5 与 `research/七源字段可得性矩阵.md`；**不可得的一律显示空态而不是填 0**。其中 dsh 的报错 / 最长单 turn / 逐工具属**部分覆盖**（原始日志仅 19/99 会话存在 → `available=true + reason=部分覆盖`）。
+6. **「工作小结」区各指标数据源已逐个源实测定案**（会话数 / turn 数 / 报错次数 / 最长单 turn / 工具调用）：参考实现取自运行时事件流，MAM 走磁盘采集，逐源结论见 §9.5 与 `research/七源字段可得性矩阵.md`；**不可得的一律显示空态而不是填 0**。其中 dsh 的报错 / 最长单 turn / 逐工具属**部分覆盖**（原始日志只覆盖一部分会话 → `available=true + reason=部分覆盖`；**比例不写死**，见 §9.5 末的登记。⚠️ **该「部分覆盖」不在界面表达**——用户 2026-10-06 裁决，理由见同处登记与 `src/lib/usage/availability.ts` 的口径 ④）。
 7. **dsh 的供应商与模型维度已核实为「部分实测」**：其投影缓存 `tokenUsage.totals` 只有四桶、无路由信息；路由信息在 `rows.modelSelection.val.lastUsed.{provider,model}` 同一对象里，但该 row **仅 36/99 存在（有值 28/99 = 28.3%）**，缺失时该行只按模型维度呈现（§8.3）。
 8. **子代理 / 侧链用量已计入合计**，各源是否天然包含**已逐源实测定案**（codex 天然含、kimi 需 glob 全部 `agents/*/` 目录、claude 架构上含但本机 `isSidechain` 全 false、dsh 47/99 个投影文件本身是子代理会话，详见 §4.3）；口径说明中一律标注「含子代理」（切 `parentsOnly` 时改为「不含子代理」）。**「计数类」指标按 D17 分层**。
 9. **turn 数不跨工具合计**（D16）：各源回合判据语义不可比，只在「按工具」维度各自显示并逐源标注口径。
@@ -415,7 +422,7 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 
 | 层 | 含义 | 逐源字段（节选） |
 |---|---|---|
-| 模型 / 传输层 | provider 侧请求失败（429、认证失败等） | claude `isApiErrorMessage`+`apiErrorStatus`（本机仅 **1** 条）；codex `event_msg.type=="error"`（15）+ `task_complete.payload.error.message`（361 行 / 186 去重 turn）；kimi `turn.ended.error.code` + `turn.step.retrying`（9）；opencode `data.error.name/type`（16/19）；zcode `model_usage.status='error'`（**21**，8 类）；workbuddy `providerData.rawResponse.is_error`（4，**无分类**）；dsh 原始日志 `turn/end.reason.error.code`（6 类）+ `llm/retry`（141）→ **仅 19/99 会话存在**：`available=true + reason=部分覆盖` |
+| 模型 / 传输层 | provider 侧请求失败（429、认证失败等） | claude `isApiErrorMessage`+`apiErrorStatus`（本机仅 **1** 条）；codex `event_msg.type=="error"`（15）+ `task_complete.payload.error.message`（361 行 / 186 去重 turn）；kimi `turn.ended.error.code` + `turn.step.retrying`（9）；opencode `data.error.name/type`（16/19）；zcode `model_usage.status='error'`（**21**，8 类）；workbuddy `providerData.rawResponse.is_error`（4，**无分类**）；dsh 原始日志 `turn/end.reason.error.code`（6 类）+ `llm/retry`（141）→ **只有一部分会话仍留有原始日志**：`available=true + reason=部分覆盖`（**不在界面表达**，见 §9.5 末的登记） |
 | 回合失败 | 整轮以错误/异常结束 | codex `turn_aborted`；dsh `turn/end.reason.kind`（error 37）；zcode `turn_usage.status='error'`（8）；kimi `turn.ended.reason` / `agent.turn.ended.outcome=failed`；claude **无回合级失败字段**（显示空态） |
 | 工具失败 | 单次工具调用失败 | claude `message.content[].is_error`（**29**，5 类）—— ⚠️ **该工具回执块位于 `user` 记录内，不在 assistant 记录**；同一批 29 条在 `toolUseResult`（字符串形态）里**同行同源各出现一次，两处不可相加**（会翻倍成 58）；工具耗时的配对键是 `sourceToolAssistantUUID` → assistant 的 `uuid`；kimi `tool.result.result.isError`（168/2574）；zcode `tool_usage` error（**343**，8 类）+ `exit_code<>0`（654）；dsh `tool/result.error`（273 条，17 种组合）；codex `function_call_output` 非零退出（1,897）；opencode **不可得**（`part.state.status` 全 completed）；workbuddy `is_error`（4） |
 | **用户主动打断（单列，不计入错误）** | 用户自己取消 | zcode cancelled（`model_usage` 53 + `turn_usage` 64）；codex `turn_aborted.reason="interrupted"`（**280**）；dsh aborted 27 / interrupted 18；claude「用户拒绝工具」5 条；opencode aborted 5 |
@@ -426,13 +433,13 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 |---|---|---|
 | zcode | `turn_usage.duration_ms` | p50 310,607 ms / p90 1,227,044 / max **13 h 58 min**（>1h 有 30 轮） |
 | codex | `task_complete.payload.duration_ms` | max **9.34 h**（n=2,885 行 / 2,308 去重 turn） |
-| dsh | 原始日志 `turn/start.time`→`turn/end.time` | max **3 h 13 min**（347 轮）—— **投影缓存拿不到此指标**；原始日志**仅 19/99 会话存在** → `available=true + reason=部分覆盖` |
+| dsh | 原始日志 `turn/start.time`→`turn/end.time` | max **3 h 13 min**（347 轮）—— **投影缓存拿不到此指标**；原始日志**只覆盖一部分会话**（**比例不写死**，见 §9.5 末的登记）→ `available=true + reason=部分覆盖`（不在界面表达） |
 | claude | `system/turn_duration.durationMs` | max **70.8 min**（n=46） |
 | kimi | 原生 `turn.ended.durationMs` 仅 11 条（覆盖 5%）→ 须按 `append_loop_event.time` 推导 | max **2,156.5 s** |
 | opencode | `time.created`→`time.completed` | max **5.07 min** |
 | workbuddy | **不可得**（无任何 duration 字段） | 仅能按行 `timestamp` 推导 403.7 s → 【默认裁定】显示空态 |
 
-**工具调用次数与耗时** ⚠️ **六个源完整可得，dsh 为部分覆盖**（探测推翻了原先「参考实现口径不一致所以不做」的顾虑）；dsh 与报错 / 最长 turn 同受「原始日志仅 19/99 会话存在」约束，记 `available=true + reason=部分覆盖`：
+**工具调用次数与耗时** ⚠️ **六个源完整可得，dsh 为部分覆盖**（探测推翻了原先「参考实现口径不一致所以不做」的顾虑）；dsh 与报错 / 最长 turn 同受「原始日志只覆盖一部分会话」约束（**不写死比例**），记 `available=true + reason=部分覆盖`：
 
 | 源 | 计数 | 耗时来源 |
 |---|---|---|
@@ -442,9 +449,17 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 | claude | 377 | `sourceToolAssistantUUID`→`uuid` 配对 100%（**`toolUseResult` 上无耗时字段**，必须配对） |
 | opencode | V1/V2 各 28 | V1 `state.time.{start,end}` / V2 **顶层** `time.{created,completed}` |
 | workbuddy | 71 | 时间戳配对 69/71（无原生字段） |
-| dsh | 投影缓存**只有总耗时、没有调用次数**；次数与逐工具耗时都须走原始 `session.v4.jsonl.zstd`（**仅 19/99 会话存在** → `available=true + reason=部分覆盖`，缺失会话显示空态） | 总耗时 `toolMs`（99/99）可得；逐工具耗时同受 19/99 约束 |
+| dsh | 投影缓存**只有总耗时、没有调用次数**；次数与逐工具耗时都须走原始 `session.v4.jsonl.zstd`（**只有一部分会话仍留有原始日志** → `available=true + reason=部分覆盖`，缺失会话显示空态） | 总耗时 `toolMs`（99/99）可得；逐工具耗时同受同一约束 |
 
 **统一原则：不可得的指标一律显示空态，不填 0**（填 0 会被误读成「真的没有发生」）。
+
+#### 9.5.1 登记：「部分覆盖」**不在界面表达**（2026-10-06 用户裁决）
+
+- **裁决**：dsh 的报错三层 / 用户打断 / 最长单 turn / 逐工具调用与耗时属**部分覆盖**（只有一部分会话仍留有原始日志），但界面上**不为它单开一档** —— 能显示的就显示，显示不出的位次走空态。
+- **理由 ①（模型是布尔两态）**：`UsageAvailability` = `available` + `perSource`，**没有「部分」这一档**；要加一档就得改 `available` 的 wire 形状 —— 那是**冻结契约**，不在本阶段范围内。
+- **理由 ②（前端不直渲后端 `reason`）**：`reason` 是给日志的中文散文（如 `部分覆盖` / `mock-empty`），不随语言切换 ⇒ 直渲会在英文界面里印中文；用户可见的原因一律走 `i18n`（`usage.work.*` / `usage.turnBasis.*`），见 `src/lib/usage/availability.ts` 口径 ③ 与 ④。
+- **落地**：某源只覆盖一部分会话时，界面照常显示它给得出的数字，给不出的位次是 `EM_DASH`。用户裁决原文：「DSH 能提取哪些数据，能显示哪些就显示哪些。不能显示的话，就用斜杠或横杠表示没有这个数据。」
+- **覆盖率本身不写死比例**：它随机器与 `~/.dsh/sessions/` 的清理策略变化 —— 本表「本机实测」列的 `19/99`（以及 §5.1 表格里的同一数字）是**探测期**的矩阵口径，**已作废**；2026-10-06 复核：账本口径下近 7 天与全时的 dsh 会话都拿到了「只有原始日志才有」的那几类指标（原始日志口径下，能对上投影缓存的会话约占七至八成，会话目录总数也从探测时的 101 涨到 279）。该比例只留在后端 `reason` 与本节审计记录里，**不参与界面表达**。
 
 ### 9.6 图表库｜【默认裁定】纯 SVG 自绘，零新增依赖
 
@@ -469,7 +484,7 @@ MAM 前端目前**没有任何图表库**（全仓零 recharts/d3/echarts，只�
 - **采集增量**：游标 + 尾指纹在「文件被外部截断/重写」时的行为需可测（参考实现有对应算法可借）。
 - **时间窗正确性**：「近 5 小时」必须是**最近 5 个完整整点桶且不含当前小时**；跨整点时窗口整体前移一格；有测试断言「不做秒级滚动」。
 - **环比正确性**：五档时间范围的「上一等长周期」边界需逐档断言（尤其 5h 的跨日回绕与自定义区间的等长前移）。
-- **显示规范**：万/亿格式化（含尾零剥离边界）、hero 千分位、命中率 1 位小数、时长三档，均需黄金用例（参考实现这套规则已被其测试钉死，可直接搬用例）。
+- **显示规范**：万/亿格式化（**不带单位 0 位、带单位恒 2 位**，见 P8 表；2026-10-06 用户裁决修订）、hero 千分位、命中率 1 位小数、时长三档，均需黄金用例（参考实现这套规则已被其测试钉死，可直接搬用例）。
 - **UI 状态三态**：空态 / 加载态 / **错误态**（错误态必须可见且可重试，不得静默回落）。
 - **缩放适配**：浮窗在小/中/大三档缩放下位置与字号等比、不越界、不加宽宠物窗口。
 - **主题适配**：看板 / 记录页 / 浮窗 / 设置分组在浅色与深色下都需可读（断言关键颜色取自主题 token 而非硬编码）；分享图导出为固定浅色版式、不随主题变化。
@@ -526,7 +541,7 @@ MAM 前端目前**没有任何图表库**（全仓零 recharts/d3/echarts，只�
 | C.1 | 供应商配置快照的采样点与存放位置 | —（本文件独有） | 决定「推断」类供应商的历史归因准确度 |
 | C.2 | dsh 63/99 个投影文件缺 `modelSelection` 行的成因未证实（mtime 全为 `2026-09-10 21:35` 同一秒，疑旧版写入器批量快照） | 6（dsh 覆盖范围） | 决定 dsh 供应商「部分实测」（28.3% 有值）的覆盖率能否提升 |
 | C.3 | dsh `toolMs` 与逐工具求和在本机 19 个会话中有 3 个不一致（−23.9% / −2.5% / −0.9%） | 6 | 决定 dsh 的总耗时是否可直接采信 |
-| C.4 | dsh 原始会话文件（`session.v4.jsonl.zstd`）的保留策略 | 6 | 将来若要做 dsh 逐工具维度，须先确认它不会被清理（当前仅 19/99 会话存在） |
+| C.4 | dsh 原始会话文件（`session.v4.jsonl.zstd`）的保留策略 | 6 | 将来若要做 dsh 逐工具维度，须先确认它不会被清理（**当前也只是一部分会话留有原始日志**——**比例不写死**：覆盖率随机器与清理策略变化，探测期的「19/99」已作废，见 §9.5.1） |
 | C.5 | codex `token_count.info` 语义未证实：部分样本 `total_token_usage` 与 `last_token_usage` 同值，无法从数据判定二者是否应区别对待 | —（矩阵 §7.6） | 现按 Codex++ 的做法统一取 `last`；若语义有别，影响 codex 逐轮四桶 |
 | C.6 | opencode V2 有 3 条 `tokens` 完全缺失（成因未定） | —（矩阵 §7.4） | 影响 opencode V2 的用量完整性与 requests 计数 |
 
