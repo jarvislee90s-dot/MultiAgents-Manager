@@ -18,6 +18,14 @@ export const KNOWN_USAGE_CODES = [
   // **本数组体内不得出现 ASCII 双引号注释**（那把锁按双引号切分取码，会被注释串味）。
   "usage-filter-unavailable",
   "usage-settings-invalid",
+  // **预留码：当前没有任何发射点**（2026-10-06 第三轮裁决，刻意保留登记、不改实现）——
+  // 总开关关闭时后端返回的是**空结果**（`empty_dashboard` / `empty_records`）而不是错误，
+  // 故该码真机不可达。源码级证据 = Rust 侧
+  // `commands::usage::usage_disabled_stays_reserved_with_no_production_emitter`。
+  // **为什么删不得**：删掉本行会让 Rust 的 `usage_codes_match_frontend_table`（同序同集合）
+  // 与 locale 键检查一起失衡（第 4 处登记早就删了，现在只有这三处）。
+  // ⚠️ locale 那两个 `usage.rpc.usage-disabled` 键**保留**（删了同样失衡）；JSON 不能写注释，
+  // 所以那句说明只此一处。**将来若要启用**：见 `services/usage/error.rs` 该码上方的四条同步清单。
   "usage-disabled",
   "usage-internal",
 ] as const;

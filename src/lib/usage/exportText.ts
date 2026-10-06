@@ -1,0 +1,100 @@
+// 复制文本摘要纯层（计划② Task 11 步骤 3；spec P4「纯文本 = 头部一行 + 各指标行『标签: 值』+ 分组明细行」）。
+// 纯字符串、零副作用、通道无关：本文件**不碰** IPC / 剪贴板 / DOM，`t` 与 `dash` 都由调用方给
+// （消费方 = `UsageExportActions` 的「复制文本」按钮）。
+//
+// 六条口径（逐条不得发挥）：
+//  ① 首行 = `usage.title` · `rangeLabelOf(dash.range)`；趋势首末键算得出跨度时追加**全角括号**
+//     `（09/27 – 10/03）`（半角是另一套口径）。标题键就用 `usage.title` —— **不新增** `summaryTitle`
+//     （同值，en 侧历史上还大小写分叉过）。
+//  ② 指标行顺序固定 `requestTotal → output → cacheRead → hitRate → requests → userEst → asOf`，
+//     标签一律取 `usage.grid.*`（与大看板首屏同一批键，不另造一套文案）。
+//  ③ 值一律**精确千分位**（`fmtInt`，含请求次数）：摘要没有列宽压力，**不用**万/亿缩写（那是看板网格的取舍）。
+//     命中率取 `fmtPct`（**0–1 分数**口径，全仓唯一一套，不得在此引入 0–100 的第二套）。
+//  ④ 不可得一律 `EM_DASH`、绝不填 0（§3 第 5 条）：`userEst === null` → `—`（`~` 前缀只在有值时加）；
+//     `collectedAt === 0` 是「尚未采集」哨兵（§3 第 8 条）→ 渲染 `usage.notCollected`，不是 `—`、更不是 1970 年。
+//  ⑤ 分组明细行全交 Task 2 的 `distributionRows`：行序（值降序）、零值行丢弃、≤10 行截断与 `moreCount`
+//     都是那一层的裁决，本文件**不重算**；值取 `DistRow.value`（= `requestTotal + output`，与 hero /
+//     分布卡同口径），**不另立**「摘要专用值」——brief 逐值核对里那两个样例数（`1,246,567` / `460,789`）
+//     取自更早的 `requestTotal` 口径，Task 2 已把该字段改成 `requestTotal + output`（1,292,245 / 484,245），
+//     本文件按**冻结层**口径走（依据与代价见 `tests/pet/usage-export-text.test.ts` 文件头与 task-11 报告）；
+//     空结果出 `EM_DASH`，`moreCount > 0` 时追加 `usage.moreN`。
+//     行名分派逐维不同：provider → `t(label)`（真机不可得时是 i18n 键，直渲会印键名）、
+//     tool → `usageAgentLabel(label)`（该维度 `label` 是工具 id，展示名只有 `AGENT_BADGE` 一个出处，§3 第 13 条）、
+//     project / model → **原文**（D21 不做大小写规范化；模型名不短化，摘要没有列宽约束）。
+//  ⑥ 隐私白名单（§3 第 23 条）：本文件只把结构化数字与静态文案拼进字符串，**读不到**任何会话正文
+//     （入参 `UsageDashboard` 里根本没有正文字段），有 `tests/pet/usage-export-text.test.ts` 的纯函数断言
+//     与 `tests/pet/usage-privacy.test.tsx` 的渲染级断言双重门禁。
+import { distributionRows, type DistRow } from "@/lib/usage/distribution";
+import { EM_DASH, fmtInt, fmtPct, usageAgentLabel } from "@/lib/usage/format";
+import { asOfText, rangeLabelOf, spanLabelOf, tokenUnmeasured, type TFn } from "@/lib/usage/range";
+import type { UsageDashboard, UsageGroupBy, UsageRange } from "@/types/usage";
+
+/**
+ * 行名分派（逐维不同，见文件头 ⑤）。本函数**不做短化**：摘要是纯文本，没有列宽约束。
+ * **导出面共用的唯一实现**：分享图装配（`useExportShare.ts`）也 import 本函数，不另写一份
+ * 同规则副本（两处口径必须永远一致：provider → `t(label)`、tool → `usageAgentLabel`、其余原文）。
+ */
+export function labelOf(row: DistRow, groupBy: UsageGroupBy, t: TFn): string {
+  if (groupBy === "provider") return t(row.label);
+  if (groupBy === "tool") return usageAgentLabel(row.label);
+  return row.label;
+}
+
+/**
+ * 看板数据 → 可复制的纯文本摘要（spec P4）。逐行版式见文件头；返回**多行字符串**（`\n` 分隔，无尾换行）。
+ * `dash.trend` 少于 2 点时 `spanLabelOf` 出空串 ⇒ 首行不带括号段（不造假跨度）。
+ */
+export function buildTextSummary(dash: UsageDashboard, t: TFn): string {
+  const head = `${t("usage.title")} · ${rangeLabelOf(dash.range, t)}`;
+  const span = spanLabelOf(dash.trend);
+  const lines: string[] = [span ? `${head}（${span}）` : head];
+
+  const { totals, totalsBuckets } = dash;
+  // **没量到 token** 的窗口（2026-10-06 用户裁决）：四个由 token 桶派生的行（请求输入 / 产出 /
+  // 缓存命中 / 命中率）一律 `—`、**绝不印 0**；**计数类（请求次数）照常出真值**。
+  // 判据只一处 = `range.ts::tokenUnmeasured`（**窗口级**）。
+  // ⚠️ **`用户输入(估)` 不置空**（2026-10-06 第三轮用户裁决）：它从**用户文本**估出来
+  // （`collectors/{claude,codex,kimi}.rs` 三源独立估），与四个 token 桶无关 ⇒「四桶全零」不蕴含
+  // 「用户没打字」（真机账本：`requests=1 | 四桶全零 | user_est = 7`）⇒ 只有「不可得」才出 `—`。
+  // ⚠️ **CSV 是例外**：那是数据文件（11 列原始整数、给 Excel / 脚本用），保留原始 0 —— 理由与落点
+  // 见 `UsageExportActions` 的 CSV 分支注释；本函数只管**给人看**的文本摘要。
+  const unmeasured = tokenUnmeasured(dash);
+  const token = (v: number) => (unmeasured ? EM_DASH : fmtInt(v));
+  lines.push(`${t("usage.grid.requestTotal")}: ${token(totals.requestTotal)}`);
+  lines.push(`${t("usage.grid.output")}: ${token(totalsBuckets.output)}`);
+  lines.push(`${t("usage.grid.cacheRead")}: ${token(totalsBuckets.cacheRead)}`);
+  lines.push(`${t("usage.grid.hitRate")}: ${unmeasured ? EM_DASH : fmtPct(totals.cacheHitRate)}`);
+  // **计数类**（请求次数）与采集时刻**不受影响**：它们是真值，不是 token 量
+  lines.push(`${t("usage.grid.requests")}: ${fmtInt(totals.requests)}`);
+  lines.push(
+    // `userEst` 同属「不是 token 桶派生的真值」⇒ 只看 `=== null`（不可得才 `—`），不看 `unmeasured`
+    `${t("usage.grid.userEst")}: ${totals.userEst === null ? EM_DASH : `~${fmtInt(totals.userEst)}`}`
+  );
+  // 采集时刻的唯一口径出处：`asOfText`（`collectedAt === 0` → `usage.notCollected`，见文件头 ④）
+  lines.push(`${t("usage.grid.asOf")}: ${asOfText(dash.collectedAt, t)}`);
+
+  lines.push(`${t(`usage.group.${dash.groupBy}`)}:`);
+  const { rows, moreCount } = distributionRows(dash.rows);
+  if (rows.length === 0) {
+    // 空分布出占位而不是空段：粘出去的一行「工具:」后面什么都没有会让人以为复制失败
+    lines.push(EM_DASH);
+  } else {
+    for (const row of rows) lines.push(`${labelOf(row, dash.groupBy, t)}  ${fmtInt(row.value)}`);
+    if (moreCount > 0) lines.push(t("usage.moreN", { n: moreCount }));
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * CSV 文件名：`custom` → `mam-usage-<from>_<to>.csv`，其余档 → `mam-usage-<preset>.csv`。
+ * **必以 `.csv` 结尾**——Rust 落盘层的 `with_bom_if_csv` 只认该后缀（无 BOM 时中文 Windows 版 Excel
+ * 会按本地代码页解码，中文列名乱码）；也**恒以 `mam-usage-` 开头**（§3 第 27 条，天然避开 Windows 保留设备名）。
+ * 自定义档缺边界时退化成档位名（仍是 `.csv`），不拼出 `mam-usage-_2026-10-03.csv` 这种半截名字。
+ */
+export function csvFilename(range: UsageRange): string {
+  if (range.preset === "custom" && range.from && range.to) {
+    return `mam-usage-${range.from}_${range.to}.csv`;
+  }
+  return `mam-usage-${range.preset}.csv`;
+}
