@@ -19,7 +19,7 @@
 // 其余：零 DOM API、零新增依赖（全仓无 date-fns / dayjs，见 spec 附 D.3）。
 // 预设四档**只发 `preset`**：窗口边界（5h 的「最近 5 个完整整点桶、不含当前小时」、上一等长周期的
 // 起止）由后端裁定，前端**不得自行推算**——这正是「两套口径」的堵口（契约 §3 要点 1）。
-import { fmtDateTime, fmtPct } from "@/lib/usage/format";
+import { fmtDateTime } from "@/lib/usage/format";
 import type {
   CompareBlock,
   UsageBuckets,
@@ -150,26 +150,27 @@ export function spanLabelOf(points: { key: string }[]): string {
  * `prev` 为 0 → 差值为「新增」（`usage.compare.new`），不得出现除零 `Infinity`。
  * **符号取自四舍五入后的差值**：取未舍入值会让近零负差印成 `-0.0%`（界面撒谎）；
  * 舍入后为零一律用 `±0.0%`（与 `hitCompareSuffix` 的零值字形统一）。
- * `fmt` 由调用方给（hero 口径 `fmtInt` / 计数口径自定义），本层不猜缩写。
+ *
+ * ⚠️ **上一周期的值不进屏上文案**（2026-10-06 用户裁决「同比冗余字太多」）：屏上只留差值，
+ * 上一周期的值由**调用方**用 `usage.compareHint` + 自己的 `fmt` 挂进 `title`（`prev` 仍在入参里，
+ * 调用方取得到）。故本函数**不再收 `fmt`**——留着它就成了一个与本函数无关的哑参数
+ * （`tsconfig` 开了 `noUnusedParameters`，哑参数写不下去，也不该写）。
  */
-export function compareSuffix(
-  cur: number,
-  prev: number | null,
-  fmt: (n: number) => string,
-  t: TFn
-): string {
+export function compareSuffix(cur: number, prev: number | null, t: TFn): string {
   if (prev === null || !Number.isFinite(prev)) return "";
-  if (prev === 0) return t("usage.compare", { prev: fmt(prev), delta: t("usage.compare.new") });
+  if (prev === 0) return t("usage.compare", { delta: t("usage.compare.new") });
   const delta = cur - prev;
   const pct = Number(((delta / prev) * 100).toFixed(1)); // 先四舍五入，再取符号
   const sign = pct > 0 ? "+" : pct < 0 ? "-" : "±";
-  return t("usage.compare", { prev: fmt(prev), delta: sign + Math.abs(pct).toFixed(1) + "%" });
+  return t("usage.compare", { delta: sign + Math.abs(pct).toFixed(1) + "%" });
 }
 
 /**
  * 命中率环比后缀：百分点差由**前端**从 `compare.prevMetrics.cacheHitRate` 算出（契约只给聚合），
  * 口径 `(cur - prev) × 100`；**先四舍五入再取符号**（近零差不得印成 `-0.0 pt`），零值字形 `±`。
  * `compare === null` 或 prev 非有限 → 空串（P8：上一周期无数据只显示当前值，不得出现 0% / NaN）。
+ * 与 `compareSuffix` 同款：屏上只留差值，上一周期的值由调用方用 `usage.compareHint` 挂进 `title`
+ * （调用方拿 `compare.prevMetrics.cacheHitRate` 自己 `fmtPct`）。
  */
 export function hitCompareSuffix(cur: number, compare: CompareBlock | null, t: TFn): string {
   if (!compare) return "";
@@ -177,7 +178,7 @@ export function hitCompareSuffix(cur: number, compare: CompareBlock | null, t: T
   if (!Number.isFinite(prev)) return "";
   const pt = Number(((cur - prev) * 100).toFixed(1)); // 先四舍五入，再取符号
   const sign = pt > 0 ? "+" : pt < 0 ? "-" : "±";
-  return t("usage.compare", { prev: fmtPct(prev), delta: sign + Math.abs(pt).toFixed(1) + " pt" });
+  return t("usage.compare", { delta: sign + Math.abs(pt).toFixed(1) + " pt" });
 }
 
 /**

@@ -47,10 +47,16 @@ interface GridRow {
   value: string;
   /** 缩写值的精确值（进 `title`）；空串 = 主值本身已是精确值 */
   exact: string;
-  /** 环比段；空串 = 整段不渲染（`compare === null` 或该项不可比） */
+  /** 环比段（**屏上只有差值**）；空串 = 整段不渲染（`compare === null` 或该项不可比） */
   compare: string;
-  /** 环比段里上一周期值的精确值（进 `title`）；空串 = 无 */
-  compareExact: string;
+  /**
+   * 环比段的 `title`（`usage.compareHint` + 上一周期值的**精确值**）；空串 = 不挂。
+   *
+   * 上一周期的值为什么只在 `title` 里（2026-10-06 用户裁决「同比冗余字太多」）：屏上 8 处
+   * （7 行指标 + 趋势区）都印「（上一周期 X · Y）」会把排版挤爆——真机取证：值被压到**折行**
+   * （`6.41` 与 `亿` 分两行）、标签被截成 `请求输入(全文…`。现在屏上只留差值，上期值 hover 可得。
+   */
+  compareTitle: string;
 }
 
 export function UsageSummary({
@@ -75,7 +81,7 @@ export function UsageSummary({
     value: EM_DASH,
     exact: "",
     compare: "",
-    compareExact: "",
+    compareTitle: "",
   });
 
   /**
@@ -102,9 +108,10 @@ export function UsageSummary({
           value: prefix + fmtTokens(cur),
           exact: prefix + fmtInt(cur),
           // prev 为 0 → compareSuffix 出「新增」；prev 为 null/非有限 → 空串（只显示当前值）
-          compare:
-            prevValue == null ? "" : compareSuffix(cur, prevValue, (n) => prefix + fmtTokens(n), t),
-          compareExact: prevValue == null ? "" : prefix + fmtInt(prevValue),
+          compare: prevValue == null ? "" : compareSuffix(cur, prevValue, t),
+          // 上期值只在 hover 里给，且给的是**精确千分位**（与 `exact` 同口径，不用万/亿缩写）
+          compareTitle:
+            prevValue == null ? "" : t("usage.compareHint", { prev: prefix + fmtInt(prevValue) }),
         };
 
   const userEst = dash.totals.userEst;
@@ -128,21 +135,26 @@ export function UsageSummary({
           exact: "",
           // 百分点差 = (cur - prev) × 100，由 hitCompareSuffix 算；compare === null → 空串
           compare: hitCompareSuffix(dash.totals.cacheHitRate, dash.compare, t),
-          compareExact: dash.compare ? fmtPct(dash.compare.prevMetrics.cacheHitRate) : "",
+          compareTitle: dash.compare
+            ? t("usage.compareHint", { prev: fmtPct(dash.compare.prevMetrics.cacheHitRate) })
+            : "",
         },
     {
       key: "requests",
       value: fmtInt(dash.totals.requests),
       exact: "",
-      compare: compareSuffix(dash.totals.requests, prev?.metrics.requests ?? null, fmtInt, t),
-      compareExact: "",
+      compare: compareSuffix(dash.totals.requests, prev?.metrics.requests ?? null, t),
+      compareTitle:
+        prev?.metrics.requests == null
+          ? ""
+          : t("usage.compareHint", { prev: fmtInt(prev.metrics.requests) }),
     },
     {
       key: "asOf",
       value: collected,
       exact: "",
       compare: "",
-      compareExact: "",
+      compareTitle: "",
     },
   ];
 
@@ -161,31 +173,41 @@ export function UsageSummary({
             <div
               key={row.key}
               data-testid={`usage-grid-${row.key}`}
-              className="flex items-baseline justify-between gap-2 text-sm"
+              /* 单元格 = **三列 grid**（标签 / 值 / 环比）。为什么不是 `flex justify-between`
+                 （2026-10-06 排版修复）：长环比与长标签会互相挤压——真机取证是**值被压到折行**
+                 （`6.41` 与 `亿` 分两行）、标签被截成 `请求输入(全文…`，且两列的值右边缘参差。
+                 三列定死各自的槽位后：值恒 `whitespace-nowrap` 不折行、环比占**固定宽**（空串也占位
+                 ⇒ 所有行的值右边缘对齐）。 */
+              className="grid grid-cols-[minmax(0,1fr)_auto_4.75rem] items-baseline gap-x-2 text-sm"
             >
               <span className="text-muted-foreground truncate">{t(`usage.grid.${row.key}`)}</span>
-              <span className="flex items-baseline gap-1.5">
-                <span className="font-medium tabular-nums" title={row.exact || undefined}>
-                  {row.value}
-                </span>
-                {row.compare ? (
-                  <span
-                    className="text-muted-foreground text-xs"
-                    title={row.compareExact || undefined}
-                  >
-                    {row.compare}
-                  </span>
-                ) : null}
+              <span
+                className="text-right font-medium whitespace-nowrap tabular-nums"
+                title={row.exact || undefined}
+              >
+                {row.value}
+              </span>
+              {/* 环比：屏上**只有差值**；上一周期的值在 `title` 里（`usage.compareHint`）。
+                  空串 → 渲染空 span **占住槽位**，否则该行的值会贴到右边缘、与其它行错开。 */}
+              <span
+                className="text-muted-foreground text-right text-xs whitespace-nowrap"
+                title={row.compareTitle || undefined}
+              >
+                {row.compare}
               </span>
             </div>
           ))}
         </div>
       </CardContent>
 
-      {/* 页脚三件套：口径常驻 + freshness（0 哨兵时同显「尚未采集」）+ 保留期（设置给了才出） */}
+      {/* 页脚口径三件套：口径常驻 + **环比基准声明一次** + 保留期（设置给了才出）。
+          ⚠️ 这里**不再**出「数据新鲜度：<时刻>」——它与网格的 `asOf` 行是**同一个 `collected`**
+          （真机截图里同一个时间戳在同一张卡上出现了两遍，2026-10-06 排版修复删掉了页脚那处）；
+          腾出的位置放「环比基准」——屏上 8 处环比现在都只印差值，基准必须**在卡上声明一次**，
+          否则「+2562.3%」没有可解释的参照物。 */}
       <footer data-testid="usage-footer" className="text-muted-foreground px-6 text-xs">
         <span>{t("usage.footer.caliber")}</span>
-        <span> · {t("usage.footer.freshness", { time: collected })}</span>
+        <span> · {t("usage.footer.baseline")}</span>
         {retentionDays != null ? (
           <span> · {t("usage.footer.retention", { days: retentionDays })}</span>
         ) : null}

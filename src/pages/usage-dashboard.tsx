@@ -133,7 +133,7 @@ export default function UsageDashboardPage() {
       const p = prevOf(dash.compare);
       return p ? p.metrics.requestTotal + p.buckets.output : null;
     })();
-    const trendCompare = compareSuffix(dash.hero, prevHero, fmtTokens, t);
+    const trendCompare = compareSuffix(dash.hero, prevHero, t);
     const trendCompareLabel =
       trendCompare === "" ? "" : `${t("usage.card.compareSubject")} ${trendCompare}`;
     body = (
@@ -175,7 +175,12 @@ export default function UsageDashboardPage() {
       contentClassName="flex-1 overflow-y-auto"
     >
       <div className="space-y-4 p-5">
-        {/* 范围条与导出行**同行**：左侧五档 + 自定义区间，右侧导出动作条（Task 11 步骤 6）。
+        {/* 范围条 + 导出 + 页签条 = **吸顶头**（2026-10-06 排版修复）：看板窗 1040×720 而内容约
+            1700px ⇒ 范围条一滚就没了（真机截图顶部只剩页签条，五档范围与导出全在视口外）。
+            `-mx-5 px-5` 抵消外层 `p-5` 让底色铺满整宽；`bg-background/95` + `backdrop-blur`
+            保证滚过的内容不透出来；取色一律主题 token（零硬编码色值）。 */}
+        <div className="bg-background/95 sticky top-0 z-10 -mx-5 space-y-4 border-b px-5 pt-5 pb-3 backdrop-blur">
+          {/* 范围条与导出行**同行**：左侧五档 + 自定义区间，右侧导出动作条（Task 11 步骤 6）。
             导出口径 = **当前页签那一份**（2026-10-06 用户裁决：CSV 要接收记录页的筛选条件）：
             * 记录页签 → 记录页的 `filters`（工具 chips + 子代理模式，经三层日档守卫）与**卡片维度**
               `cardDim` 作 `groupBy` —— 屏幕上按什么分组，导出就按什么分组；记录页的卡片维度控件
@@ -183,39 +188,40 @@ export default function UsageDashboardPage() {
             * 看板页签 → `filters: {}` + 看板的分布维度 `groupBy`（看板没有筛选控件，故不筛）。
             `filters` 由 `useRecordsFilters` 产出（**已经是**第三层守卫的产物：日档不含
             `subagentMode`），所以这里**不会**撞上「日档 + parentsOnly」的 `usage-filter-unavailable`。 */}
-        <div className="flex flex-wrap items-start justify-between gap-2">
-          <UsageRangeBar
-            preset={preset}
-            custom={custom}
-            clamped={clamped}
-            t={t}
-            onSelectPreset={handleSelectPreset}
-            onCustomChange={handleCustomChange}
-          />
-          <UsageExportActions
-            dash={dashboard.data ?? null}
-            range={range}
-            tab={tab}
-            filters={tab === "records" ? rec.filters : {}}
-            groupBy={tab === "records" ? rec.cardDim : groupBy}
-            t={t}
-          />
-        </div>
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <UsageRangeBar
+              preset={preset}
+              custom={custom}
+              clamped={clamped}
+              t={t}
+              onSelectPreset={handleSelectPreset}
+              onCustomChange={handleCustomChange}
+            />
+            <UsageExportActions
+              dash={dashboard.data ?? null}
+              range={range}
+              tab={tab}
+              filters={tab === "records" ? rec.filters : {}}
+              groupBy={tab === "records" ? rec.cardDim : groupBy}
+              t={t}
+            />
+          </div>
 
-        {/* 页签条（范围条下方；Task 11 的导出行落在范围条同行右侧，与这里不争位） */}
-        <div className="flex items-center gap-1.5">
-          {(["board", "records"] as const).map((key) => (
-            <Button
-              key={key}
-              size="sm"
-              variant={key === tab ? "default" : "outline"}
-              aria-pressed={key === tab}
-              data-testid={`usage-tab-${key}`}
-              onClick={() => setTab(key)}
-            >
-              {t(`usage.tab.${key}`)}
-            </Button>
-          ))}
+          {/* 页签条（范围条下方；Task 11 的导出行落在范围条同行右侧，与这里不争位） */}
+          <div className="flex items-center gap-1.5">
+            {(["board", "records"] as const).map((key) => (
+              <Button
+                key={key}
+                size="sm"
+                variant={key === tab ? "default" : "outline"}
+                aria-pressed={key === tab}
+                data-testid={`usage-tab-${key}`}
+                onClick={() => setTab(key)}
+              >
+                {t(`usage.tab.${key}`)}
+              </Button>
+            ))}
+          </div>
         </div>
 
         {tab === "board" ? (

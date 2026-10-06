@@ -1027,7 +1027,7 @@
       "tool": "按工具",
       "project": "按项目",
       "provider": "按供应商",
-      "model": "按模型"
+      "model": "按供应商/模型"
     },
     "records": {
       "cardDim": "卡片分组",
@@ -1054,7 +1054,8 @@
     },
     "moreN": "等 {{n}}",
     "exact": "精确值 {{value}}",
-    "compare": "（上一周期 {{prev}} · {{delta}}）",
+    "compare": "（{{delta}}）",
+    "compareHint": "环比上一等长周期 {{prev}}",
     "compare.new": "新增",
     "turnBasis": {
       "claude": "按「已发起回合」计数（user 行且 toolUseResult 为空、非 meta）；绝不数 assistant 行（流式重复 2.68×）",
@@ -1094,7 +1095,7 @@
     "notCollected": "尚未采集",
     "footer": {
       "caliber": "纯 token · 含子代理 · 本地聚合",
-      "freshness": "数据新鲜度：{{time}}",
+      "baseline": "环比基准：上一等长周期",
       "retention": "{{days}} 天前无明细"
     }
   },

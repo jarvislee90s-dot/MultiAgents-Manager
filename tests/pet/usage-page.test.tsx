@@ -109,21 +109,21 @@ describe("usage-page（计划② Task 6：大看板首屏）", () => {
     expect(reqRow).toHaveTextContent("195.43万");
     expect(reqRow.querySelector("[title='1,954,268']")).toBeTruthy();
 
-    // 命中率行：当前值 1 位小数 + 全角括号的环比段（zh 模板）
+    // 命中率行：当前值 1 位小数 + 环比段**只剩差值**（2026-10-06 用户裁决「同比冗余字太多」）
     const hitRow = screen.getByTestId("usage-grid-hitRate");
     expect(hitRow).toHaveTextContent("67.4%");
-    expect(hitRow).toHaveTextContent("（上一周期");
+    expect(hitRow).toHaveTextContent(/（[+±-]\d+\.\d pt）/);
+    // 上一周期的值不再进屏上文案，但**没有丢**——挂在环比格的 `title` 里（usage.compareHint）
+    expect(hitRow.querySelector("[title*='环比上一等长周期']")).toBeTruthy();
 
     expect(screen.getByTestId("usage-grid-asOf")).toHaveTextContent(/\d{2}:\d{2}:\d{2}/);
 
     // **趋势区也必须有环比**（spec P8：「指标网格各项**与趋势区**都显示对比值」）。
     // 页面接线锁：口径 = 区间 hero（2,036,981）环比上一等长区间
     // （夹具 prevBuckets.output 71,133 + prevMetrics.requestTotal 1,680,670 = 1,751,803）
-    // ⇒ 区间合计 （上一周期 175.18万 · +16.3%）。主语（「区间合计」）不能省：这一行紧贴在
-    // 「峰值 {{v}}」正下方，没主语会被读成「峰值的上一周期是 175.18万」（数字对、归属错）。
-    expect(screen.getByTestId("usage-trend-compare")).toHaveTextContent(
-      "区间合计 （上一周期 175.18万 · +16.3%）"
-    );
+    // ⇒ 区间合计 +16.3%。主语（「区间合计」）不能省：这一行紧贴在「峰值 {{v}}」正下方，
+    // 没主语会被读成「峰值涨了 16.3%」（数字对、归属错）。
+    expect(screen.getByTestId("usage-trend-compare")).toHaveTextContent("区间合计 （+16.3%）");
   });
 
   it("2. 默认档 last7d；切「近 30 天」只把 preset 交给后端重查（前端不自行推算窗口）", async () => {
@@ -325,21 +325,26 @@ describe("usage-page（计划② Task 6：大看板首屏）", () => {
     okView.unmount();
   });
 
-  it("6. 页脚口径常驻 + 保留期由设置项驱动 + collectedAt===0 哨兵在两处可见", async () => {
+  it("6. 页脚口径常驻 + 环比基准声明一次 + 保留期由设置项驱动 + collectedAt===0 哨兵可见", async () => {
     const page = renderPage();
     await screen.findByTestId("usage-hero");
     const footer = screen.getByTestId("usage-footer");
     expect(footer).toHaveTextContent("纯 token · 含子代理 · 本地聚合");
+    // 2026-10-06 排版修复：页脚的「数据新鲜度：<时刻>」删掉了——它与网格的 asOf 行是**同一个
+    // `collected`**（真机截图里同一时间戳在一张卡上出现两遍）；腾出的位置放「环比基准」，
+    // 因为屏上 8 处环比现在都只印差值，基准必须在卡上声明一次。
+    expect(footer).toHaveTextContent("环比基准：上一等长周期");
+    expect(footer.textContent).not.toMatch(/\d{2}:\d{2}:\d{2}/);
     // 设置夹具默认 `detailRetentionDays = 90` ⇒ 页面把设置值传进页脚（设置查询与看板并行，
     // 谁先落地不定 ⇒ 这句要等）
     await waitFor(() =>
       expect(screen.getByTestId("usage-footer")).toHaveTextContent("90 天前无明细")
     );
-    expect(screen.getByTestId("usage-footer")).toHaveTextContent(/\d{2}:\d{2}:\d{2}/);
     page.unmount();
 
     // `collectedAt === 0` 是「尚未采集」哨兵。mock 的 0 哨兵必与空态同现（页面走 UsageEmpty），
-    // 故这一支只能直接渲染组件覆盖：asOf 与页脚 freshness 两处都要出哨兵，**不得**出 `—`。
+    // 故这一支只能直接渲染组件覆盖：**网格 asOf 行**要出哨兵（页脚那处已随 freshness 一并删除），
+    // **不得**出 `—`。
     const dash = {
       ...mockUsageDashboard({ preset: "last7d" }, "tool"),
       compare: null,
@@ -348,14 +353,14 @@ describe("usage-page（计划② Task 6：大看板首屏）", () => {
     const t = i18n.t.bind(i18n);
     const one = render(<UsageSummary dash={dash} retentionDays={30} t={t} />);
     expect(screen.getByTestId("usage-grid-asOf")).toHaveTextContent("尚未采集");
-    expect(screen.getByTestId("usage-footer")).toHaveTextContent("尚未采集");
     expect(screen.getByTestId("usage-footer")).toHaveTextContent("30 天前无明细");
+    expect(screen.getByTestId("usage-footer").textContent).not.toMatch(/NaN|Infinity|0%/);
 
-    // compare === null ⇒ 只显示当前值：不得出现 0% / NaN / Infinity，也不得出现对比段
+    // compare === null ⇒ 只显示当前值：不得出现对比段（值照常出）
     const hitRow = screen.getByTestId("usage-grid-hitRate");
     expect(hitRow).toHaveTextContent("67.4%");
     expect(hitRow).not.toHaveTextContent("上一周期");
-    expect(screen.getByTestId("usage-footer").textContent).not.toMatch(/NaN|Infinity|0%/);
+    expect(hitRow.textContent).not.toMatch(/pt）/);
     one.unmount();
 
     // `retentionDays` 为空 ⇒ 不出保留期（步骤 6 的页脚三件套）

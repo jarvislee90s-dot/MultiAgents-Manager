@@ -137,8 +137,11 @@ describe("usage-trendchart（计划② Task 4：纯 SVG 趋势图）", () => {
       expect(container.querySelectorAll('[data-testid="usage-trend-area"]')).toHaveLength(1);
       expect(container.querySelectorAll('[data-testid="usage-trend-line"]')).toHaveLength(1);
       expect(container.querySelectorAll('[data-testid="usage-trend-dot"]')).toHaveLength(P3.length);
-      // 版式常量（分享图的趋势段引用同一组，避免两处漂移）
-      expect(CHART_PAD).toEqual({ l: 6, r: 6, t: 8, bLabel: 16, bPlain: 6 });
+      // 版式常量（分享图的趋势段引用同一组，避免两处漂移）。
+      // `l/r` 2026-10-06 由 6 改 **22**：x 轴首末标签以 `textAnchor="middle"` 画在 `x = l` /
+      // `x = width - r` 上，半宽约 13–14 个视口单位 ⇒ `6` 时首末标签各被裁掉约 28%
+      // （真机：最左只剩半个字形，最右 `22:00` 印成 `22:0`；分享图同一处溢出白卡边界）。
+      expect(CHART_PAD).toEqual({ l: 22, r: 22, t: 8, bLabel: 16, bPlain: 6 });
     });
 
     it("9. 取色：渐变端点只取两个主题变量，网格线 currentColor + opacity，零硬编码色值", () => {

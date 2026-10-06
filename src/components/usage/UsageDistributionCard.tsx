@@ -1,4 +1,4 @@
-// 分组分布卡（计划② Task 7 步骤 4）——四维切换（工具 / 项目 / 供应商 / 模型）+ 逐行
+// 分组分布卡（计划② Task 7 步骤 4）——三维切换（工具 / 项目 / 供应商·模型）+ 逐行
 // 「名称 + 数值 + 占比条」，超出 10 行折「等 N」。
 // 消费方：大看板页（board 分支，工作小结之后）。
 //
@@ -8,22 +8,38 @@
 //     零值行在那里就被丢掉 ⇒ 空结果出空态，**绝不渲染一行 0**（spec P8）。
 //  ② **行名分派逐维不同、不得互相借用**（§3 第 10/11/13 条 / D21）：
 //     provider → `t(label)`（不可得时 `label` 是 i18n 键 `usage.label.unknownProvider`，直渲会印键名）；
-//     model → `shortModel(label)`（短化，全名由 `title` 给）；project → `label` **原文**
-//     （不做 realpath、不做大小写规范化、不用 `projectPath`）；tool → `usageAgentLabel(label)`
-//     （真机这个维度的 `label` 是**工具 id**，展示名只由 `AGENT_BADGE` 解析）。
+//     model → `label` **原文**（2026-10-06 用户裁决：模型维度已合并为「供应商 / 模型」，Rust 侧
+//     与记录页卡内行共用 `query.rs::route_label`，**前端不得再短化**——短化会把
+//     `deepseek-v4.1-flash` 砍成与另一个模型无法分辨的 `deepseek-v…`）；
+//     project → `label` **原文**（不做 realpath、不做大小写规范化、不用 `projectPath`）；
+//     tool → `usageAgentLabel(label)`（真机这个维度的 `label` 是**工具 id**，展示名只由 `AGENT_BADGE` 解析）。
 //  ③ 取色只认主题变量：底轨 `--usage-track`、填充 `--usage-accent-a`（§3 第 19/20 条），
 //     零硬编码色值；按钮/卡片用 `ui/{button,card}` 原语（§3 第 40 条）。
-//  ④ **空态只换内容区，不换整卡**（Task 7 空态修复）：卡头与四维切换按钮在空窗口里照常在位
+//  ④ **空态只换内容区，不换整卡**（Task 7 空态修复）：卡头与三维切换按钮在空窗口里照常在位
 //     （那是用户此时唯一还能做的事）；空标签直接落 `CardContent`，不再整卡退化成裸 `UsageEmpty`。
+//
+// ⑤ **名称列宽度按「整列」取，不按行取**（2026-10-06 排版修复）：以前每行是一个 flex，名称列写死
+//    `w-28`(112px) ⇒ 真机两个模型名双双被截成 `deepseek-v…` / `DeepSeek-V…`，而同一行的占比条却
+//    独占约 600px 空转。现在**整张列表共用一个 CSS grid**（`grid-cols-[minmax(0,auto)_auto_minmax(80px,1fr)]`）
+//    ⇒ `auto` 列按**所有行里最长的名称**定宽，名称能完整显示、且所有占比条起点落在同一条竖线上。
+//    **刻意不做 JS 实测宽度**（参考实现 dsh-foxbell-pet 的 `--model-name-w` 探针那套）：本项目
+//    `getBoundingClientRect()` 在 jsdom 恒 0 ⇒ 那种实现**测不到**、门禁形同不存在（§3 第 33 条）。
+//    `minmax(0,auto)` 让名称列在真的放不下时才被压缩、由 `truncate` 收尾（此时 hover 给全名）。
+import { Fragment } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { DIST_MIN_BAR_PCT, distributionRows, type DistRow } from "@/lib/usage/distribution";
-import { fmtInt, fmtTokens, shortModel, usageAgentLabel } from "@/lib/usage/format";
+import { fmtInt, fmtTokens, usageAgentLabel } from "@/lib/usage/format";
 import type { TFn } from "@/lib/usage/range";
 import type { UsageGroupBy, UsageRow } from "@/types/usage";
 
-/** 四维顺序 = spec P1 第 5 条（工具 / 项目 / 供应商 / 模型）⇒ 数组顺序即按钮顺序 */
-const GROUP_DIMS: readonly UsageGroupBy[] = ["tool", "project", "provider", "model"];
+/**
+ * 三维顺序 = 用户裁决后的展示顺序（工具 / 项目 / 供应商·模型）⇒ 数组顺序即按钮顺序。
+ * ⚠️ `provider` **不再**出现在这里（2026-10-06 用户裁决：供应商与模型合并成一个 sheet）；
+ * 它仍是契约 `UsageGroupBy` 的合法取值、仍是 CSV/内部查询的入参，`usage.group.provider` 这个
+ * i18n 键也**保留**（`exportText.ts` 走 `t(\`usage.group.${groupBy}\`)` 查表，键必须在）。
+ */
+const GROUP_DIMS: readonly UsageGroupBy[] = ["tool", "project", "model"];
 
 /**
  * 占比条宽度（%）。`share` 是 **0–1 分数**（绝不是 0–100），`distributionRows` 已把
@@ -35,16 +51,16 @@ function barPctOf(share: number): string {
   return Math.max(DIST_MIN_BAR_PCT, share * 100).toFixed(1);
 }
 
-/** 行名分派（逐维不同，见文件头纪律 ②）；`full` 只在短化时给（进名称的 `title`） */
+/** 行名分派（逐维不同，见文件头纪律 ②）；`full` 只在「显示名与原文不同」时给（进名称的 `title`） */
 function nameOf(
   row: DistRow,
   groupBy: UsageGroupBy,
   t: TFn
 ): { text: string; full: string | null } {
   if (groupBy === "provider") return { text: t(row.label), full: null };
-  if (groupBy === "model") return { text: shortModel(row.label), full: row.label };
+  if (groupBy === "model") return { text: row.label, full: row.label };
   if (groupBy === "tool") return { text: usageAgentLabel(row.label), full: null };
-  return { text: row.label, full: null };
+  return { text: row.label, full: row.label };
 }
 
 export interface UsageDistributionCardProps {
@@ -100,45 +116,53 @@ export function UsageDistributionCard({
             {t("usage.empty")}
           </p>
         ) : (
-          <>
+          /* 整张列表**共用一个 grid**（文件头纪律 ⑤）：名称列 `auto` 按所有行的最长名称定宽
+             ⇒ 名称完整显示、所有占比条起点落在同一条竖线上。每行的三个格子是该 grid 的
+             **直接子节点**（用 `Fragment` 成组，不套行容器——套了容器 `auto` 列就退化成逐行各自
+             计算，等于没改）。「等 N」横跨三列。 */
+          <div className="grid grid-cols-[minmax(0,auto)_auto_minmax(80px,1fr)] items-center gap-x-2 gap-y-2 text-sm">
             {distRows.map((row) => {
               const name = nameOf(row, groupBy, t);
               return (
-                <div
-                  key={row.key}
-                  data-testid={`usage-dist-${row.key}`}
-                  // 行尾 title = 精确值（hero 口径的完整千分位）：缩写数值一律可在 hover 时读到精确值
-                  title={t("usage.exact", { value: fmtInt(row.value) })}
-                  className="flex items-center gap-2 text-sm"
-                >
+                <Fragment key={row.key}>
+                  {/* 名称格：行 testid 落在这里（`usage-dist-<key>` 的既有断言仍指向「这一行」）。
+                      名称可能被 CSS 截断 ⇒ 全名常驻 `title`。 */}
                   <span
-                    className="w-28 shrink-0 truncate"
-                    title={name.full !== null && name.full !== name.text ? name.full : undefined}
+                    data-testid={`usage-dist-${row.key}`}
+                    className="min-w-0 truncate"
+                    title={name.full ?? undefined}
                   >
                     {name.text}
                   </span>
-                  <span className="w-20 shrink-0 text-right font-medium tabular-nums">
+                  {/* 数值格：缩写值；**精确值常驻 `title`**（spec P8「所有缩写数值都必须能在 hover
+                      时读到精确值」）。testid 用 `usage-val-<key>` 而**不是** `usage-dist-val-<key>`：
+                      后者会落进 `getAllByTestId(/^usage-dist-k/)` 的匹配面，把「10 行」数成 20。 */}
+                  <span
+                    data-testid={`usage-val-${row.key}`}
+                    title={t("usage.exact", { value: fmtInt(row.value) })}
+                    className="text-right font-medium whitespace-nowrap tabular-nums"
+                  >
                     {fmtTokens(row.value)}
                   </span>
                   <span
                     data-testid={`usage-dist-bar-${row.key}`}
-                    className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-[var(--usage-track)]"
+                    className="h-1.5 min-w-0 overflow-hidden rounded-full bg-[var(--usage-track)]"
                   >
                     <span
                       className="block h-full rounded-full bg-[var(--usage-accent-a)]"
                       style={{ width: `${barPctOf(row.share)}%` }}
                     />
                   </span>
-                </div>
+                </Fragment>
               );
             })}
 
             {moreCount > 0 ? (
-              <p data-testid="usage-dist-more" className="text-muted-foreground text-xs">
+              <p data-testid="usage-dist-more" className="text-muted-foreground col-span-3 text-xs">
                 {t("usage.moreN", { n: moreCount })}
               </p>
             ) : null}
-          </>
+          </div>
         )}
       </CardContent>
     </Card>

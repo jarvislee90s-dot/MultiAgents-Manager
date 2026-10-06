@@ -106,7 +106,7 @@ describe("buildTextSummary（计划② Task 11：复制文本摘要）", () => {
       }),
     };
     const folded = buildTextSummary(many, t).split("\n");
-    expect(folded[8]).toBe("按模型:");
+    expect(folded[8]).toBe("按供应商/模型:");
     const dist = folded.filter((l) => l.includes("  ")); // 两个空格 = 分布行的分隔符
     expect(dist).toHaveLength(10);
     expect(dist[0]).toBe("m0  1,000");
@@ -126,9 +126,10 @@ describe("buildTextSummary（计划② Task 11：复制文本摘要）", () => {
     expect(proj).toContain("按项目:");
     expect(proj).toContain("MultiAgents-Manager  1,292,245");
 
-    // model：文本摘要**不短化**（`shortModel` 是分布卡的列宽妥协，摘要按原文给全名）
+    // model：文本摘要**不短化**（2026-10-06 起分布卡也不再短化——模型维度已合并为
+    // 「供应商 / 模型」，见 `UsageDistributionCard` 文件头纪律 ②）
     const model = buildTextSummary(mockUsageDashboard({ preset: "last7d" }, "model"), t);
-    expect(model).toContain("按模型:");
+    expect(model).toContain("按供应商/模型:");
     expect(model).toContain("claude-sonnet-4-5  1,292,245");
   });
 

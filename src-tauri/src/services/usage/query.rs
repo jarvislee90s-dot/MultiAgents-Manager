@@ -63,6 +63,9 @@
 //! * **记录页 `records`**（W6/D6/D7）：`groupBy` **只接受 `tool` | `project`**——它只驱动**卡片**维度，
 //!   卡内行**恒为「供应商 / 模型」**（供应商不可得时只呈现模型名，§8.3）。传 `provider` / `model`
 //!   一律结构化错误 `usage-groupby-invalid`；**守卫在总开关之前**（关闭态也报错，锁在用例里）。
+//!   **大看板的 `model` 维度用同一形状**（**2026-10-06 用户裁决**：分布维度合并为「供应商 / 模型」）
+//!   ——不再是裸模型名；同一模型挂在两个供应商下 = **两组**（键必须含供应商，否则两个供应商的
+//!   同名模型会互相吃掉）。两处共用同一个私有实现 `route_label`，**不得各写一份**。
 //!   卡内行的 `isSubagent` **恒 `None`**（契约 §2 用户裁决）：该字段的语义是 D17 的计数分层，
 //!   而这一层的行维度是「供应商 / 模型」、**不含 `session_id`** → 本档位算不出
 //!   （**小时档也一样**；与小时档**分组行**的真值不是同一层，别写混）——不得写真 `false`。
@@ -279,6 +282,19 @@ pub(crate) fn apply_filters(
         .collect()
 }
 
+/// 「供应商 / 模型」路由标签（**唯一实现**，两处消费：记录页卡内行 + 大看板 `model` 维度）。
+/// 供应商不可得（空串，workbuddy 实测形态）时只回**裸模型名**（§8.3：归因不到就只按模型维度呈现）；
+/// 否则回 `"{provider} / {model}"`——**键必须含供应商**，否则两个供应商下的同名模型会被折叠成一组。
+/// **2026-10-06 用户裁决**：分布维度合并为「供应商 / 模型」，故大看板的 `model` 维度与记录页卡内行
+/// 形状**逐字一致**（此前大看板只给裸模型名）。
+fn route_label(row: &LedgerRow) -> String {
+    if row.provider.is_empty() {
+        row.model.clone()
+    } else {
+        format!("{} / {}", row.provider, row.model)
+    }
+}
+
 /// 分组键/标签/三态（D21：项目键 = 小写 projectName，标签 = projectName 原文）。
 /// 供应商不可得（空串）时标签回 **i18n 键** `UNKNOWN_PROVIDER_LABEL_KEY`（W5：不得硬编码中文，
 /// 前端 `t(label)` 渲染；CSV 是导出文件、由 Task 19 把该键还原成空串）。
@@ -311,7 +327,12 @@ pub(crate) fn group_of(row: &LedgerRow, group_by: UsageGroupBy) -> (String, Stri
                 (key.clone(), key, row.provider_kind)
             }
         }
-        UsageGroupBy::Model => (row.model.clone(), row.model.clone(), row.provider_kind),
+        // 大看板 `model` 维度 = 与记录页卡内行**同一形状**「供应商 / 模型」（2026-10-06 用户裁决，
+        // 见 `route_label` 的文档）：键含供应商 ⇒ 同一模型挂在两个供应商下出**两行**。
+        UsageGroupBy::Model => {
+            let label = route_label(row);
+            (label.clone(), label, row.provider_kind)
+        }
     }
 }
 
@@ -680,19 +701,13 @@ pub fn records_with_conn(
             let (buckets, metrics) = aggregate(&rs);
             // 卡内行**恒为「供应商 / 模型」**（D6）：键取这一对，避免同供应商的多个模型互相吃掉；
             // 供应商不可得（workbuddy）时只呈现模型名（§8.3：归因不到就只按模型维度呈现）。
+            // 形状由 `route_label` **独占**（大看板 `model` 维度走同一个函数，2026-10-06 用户裁决）。
             // `is_subagent` **恒 `None`**（契约 §2，2026-10-03 用户裁决）：该字段的语义是 D17 的
             // 计数分层，而这一层的行维度是「供应商 / 模型」、**不含 `session_id`**
             // → 本档位算不出（**小时档也一样**：档位判定不落在这一层），不得写真 `false`。
             let mut inner: BTreeMap<String, (String, Vec<LedgerRow>)> = BTreeMap::new();
             for r in &rs {
-                let (k, label) = if r.provider.is_empty() {
-                    (r.model.clone(), r.model.clone())
-                } else {
-                    (
-                        format!("{} / {}", r.provider, r.model),
-                        format!("{} / {}", r.provider, r.model),
-                    )
-                };
+                let (k, label) = (route_label(r), route_label(r));
                 inner
                     .entry(k)
                     .or_insert_with(|| (label, Vec::new()))
@@ -4031,7 +4046,13 @@ mod tests {
             codex.rows[0].key, "p / ",
             "provider 非空 + model 空 → **尾分隔符**标签（真机当前不可达，防御性钉住）"
         );
-        // CSV 侧同一形态：`Model` 分组下两行都落空键组（组级三态取最强 = inferred）
+        // CSV 侧同一形态（**2026-10-06 裁决后**）：`Model` 分组的键**含供应商** ⇒ 这两个
+        // 结构性无模型的行**不再合并成一组**——`provider="p" / model=""` 自成一组（键与标签都是
+        // 尾分隔符形态 `"p / "`，与上面卡内行那条防御性钉子同形），`provider="" / model=""` 单独
+        // 落空键组；两组各自照实给三态（inferred / unknown）。
+        // ⚠️ 旧断言钉的是「两行落同一个空键组、合成 30」——那正是本次要改掉的行为（键不含供应商
+        // 时，两家供应商的同名模型会互相吃掉）。故这里**正向断言两组各自的整行**，并**反向断言**
+        // 旧的合并组已不存在（只改正向断言的话，实现若退回旧行为仍可能蒙混过关）。
         let csv = csv_with_conn(
             &conn,
             &range(UsageRangePreset::Today),
@@ -4041,8 +4062,16 @@ mod tests {
         )
         .unwrap();
         assert!(
-            csv.contains("\n,,30,0,0,0,30,0.000000,2,,inferred\n"),
-            "CSV 的空模型组：groupKey 与 label 双空、三态仍如实出：{csv}"
+            csv.contains("\np / ,p / ,20,0,0,0,20,0.000000,1,,inferred\n"),
+            "provider 非空 + model 空 → **自成一组**且键含供应商（尾分隔符形态，与卡内行同形）：{csv}"
+        );
+        assert!(
+            csv.contains("\n,,10,0,0,0,10,0.000000,1,,unknown\n"),
+            "供应商与模型双空 → 单独落空键组，三态照实给 unknown：{csv}"
+        );
+        assert!(
+            !csv.contains("\n,,30,"),
+            "旧的「两行合并成空键组 30」行为已被 2026-10-06 裁决取代（键必须含供应商）：{csv}"
         );
     }
 
@@ -4096,6 +4125,131 @@ mod tests {
             !json.contains(crate::services::usage::UNKNOWN_PROVIDER_LABEL_KEY),
             "记录页卡内行不得落 i18n 键：{json}"
         );
+    }
+
+    /// **2026-10-06 用户裁决**：大看板的 `model` 维度 = 「供应商 / 模型」（与记录页卡内行**同一形状**，
+    /// 两处共用 `route_label`）。两条硬判据：
+    ///  ① **键必须含供应商**：同一个模型挂在两个供应商下必须是**两组**——键里没有供应商，两家的同名
+    ///     模型就会被折叠成一组（本次要堵的缺陷）。判据用**各自的量**（10 / 20）而非只数行数：
+    ///     折叠成一组时那一组的量是 30，能真红；
+    ///  ② 供应商不可得（空串，workbuddy 实测形态）→ 回**裸模型名**（§8.3），不得出「 / 模型」这种
+    ///     以分隔符开头的标签。
+    /// 另加**交叉锁**：同一条明细在记录页卡内行与看板 `model` 维度下的键**逐字相同**——两处一旦
+    /// 各写一份实现（或改了一处忘了另一处），本用例红。
+    #[test]
+    fn model_dimension_key_is_provider_slash_model_and_falls_back_to_bare_model_name() {
+        const SHARED: &str = "deepseek-v4.1-flash";
+        let conn = mem_empty();
+        // 同模型、两个供应商：量分别 10 / 20（被折叠时会是 30）
+        for (source, provider, input) in
+            [("claude", "anthropic", 10i64), ("codex", "volcengine", 20)]
+        {
+            add_spec(
+                &conn,
+                source,
+                "s1",
+                "proj",
+                "2026-10-03T10",
+                RowSpec {
+                    provider: provider.into(),
+                    model: SHARED.into(),
+                    kind: SourceKind::Measured,
+                    buckets: UsageBuckets {
+                        input_fresh: input,
+                        ..Default::default()
+                    },
+                    request_total: input,
+                    ..Default::default()
+                },
+            );
+        }
+        // 供应商不可得（workbuddy 实测形态）：键与标签都是裸模型名
+        add_spec(
+            &conn,
+            "workbuddy",
+            "w1",
+            "proj",
+            "2026-10-03T10",
+            RowSpec {
+                provider: String::new(),
+                model: "hy3".into(),
+                kind: SourceKind::Unknown,
+                buckets: UsageBuckets {
+                    input_fresh: 5,
+                    ..Default::default()
+                },
+                request_total: 5,
+                ..Default::default()
+            },
+        );
+        let now = local_ms(2026, 10, 3, 12, 0);
+
+        let d = dashboard_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Model,
+            now,
+        )
+        .unwrap();
+        let by_key: Vec<(&str, i64)> = d
+            .rows
+            .iter()
+            .map(|r| (r.key.as_str(), r.buckets.input_fresh))
+            .collect();
+        assert_eq!(
+            by_key.len(),
+            3,
+            "同模型的两种供应商不得被折叠成一组：{by_key:?}"
+        );
+        assert!(
+            by_key.contains(&("anthropic / deepseek-v4.1-flash", 10)),
+            "键必须含供应商（且量与行对应）：{by_key:?}"
+        );
+        assert!(
+            by_key.contains(&("volcengine / deepseek-v4.1-flash", 20)),
+            "键必须含供应商（且量与行对应）：{by_key:?}"
+        );
+        assert!(
+            !by_key.iter().any(|(k, _)| *k == SHARED),
+            "键不得只是裸模型名（该模型挂了两个供应商）：{by_key:?}"
+        );
+        assert!(
+            by_key.contains(&("hy3", 5)),
+            "供应商不可得 → 键回裸模型名，不得带分隔符：{by_key:?}"
+        );
+        for r in &d.rows {
+            assert_eq!(
+                r.label, r.key,
+                "model 维度的标签与键同形（都由 route_label 一处产出）：{r:?}"
+            );
+        }
+
+        // 交叉锁：记录页卡内行（恒「供应商 / 模型」）与看板 model 维度**逐字同形**
+        let rec = records_with_conn(
+            &conn,
+            &range(UsageRangePreset::Today),
+            UsageGroupBy::Tool,
+            &UsageFilters::default(),
+            now,
+        )
+        .unwrap();
+        let inner: Vec<&str> = rec
+            .cards
+            .iter()
+            .flat_map(|c| c.rows.iter())
+            .map(|r| r.key.as_str())
+            .collect();
+        for k in [
+            "anthropic / deepseek-v4.1-flash",
+            "volcengine / deepseek-v4.1-flash",
+            "hy3",
+        ] {
+            assert!(
+                inner.contains(&k),
+                "记录页卡内行也必须是 {k}（同一 route_label）：{inner:?}"
+            );
+        }
+        assert_eq!(inner.len(), 3, "三个 (供应商, 模型) 组合 = 三行：{inner:?}");
     }
 
     /// 卡内行的 `sourceKind` 是**该行所有记录的「最强」三态**（measured > inferred > unknown）：

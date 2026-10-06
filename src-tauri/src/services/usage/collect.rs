@@ -1808,6 +1808,20 @@ mod tests {
     /// 改的另外三处（`commands/usage.rs` 的锁与辅助函数、两处文字计数）**都不在面内**
     /// （前者在 `#[cfg(test)] mod tests` 里；`collect.rs` 的机制句在 BEGIN..END 排除区内；
     /// 前端测试文件根本不在面内）。面**没有新增文件**、排除区标记未动、其余 23 个文件逐字未改。
+    ///
+    /// **第 13 轮同步（2026-10-06 分布维度合并为「供应商 / 模型」）**：6913/149440 → **6917/149472**
+    /// （**+4 行 / +32 字符**）。变化**全部来自 `query.rs` 生产半边**的三处，且只有这三处：
+    ///   * **新增私有 `route_label`**（生产行 **7 行 + 1 空行**）——「供应商 / 模型」的**唯一实现**；
+    ///   * `group_of` 的 `UsageGroupBy::Model` 分支：原来的**一行**改成**四行块**（`=> {` /
+    ///     `let label = …` / `(label.clone(), label, …)` / `}`）；
+    ///   * `records_with_conn` 卡内行：原来**内联的 9 行 if/else** 删掉，换成**一行**
+    ///     `let (k, label) = (route_label(r), route_label(r));`。
+    ///   净行数 = 8 + 4 − 1 − 1 − 9 = **+1 代码行 + 1 空行 = +4**（与实测逐字对上）；
+    ///   字符数 +32 是三者相抵后的净值（新增的 `route_label` 与 `format!` 被删掉的那份重复
+    ///   `format!` 抵掉了大半）。**归属**：本轮的另外几处改动都不在面内——`query.rs` 的模块头说明
+    ///   与函数内注释是**整行 `//`**（判据面剥掉，**不进面**）、新增用例在 BEGIN..END 排除区内；
+    ///   前端（`UsageDistributionCard.tsx` / `i18n` / 测试）根本不在面内。
+    ///   面**没有新增文件**、排除区标记未动、其余 23 个文件逐字未改。
     #[test]
     fn scan_face_size_is_pinned() {
         let (mut lines, mut chars) = (0usize, 0usize);
@@ -1818,7 +1832,7 @@ mod tests {
         }
         assert_eq!(
             (lines, chars),
-            (6913, 149440),
+            (6917, 149472),
             "判据面尺寸变了（实测 {lines} 行 / {chars} 字符）：本用例是**声明 = 实际**的钉子——\
              先弄清面为什么变（新增文件？改了排除区标记？动了生产代码？），再同步本常量、\
              `no_source_timezone_is_fed_into_any_key_function` 的锁注释、`KNOWN-PLAN-DEFECTS.md` \

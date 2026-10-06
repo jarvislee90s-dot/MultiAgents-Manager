@@ -1027,7 +1027,7 @@
       "tool": "By tool",
       "project": "By project",
       "provider": "By provider",
-      "model": "By model"
+      "model": "By provider / model"
     },
     "records": {
       "cardDim": "Card grouping",
@@ -1054,7 +1054,8 @@
     },
     "moreN": "+{{n}}",
     "exact": "Exact value {{value}}",
-    "compare": " (prev {{prev}} · {{delta}})",
+    "compare": " ({{delta}})",
+    "compareHint": "vs. previous equal-length range {{prev}}",
     "compare.new": "new",
     "turnBasis": {
       "claude": "Counts started turns (user rows with no toolUseResult and not meta); assistant rows are never counted (2.68x streaming duplicates)",
@@ -1094,7 +1095,7 @@
     "notCollected": "Not collected yet",
     "footer": {
       "caliber": "Tokens only · incl. subagents · aggregated locally",
-      "freshness": "Data freshness: {{time}}",
+      "baseline": "Baseline: previous equal-length range",
       "retention": "No detail older than {{days}} days"
     }
   },

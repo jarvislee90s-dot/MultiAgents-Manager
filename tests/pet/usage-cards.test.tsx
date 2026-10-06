@@ -87,7 +87,7 @@ describe("usage-cards（计划② Task 7：趋势卡 + 四维分布卡）", () =
         peakLabel={peakOf(PTS)}
         // 趋势区环比（spec P8：「指标网格各项**与趋势区**都显示对比值」）：口径 = 区间 hero 环比
         // 上一等长区间。这里给 1,954,268 ← 1,802,000 ⇒ 差 +152,268 ⇒ +8.4%，上一周期 180.20万
-        compareLabel={compareSuffix(1_954_268, 1_802_000, fmtTokens, tf)}
+        compareLabel={compareSuffix(1_954_268, 1_802_000, tf)}
         title="用量趋势"
         loadingLabel="加载中…"
         emptyLabel="暂无数据"
@@ -107,11 +107,10 @@ describe("usage-cards（计划② Task 7：趋势卡 + 四维分布卡）", () =
     expect(peak.textContent).not.toContain(",");
 
     // 趋势区**文字**环比（spec P8 明文要求；不画上一周期的折线——契约没有上一周期的序列）。
-    // 逐字钉住两个数：上一周期缩写（180.20万，带单位 2 位）与百分点差（+8.4%）。
+    // 2026-10-06 用户裁决「同比冗余字太多」后：**屏上只剩差值**，上一周期的值（180.20万）
+    // 不再进这句文案——它归调用方挂进 `title`（`usage.compareHint`，见 `usage-page.test.tsx`）。
     // 峰值与环比都在右槽，但**是两个节点** ⇒ 峰值那行的 textContent 不含环比（上一条断言的隐含前提）。
-    expect(screen.getByTestId("usage-trend-compare")).toHaveTextContent(
-      "（上一周期 180.20万 · +8.4%）"
-    );
+    expect(screen.getByTestId("usage-trend-compare")).toHaveTextContent("（+8.4%）");
     expect(peak.textContent).not.toContain("上一周期");
 
     // 内层直接用 Task 4 的 TrendChartWithTooltip：hover 出**精确值**（完整千分位）
@@ -165,28 +164,31 @@ describe("usage-cards（计划② Task 7：趋势卡 + 四维分布卡）", () =
     busyChart.unmount();
   });
 
-  it("3. 分布卡：四维切换按钮（aria-pressed 反映当前维度）点击回调出分组键", () => {
+  it("3. 分布卡：三维切换按钮（aria-pressed 反映当前维度）点击回调出分组键", () => {
     const onGroupByChange = vi.fn();
     const rows = [row("claude", "claude", 1_000)];
     render(
       <UsageDistributionCard rows={rows} groupBy="tool" onGroupByChange={onGroupByChange} t={tf} />
     );
 
-    // 四维按钮文案走 usage.group.<dim>，当前维度 aria-pressed=true，其余 false
+    // 三维按钮文案走 usage.group.<dim>，当前维度 aria-pressed=true，其余 false。
+    // ⚠️ **供应商不再是独立维度**（2026-10-06 用户裁决：与模型合并成一个 sheet）⇒ 这里也**不得**
+    // 再断言 `usage-dist-group-provider` 存在（那正是本次要撤掉的按钮）；它仍是契约的合法取值、
+    // 仍供 CSV/内部查询使用，`usage.group.provider` 这个键也保留（`exportText.ts` 查表要用）。
     expect(screen.getByTestId("usage-dist-group-tool")).toHaveTextContent("按工具");
     expect(screen.getByTestId("usage-dist-group-project")).toHaveTextContent("按项目");
-    expect(screen.getByTestId("usage-dist-group-provider")).toHaveTextContent("按供应商");
-    expect(screen.getByTestId("usage-dist-group-model")).toHaveTextContent("按模型");
-    for (const dim of ["tool", "project", "provider", "model"]) {
+    expect(screen.getByTestId("usage-dist-group-model")).toHaveTextContent("按供应商/模型");
+    expect(screen.queryByTestId("usage-dist-group-provider")).toBeNull();
+    for (const dim of ["tool", "project", "model"]) {
       expect(screen.getByTestId(`usage-dist-group-${dim}`)).toHaveAttribute(
         "aria-pressed",
         String(dim === "tool")
       );
     }
 
-    fireEvent.click(screen.getByRole("button", { name: "按供应商" }));
+    fireEvent.click(screen.getByRole("button", { name: "按供应商/模型" }));
     expect(onGroupByChange).toHaveBeenCalledTimes(1);
-    expect(onGroupByChange).toHaveBeenCalledWith("provider");
+    expect(onGroupByChange).toHaveBeenCalledWith("model");
   });
 
   it("4. 分布卡：供应商维度行名走 t(label)；不可得的 i18n 键不得原样印给用户", () => {
@@ -217,16 +219,20 @@ describe("usage-cards（计划② Task 7：趋势卡 + 四维分布卡）", () =
       <UsageDistributionCard rows={rows} groupBy="tool" onGroupByChange={vi.fn()} t={tf} />
     );
 
-    // 名称（AGENT_BADGE 展示名，不是 id）+ 数值（万/亿缩写）
+    // 名称（AGENT_BADGE 展示名，不是 id）落在 `usage-dist-<key>`；数值落在同一行的 `usage-val-<key>`
+    // （2026-10-06 排版修复后名称与数值是**两个格子**：整张列表共用一个 grid，名称列按最长名称取宽，
+    // 数值列右对齐 ⇒ 两者不再是同一个元素的孩子。testid 刻意不带 `dist-` 前缀，免得落进
+    // 下面「恰 10 行」那条 `/^usage-dist-k/` 的匹配面把行数数成 20）。
     const top = screen.getByTestId("usage-dist-claude");
     expect(top).toHaveTextContent("Claude");
-    expect(top).toHaveTextContent("195.43万");
+    expect(screen.getByTestId("usage-val-claude")).toHaveTextContent("195.43万");
     expect(screen.getByTestId("usage-dist-codex")).toHaveTextContent("Codex");
-    expect(screen.getByTestId("usage-dist-codex")).toHaveTextContent("50.00万");
+    expect(screen.getByTestId("usage-val-codex")).toHaveTextContent("50.00万");
 
-    // hover 精确值（hero 口径的完整千分位，走 usage.exact）
-    expect(top).toHaveAttribute("title", "精确值 1,954,268");
-    expect(screen.getByTestId("usage-dist-codex")).toHaveAttribute("title", "精确值 500,000");
+    // hover 精确值（hero 口径的完整千分位，走 usage.exact）——挂在**数值格**上，
+    // 因为它说的就是这个被缩写过的数（spec P8「所有缩写数值都必须能在 hover 时读到精确值」）
+    expect(screen.getByTestId("usage-val-claude")).toHaveAttribute("title", "精确值 1,954,268");
+    expect(screen.getByTestId("usage-val-codex")).toHaveAttribute("title", "精确值 500,000");
 
     // 占比条：按该组最大值归一；下限 DIST_MIN_BAR_PCT（4%）防短条不可见
     expect(DIST_MIN_BAR_PCT).toBe(4);
@@ -278,30 +284,32 @@ describe("usage-cards（计划② Task 7：趋势卡 + 四维分布卡）", () =
       <UsageDistributionCard rows={rows} groupBy="model" onGroupByChange={vi.fn()} t={tf} />
     );
 
+    // 2026-10-06 用户裁决后（模型维度合并为「供应商 / 模型」）**不再短化**：以前 12 字符以上会被
+    // 砍成 `claude-son…`（再叠上 `w-28` 的 CSS 截断，真机两个模型名双双不可分辨），现在**原文直出**，
+    // 列宽由整列 `auto` 保证；名称仍常驻 `title`（真的被 CSS 压窄时 hover 可读全名）。
     const long = screen.getByTestId("usage-dist-m1");
-    expect(long).toHaveTextContent("claude-son…");
-    expect(long.textContent).not.toContain("claude-sonnet-4-5");
-    expect(long.querySelector("[title='claude-sonnet-4-5']")).toBeTruthy();
+    expect(long).toHaveTextContent("claude-sonnet-4-5");
+    expect(long).not.toHaveTextContent("…");
+    expect(long).toHaveAttribute("title", "claude-sonnet-4-5");
 
-    // 未超 12 字符：原文直出，不另挂 title
+    // 短名同样是原文（不再有「短名不挂 title」这条分支——全名 title 现在是恒挂的）
     const brief = screen.getByTestId("usage-dist-m2");
     expect(brief).toHaveTextContent("gpt-5");
-    expect(brief.querySelector("[title='gpt-5']")).toBeNull();
 
     view.unmount();
   });
 
-  it("8. 分布卡空态：卡壳与四维按钮照常在位，空标签**恰好一个**（Task 7 空态修复）", () => {
+  it("8. 分布卡空态：卡壳与三维按钮照常在位，空标签**恰好一个**（Task 7 空态修复）", () => {
     // 真机可达路径 = **空窗口**（窗口内零行）⇒ 卡片不是「整卡换空态」，而是「卡壳 + 内容区空标签」。
-    // 旧写法 `return <UsageEmpty …/>` 会把这四个按钮一并抽掉——那是用户在空窗口里唯一还能做的事。
+    // 旧写法 `return <UsageEmpty …/>` 会把这几个按钮一并抽掉——那是用户在空窗口里唯一还能做的事。
     const onGroupByChange = vi.fn();
     const view = render(
       <UsageDistributionCard rows={[]} groupBy="project" onGroupByChange={onGroupByChange} t={tf} />
     );
 
-    // ① 卡壳在位：标题 + 四个 usage-dist-group-* 按钮（当前维度 aria-pressed，可点回调）
+    // ① 卡壳在位：标题 + 三个 usage-dist-group-* 按钮（当前维度 aria-pressed，可点回调）
     expect(screen.getByText("分组分布")).toBeTruthy();
-    for (const dim of ["tool", "project", "provider", "model"]) {
+    for (const dim of ["tool", "project", "model"]) {
       const btn = screen.getByTestId(`usage-dist-group-${dim}`);
       expect(btn).toHaveAttribute("aria-pressed", String(dim === "project"));
     }

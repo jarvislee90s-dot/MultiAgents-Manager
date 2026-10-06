@@ -65,9 +65,20 @@ export function trendPoints(trend: TrendPoint[] | null | undefined): ChartPoint[
 /**
  * 趋势图版式常量（`viewBox` 数值坐标）：左/右留白、顶部留白，底部两种——
  * 出 x 轴标签用 `bLabel`（给文字留位置），不出标签用 `bPlain`（收窄留白、把曲线画高）。
- * **分享图导出的趋势小图引用同一组**（Task 12），改这里两处一起变。
+ * **分享图导出的趋势小图引用同一组**（Task 12 的 `exportLayout.ts:20` import 它并复算投影），
+ * 改这里两处一起变——本次 `l/r` 由 6 改 22 正是**一处修两个面**，见下。
+ *
+ * ⚠️ **`l/r = 6` 会裁掉首末标签**（2026-10-06 实机取证）：x 轴标签以 `textAnchor="middle"`
+ * 画在 `x = CHART_PAD.l` 与 `x = width - CHART_PAD.r` 上（本文件 `:236` 的 `<text>`，以及分享图
+ * `exportLayout.ts:368` 的同一个画法），标签半宽约 13–14 个视口单位 ⇒ 在 `l=r=6` 时首末标签各有
+ * 约 28% 落在视口外。真机表现：屏上最左只剩半个字形 + `:00`，最右 `22:00` 印成 `22:0`；
+ * 分享图上同一处标签**溢出白卡内边距**（那里没有被 SVG 视口裁，但压出卡片边界，一样错）。
+ * `bLabel` 已是 16、容得下标签的**高度**；`l/r` 管的是**横向**，故它才是病根。
+ * 取 22 = 半宽 14 + 余量 8：绘图区横向只窄 32/880 ≈ 3.6%（趋势形状不变），首末标签完整可读。
+ * **不得**改用 `textAnchor` 首末特判来打补丁——那会让首末标签与其余标签的锚点语义不一致，
+ * 且分享图那条链路也要跟着复制一遍特判（两处版式漂移的老路）。
  */
-export const CHART_PAD = { l: 6, r: 6, t: 8, bLabel: 16, bPlain: 6 } as const;
+export const CHART_PAD = { l: 22, r: 22, t: 8, bLabel: 16, bPlain: 6 } as const;
 
 /** `viewBox` 坐标点（数值坐标，不是任何像素测量值） */
 type Pt = { x: number; y: number };

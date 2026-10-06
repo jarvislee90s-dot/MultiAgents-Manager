@@ -256,34 +256,28 @@ describe("rangeLabelOf / spanLabelOf", () => {
 });
 
 describe("环比文案（P8：上一周期无数据只显示当前值，不得出现 0% / NaN）", () => {
-  const fmt = (n: number) => String(n);
+  // ⚠️ `compareSuffix` 自 2026-10-06 起**不再收 `fmt`**：上一周期的值按用户裁决（「同比冗余字太多」）
+  // 不进屏上文案，改由调用方用 `usage.compareHint` 挂进 `title`。屏上只剩差值 ⇒ 本文件的期望串
+  // 一律只剩 `delta`（`prev` 不再出现在插值里）。
 
   it("17. 数值型：prev 为 null 或非有限 → 空串", () => {
-    expect(compareSuffix(100, null, fmt, t)).toBe("");
-    expect(compareSuffix(100, Number.NaN, fmt, t)).toBe("");
+    expect(compareSuffix(100, null, t)).toBe("");
+    expect(compareSuffix(100, Number.NaN, t)).toBe("");
   });
 
   it("18. 数值型：正常升降出百分比差（1 位小数带符号）", () => {
-    expect(compareSuffix(120, 100, fmt, t)).toBe('usage.compare|{"prev":"100","delta":"+20.0%"}');
-    expect(compareSuffix(80, 100, fmt, t)).toBe('usage.compare|{"prev":"100","delta":"-20.0%"}');
+    expect(compareSuffix(120, 100, t)).toBe('usage.compare|{"delta":"+20.0%"}');
+    expect(compareSuffix(80, 100, t)).toBe('usage.compare|{"delta":"-20.0%"}');
   });
 
   it("19. 数值型：上一周期为 0 → 显示「新增」而不是除零 Infinity", () => {
-    expect(compareSuffix(50, 0, fmt, t)).toBe(
-      'usage.compare|{"prev":"0","delta":"usage.compare.new"}'
-    );
+    expect(compareSuffix(50, 0, t)).toBe('usage.compare|{"delta":"usage.compare.new"}');
   });
 
   it("20. 命中率型：百分点差由前端从 prevMetrics.cacheHitRate 算出（当前 71.9% vs 上一周期 71.2%）", () => {
-    expect(hitCompareSuffix(0.719, COMPARE, t)).toBe(
-      'usage.compare|{"prev":"71.2%","delta":"+0.7 pt"}'
-    );
-    expect(hitCompareSuffix(0.678, COMPARE, t)).toBe(
-      'usage.compare|{"prev":"71.2%","delta":"-3.4 pt"}'
-    );
-    expect(hitCompareSuffix(0.712, COMPARE, t)).toBe(
-      'usage.compare|{"prev":"71.2%","delta":"±0.0 pt"}'
-    );
+    expect(hitCompareSuffix(0.719, COMPARE, t)).toBe('usage.compare|{"delta":"+0.7 pt"}');
+    expect(hitCompareSuffix(0.678, COMPARE, t)).toBe('usage.compare|{"delta":"-3.4 pt"}');
+    expect(hitCompareSuffix(0.712, COMPARE, t)).toBe('usage.compare|{"delta":"±0.0 pt"}');
   });
 
   it("21. 命中率型：compare 为 null → 空串（整段对比不渲染）", () => {
@@ -292,28 +286,16 @@ describe("环比文案（P8：上一周期无数据只显示当前值，不得�
 
   it("22. 零值字形：**先四舍五入再取符号**——近零差不得印成 -0.0% / -0.0 pt", () => {
     // 精确零：两侧零值字形统一为 `±`（不是 `+0.0%`）
-    expect(compareSuffix(1_000_000, 1_000_000, fmt, t)).toBe(
-      'usage.compare|{"prev":"1000000","delta":"±0.0%"}'
-    );
+    expect(compareSuffix(1_000_000, 1_000_000, t)).toBe('usage.compare|{"delta":"±0.0%"}');
     // 近零负差（-400 / 1e6 = -0.04%，舍入后为 0）——符号取未舍入值时会印成 -0.0%
-    expect(compareSuffix(999_600, 1_000_000, fmt, t)).toBe(
-      'usage.compare|{"prev":"1000000","delta":"±0.0%"}'
-    );
+    expect(compareSuffix(999_600, 1_000_000, t)).toBe('usage.compare|{"delta":"±0.0%"}');
     // 近零正差（+400 / 1e6 = +0.04%，舍入后同样为 0）→ 也是 ±，不是 +0.0%
-    expect(compareSuffix(1_000_400, 1_000_000, fmt, t)).toBe(
-      'usage.compare|{"prev":"1000000","delta":"±0.0%"}'
-    );
+    expect(compareSuffix(1_000_400, 1_000_000, t)).toBe('usage.compare|{"delta":"±0.0%"}');
     // 舍入后**仍非零**的差值不得被「零值化」吃掉符号
-    expect(compareSuffix(999_000, 1_000_000, fmt, t)).toBe(
-      'usage.compare|{"prev":"1000000","delta":"-0.1%"}'
-    );
+    expect(compareSuffix(999_000, 1_000_000, t)).toBe('usage.compare|{"delta":"-0.1%"}');
     // 命中率同理：-0.02 pt / +0.02 pt 舍入后为 0 → ±0.0 pt
-    expect(hitCompareSuffix(0.7118, COMPARE, t)).toBe(
-      'usage.compare|{"prev":"71.2%","delta":"±0.0 pt"}'
-    );
-    expect(hitCompareSuffix(0.7122, COMPARE, t)).toBe(
-      'usage.compare|{"prev":"71.2%","delta":"±0.0 pt"}'
-    );
+    expect(hitCompareSuffix(0.7118, COMPARE, t)).toBe('usage.compare|{"delta":"±0.0 pt"}');
+    expect(hitCompareSuffix(0.7122, COMPARE, t)).toBe('usage.compare|{"delta":"±0.0 pt"}');
   });
 });
 

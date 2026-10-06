@@ -48,6 +48,14 @@ UsageMetrics {             // 派生口径（说明书 §4）
 UsageRow {
   key: string              // 分组键（工具 id / 项目小写键 projectName.toLowerCase() / 供应商 id / 模型名）
   label: string            // 展示名（项目名原文 = project_name_from_path 的 basename；模型名原文）
+                           // ⚠️ **2026-10-06 用户裁决（接口变更申报，随实现一并落地）**：
+                           // `groupBy="model"` 的 `key` / `label` 由「模型名」改为 **「供应商 / 模型」**
+                           // （供应商不可得时只回模型名）——与记录页卡内行（D6）**同一形状、同一实现**
+                           // （`query.rs::route_label`，两处共用，不得各写一份）。**枚举值本身不变**
+                           // （仍是 tool | project | provider | model），改的是 `model` 维度的行名语义；
+                           // 键含供应商 ⇒ 同一模型挂在两个供应商下出**两行**，不再互相吃掉。
+                           // `groupBy="provider"` 仍是合法取值（CSV 导出与内部查询照用），但**大看板
+                           // 不再提供该维度的切换按钮**：供应商与模型已合并为一个 sheet（见说明书 §P1 第 5 条）。
   buckets: UsageBuckets
   metrics: UsageMetrics
   sourceKind: "measured" | "inferred" | "unknown"   // 供应商归因三态（说明书 §4.3）

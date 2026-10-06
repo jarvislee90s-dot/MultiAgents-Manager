@@ -14,7 +14,6 @@ import {
   fmtLongest,
   fmtPct,
   fmtTokens,
-  shortModel,
   usageAgentLabel,
 } from "@/lib/usage/format";
 
@@ -91,12 +90,10 @@ describe("format.ts（spec P8 显示规范）", () => {
     expect(fmtLongest(0)).toBe("0 秒");
   });
 
-  it("11. shortModel：>12 字符取前 10 + …，否则原文", () => {
-    expect(shortModel("123456789012")).toBe("123456789012");
-    expect(shortModel("1234567890123")).toBe("1234567890…");
-    expect(shortModel("gpt-5-codex")).toBe("gpt-5-codex");
-    expect(shortModel("claude-sonnet-4-5-20250929")).toBe("claude-son…");
-  });
+  // 第 11 条（`shortModel`）已于 2026-10-06 删除：模型维度合并为「供应商 / 模型」后，
+  // 分布卡改用**整列取宽**（`.grid-cols-[minmax(0,auto)_…]`）而不是 JS 短化，
+  // `shortModel` 失去唯一消费方 ⇒ 函数与它的用例一并删除（不留死导出）。
+  // 名称的「显示不全」由布局解决、由 `UsageDistributionCard` 的用例钉住。
 
   it("12. fmtDateTime：本地时刻 YYYY-MM-DD HH:mm:ss；≤0 / 非有限 → EM_DASH", () => {
     // 用本地日历构造入参 → 任意时区下期望值都是同一串（与夹具的时区无关写法同源）

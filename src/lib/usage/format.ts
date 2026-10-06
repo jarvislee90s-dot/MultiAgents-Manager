@@ -70,11 +70,6 @@ export function fmtLongest(ms: number): string {
   return Math.round(ms / 1_000) + " 秒";
 }
 
-/** 模型名短化（Task 7 分布卡模型行）：>12 字符取前 10 + `…`，否则原文（全名由 `title` 给）。 */
-export function shortModel(name: string): string {
-  return name.length > 12 ? name.slice(0, 10) + "…" : name;
-}
-
 /**
  * 采集时刻（Task 6 `usage.grid.asOf` / Task 11 文本摘要）：**本地时区** `YYYY-MM-DD HH:mm:ss`。
  * 非有限值与 `≤0` 归 `EM_DASH` —— `collectedAt === 0` 是「尚未采集」哨兵（计划 §3 第 8 条），

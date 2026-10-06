@@ -3,7 +3,7 @@
 // Task 11 文本摘要（`label + 两个空格 + fmtInt(value)` 精确值）、Task 12 分享图。
 // 纪律：零 DOM API、零新增依赖；值口径与 hero 一致（`metrics.requestTotal + buckets.output`），
 // **不是**四桶之和（brief 关键坑）。label 原样透传 —— 维度分派由组件做
-// （provider → `t(label)`、model → `shortModel(label)`、project → 原文、tool → `usageAgentLabel`）。
+// （provider → `t(label)`、model → 原文（**不短化**）、project → 原文、tool → `usageAgentLabel`）。
 import type { UsageRow } from "@/types/usage";
 
 /** 占比条最小宽度（**百分比**，Task 7 直接写进 style；0–1 分数口径见 `DistRow.share`） */
