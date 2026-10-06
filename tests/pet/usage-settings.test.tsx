@@ -140,10 +140,12 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
     expect(screen.getByTestId("usage-detail-retention-days")).toBeTruthy();
     expect(screen.getByTestId("usage-collect-interval-min")).toBeTruthy();
     expect(screen.getByTestId("usage-provider-map-rules")).toBeTruthy();
-    expect(screen.getByTestId("usage-export-quote")).toBeTruthy();
+    // **B1（2026-10-07）**：评语已搬到看板导出条 ⇒ 本页**不得**再有它。
+    // 这条是**正向锁**（不是删掉了事）：将来谁把评语搬回来，两处入口就会各写各的、必然漂移。
+    expect(screen.queryByTestId("usage-export-quote")).toBeNull();
     expect(screen.getByTestId("usage-export-pose")).toBeTruthy();
 
-    // 8 行标题（zh/en 同父同键的 8 个 label key）
+    // 7 行标题（zh/en 同父同键的 7 个 label key；B1 后**不含** Share-image caption —— 它随评语搬走）
     for (const label of [
       "Enable usage statistics",
       "Mini bar range",
@@ -151,7 +153,6 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
       "Detail retention (days)",
       "Fallback collect interval (minutes)",
       "Provider mapping rules (JSON)",
-      "Share-image caption",
       "Share-image pose",
     ]) {
       expect(screen.getByText(label)).toBeTruthy();
@@ -170,7 +171,6 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
       "usage-detail-retention-days",
       "usage-collect-interval-min",
       "usage-provider-map-rules",
-      "usage-export-quote",
       "usage-export-pose",
     ]) {
       expect(screen.getAllByTestId(id)).toHaveLength(1);
@@ -306,28 +306,30 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
     });
   });
 
-  it("8. 评语占位符提示 + 保存失败原因可见（usage-set-error，不静默）", async () => {
+  it("8. 保存失败原因可见（usage-set-error，不静默）——B1 后改用 providerMapRules 当载体", async () => {
+    // ⚠️ **2026-10-07 B1：换载体、不换断言。** 本条原先拿「分享图评语」输入框当载体，而评语已搬到
+    // 看板导出条（`UsageQuoteEditor`）⇒ 本页不再有该输入框。本条验的是「后端整包拒绝 ⇒ 原因可见 +
+    // 用户输入保留 + 控制台留痕」这套**通用**机制，与具体字段无关；评语自己的读/写/失败路径由
+    // `tests/pet/usage-quote-editor.test.tsx` 覆盖（含占位符变量提示）。
     renderSection();
-    await screen.findByTestId("usage-export-quote");
-    const quote = input("usage-export-quote");
-    // 占位符提示可用变量（单花括号是字面量，不是 i18next 插值）
-    for (const placeholder of ["{range}", "{tokens}", "{hitPct}", "{models}"]) {
-      expect(quote.placeholder).toContain(placeholder);
-    }
+    await screen.findByTestId("usage-provider-map-rules");
+    const field = input("usage-provider-map-rules");
 
     // 后端整包拒绝（形态不符 / 越界）→ 原因必须可见，不得静默吞掉
     failNext = { code: "usage-settings-invalid", detail: "浮窗分工具条数须在 1–7" };
     // 组件在失败时 console.error 留痕（与其它命令失败同惯例）→ 用例内静音，避免污染套件输出
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      fireEvent.change(quote, { target: { value: "今日 {tokens} tokens" } });
+      fireEvent.change(field, {
+        target: { value: '{"rules":[{"prefix":"x-","provider":"p"}]}' },
+      });
       const box = await screen.findByTestId("usage-set-error");
       expect(box.textContent).toContain("Failed to save usage settings");
       // 原因走 usage.rpc.<code> 码表 + detail 通道，不打印原始错误对象
       expect(box.textContent).toContain("Invalid usage settings");
       expect(box.textContent).toContain("浮窗分工具条数须在 1–7");
       // 失败不谎报成功：输入框保留用户刚输入的值（后端没接受，错误就在旁边）
-      expect(quote.value).toBe("今日 {tokens} tokens");
+      expect(field.value).toBe('{"rules":[{"prefix":"x-","provider":"p"}]}');
       expect(errSpy).toHaveBeenCalled(); // 控制台也留痕，不静默
     } finally {
       errSpy.mockRestore();

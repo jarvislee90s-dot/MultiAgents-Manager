@@ -196,7 +196,13 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
     // X7（2026-10-06）：口径不变（文本摘要与分享图都是看板口径的产物，不在记录页出口），
     // 但**不再整组撤掉**——以前 `queryByTestId(...)` 为 null，用户看到的是「按钮凭空消失」，
     // 以为功能坏了。现在在位 + `disabled` + `title` 说明原因。
-    for (const id of ["usage-export-copy-text", "usage-export-image", "usage-export-copy-image"]) {
+    // 评语按钮（B1 从设置页搬来）也在同一条导出条上 ⇒ 同样「在位但禁用」
+    for (const id of [
+      "usage-export-copy-text",
+      "usage-export-image",
+      "usage-export-copy-image",
+      "usage-export-quote-open",
+    ]) {
       expect(screen.getByTestId(id)).toBeDisabled();
       expect(screen.getByTestId(id).getAttribute("title")).toBeTruthy();
     }
@@ -207,6 +213,9 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
     render(<UsageExportActions {...boardProps({ dash: null })} />);
     expect(screen.getByTestId("usage-export-copy-text")).toBeDisabled();
     expect(screen.getByTestId("usage-export-copy-text").getAttribute("title")).toBeNull();
+    // 评语按钮**也随导出条一起禁用**（2026-10-07 B1）。它严格说只需要「设置」不需要看板数据，
+    // 但整条导出条在数据未就绪时统一不可点更好懂（也就多禁用一瞬），故跟随 `!dash` 同纪律。
+    expect(screen.getByTestId("usage-export-quote-open")).toBeDisabled();
     expect(screen.getByTestId("usage-export-csv")).not.toBeDisabled();
   });
 

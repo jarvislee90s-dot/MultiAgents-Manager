@@ -12,7 +12,7 @@
 //  4 `detailRetentionDays`   同上，夹取 **1–3650**；提示明示「N 天前无明细」
 //  5 `collectIntervalMin`    同上，夹取 **1–1440**
 //  6 `providerMapRules`      JSON 文本域，形态固定 `{"rules":[{"prefix":…,"provider":…}]}`
-//  7 `exportQuote`           文本框，占位符提示 `{range} {tokens} {hitPct} {models}`
+//  7 `exportQuote`           **已搬走**（2026-10-07 B1）→ 看板导出条的 `UsageQuoteEditor`
 //  8 `exportPose`            原生 `<select>`，选项 = `poseKeysFor(11)` 的 11 项（键族**唯一**出处
 //                            是 Task 12 的 `sheet.ts`，**不得**自造第二份键表；`look` 项保留——
 //                            9 行图集上它回落待机，文案里写明）
@@ -344,21 +344,9 @@ export function UsageSection() {
           </div>
           <div className="border-t" />
 
-          {/* 分享图评语：留空用默认评语池；可用变量在占位符里点明 */}
-          <div className="py-2.5">
-            <label className="text-sm font-medium" htmlFor="usage-export-quote">
-              {t("settings.usage.exportQuote")}
-            </label>
-            <Input
-              id="usage-export-quote"
-              data-testid="usage-export-quote"
-              className="mt-1.5 h-8"
-              placeholder={t("settings.usage.exportQuotePlaceholder")}
-              value={form.exportQuote}
-              onChange={(e) => change({ exportQuote: e.currentTarget.value })}
-            />
-          </div>
-          <div className="border-t" />
+          {/* 分享图评语**不在本页**（2026-10-07 用户裁决 B1）：它搬到了「导出所在的地方」——
+              用量看板吸顶导出条上的「评语」按钮（`components/usage/UsageQuoteEditor.tsx`）。
+              字段本身仍是 `UsageSettings.exportQuote`、仍走同一条 `usage_set_settings`。 */}
 
           {/* 分享图姿态：键族取自 Task 12 的 `poseKeysFor(11)`（**不得**自造第二份）；`look` 项保留 */}
           <SettingRow label={t("settings.usage.exportPose")} htmlFor="usage-export-pose">

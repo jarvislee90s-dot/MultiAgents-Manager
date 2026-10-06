@@ -386,8 +386,6 @@
       "providerMapRulesPlaceholder": "{\"rules\":[{\"prefix\":\"deepseek-\",\"provider\":\"volcengine\"}]}",
       "providerMapRulesHint": "Only the {\"rules\":[{\"prefix\":…,\"provider\":…}]} shape is accepted; an invalid value is only flagged here and the save is still sent.",
       "providerMapRulesInvalid": "Not the {\"rules\":[{\"prefix\":…,\"provider\":…}]} shape: the backend will reject the save (warning only, submission is not blocked).",
-      "exportQuote": "Share-image caption",
-      "exportQuotePlaceholder": "Leave empty for the default caption pool; {range} {tokens} {hitPct} {models} are available",
       "exportPose": "Share-image pose",
       "poseResetOnSwitch": "The pose fell back to Random because the pet changed: pose keys follow the sheet's row count and may not exist on the new sheet.",
       "saveFailed": "Failed to save usage settings",
@@ -983,6 +981,13 @@
       "saveFailed": "Export failed: {{error}}",
       "exporting": "Exporting…",
       "copyFailed": "Copy failed: {{error}}",
+      "quote": "Quote",
+      "quoteTitle": "Share-image quote",
+      "quotePlaceholder": "Leave empty to use the default pool (variables: {range} {tokens} {hitPct} {models})",
+      "quoteHint": "Printed in the share image's speech bubble and included in the text summary.",
+      "quoteSave": "Save",
+      "quoteCancel": "Cancel",
+      "quoteSaved": "Quote saved",
       "boardOnly": "Board tab only (the text summary and share image are board-scoped)"
     },
     "range": {
