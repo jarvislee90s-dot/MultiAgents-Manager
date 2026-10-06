@@ -584,6 +584,15 @@ export function FoxbellPet() {
   const [miniMode, setMiniMode] = useState<"hover" | "manual" | null>(null);
   // 浮窗定位基准：卡片区**实测**高度（jsdom 恒 0）。浮窗贴在卡片上方 ⇒ 卡片增减后必须重算 bottom。
   const [cardsHeight, setCardsHeight] = useState(0);
+  /**
+   * 诊断（H1 的判据 + 行为中性守卫）：上一次**真正写进** `cardsHeight` 的量测值，以及亚像素
+   * 抖动计数。布局 effect 里的 `setCardsHeight(cardsH)` 用的是 `getBoundingClientRect().height`
+   * 的**浮点**值，而 `cardsHeight` **不在那个 effect 的依赖数组里** ⇒ 抖动一次就 setState 一次、
+   * 进而再量测一次（「宠物不显示」事故的嫌疑假设 H1）。React 对**相同值**本来就 bail out
+   * ⇒ 「值没变就不 set」不改变任何行为，只是把「其实什么都没发生」这句话落实，并把抖动留成证据。
+   */
+  const cardsHeightRef = useRef<number | null>(null);
+  const cardsJitterRef = useRef<{ count: number; since: number }>({ count: 0, since: 0 });
   const miniWrapRef = useRef<HTMLDivElement | null>(null);
   const miniHoverTimerRef = useRef<(() => void) | null>(null); // 悬停 MINI_HOVER_MS 出浮窗
   const miniGraceTimerRef = useRef<(() => void) | null>(null); // 移开 MINI_GRACE_MS 宽限后消失
@@ -664,7 +673,24 @@ export function FoxbellPet() {
     const menuH = menuWrapRef.current?.getBoundingClientRect().height ?? 0;
     const cardsH = cardsWrapRef.current?.getBoundingClientRect().height ?? 0;
     const candidatesH = jumpCandidatesRef.current?.getBoundingClientRect().height ?? 0;
-    setCardsHeight(cardsH); // 浮窗定位基准（jsdom 恒 0）
+    // 浮窗定位基准（jsdom 恒 0）+ 诊断：只有**真的变了**才 setState（React 对相同值本就 bail out，
+    // 故这不是行为变更），并把亚像素抖动记下来 —— 抖动即自激的燃料（见 `cardsHeightRef` 的注释）。
+    const prevCardsH = cardsHeightRef.current;
+    if (prevCardsH === null || cardsH !== prevCardsH) {
+      const delta = prevCardsH === null ? 0 : cardsH - prevCardsH;
+      if (prevCardsH !== null && delta > 0 && delta < 0.5) {
+        const j = cardsJitterRef.current;
+        const now = performance.now();
+        if (now - j.since > 2000) cardsJitterRef.current = { count: 1, since: now };
+        else j.count += 1;
+        console.debug("[pet] cardsHeight 亚像素抖动", { from: prevCardsH, to: cardsH, delta });
+        if (cardsJitterRef.current.count === 9) {
+          console.warn("[pet] cardsHeight 在 2s 内抖动 9 次 —— 迷你条布局 effect 可能自激（H1）");
+        }
+      }
+      cardsHeightRef.current = cardsH;
+      setCardsHeight(cardsH);
+    }
     // 浮窗高度：菜单打开时浮窗被渲染守卫隐藏 ⇒ miniH = 0（否则菜单与浮窗的高度会被一起算进去）
     const miniH = miniMode !== null && menu === null ? miniBarHeight(cfg.scale) : 0;
     // 高度 = base + (浮窗显示 ? 卡片 + 浮窗 : max(卡片, 菜单, 候选)) —— D20 核心修订：**求和**

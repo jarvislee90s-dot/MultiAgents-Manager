@@ -37,6 +37,15 @@ fn window_alive(_w: &tauri::WebviewWindow) -> bool {
     true
 }
 
+/// 诊断取值：窗口自报的可见性文本（`is_visible` 失败时返回 err 文本）。
+/// 纯观测——任何失败都不参与建窗/显隐结果，只为回答「窗口自己说它可见吗」
+fn visible_text(w: &tauri::WebviewWindow) -> String {
+    match w.is_visible() {
+        Ok(v) => v.to_string(),
+        Err(e) => format!("err: {}", e),
+    }
+}
+
 /// 清除可能存在的幽灵/旧窗口（幂等）：destroy 后注册表条目经事件循环异步清除，
 /// 轮询等待消失（最多 300ms），避免同标签重建冲突
 fn clear_pet_window(app: &AppHandle) {
@@ -57,6 +66,12 @@ pub fn create_pet_window(app: &AppHandle) -> Result<(), String> {
     let _guard = PET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = app.get_webview_window("pet") {
         if window_alive(&existing) {
+            // 诊断（分支留痕）：复用分支此前完全静默——回答「这次建窗是复用已有窗口还是新建」
+            // 与「复用那一刻窗口自报的可见性」（is_visible=false ⇒ 建窗成功但从未 show，与 H2 互通）
+            log::info!(
+                "pet window 复用已落地窗口（branch=reused existing, attempt=0, is_visible={}）",
+                visible_text(&existing)
+            );
             return Ok(());
         }
         log::warn!("pet window 未落地（启动竞态幽灵），销毁重建");
@@ -67,6 +82,15 @@ pub fn create_pet_window(app: &AppHandle) -> Result<(), String> {
         match build_pet_window(app) {
             Ok(w) => {
                 if window_alive(&w) {
+                    // 诊断（分支留痕）：成功路径在 `attempt == 1` 时**完全静默** ⇒ 日志里
+                    // 「建窗成功」与「压根没走到这一步」无法区分。本次事故正是这样：4 小时 15 分
+                    // 的日志里宠物行数为 0，既不能排除建窗失败、也不能确认建窗成功。
+                    // 记 `is_visible` 一并回答「建窗那一刻窗口自报可见吗」。
+                    log::info!(
+                        "pet window 新建成功（branch=built new, attempt={}, is_visible={}）",
+                        attempt,
+                        visible_text(&w)
+                    );
                     if attempt > 1 {
                         log::info!("pet window 第 {} 次尝试创建成功", attempt);
                     }
@@ -125,11 +149,29 @@ pub async fn set_pet_visible(app: AppHandle, visible: bool) -> Result<(), String
         }
     }
     if let Some(w) = app.get_webview_window("pet") {
-        if visible {
-            w.show().map_err(|e| e.to_string())?;
-        } else {
-            w.hide().map_err(|e| e.to_string())?;
+        // 诊断（显隐前后各一行）：`is_visible` 的**前后对账**是区分本次事故三种假设的关键——
+        // 若 after = true 而用户看不见 ⇒ 窗口在、页面没画出来（H1：渲染/量测自激）；若日志里
+        // 压根没有这一对 ⇒ 前端那条**唯一**的显示路径没走到（H2：`pet.tsx` 的 `.catch` 吞了失败）。
+        let before = visible_text(&w);
+        let r = if visible { w.show() } else { w.hide() };
+        if let Err(e) = r {
+            log::warn!(
+                "set_pet_visible({}) 失败：{}（is_visible before={}）",
+                visible,
+                e,
+                before
+            );
+            return Err(e.to_string());
         }
+        log::info!(
+            "set_pet_visible({})：is_visible {} → {}",
+            visible,
+            before,
+            visible_text(&w)
+        );
+    } else {
+        // 窗口不在注册表里也要留痕：否则「调用发生了但没有窗口」与「调用压根没发生」无法区分
+        log::warn!("set_pet_visible({}) 但 pet 窗口不在注册表里", visible);
     }
     Ok(())
 }

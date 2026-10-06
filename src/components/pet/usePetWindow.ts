@@ -107,6 +107,19 @@ export function usePetWindow() {
   const menuOpenRef = useRef(false);
   const fallRafRef = useRef(0);
   const resizeTimer = useRef<number | null>(null);
+  /**
+   * 诊断（自激探测器，**只告警、不改行为**）：同一个 `(w,h)` 在 2 秒内被反复请求 ⇒ 上游很可能在
+   * 「量测 DOM → setState → 再量测」里打转。本次「宠物不显示」事故的嫌疑假设 H1 正是它：
+   * `FoxbellPet` 的迷你条布局 effect 用 `getBoundingClientRect().height` 的**浮点值** setState，
+   * 而该值**不在依赖数组里** ⇒ 亚像素抖动即可驱动一次窗口尺寸变化、再触发一次量测。
+   * 计数只发生在**真要改窗口**的那条路径上（被 `geo.w === w && geo.h === h` 挡掉的重复请求
+   * 本来就是 no-op，不构成自激）。
+   */
+  const sizeBurstRef = useRef<{ key: string; count: number; since: number }>({
+    key: "",
+    count: 0,
+    since: 0,
+  });
 
   const readGeometry = useCallback(async () => {
     try {
@@ -148,11 +161,35 @@ export function usePetWindow() {
           let nx = geo.x;
           let ny = bottomAnchoredY(geo.y, geo.h, h); // 底部锚定：精灵不动
           if (work) ({ x: nx, y: ny } = clampToWorkArea(nx, ny, w, h, work));
+          // 诊断（窗口几何每次变更都留痕）：回答「宠物窗口在不在被反复改尺寸」「改成了多大、
+          // 放到了哪里、有没有拿到工作区」——H1（自激）与 H3（其实画在屏上、只是没人看）都靠这行区分。
+          const key = `${w}x${h}`;
+          const now = performance.now();
+          const burst = sizeBurstRef.current;
+          if (burst.key === key && now - burst.since < 2000) {
+            burst.count += 1;
+            // 第 9 次才告警、每轮只告一次（不刷屏）
+            if (burst.count === 9) {
+              console.warn(
+                `[pet] syncSize 自激告警：${key} 在 2s 内被请求 ${burst.count} 次 —— 上游在用浮点量测值反复改窗口？`
+              );
+            }
+          } else {
+            sizeBurstRef.current = { key, count: 1, since: now };
+          }
+          console.debug("[pet] syncSize", {
+            w,
+            h,
+            from: geo,
+            to: { x: nx, y: ny },
+            hasWorkArea: work !== null,
+          });
           await win.setSize(new LogicalSize(w, h));
           await win.setPosition(new LogicalPosition(nx, ny));
           geoRef.current = { x: nx, y: ny, w, h };
-        } catch {
-          // ignore
+        } catch (e) {
+          // 诊断：原先这里是空 catch ⇒ 尺寸/位置设置失败**静默**（界面表现就是「窗口不对/看不见」）
+          console.error("[pet] syncSize 失败", { w, h, error: e });
         }
       }, 50);
     },
