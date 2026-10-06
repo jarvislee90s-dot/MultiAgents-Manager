@@ -40,6 +40,8 @@
 // 文件头的源码锁说明）：① 的源码锁按纯文本扫描「含轮询字段字面量的前端文件」，并要求这类文件里不出现
 // 用量命令的 snake_case 字面量。本文件不写那两个字面量，就不会被卷进那张清单；命令名一律用
 // `src/lib/api/usage.ts` 的 camelCase 包装名称呼（`usageGetSettings` / `usageSetSettings`）。
+import { SETTINGS_FIELD } from "@/components/settings/typography";
+import { SETTINGS_CARD_TITLE, SETTINGS_SUBTITLE } from "@/components/settings/typography";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Input } from "@/components/ui/input";
@@ -120,7 +122,7 @@ function SettingRow({
   return (
     <div className="flex items-center justify-between gap-4 py-2.5">
       <div className="flex-1">
-        <label className="text-sm font-medium" htmlFor={htmlFor}>
+        <label className={SETTINGS_FIELD} htmlFor={htmlFor}>
           {label}
         </label>
         {hint ? <p className="text-muted-foreground mt-0.5 text-xs">{hint}</p> : null}
@@ -200,8 +202,8 @@ export function UsageSection() {
 
   return (
     <div>
-      <h2 className="text-lg font-semibold">{t("settings.usage.title")}</h2>
-      <p className="text-muted-foreground mt-1 text-sm">{t("settings.usage.desc")}</p>
+      <h2 className={SETTINGS_CARD_TITLE}>{t("settings.usage.title")}</h2>
+      <p className={`mt-1 ${SETTINGS_SUBTITLE}`}>{t("settings.usage.desc")}</p>
 
       {/* 保存失败：命令级整包拒绝（越界 / 形态不符 / 落库失败）→ 原因必须可见可重试（不静默） */}
       {saveError ? (
@@ -319,7 +321,7 @@ export function UsageSection() {
 
           {/* 供应商映射规则：JSON 文本域（仓内无 textarea 原语 → 原生元素 + 与 Input 同款主题 token） */}
           <div className="py-2.5">
-            <label className="text-sm font-medium" htmlFor="usage-provider-map-rules">
+            <label className={SETTINGS_FIELD} htmlFor="usage-provider-map-rules">
               {t("settings.usage.providerMapRules")}
             </label>
             <p className="text-muted-foreground mt-0.5 text-xs">

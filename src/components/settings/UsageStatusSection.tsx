@@ -22,6 +22,7 @@
 //   是 `commands/resource.rs` 的既有命令；Task 21 复用的是白名单核 `ensure_reveal_allowed`，
 //   并**没有**调 `reveal_dir`——导出侧首次接线在本任务）——**未新增命令、未新增权限/capability、
 //   未新增依赖**。定位与落盘**必须分开报错**（`export.rs` 明文：定位失败不代表导出失败）。
+import { SETTINGS_CARD_TITLE, SETTINGS_SUBTITLE } from "@/components/settings/typography";
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Activity, FolderOpen, RefreshCw } from "lucide-react";
@@ -176,7 +177,7 @@ export function UsageStatusSection() {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold">{t("settings.usageStatus.title")}</h2>
+        <h2 className={SETTINGS_CARD_TITLE}>{t("settings.usageStatus.title")}</h2>
         <Button
           variant="outline"
           size="sm"
@@ -191,7 +192,7 @@ export function UsageStatusSection() {
           </span>
         </Button>
       </div>
-      <p className="text-muted-foreground mt-1 text-sm">{t("settings.usageStatus.description")}</p>
+      <p className={`mt-1 ${SETTINGS_SUBTITLE}`}>{t("settings.usageStatus.description")}</p>
 
       {/* 采集结果：汇总 + 逐源（失败源标红 + 错误码文案） */}
       {collectError ? (
@@ -268,7 +269,7 @@ export function UsageStatusSection() {
       ) : null}
 
       {/* 今日口径：三态（加载 / 错误可重试 / 空态） */}
-      <h3 className="mt-5 text-sm font-medium">{t("settings.usageStatus.todayTitle")}</h3>
+      <h3 className={`mt-5 ${SETTINGS_CARD_TITLE}`}>{t("settings.usageStatus.todayTitle")}</h3>
       {/* 总开关关闭提示：关闭态 dashboard 早退成空态，与「今天没跑」在数字上完全同形，
           只有这句提示能把两者分开（GC 7：不得把「不可得/被关掉」伪装成合法值） */}
       {switchEnabled === false ? (

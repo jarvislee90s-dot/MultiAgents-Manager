@@ -3,6 +3,8 @@
 // MAM 条目（codex 信任门：注册成功 ≠ 事件触发，TUI 内人工信任一次后 hash 落用户层）。
 // 数据源 = hook_signal_health（后端复用会话扫描快照 + 30s TTL 事件目录既有信息，
 // 零新增扫描预算）；挂载/手动刷新各拉一次，无轮询（同 AuditLogSection 惯例）。
+import { SETTINGS_FIELD } from "@/components/settings/typography";
+import { SETTINGS_CARD_TITLE, SETTINGS_SUBTITLE } from "@/components/settings/typography";
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Copy } from "lucide-react";
@@ -79,12 +81,12 @@ export function SignalHealthSection() {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold">{t("settings.signalHealth.title")}</h2>
+        <h2 className={SETTINGS_CARD_TITLE}>{t("settings.signalHealth.title")}</h2>
         <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
           {t("settings.signalHealth.refresh")}
         </Button>
       </div>
-      <p className="text-muted-foreground mt-1 text-sm">{t("settings.signalHealth.description")}</p>
+      <p className={`mt-1 ${SETTINGS_SUBTITLE}`}>{t("settings.signalHealth.description")}</p>
 
       {items.length === 0 ? (
         loadError ? (
@@ -104,7 +106,7 @@ export function SignalHealthSection() {
             >
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <ToolIcon toolId={h.toolId} size={16} />
-                <span className="text-sm font-medium">{h.label}</span>
+                <span className={SETTINGS_FIELD}>{h.label}</span>
                 {!h.registered ? (
                   // 灰：未注册
                   <span className="bg-muted text-muted-foreground rounded px-1.5 py-0.5 text-[10px]">

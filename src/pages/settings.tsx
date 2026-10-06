@@ -1,3 +1,10 @@
+import { SETTINGS_FIELD } from "@/components/settings/typography";
+import {
+  SETTINGS_BADGE,
+  SETTINGS_CARD_TITLE,
+  SETTINGS_PAGE_TITLE,
+  SETTINGS_SUBTITLE,
+} from "@/components/settings/typography";
 import { useCallback, useEffect, useRef, useState } from "react";
 import RemoteAppearanceSection from "@/components/settings/RemoteAppearanceSection";
 import { emit } from "@tauri-apps/api/event";
@@ -551,16 +558,14 @@ export default function SettingsPage() {
         <div className="max-w-3xl space-y-4 p-4">
           {/* 一级导航选中的那一块的标题 + 一句话说明（块内各节自带 h2，故这里是 h2 之上的块头） */}
           <div>
-            <h2 className="mb-1 text-lg font-semibold">{t(activeBlockMeta.labelKey)}</h2>
-            <p className="text-muted-foreground text-sm">{t(activeBlockMeta.descKey)}</p>
+            <h2 className={`mb-1 ${SETTINGS_PAGE_TITLE}`}>{t(activeBlockMeta.labelKey)}</h2>
+            <p className={SETTINGS_SUBTITLE}>{t(activeBlockMeta.descKey)}</p>
           </div>
           {visibleIds.has("appearance") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("settings.appearance.title")}</h2>
-                <p className="text-muted-foreground text-sm">
-                  {t("settings.appearance.description")}
-                </p>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("settings.appearance.title")}</h2>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.appearance.description")}</p>
               </div>
 
               {/* 框一 · 桌面端外观（即点即生效，本期维持现状） */}
@@ -577,9 +582,7 @@ export default function SettingsPage() {
                 <div className="px-4 py-1">
                   <div className="space-y-0">
                     <div className="flex items-center justify-between py-2.5">
-                      <label className="text-sm font-medium">
-                        {t("settings.appearance.theme")}
-                      </label>
+                      <label className={SETTINGS_FIELD}>{t("settings.appearance.theme")}</label>
                       <div className="flex gap-2">
                         <Button
                           variant={theme === "light" ? "default" : "outline"}
@@ -614,9 +617,7 @@ export default function SettingsPage() {
                     <div className="border-t" />
 
                     <div className="flex items-center justify-between py-2.5">
-                      <label className="text-sm font-medium">
-                        {t("settings.appearance.language")}
-                      </label>
+                      <label className={SETTINGS_FIELD}>{t("settings.appearance.language")}</label>
                       <LanguageToggle />
                     </div>
                   </div>
@@ -635,16 +636,14 @@ export default function SettingsPage() {
           {visibleIds.has("shortcut") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("settings.shortcut.title")}</h2>
-                <p className="text-muted-foreground text-sm">
-                  {t("settings.shortcut.description")}
-                </p>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("settings.shortcut.title")}</h2>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.shortcut.description")}</p>
               </div>
 
               <div className="space-y-0">
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">{t("settings.shortcut.showMain")}</label>
+                    <label className={SETTINGS_FIELD}>{t("settings.shortcut.showMain")}</label>
                     <p className="text-muted-foreground mt-0.5 text-xs">
                       {t("settings.shortcut.showMainDesc")}
                     </p>
@@ -658,19 +657,15 @@ export default function SettingsPage() {
           {visibleIds.has("notifications") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>
                   {t("settings.notifications.heading")}
                 </h2>
-                <p className="text-muted-foreground text-sm">
-                  {t("settings.notifications.description")}
-                </p>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.notifications.description")}</p>
               </div>
               <div className="space-y-0">
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">
-                      {t("settings.notifications.desktop")}
-                    </label>
+                    <label className={SETTINGS_FIELD}>{t("settings.notifications.desktop")}</label>
                     <p className="text-muted-foreground mt-0.5 text-xs">
                       {t("settings.notifications.desktopDesc")}
                     </p>
@@ -689,7 +684,7 @@ export default function SettingsPage() {
                 <div className="space-y-3 py-2.5">
                   {/* 全局完成音：所有工具默认播放的音效 */}
                   <div className="flex items-center justify-between gap-2">
-                    <label className="text-sm font-medium">
+                    <label className={SETTINGS_FIELD}>
                       {t("settings.notifications.soundGlobalDefault")}
                     </label>
                     <div className="flex items-center gap-1.5">
@@ -718,7 +713,7 @@ export default function SettingsPage() {
                     </div>
                   </div>
                   {/* 工具专属音：覆盖全局默认，空值=跟随全局 */}
-                  <label className="text-sm font-medium">
+                  <label className={SETTINGS_FIELD}>
                     {t("settings.notifications.soundToolOverride")}
                   </label>
                   {enabledTools.map((tool) => {
@@ -771,7 +766,7 @@ export default function SettingsPage() {
                 <div className="border-t" />
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">
+                    <label className={SETTINGS_FIELD}>
                       {t("settings.notifications.floatTest")}
                     </label>
                     <p className="text-muted-foreground mt-0.5 text-xs">
@@ -812,14 +807,14 @@ export default function SettingsPage() {
           {visibleIds.has("pet") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("settings.pet.title")}</h2>
-                <p className="text-muted-foreground text-sm">{t("settings.pet.desc")}</p>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("settings.pet.title")}</h2>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.pet.desc")}</p>
               </div>
               <div className="space-y-0">
                 {/* 开启开关：显隐同步 Rust 端创建/销毁宠物窗口 */}
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">{t("settings.pet.enable")}</label>
+                    <label className={SETTINGS_FIELD}>{t("settings.pet.enable")}</label>
                   </div>
                   <Switch checked={petVisible} onCheckedChange={onPetVisibleChange} />
                 </div>
@@ -827,7 +822,7 @@ export default function SettingsPage() {
                 {/* 置顶开关：置顶时抑制主窗口浮窗通知（spec D4） */}
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">{t("settings.pet.alwaysOnTop")}</label>
+                    <label className={SETTINGS_FIELD}>{t("settings.pet.alwaysOnTop")}</label>
                   </div>
                   <Switch
                     checked={petCfg.alwaysOnTop}
@@ -837,7 +832,7 @@ export default function SettingsPage() {
                 <div className="border-t" />
                 {/* 大小三档 */}
                 <div className="flex items-center justify-between py-2.5">
-                  <label className="text-sm font-medium">{t("settings.pet.scale")}</label>
+                  <label className={SETTINGS_FIELD}>{t("settings.pet.scale")}</label>
                   <div className="flex gap-1">
                     {PET_SCALES.map((s) => (
                       <button
@@ -861,7 +856,7 @@ export default function SettingsPage() {
                 <div className="border-t" />
                 {/* 当前宠物 + 三入口（spec §11）：切换在 Task 13，导入在 Task 16，修改在 Task 17 */}
                 <div className="flex items-center justify-between gap-2 py-2.5">
-                  <label className="text-sm font-medium">{t("settings.pet.currentPet")}</label>
+                  <label className={SETTINGS_FIELD}>{t("settings.pet.currentPet")}</label>
                   <span className="text-muted-foreground mr-auto pl-2 text-sm">
                     {activePetName}
                   </span>
@@ -884,8 +879,8 @@ export default function SettingsPage() {
           {visibleIds.has("tools") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("settings.tools.title")}</h2>
-                <p className="text-muted-foreground text-sm">{t("settings.tools.hint")}</p>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("settings.tools.title")}</h2>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.tools.hint")}</p>
               </div>
               {/* 行式开关列表：名称 + 安装状态 badge + Switch */}
               <div className="divide-border divide-y rounded-md border">
@@ -894,10 +889,10 @@ export default function SettingsPage() {
                     <div className="flex items-center gap-2">
                       {/* issue #36-6：行首补图标（spec §6「图标 + 名称 + badge + 开关」） */}
                       <ToolIcon toolId={r.toolId} size={16} />
-                      <span className="text-sm font-medium">{r.name}</span>
+                      <span className={SETTINGS_FIELD}>{r.name}</span>
                       <span
                         className={cn(
-                          "rounded px-1.5 py-0.5 text-[10px]",
+                          `rounded px-1.5 py-0.5 ${SETTINGS_BADGE}`,
                           r.installed
                             ? "bg-emerald-500/10 text-emerald-500"
                             : "bg-muted text-muted-foreground"
@@ -922,7 +917,7 @@ export default function SettingsPage() {
           {visibleIds.has("health") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("resources.health.title")}</h2>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("resources.health.title")}</h2>
               </div>
               <HealthSummary />
             </div>

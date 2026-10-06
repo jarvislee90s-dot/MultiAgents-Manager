@@ -2,6 +2,7 @@
 // 数据源 = inject_list_audit（最近 100 条，AuditRow serde camelCase；行内无 device_id，
 // 设备标识不外泄）；动作词表 send|queue|flush|jump|retract|approve|reject|fail|key 由后端
 // 约束，前端原样小写展示（不翻译不改写）。样式对齐 RemoteSection：分区标题 + 边框卡片。
+import { SETTINGS_CARD_TITLE } from "@/components/settings/typography";
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -63,7 +64,7 @@ export function AuditLogSection() {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold">{t("settings.audit.title")}</h2>
+        <h2 className={SETTINGS_CARD_TITLE}>{t("settings.audit.title")}</h2>
         <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
           {t("settings.audit.refresh")}
         </Button>
