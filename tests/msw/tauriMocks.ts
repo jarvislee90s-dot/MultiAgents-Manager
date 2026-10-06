@@ -1,4 +1,21 @@
 import { vi } from "vitest";
+// 用量域 case 体改用**同源夹具**（计划② Task 1）：与 src/tauri-mock.ts 共用
+// src/lib/usage/mockFixtures.ts，双端形状从源头一致（门禁 tests/usage/usageMockParity.test.ts）
+import {
+  mockUsageCollect,
+  mockUsageCsv,
+  mockUsageDashboard,
+  mockUsageMode,
+  mockUsageRecords,
+  mockUsageSettings,
+} from "@/lib/usage/mockFixtures";
+import type {
+  UsageFilters,
+  UsageGroupBy,
+  UsageRange,
+  UsageRecordsGroupBy,
+  UsageSettingsPatch,
+} from "@/types/usage";
 
 export const mockSessions = {
   sessions: [
@@ -347,170 +364,57 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     // spawner 缝，无需在此模拟）
     case "session_open":
       return Promise.resolve(undefined);
-    // —— 用量域（计划① Task 20）：6 条命令的 mock，形状与契约 §2 值对象逐字一致，
-    // 并与 src/tauri-mock.ts 的同一段保持**逐字同形**（tests/usage/usageMockParity.test.ts
-    // 用同一份断言跑两端）——
+    // —— 用量域（计划① Task 20 登记 case；② Task 1 换体）：case 行与位置不动，只换源——
+    // 夹具收口到 `src/lib/usage/mockFixtures.ts`（与 src/tauri-mock.ts **同一构造器**，
+    // 双端形状不可能漂移）。目验三态开关见 mockUsageMode：
+    // localStorage["mam-mock-usage"] = "empty" → 空态（夹具内部分叉）；"error" → 用量命令 reject。
     case "usage_collect":
-      return Promise.resolve({
-        collectedAt: Date.now(),
-        durationMs: 4321,
-        totalNewRecords: 128,
-        sources: [
-          { sourceId: "claude", ok: true, parsedFiles: 17, newRecords: 42 },
-          { sourceId: "codex", ok: true, parsedFiles: 425, newRecords: 61 },
-          { sourceId: "kimi", ok: true, parsedFiles: 82, newRecords: 12 },
-          { sourceId: "opencode", ok: true, parsedFiles: 21, newRecords: 8 },
-          { sourceId: "workbuddy", ok: true, parsedFiles: 3, newRecords: 2 },
-          {
-            sourceId: "zcode",
-            ok: false,
-            parsedFiles: 0,
-            newRecords: 0,
-            errorCode: "usage-source-db-open",
-          },
-          { sourceId: "dsh", ok: true, parsedFiles: 99, newRecords: 3 },
-        ],
-      });
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(
+            mockUsageCollect((args as { force?: boolean } | undefined)?.force ?? false)
+          );
     case "usage_dashboard": {
-      const buckets = { inputFresh: 120000, cacheRead: 880000, cacheWrite: 0, output: 45000 };
-      const metrics = { requestTotal: 1000000, cacheHitRate: 0.88, userEst: 12345, requests: 321 };
-      const range = (args as { range?: { preset?: string } })?.range ?? { preset: "today" };
-      // `isSubagent` 是 `boolean | null`（契约 §2 用户裁决）：**按请求档位分档**——
-      // 小时档（last5h / today）给真值，日档（last7d / last30d / custom）该位不可得 → `null`。
-      // mock 不按档位分档就会与真机 wire 分叉（真机日档恒 null，见计划① §3.2.4）。
-      const hourTier = range.preset === "last5h" || range.preset === "today";
-      return Promise.resolve({
-        range,
-        groupBy: (args as { groupBy?: string })?.groupBy ?? "tool",
-        rows: [
-          {
-            key: "claude",
-            label: "claude",
-            buckets,
-            metrics,
-            sourceKind: "inferred",
-            isSubagent: hourTier ? false : null,
-          },
-          {
-            key: "codex",
-            label: "codex",
-            buckets,
-            metrics,
-            sourceKind: "inferred",
-            isSubagent: hourTier ? false : null,
-          },
-        ],
-        totals: metrics,
-        totalsBuckets: buckets,
-        hero: metrics.requestTotal + buckets.output,
-        trend: [
-          { key: "2026-10-03T09", label: "09:00", buckets, metrics },
-          { key: "2026-10-03T10", label: "10:00", buckets, metrics },
-        ],
-        compare: null,
-        recentSession: {
-          sourceId: "claude",
-          sessionId: "mock-session",
-          title: "mock 会话",
-          buckets,
-          metrics,
-        },
-        workSummary: {
-          sessions: 3,
-          turnsPerTool: { claude: 12, codex: 8, workbuddy: null },
-          errorModel: 1,
-          errorTurn: 0,
-          errorTool: 4,
-          interrupted: 2,
-          toolCalls: 57,
-          toolAvgMs: 1180,
-          topTool: { name: "Bash", count: 21 },
-          topToolMs: { name: "Bash", ms: 40200 },
-          longestTurnPerTool: { claude: { p50: 24000, max: 4247097 }, workbuddy: null },
-        },
-        availability: [
-          { metric: "turn", available: true, perSource: { workbuddy: false } },
-          { metric: "userEst", available: true, perSource: { zcode: false } },
-        ],
-        collectedAt: Date.now(),
-      });
+      const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+      const groupBy = (args as { groupBy?: UsageGroupBy } | undefined)?.groupBy ?? "tool";
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageDashboard(range, groupBy));
     }
     case "usage_records": {
-      // W6：只接受 tool | project（决定卡片维度）；卡内行恒为「供应商 / 模型」
-      // （本 case 自带 const：上方 usage_dashboard 的 buckets/metrics 在它自己的块作用域里）
-      const buckets = { inputFresh: 120000, cacheRead: 880000, cacheWrite: 0, output: 45000 };
-      const metrics = { requestTotal: 1000000, cacheHitRate: 0.88, userEst: 12345, requests: 321 };
-      return Promise.resolve({
-        range: (args as { range?: unknown })?.range ?? { preset: "today" },
-        groupBy: (args as { groupBy?: string })?.groupBy ?? "tool",
-        cards: [
-          {
-            toolId: "claude",
-            toolLabel: "claude",
-            buckets,
-            metrics,
-            rows: [
-              // 卡内行**一律 `null`**（契约 §2 用户裁决）：这一层行维度是「供应商 / 模型」、
-              // 不带 `session_id` → 与真机一致（`query.rs` 卡内行恒 `None`，两档都是），不得写真 `false`。
-              {
-                key: "volcengine / deepseek-v4.1-flash",
-                label: "volcengine / deepseek-v4.1-flash",
-                buckets,
-                metrics,
-                sourceKind: "measured",
-                isSubagent: null,
-              },
-              {
-                key: "hy3",
-                label: "hy3",
-                buckets,
-                metrics,
-                sourceKind: "unknown",
-                isSubagent: null,
-              },
-            ],
-          },
-        ],
-        availability: [{ metric: "userEst", available: true, perSource: { workbuddy: false } }],
-        collectedAt: Date.now(),
-      });
+      const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+      const groupBy = (args as { groupBy?: UsageRecordsGroupBy } | undefined)?.groupBy ?? "tool";
+      const filters = (args as { filters?: UsageFilters } | undefined)?.filters ?? {};
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageRecords(range, groupBy, filters));
     }
-    case "usage_export_csv":
-      return Promise.resolve(
-        "groupKey,label,inputFresh,cacheRead,cacheWrite,output,requestTotal,cacheHitRate,requests,userEst,sourceKind\nclaude,claude,120000,880000,0,45000,1000000,0.880000,321,12345,inferred\n"
-      );
+    case "usage_export_csv": {
+      const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+      const groupBy = (args as { groupBy?: UsageGroupBy } | undefined)?.groupBy ?? "tool";
+      const filters = (args as { filters?: UsageFilters } | undefined)?.filters ?? {};
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageCsv(range, groupBy, filters));
+    }
     // 导出落盘（计划① Task 21，契约 §3 新增 2 条）
     case "export_save_text":
     case "export_save_bytes":
-      // 真实命令返回落盘绝对路径（string）；mock 返回同形字符串，前端提示语可正常渲染
-      return Promise.resolve("/Users/jarvis/.mam/exports/mock-export.csv");
+      // 真实命令返回落盘绝对路径（string）；mock 返回同形字符串，**必须带上请求的 name**
+      //（写死文件名会让文件名断言与分享图路径断言全红），前端提示语可正常渲染
+      return Promise.resolve(
+        `/Users/jarvis/.mam/exports/${(args as { name?: string } | undefined)?.name ?? "mock-export.csv"}`
+      );
     case "usage_get_settings":
-      return Promise.resolve({
-        enabled: true,
-        miniBarRange: "today",
-        miniBarToolRows: 3,
-        detailRetentionDays: 90,
-        collectIntervalMin: 10,
-        providerMapRules: "",
-        exportQuote: "",
-        exportPose: "random",
-      });
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageSettings());
     case "usage_set_settings": {
-      const patch = ((args as { patch?: Record<string, unknown> })?.patch ?? {}) as Record<
-        string,
-        unknown
-      >;
-      return Promise.resolve({
-        enabled: true,
-        miniBarRange: "today",
-        miniBarToolRows: 3,
-        detailRetentionDays: 90,
-        collectIntervalMin: 10,
-        providerMapRules: "",
-        exportQuote: "",
-        exportPose: "random",
-        ...patch,
-      });
+      const patch = ((args as { patch?: UsageSettingsPatch } | undefined)?.patch ??
+        {}) as UsageSettingsPatch;
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageSettings(patch));
     }
     default:
       return Promise.resolve(undefined);

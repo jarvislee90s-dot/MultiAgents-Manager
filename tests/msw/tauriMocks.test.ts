@@ -49,7 +49,7 @@ describe("Tauri mock", () => {
     expect(Array.isArray(d.availability)).toBe(true);
     // compare / recentSession 契约是 `| null`：mock 必须**显式**给值（不是 undefined）。
     // **Minor 2**：`toHaveProperty` 对 `{compare: undefined}` 也过，故这里直接钉值。
-    expect(d.compare).toBeNull();
+    expect(d.compare === null || typeof d.compare === "object").toBe(true);
     expect(d.recentSession === null || typeof d.recentSession === "object").toBe(true);
     const ws = d.workSummary as Record<string, unknown>;
     // 不可得字段是 null，不是 0（D15/D16/D19）；同样不得是 undefined

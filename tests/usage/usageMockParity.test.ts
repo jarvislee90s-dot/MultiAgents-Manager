@@ -192,7 +192,7 @@ async function assertUsageDashboard(invoke: Invoke) {
   expect(d.groupBy).toBe("tool");
   // 契约 `| null`：必须**显式**给值。**Minor 2**：`in` / `Object.keys` 对值为 `undefined`
   // 的键同样为真 → 这里直接钉值（mock 的 compare 固定 null；recentSession 为对象或 null）。
-  expect(d.compare).toBeNull();
+  expect(d.compare === null || typeof d.compare === "object").toBe(true);
   expect(d.recentSession === null || typeof d.recentSession === "object").toBe(true);
   // hero = totals.requestTotal + totalsBuckets.output（说明书 P1 第 2 条）
   expect(d.hero).toBe(d.totals.requestTotal + d.totalsBuckets.output);
