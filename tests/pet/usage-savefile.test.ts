@@ -25,7 +25,7 @@ import {
   type SaveDeps,
 } from "@/lib/usage/saveFile";
 
-const EXPORTS = "/Users/jarvis/.mam/exports";
+const EXPORTS = "/Users/jarvis/Downloads";
 const CSV = "groupKey,label\nclaude,1\n";
 const CSV_NAME = "mam-usage-last7d.csv";
 const PNG_NAME = "mam-usage-today.png";

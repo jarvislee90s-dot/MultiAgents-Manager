@@ -1,6 +1,6 @@
 // 导出落盘**唯一接缝**（计划② Task 10）：把「内容生成」与「落到哪里」解耦到一处。
 //
-// 主出口恒为 **Rust 落盘**（`exportSaveText` / `exportSaveBytes` → `~/.mam/exports/`，回传落盘
+// 主出口恒为 **Rust 落盘**（`exportSaveText` / `exportSaveBytes` → 系统下载目录，回传落盘
 // **绝对路径**）。**不走** `<a download>` / Blob 下载 / 对象 URL：wry 未注册 download handler 时
 // 要么对 download 类导航直接 Cancel 且失败静默，要么把窗口导航到 blob URL（界面跑飞）；
 // 也不走 `dialog.save` + plugin-fs（未安装、未声明、二级窗口不在 capability 白名单 → 必被 ACL 拒）。

@@ -364,7 +364,7 @@
       "exportAndReveal": "Export today's CSV and open its folder",
       "exporting": "Exporting…",
       "exportFailed": "Export failed",
-      "exportHint": "Exports today's totals as CSV into ~/.mam/exports/ and reveals it in your system file manager (CSV export is not gated by the usage switch)",
+      "exportHint": "Exports today's totals as CSV into your Downloads folder and reveals it in your system file manager (CSV export is not gated by the usage switch)",
       "exportHintDisabled": "It exports the already-collected historical ledger (nothing new is collected while the switch is off); the export button stays available — no need to re-enable the switch to back up or export your history",
       "disabledNotice": "The usage statistics switch is off: nothing is collected or stored, so today's totals below are necessarily empty (CSV export is not gated by that switch)",
       "emptyDisabled": "Today's totals are empty — the usage statistics switch is off (see the notice above)",

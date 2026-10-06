@@ -856,7 +856,7 @@ if (!isTauri) {
       case "export_save_text":
       case "export_save_bytes":
         return Promise.resolve(
-          `/Users/jarvis/.mam/exports/${(args as { name?: string } | undefined)?.name ?? "mock-export.csv"}`
+          `/Users/jarvis/Downloads/${(args as { name?: string } | undefined)?.name ?? "mock-export.csv"}`
         );
       case "usage_get_settings":
         return mockUsageMode() === "error"

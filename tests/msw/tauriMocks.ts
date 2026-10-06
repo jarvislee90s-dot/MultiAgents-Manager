@@ -403,7 +403,7 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
       // 真实命令返回落盘绝对路径（string）；mock 返回同形字符串，**必须带上请求的 name**
       //（写死文件名会让文件名断言与分享图路径断言全红），前端提示语可正常渲染
       return Promise.resolve(
-        `/Users/jarvis/.mam/exports/${(args as { name?: string } | undefined)?.name ?? "mock-export.csv"}`
+        `/Users/jarvis/Downloads/${(args as { name?: string } | undefined)?.name ?? "mock-export.csv"}`
       );
     case "usage_get_settings":
       return mockUsageMode() === "error"

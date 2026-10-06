@@ -44,7 +44,7 @@ describe("用量域 IPC 入口（src/lib/api/usage.ts）", () => {
     await usageSetSettings({ detailRetentionDays: 30 });
     await exportSaveText("mam-usage-today.csv", "groupKey\n");
     await exportSaveBytes("mam-usage-today.png", "iVBORw0KGgo=");
-    await revealDir("/Users/jarvis/.mam/exports");
+    await revealDir("/Users/jarvis/Downloads");
 
     expect(invocations()).toEqual([
       ["usage_collect", ["force"]],

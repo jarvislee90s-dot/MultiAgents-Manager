@@ -60,20 +60,30 @@ pub fn sanitize_export_name(name: &str) -> Result<String, String> {
     Ok(n.to_string())
 }
 
-/// 导出目录：`~/.mam/exports/`。
-/// 与 `database/connection.rs::app_data_home()` 同一条约定——**仅在 debug/test 构建**下
-/// 认 `MAM_HOME` 重定向（集成测试 `tests/support.rs` 就是靠它把数据目录指到 tempdir），
+/// 导出目录：**系统「下载」文件夹**（2026-10-07 用户裁决 A2 —— 原为 `~/.mam/exports/`）。
+///
+/// **为什么改**：用户的心智模型是「我导出的东西在下载里」。`~/.mam/exports/` 藏在应用数据目录
+/// 深处，导出成功后只能靠行内那个「打开所在目录」才找得到；而这个目录在 Finder / 资源管理器里
+/// **不在任何常见入口下**。契约与需求说明书已同步（见 §3 的 2026-10-07 注记）。
+///
+/// **跨平台同一套**：`dirs::download_dir()` 在 macOS 给 `~/Downloads`、Windows 给
+/// `%USERPROFILE%\Downloads`（以注册表 Shell Folders 为准，**可能是被 OneDrive 重定向过的路径**）
+/// ⇒ 优先用它；取不到（极少见）才回落到 `<home>/Downloads`。
+///
+/// 与 `database/connection.rs::app_data_home()` 同一条约定——**仅在 debug/test 构建**下认
+/// `MAM_HOME` 重定向（集成测试 `tests/support.rs` 靠它把数据目录指到 tempdir），此时导出目录 =
+/// `$MAM_HOME/Downloads`：**保住测试隔离**，不让 `cargo test` 往开发机真实下载目录写文件。
 /// release 生产构建一律用真实用户目录，防环境变量误设导致导出落到别处。
-fn exports_dir() -> std::path::PathBuf {
-    let home = if cfg!(debug_assertions) {
-        std::env::var_os("MAM_HOME")
-            .filter(|h| !h.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
-    } else {
-        dirs::home_dir().unwrap_or_default()
-    };
-    home.join(".mam").join("exports")
+///
+/// ⚠️ **改这里必须同时看 `commands/resource.rs::reveal_allowed_roots()`**：那个白名单根里就有
+/// 本函数（否则导出成功却点不开「打开所在目录」）。两处由 `export.rs` 的单测钉住同源。
+pub(crate) fn exports_dir() -> std::path::PathBuf {
+    if cfg!(debug_assertions) {
+        if let Some(h) = std::env::var_os("MAM_HOME").filter(|h| !h.is_empty()) {
+            return std::path::PathBuf::from(h).join("Downloads");
+        }
+    }
+    dirs::download_dir().unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Downloads"))
 }
 
 /// `.csv` 前置 UTF-8 BOM（幂等：已有则不重复加）
@@ -431,26 +441,48 @@ mod tests {
         assert_eq!(&raw[3..], content.as_bytes(), "BOM 之后逐字节等于入参");
     }
 
-    /// 生产目录形态：`exports_dir()` 必须以 `.mam/exports` 结尾，且是**绝对路径**
-    /// （契约 §3：返回落盘绝对路径）。**纯路径断言、零 IO**（旧版这条用例真的往
-    /// `~/.mam/exports/` 写了一个文件再自删，见 §3.2.3 FIX-6 同类）。
+    /// 生产目录形态：`exports_dir()` 必须是**系统下载目录**且是**绝对路径**
+    /// （契约 §3：返回落盘绝对路径）。**纯路径断言、零 IO**（旧版这条用例真的往导出目录
+    /// 写了一个文件再自删，见 §3.2.3 FIX-6 同类）。
     ///
-    /// **本用例故意不调 `ensure_reveal_allowed`**（旧版调了）：它的白名单根是
-    /// `dirs::home_dir()/.mam`（见 `commands/resource.rs`，**不认 `MAM_HOME`**），而且对
-    /// 不存在的路径 `canonicalize` 会**报"路径不存在"**——lib 单测不重定向 HOME，
-    /// 断言它就是在依赖开发机的真实 `~/.mam` 状态（干净机器上必红）。"落盘路径能过 reveal
-    /// 白名单"由 ① 本仓既有 `ensure_reveal_allowed` 自身的单测、② Task 24 的人工目验
-    /// （点导出 → 点定位）覆盖；本计划只保证复用同一条校验、不另写打开逻辑（GC 16）。
+    /// 2026-10-07 A2：期望值由「以 `.mam/exports` 结尾」改为「以 `Downloads` 结尾」。
+    /// 断言用**后缀**而不是 `dirs::download_dir()` 逐字比对 —— 后者在 Windows 上可能是被
+    /// OneDrive 重定向过的路径，而本仓 CI 只跑 ubuntu + Windows 交叉**编译**（不跑 Windows 测试）
+    /// ⇒ 拿本机 `download_dir()` 当期望值等于把「本机恰好没重定向」写成契约。
+    ///
+    /// **本用例故意不调 `ensure_reveal_allowed`**（旧版调了）：它对不存在的路径 `canonicalize`
+    /// 会报「路径不存在」，而 lib 单测里那目录未必存在（`MAM_HOME` 下的 tempdir）。
+    /// 「落盘路径能过 reveal 白名单」这条不变量改由下面 `reveal_whitelist_contains_exports_dir`
+    /// **结构性**钉住（白名单根里就有本函数），零 IO、零环境变量副作用。
     #[test]
     fn production_exports_dir_shape() {
         let dir = exports_dir();
         assert!(
-            dir.ends_with(".mam/exports") || dir.ends_with(".mam\\exports"),
-            "导出目录必须是 <home>/.mam/exports，实际 {dir:?}"
+            dir.ends_with("Downloads")
+                || dir.ends_with("Downloads/")
+                || dir.ends_with("Downloads\\"),
+            "导出目录必须是系统下载目录（A2），实际 {dir:?}"
         );
         assert!(
             dir.is_absolute(),
             "导出目录必须是绝对路径（否则返回给前端的落盘路径不是契约要求的绝对路径）：{dir:?}"
+        );
+    }
+
+    /// **A2 的配套不变量（2026-10-07）**：`reveal_dir` 的白名单根必须**包含导出目录本身**。
+    ///
+    /// 为什么单独钉一条：导出目录从 `~/.mam/exports/` 改到系统下载目录后，**最容易漏的就是白名单**
+    /// ——落盘成功、行内提示「已保存：…」，用户点「打开所在目录」却报「路径不在允许打开的范围」。
+    /// 这条不变量是**同一函数**的两处引用（白名单根 ↔ 导出目录），故零 IO、不依赖目录是否已存在、
+    /// 也不受 `MAM_HOME` 是否设置影响，任何平台都稳定。
+    #[test]
+    fn reveal_whitelist_contains_exports_dir() {
+        let roots = crate::commands::resource::reveal_allowed_roots();
+        let dir = exports_dir();
+        assert!(
+            roots.contains(&dir),
+            "reveal 白名单根必须包含导出目录 {dir:?}，实际根 = {roots:?}\
+             （漏了它 ⇒ 导出成功但「打开所在目录」必然失败）"
         );
     }
 

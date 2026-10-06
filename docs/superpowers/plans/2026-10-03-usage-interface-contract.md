@@ -207,6 +207,15 @@ UsageCollectResult {
 
 ## 3. Tauri 命令面（前端只调这些，共 8 条：6 条用量查询/设置 + 2 条导出落盘）
 
+> **2026-10-07 接口变更申报（用户裁决 A2）**：两条导出落盘命令的**落盘目录**由 `~/.mam/exports/`
+> 改为**系统「下载」文件夹**（macOS `~/Downloads`、Windows `%USERPROFILE%\Downloads`，以
+> `dirs::download_dir()` 为准——Windows 上可能是被 OneDrive 重定向过的路径）。
+> **命令签名、文件名校验、体积上限、UTF-8 BOM 规则全部不变**；变的只有目录。
+> **配套**：`commands/resource.rs::reveal_allowed_roots()` 同步把导出目录加进 `reveal_dir`
+> 的白名单根（否则导出成功却点不开「打开所在目录」），该不变量由
+> `commands/export.rs::reveal_whitelist_contains_exports_dir` 钉住。
+> debug 构建下 `MAM_HOME` 仍会重定向导出目录（`$MAM_HOME/Downloads`）以保住测试隔离。
+
 | 命令 | 入参 | 返回 | 说明 |
 |---|---|---|---|
 | `usage_collect` | `force: bool` | `UsageCollectResult` | 触发一次采集。`force=false` 且距上次采集小于 `collectIntervalMin` 时直接返回上次结果（**不扫描**）。单飞：并发调用复用同一次结果 |
@@ -215,7 +224,7 @@ UsageCollectResult {
 | `usage_export_csv` | `range`, `groupBy`, `filters` | `string` | 返回 CSV 文本；**落盘走 `export_save_text`**（不得用 Blob / `<a download>`，见下） |
 | `usage_get_settings` | — | `UsageSettings` | |
 | `usage_set_settings` | `patch: UsageSettingsPatch` | `UsageSettings` | 返回合并后的完整设置 |
-| `export_save_text` | `name: string`, `content: string` | `string`（落盘绝对路径） | 文本落盘（CSV 用）。写 `~/.mam/exports/`，`.csv` 自动前置 UTF-8 BOM |
+| `export_save_text` | `name: string`, `content: string` | `string`（落盘绝对路径） | 文本落盘（CSV 用）。写 `系统下载目录`（2026-10-07 裁决 A2，原 `~/.mam/exports/`），`.csv` 自动前置 UTF-8 BOM |
 | `export_save_bytes` | `name: string`, `base64: string` | `string`（落盘绝对路径） | 二进制落盘（分享图 PNG 用）。base64 输入，原因见下 |
 
 **关于两条导出命令（2026-10-03 实测后新增，属契约变更）**：

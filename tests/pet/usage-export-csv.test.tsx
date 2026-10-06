@@ -148,14 +148,14 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
 
     // 落盘**绝对路径**可见
     expect(await screen.findByTestId("usage-export-toast")).toHaveTextContent(
-      "已保存：/Users/jarvis/.mam/exports/mam-usage-last7d.csv"
+      "已保存：/Users/jarvis/Downloads/mam-usage-last7d.csv"
     );
 
     // 「查看/定位」复用既有 reveal_dir，且传的是**文件路径本身**（不是父目录）
     fireEvent.click(screen.getByTestId("usage-export-open-dir"));
     await waitFor(() => expect(callsOf("reveal_dir")).toHaveLength(1));
     expect(callsOf("reveal_dir")[0][1]).toEqual({
-      path: "/Users/jarvis/.mam/exports/mam-usage-last7d.csv",
+      path: "/Users/jarvis/Downloads/mam-usage-last7d.csv",
     });
   });
 
@@ -246,12 +246,12 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
 
     // 落盘**绝对路径**可见 + 复用 reveal_dir（传文件路径本身）；路径里的文件名就是上面那次落盘的名字
     expect(await screen.findByTestId("usage-export-toast")).toHaveTextContent(
-      `已保存：/Users/jarvis/.mam/exports/${saveArgs.name}`
+      `已保存：/Users/jarvis/Downloads/${saveArgs.name}`
     );
     fireEvent.click(screen.getByTestId("usage-export-open-dir"));
     await waitFor(() => expect(callsOf("reveal_dir")).toHaveLength(1));
     expect(callsOf("reveal_dir")[0][1]).toEqual({
-      path: `/Users/jarvis/.mam/exports/${saveArgs.name}`,
+      path: `/Users/jarvis/Downloads/${saveArgs.name}`,
     });
     view.unmount();
 

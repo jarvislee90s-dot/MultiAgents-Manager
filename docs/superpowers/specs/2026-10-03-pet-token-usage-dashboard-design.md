@@ -217,7 +217,7 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 |---|---|
 | **复制文本摘要** | 纯文本，格式 = 头部一行（看板名 + 时间范围）+ 各指标行「标签: 值」+ 分组明细行（沿用原插件的文本结构） |
 | **导出分享图** | Canvas 绘制竖版卡，固定版式：标题（视图与日期范围）→ hero 大数字 → 指标行 → 趋势 mini 图 → 分组 Top 行 → 底部**当前宠物立绘** + 气泡评语。导出**姿态**可选「随机 / 指定」（设置项，切换宠物后回退「随机」）。**评语**按要素优先级从预制池匹配。**要素为四项**：区间总量档位 / 趋势方向 / 命中率档位 / 模型形态（参考实现还有第五项「当日节奏（高强度/摸鱼）」，但其依赖的节奏档位体系 MAM 没有，**本次不做**）；支持自定义评语与占位符 `{range}` `{tokens}` `{hitPct}` `{models}`。落款文案改为 MAM 品牌（【默认裁定】，审阅可改） |
-| **CSV 导出** | 明细账（按分组维度导出行）。**内容生成与落盘通道解耦**：内容在前端生成（纯字符串），落盘走 Rust 命令 `export_save_text`（写 `~/.mam/exports/`，`.csv` 自动带 UTF-8 BOM 以兼容 Excel）。**不得用 `<a download>`**（实测 MAM webview 上不成立，见 §9.7）。**原插件与两个参考实现都没有 CSV，属新增** |
+| **CSV 导出** | 明细账（按分组维度导出行）。**内容生成与落盘通道解耦**：内容在前端生成（纯字符串），落盘走 Rust 命令 `export_save_text`（写 `系统下载目录`（2026-10-07 裁决 A2），`.csv` 自动带 UTF-8 BOM 以兼容 Excel）。**不得用 `<a download>`**（实测 MAM webview 上不成立，见 §9.7）。**原插件与两个参考实现都没有 CSV，属新增** |
 
 **分享图的实现要点**（参考实现的踩坑记录 + 本次实测，实现必须遵守）：
 
@@ -227,7 +227,7 @@ MAM 与原插件的根本差别决定了本次不是照搬：
 4. **帧几何从真实图集尺寸推导**（`frameW = naturalWidth / 8`、`frameH = naturalHeight / rows`，`rows` 取 9 或 11），**不要硬编码 192/208** —— 实测两者恰好相等，但推导写法对未知宠物更安全；
 5. **姿态可选项必须按 `rows === 11` 门控 look 动作**（9 行图集没有 look 行，画出来是空白；运行时 `FoxbellPet.tsx:391-393` 已有同样门控）；
 6. **代表帧取 `min(col, 该动作帧数 - 1)`**：实测每行非空列数恰好等于该动作的帧数数组长度，**跨宠物不存在通用的「最好看」列**，通用安全默认是 **col 0**；
-7. 落盘走 `export_save_bytes`（base64 → Rust 写 `~/.mam/exports/`），**不用对象 URL + `<a download>`**，故参考实现那条「对象 URL 延迟回收」在本方案**不再适用**（仅当仍用 ObjectURL 做中转时才需要）；
+7. 落盘走 `export_save_bytes`（base64 → Rust 写 `系统下载目录`（2026-10-07 裁决 A2）），**不用对象 URL + `<a download>`**，故参考实现那条「对象 URL 延迟回收」在本方案**不再适用**（仅当仍用 ObjectURL 做中转时才需要）；
 8. 默认 1× DPI，不做 2× 高清导出。
 
 ### P5 · 分组维度
@@ -467,7 +467,7 @@ MAM 前端目前**没有任何图表库**（全仓零 recharts/d3/echarts，只�
 
 ### 9.7 导出通道与图集 canvas（2026-10-03 实测结论）
 
-**导出落盘**：`<a download>` + Blob URL **在本仓 webview 上不成立**——wry 在未注册 download handler 时对 download 类导航直接 Cancel（**失败静默**），未标成 download 时则把窗口导航到 blob URL（**界面跑飞**）。且 `plugin-fs` 未安装、`dialog:allow-save` 未声明、**新窗口不在任何 capability 的 windows 白名单里**（插件命令会被 ACL 拒，而应用自定义命令不受影响）。**结论：走 Rust 落盘**（`export_save_text` / `export_save_bytes` → `~/.mam/exports/`，复用既有 `reveal_dir` 定位），**零新插件、零新权限**。
+**导出落盘**：`<a download>` + Blob URL **在本仓 webview 上不成立**——wry 在未注册 download handler 时对 download 类导航直接 Cancel（**失败静默**），未标成 download 时则把窗口导航到 blob URL（**界面跑飞**）。且 `plugin-fs` 未安装、`dialog:allow-save` 未声明、**新窗口不在任何 capability 的 windows 白名单里**（插件命令会被 ACL 拒，而应用自定义命令不受影响）。**结论：走 Rust 落盘**（`export_save_text` / `export_save_bytes` → `系统下载目录`（2026-10-07 裁决 A2），复用既有 `reveal_dir` 定位），**零新插件、零新权限**。
 
 **图集可绘制性**：帧几何实测**正确**（foxbell 1536×2288 与仓内样例 starry-dew 1536×1872 均整除得 192×208，逐帧 alpha bbox 无错位）；`asset://` scope 已放行 `$HOME/.mam/pets/**`；但 **asset 与页面跨源，直接 `<img>` 绘制会污染 canvas** → 必须走 fetch → ImageBitmap。
 
