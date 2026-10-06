@@ -975,7 +975,10 @@
       "copiedImage": "图片已复制",
       "savedTo": "已保存：{{path}}",
       "openDir": "打开所在目录",
-      "saveFailed": "导出失败：{{error}}"
+      "saveFailed": "导出失败：{{error}}",
+      "exporting": "导出中…",
+      "copyFailed": "复制失败：{{error}}",
+      "boardOnly": "仅「看板」页签可用（文本摘要与分享图都是看板口径）"
     },
     "range": {
       "last5h": "近 5 小时",

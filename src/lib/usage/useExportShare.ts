@@ -21,8 +21,8 @@ import { trendPoints } from "@/components/usage/TrendChart";
 import { usageGetSettings } from "@/lib/api/usage";
 import { distributionRows } from "@/lib/usage/distribution";
 import { defaultExportDeps, renderShareImage } from "@/lib/usage/exportImage";
-import type { ExportInput } from "@/lib/usage/exportLayout";
-import { labelOf } from "@/lib/usage/exportText";
+import { GROUPS_MAX, type ExportInput } from "@/lib/usage/exportLayout";
+import { labelOf, pngFilename } from "@/lib/usage/exportText";
 import { EM_DASH, fmtDur, fmtInt, fmtPct } from "@/lib/usage/format";
 import { getLang } from "@/lib/usage/lang";
 import { pickQuote, type QuoteVars } from "@/lib/usage/quotes";
@@ -122,6 +122,15 @@ async function buildShareInput(
   const span = spanLabelOf(chartPoints);
   const rangeName = rangeLabelOf(dash.range, t);
   const dist = distributionRows(dash.rows);
+  /**
+   * 分享图**没画出来**的分组行数（X2 缺陷修复）：本层最多画 `GROUPS_MAX`(6) 行，而屏上分布卡是
+   * `DIST_MAX_ROWS`(10) 行 + 「等 N」。两项都要算：
+   *  * `dist.rows.length - min(dist.rows.length, GROUPS_MAX)` = 图比列表少画的那几行；
+   *  * `dist.moreCount` = 列表自己被 10 行上限折掉的余量（`distributionRows` 已经算好但旧实现丢掉了）。
+   * 两者相加才是「真实组数 − 图上画出来的行数」。为 0 ⇒ 不出这行（不印「等 0」）。
+   */
+  const groupsMoreCount =
+    dist.rows.length - Math.min(dist.rows.length, GROUPS_MAX) + dist.moreCount;
   // **没量到 token** 的窗口（2026-10-06 用户裁决）：token 位一律 `—`（头部 hero、指标行、评语的
   // `{tokens}`），**计数类照常**；趋势也**不画**（全零点会被画成一条贴底零线 = 假图，见
   // `UsageTrendCard` 的同款纪律）——交给布局层的空态分支（`points.length < 2` → `emptyLabel`）。
@@ -164,12 +173,15 @@ async function buildShareInput(
       // 没量到 token ⇒ 不把全零点交给画布（贴底零线 = 假图）；布局层按「点 < 2」走空态
       points: unmeasured ? [] : points,
       groupTitle: t("usage.card.distribution"),
+      // 完整列表交给布局层，由它按 `GROUPS_MAX` 截断（**截断只此一处**；本层只负责把「少了多少」
+      // 算准，见上面的 `groupsMoreCount`）
       groups: dist.rows.map((row) => ({
         // 行名分派与文本摘要同一实现（`exportText.ts::labelOf`），此处不另立副本
         name: labelOf(row, dash.groupBy, t),
         value: fmtInt(row.value),
         share: row.share,
       })),
+      groupsMore: groupsMoreCount > 0 ? t("usage.moreN", { n: groupsMoreCount }) : null,
       toolsTitle: t("usage.work.toolCalls"),
       tools2x2: toolCells(dash, t),
       quote: pickQuote(agg, getLang(), settings?.exportQuote ?? "", vars),
@@ -184,7 +196,12 @@ async function buildShareInput(
 
 /** 分享图两条出口（都先出图；差别只在最后一步去向） */
 export interface ShareExport {
-  /** 出图并**落盘**（Task 10 的 `saveBytes` → 契约的二进制落盘命令），文件名 `mam-usage-<preset>.png` */
+  /**
+   * 出图并**落盘**（Task 10 的 `saveBytes` → 契约的二进制落盘命令）。文件名走
+   * `pngFilename(range)` = `mam-usage-<窗口标识>-<导出时刻>.png` —— **带导出时刻是刻意的**
+   * （2026-10-06 修复 X1）：落盘层是裸 `fs::write`，同名即静默覆盖，而 `mam-usage-<preset>.png`
+   * 对固定档位跨天同名、对自定义档每次同名。
+   */
   exportImage(dash: UsageDashboard): Promise<SaveOutcome>;
   /** 出图并**复制到剪贴板**（best-effort 副本，不落盘；成功也没有路径可定位） */
   copyImage(dash: UsageDashboard): Promise<SaveOutcome>;
@@ -204,10 +221,7 @@ export function useExportShare(t: TFn): ShareExport {
   return {
     async exportImage(dash: UsageDashboard): Promise<SaveOutcome> {
       const blob = await render(dash);
-      return saveBytes(
-        new Uint8Array(await blob.arrayBuffer()),
-        `mam-usage-${dash.range.preset}.png`
-      );
+      return saveBytes(new Uint8Array(await blob.arrayBuffer()), pngFilename(dash.range));
     },
     async copyImage(dash: UsageDashboard): Promise<SaveOutcome> {
       const blob = await render(dash);

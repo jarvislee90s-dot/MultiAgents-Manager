@@ -190,16 +190,23 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
     expect(callsOf("export_save_text")).toHaveLength(savesAfterA);
   });
 
-  it("4. 记录页签只留 CSV（文本摘要与分享图都是看板口径的产物）；看板数据未就绪时复制按钮禁用", () => {
+  it("4. 记录页签下三个「看板口径」按钮**在位但禁用**（X7：不再凭空消失）；看板数据未就绪时同样禁用", () => {
     render(<UsageExportActions {...boardProps({ tab: "records", dash: null })} />);
     expect(screen.getByTestId("usage-export-csv")).toBeTruthy();
-    expect(screen.queryByTestId("usage-export-copy-text")).toBeNull();
+    // X7（2026-10-06）：口径不变（文本摘要与分享图都是看板口径的产物，不在记录页出口），
+    // 但**不再整组撤掉**——以前 `queryByTestId(...)` 为 null，用户看到的是「按钮凭空消失」，
+    // 以为功能坏了。现在在位 + `disabled` + `title` 说明原因。
+    for (const id of ["usage-export-copy-text", "usage-export-image", "usage-export-copy-image"]) {
+      expect(screen.getByTestId(id)).toBeDisabled();
+      expect(screen.getByTestId(id).getAttribute("title")).toBeTruthy();
+    }
     expect(screen.queryByTestId("usage-export-open-dir")).toBeNull();
     cleanup();
 
     // 看板页签但数据还没回来：按钮在位但不可点（点了也拼不出摘要）
     render(<UsageExportActions {...boardProps({ dash: null })} />);
     expect(screen.getByTestId("usage-export-copy-text")).toBeDisabled();
+    expect(screen.getByTestId("usage-export-copy-text").getAttribute("title")).toBeNull();
     expect(screen.getByTestId("usage-export-csv")).not.toBeDisabled();
   });
 
@@ -209,11 +216,12 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
     fireEvent.click(screen.getByTestId("usage-export-image"));
     await waitFor(() => expect(callsOf("export_save_bytes")).toHaveLength(1));
 
-    // 落盘：前端只做 base64（1,2,3 → AQID）与文件名；文件名恒为 `mam-usage-<preset>.png`
-    expect(callsOf("export_save_bytes")[0][1]).toEqual({
-      name: "mam-usage-last7d.png",
-      base64: "AQID",
-    });
+    // 落盘：前端只做 base64（1,2,3 → AQID）与文件名；文件名 = `mam-usage-<窗口标识>-<导出时刻>.png`
+    // （X1，2026-10-06：**必须带导出时刻**——落盘层是裸 `fs::write`，同名即静默覆盖，而
+    // `mam-usage-last7d.png` 跨天同名 ⇒ 昨天的图会被今天的悄悄盖掉且照样提示「已保存」）
+    const saveArgs = callsOf("export_save_bytes")[0][1] as { name: string; base64: string };
+    expect(saveArgs.name).toMatch(/^mam-usage-last7d-\d{8}-\d{6}\.png$/);
+    expect(saveArgs.base64).toBe("AQID");
     // §3 第 15 条：导出链只读账本 / 设置，绝不触发扫描
     expect(callsOf("usage_collect")).toHaveLength(0);
 
@@ -236,14 +244,14 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
     expect(input.sheet).toBeNull(); // 图集替身给 null → 不画立绘也要出图
     expect(renderShareImageMock.mock.calls[0][1]).toMatchObject({ bitmap: null });
 
-    // 落盘**绝对路径**可见 + 复用 reveal_dir（传文件路径本身）
+    // 落盘**绝对路径**可见 + 复用 reveal_dir（传文件路径本身）；路径里的文件名就是上面那次落盘的名字
     expect(await screen.findByTestId("usage-export-toast")).toHaveTextContent(
-      "已保存：/Users/jarvis/.mam/exports/mam-usage-last7d.png"
+      `已保存：/Users/jarvis/.mam/exports/${saveArgs.name}`
     );
     fireEvent.click(screen.getByTestId("usage-export-open-dir"));
     await waitFor(() => expect(callsOf("reveal_dir")).toHaveLength(1));
     expect(callsOf("reveal_dir")[0][1]).toEqual({
-      path: "/Users/jarvis/.mam/exports/mam-usage-last7d.png",
+      path: `/Users/jarvis/.mam/exports/${saveArgs.name}`,
     });
     view.unmount();
 
@@ -256,11 +264,11 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
       "尚未采集"
     );
 
-    // 图片两个入口的可见性纪律：记录页签只留 CSV（分享图是看板口径的产物）；看板数据未就绪时不可点
+    // 图片两个入口的可见性纪律：记录页签下**在位但禁用**（X7：不再整组消失）；看板数据未就绪时不可点
     cleanup();
     render(<UsageExportActions {...boardProps({ tab: "records", dash: null })} />);
-    expect(screen.queryByTestId("usage-export-image")).toBeNull();
-    expect(screen.queryByTestId("usage-export-copy-image")).toBeNull();
+    expect(screen.getByTestId("usage-export-image")).toBeDisabled();
+    expect(screen.getByTestId("usage-export-copy-image")).toBeDisabled();
     cleanup();
     render(<UsageExportActions {...boardProps({ dash: null })} />);
     expect(screen.getByTestId("usage-export-image")).toBeDisabled();
@@ -334,7 +342,9 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
     const savesAfterC = callsOf("export_save_bytes").length;
     expect(savesAfterC).toBe(2);
 
-    // (d) 剪贴板不可用（`ClipboardItem` 全仓零先例、secure-context 前提未验证）⇒ 如实报原因，不谎报「已复制」
+    // (d) 剪贴板不可用（`ClipboardItem` 全仓零先例、secure-context 前提未验证）⇒ 如实报原因，不谎报「已复制」。
+    //     文案走**复制专属**键（X5：以前复用「导出失败：…」，可这条路径根本没有导出任何文件，
+    //     文案把人引向磁盘、而真正要查的是剪贴板权限）
     renderShareImageMock.mockResolvedValueOnce(pngBlob);
     installClipboardImage(async () => {
       throw new Error("no clipboard");
@@ -343,7 +353,7 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
     fireEvent.click(screen.getByTestId("usage-export-copy-image"));
     await waitFor(() =>
       expect(screen.getByTestId("usage-export-toast")).toHaveTextContent(
-        "导出失败：Error: no clipboard"
+        "复制失败：Error: no clipboard"
       )
     );
     expect(callsOf("export_save_bytes")).toHaveLength(savesAfterC); // 复制链不落盘

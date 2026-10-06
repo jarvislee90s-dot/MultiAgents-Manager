@@ -83,7 +83,8 @@ const BUBBLE_R = 16;
 const BUBBLE_TAIL_GAP = 18;
 const FOOTER_BLOCK_H = 34;
 /** 分组 Top 最多几行（brief 钉死 ≤6） */
-const GROUPS_MAX = 6;
+/** 分组区最多画几行（**导出给装配层用**：`useExportShare` 要按它算「等 N」的 N，见 `groupsMore`） */
+export const GROUPS_MAX = 6;
 /** 趋势 x 轴标签最多几个（竖版静态图：30 个日标签会糊成一团；首末必显） */
 const TREND_LABEL_CAP = 8;
 
@@ -184,6 +185,18 @@ export interface ExportInput {
   /** `t("usage.card.distribution")` */
   groupTitle: string;
   groups: readonly ExportGroupRow[];
+  /**
+   * 分组区**没画出来的行数**文案（`usage.moreN` 已由装配层译好）；`null` = 一行没少、不出这行。
+   *
+   * 为什么必须有它（2026-10-06 缺陷修复 X2）：本层最多只画 `GROUPS_MAX`(6) 行，而屏上的分布卡是
+   * `DIST_MAX_ROWS`(10) 行 + 「等 N」。旧实现**静默**只画 6 行 ⇒ 导出的图看起来「就这么多」，
+   * 与屏上是两个口径，而且用户在图上**看不出**少了——这正是「导出与屏幕不一致且界面上看不出来」
+   * 那一类缺陷。装配层按 `dist.rows.length - GROUPS_MAX + dist.moreCount` 算总数（两者都要算：
+   * 前一半是图比列表少画的，后一半是列表自己被折掉的），本层只负责画。
+   *
+   * 按本接口的纪律，这里收的是**成品字符串**（本层不做 i18n、不拼 `等 N` 的措辞）。
+   */
+  groupsMore: string | null;
   /** `t("usage.work.toolCalls")` */
   toolsTitle: string;
   /** 工具 2×2 的 4 行，`[标签, 值]`（`null` 已由装配层换成 `EM_DASH`） */
@@ -390,6 +403,12 @@ export function layoutExport(input: ExportInput, measure: MeasureText): ExportLa
       r: 4,
     });
     y += GROUP_ROW_H;
+  }
+  // 「等 N」：图上看不到的组数**必须**说出来（旧实现静默丢行，见 `groupsMore` 的长注释）。
+  // 字号比分组行小一档、同样左对齐 ⇒ 读起来是「这一段的补充说明」，而不是第 7 个分组行。
+  if (input.groupsMore !== null) {
+    content.push(text(input.groupsMore, contentX, y + 12, FONT_TICK, SUB));
+    y += 22;
   }
   y += 8;
 

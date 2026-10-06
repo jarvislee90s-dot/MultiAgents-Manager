@@ -58,17 +58,38 @@ export function UsageExportActions(props: {
   const { t, tab, dash, range, groupBy, filters } = props;
   /** 行内反馈（成功与失败共用一条通路：后一条覆盖前一条） */
   const [note, setNote] = useState("");
+  /** 是否有导出动作在途（X4）——四个动作共用一道门闸，见 `run` */
+  const [busy, setBusy] = useState(false);
   /** 落盘绝对路径；空串 = 没有可定位的文件（失败态与初始态都是它；复制图片**不**置它） */
   const [savedPath, setSavedPath] = useState("");
   /** 分享图（出图 + 落盘 / 出图 + 剪贴板）：两个动作都是点击时才干活，挂载期零 IPC（见 hook 注释） */
   const share = useExportShare(t);
 
+  /**
+   * 单一在途门闸（X4 缺陷修复）：四个导出动作**都不允许重入**。
+   *
+   * 为什么必须有（一致性 + 真缺陷）：同一个产品里阶段① 的导出按钮**有** `exporting` 防重入与
+   * 进行中文案（`UsageStatusSection.tsx:64/360/363`），而这里四个 handler 全是 `void onX()`、
+   * 按钮一个都不禁用 ⇒ 狂点会并发出图 / 并发落盘；而分享图文件名在修复 X1 之前**是固定的**
+   * （`mam-usage-<preset>.png`）⇒ 两次并发落盘会互相覆盖，用户拿到的可能是半张图。
+   * 把「置忙 → 执行 → 复位」收在这一个函数里、五个入口共用，杜绝漏掉某一个按钮。
+   */
+  const run = async (fn: () => Promise<void>) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await fn();
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const onCopyText = async () => {
     if (!dash) return;
     const r = await copyText(buildTextSummary(dash, t));
-    // 复制失败没有专属文案（`usage.export.*` 只有 savedTo / saveFailed 两条结果键）：如实报原因，
-    // 不谎报「已复制」——那是这条路径最坏的失败形态（用户以为粘得到，实际剪贴板里是旧内容）
-    setNote(r.ok ? t("usage.export.copied") : t("usage.export.saveFailed", { error: r.error }));
+    // 复制失败走**复制专属**文案（X5 修复）：原来复用了 `usage.export.saveFailed`（「导出失败：…」），
+    // 可这条路径**根本没有导出**任何文件——文案把人引向磁盘，而真正要去查的是剪贴板权限。
+    setNote(r.ok ? t("usage.export.copied") : t("usage.export.copyFailed", { error: r.error }));
   };
 
   const onCsv = async () => {
@@ -126,11 +147,11 @@ export function UsageExportActions(props: {
         // best-effort 副本：成功**也不**置 `savedPath` —— 剪贴板里没有路径，没什么可「打开所在目录」的
         setNote(t("usage.export.copiedImage"));
       } else {
-        setNote(t("usage.export.saveFailed", { error: r.error }));
+        setNote(t("usage.export.copyFailed", { error: r.error }));
       }
     } catch (e) {
       // 与 `onImage` 同因：`void` 不吞错误，失败必须行内可见
-      setNote(t("usage.export.saveFailed", { error: String(e) }));
+      setNote(t("usage.export.copyFailed", { error: String(e) }));
     }
   };
 
@@ -148,46 +169,36 @@ export function UsageExportActions(props: {
 
   return (
     <div className="flex flex-wrap items-center gap-2">
-      {tab === "board" ? (
+      {/* 三个「看板口径」按钮（复制文本 / 导出图片 / 复制图片）：记录页签下**不再整组消失**，
+          改为**禁用 + `title` 说明原因**（X7 修复）。口径不变（文本摘要与分享图都是看板口径的产物，
+          放在记录页会产生口径歧义），但「按钮凭空消失」会让用户以为功能坏了、也看不出为什么。
+          `disabled` 里带上 `busy`：四个动作共用 `run` 的那道门闸（X4）。 */}
+      {(
+        [
+          ["usage-export-copy-text", "usage.export.copyText", onCopyText],
+          ["usage-export-image", "usage.export.image", onImage],
+          ["usage-export-copy-image", "usage.export.copyImage", onCopyImage],
+        ] as const
+      ).map(([testid, key, fn]) => (
         <Button
+          key={testid}
           size="sm"
           variant="outline"
-          data-testid="usage-export-copy-text"
-          disabled={!dash}
-          onClick={() => void onCopyText()}
+          data-testid={testid}
+          disabled={!dash || busy || tab !== "board"}
+          title={tab !== "board" ? t("usage.export.boardOnly") : undefined}
+          onClick={() => void run(fn)}
         >
-          {t("usage.export.copyText")}
+          {t(key)}
         </Button>
-      ) : null}
-
-      {tab === "board" ? (
-        <>
-          <Button
-            size="sm"
-            variant="outline"
-            data-testid="usage-export-image"
-            disabled={!dash}
-            onClick={() => void onImage()}
-          >
-            {t("usage.export.image")}
-          </Button>
-          <Button
-            size="sm"
-            variant="outline"
-            data-testid="usage-export-copy-image"
-            disabled={!dash}
-            onClick={() => void onCopyImage()}
-          >
-            {t("usage.export.copyImage")}
-          </Button>
-        </>
-      ) : null}
+      ))}
 
       <Button
         size="sm"
         variant="outline"
         data-testid="usage-export-csv"
-        onClick={() => void onCsv()}
+        disabled={busy}
+        onClick={() => void run(onCsv)}
       >
         {t("usage.export.csv")}
       </Button>
@@ -203,11 +214,25 @@ export function UsageExportActions(props: {
         </Button>
       ) : null}
 
-      {note ? (
+      {/* 行内反馈：在途时出进行中文案（与阶段① 的 `exporting` 同款）。
+          ⚠️ **不换行**（X6）：`savedTo` 带的是绝对路径，原先 `break-all` 会把它折成好几行，
+          而本组件就住在看板的**吸顶头**里 ⇒ 头部一忽儿高、一忽儿矮，底下的内容跟着跳。
+          改用 `truncate` + `title`：一眼看得出来是成功还是失败，完整路径 hover 可读
+          （`textContent` 仍是完整串 ⇒ 既有断言不受影响）。 */}
+      {busy ? (
         <span
           role="status"
           data-testid="usage-export-toast"
-          className="text-muted-foreground max-w-full text-xs break-all"
+          className="text-muted-foreground text-xs"
+        >
+          {t("usage.export.exporting")}
+        </span>
+      ) : note ? (
+        <span
+          role="status"
+          data-testid="usage-export-toast"
+          title={note}
+          className="text-muted-foreground max-w-[18rem] truncate text-xs"
         >
           {note}
         </span>

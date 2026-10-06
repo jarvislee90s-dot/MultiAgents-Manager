@@ -975,7 +975,10 @@
       "copiedImage": "Image copied",
       "savedTo": "Saved to {{path}}",
       "openDir": "Open containing folder",
-      "saveFailed": "Export failed: {{error}}"
+      "saveFailed": "Export failed: {{error}}",
+      "exporting": "Exporting…",
+      "copyFailed": "Copy failed: {{error}}",
+      "boardOnly": "Board tab only (the text summary and share image are board-scoped)"
     },
     "range": {
       "last5h": "Last 5 hours",

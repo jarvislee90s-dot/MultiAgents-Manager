@@ -98,3 +98,33 @@ export function csvFilename(range: UsageRange): string {
   }
   return `mam-usage-${range.preset}.csv`;
 }
+
+/**
+ * 分享图文件名：`mam-usage-<窗口标识>-<导出时刻>.png`。
+ *
+ * **为什么必须带导出时刻**（2026-10-06 缺陷修复 X1）：落盘层是**裸 `fs::write`、没有重名处理**
+ * （`src-tauri/src/commands/export.rs::save_bytes_file_in`）⇒ 同名即**静默覆盖**，而界面照样提示
+ * 「已保存：<路径>」。原文件名 `mam-usage-<preset>.png` 对 `today` / `last5h` / `last7d` / `last30d`
+ * **跨天同名**，对 `custom` 更是**每次同名**（连导两次自定义区间，第二次就把第一次覆盖掉）——
+ * 被覆盖的那张图不会有任何提示。
+ *
+ * 窗口标识只用来**看得出这是哪个区间**（`custom` 带 `from_to`，与 `csvFilename` 同规则），
+ * 唯一性由时刻保证（秒级；同一秒内连导两次仍是同名，但那是人手点不出来的速度）。
+ *
+ * ⚠️ **CSV 刻意不加时刻**（`csvFilename` 保持稳定名）：它是脚本按名取用的数据文件，
+ * 稳定的 `mam-usage-last7d.csv` 有用。代价是 **CSV 跨天同名仍会被覆盖** —— 已登记为 PR 的
+ * 「已知边界」，要改口径就同时改这两个函数（它们必须永远是同一套命名规则，见 `usage-export-*` 用例）。
+ *
+ * `now` 由调用方给（默认取当前时刻）：纯函数要能钉住时刻才可测。
+ */
+export function pngFilename(range: UsageRange, now: Date = new Date()): string {
+  const p = (v: number) => String(v).padStart(2, "0");
+  const stamp =
+    `${now.getFullYear()}${p(now.getMonth() + 1)}${p(now.getDate())}` +
+    `-${p(now.getHours())}${p(now.getMinutes())}${p(now.getSeconds())}`;
+  const base =
+    range.preset === "custom" && range.from && range.to
+      ? `${range.from}_${range.to}`
+      : range.preset;
+  return `mam-usage-${base}-${stamp}.png`;
+}

@@ -67,6 +67,8 @@ function baseInput(over: Partial<ExportInput> = {}): ExportInput {
       { name: "Codex", value: "460,789", share: 0.37 },
       { name: "空档", value: "0", share: 0 },
     ],
+    // 分组区「等 N」文案（2026-10-06 X2 修复新增字段）：`null` = 一行没少、不出这行
+    groupsMore: null,
     toolsTitle: "工具调用",
     tools2x2: [
       ["调用总数", "1,234"],
@@ -211,6 +213,20 @@ describe("exportLayout（计划② Task 12：分享图版式纯层）", () => {
       "bar"
     );
     expect(many).toHaveLength(6);
+  });
+
+  it("分组区「等 N」：给了文案必须画出来，且整段高度跟着长（X2：旧实现静默丢行）", () => {
+    // 没给（null）⇒ 一行都不多画
+    expect(textsOf(layoutExport(baseInput(), measure))).not.toContain("等 6");
+    // 给了 ⇒ 逐字画出来，且**内容底随之下移**（否则它会盖住下面的「工具 2×2」）
+    const withMore = layoutExport(baseInput({ groupsMore: "等 6" }), measure);
+    expect(textsOf(withMore)).toContain("等 6");
+    expect(withMore.contentBottom).toBeGreaterThan(
+      layoutExport(baseInput(), measure).contentBottom
+    );
+    // 与「工具 2×2」段标题的先后：等 N 在分组段内、必须在工具段之前
+    const texts = textsOf(withMore);
+    expect(texts.indexOf("等 6")).toBeLessThan(texts.indexOf("工具调用"));
   });
 
   it("4. 立绘：petW = round(360×frameW/frameH)、petX = W-PAD-petW、cut 框 = (col×frameW, row×frameH, frameW, frameH)、h 恒 360", () => {

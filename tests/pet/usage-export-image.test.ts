@@ -52,6 +52,7 @@ function input(over: Partial<ExportInput> = {}): ExportInput {
     ],
     groupTitle: "分组分布",
     groups: [{ name: "Claude", value: "1,246,567", share: 0.5 }],
+    groupsMore: null,
     toolsTitle: "工具调用",
     tools2x2: [
       ["调用总数", "1,234"],
