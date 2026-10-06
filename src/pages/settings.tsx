@@ -210,13 +210,6 @@ const SETTINGS_BLOCKS: {
     sections: ["shortcut", "notifications", "pet"],
   },
   {
-    id: "tools",
-    labelKey: "settings.nav.tools",
-    descKey: "settings.nav.toolsDesc",
-    icon: Wrench,
-    sections: ["tools", "health"],
-  },
-  {
     id: "usage",
     labelKey: "settings.nav.usage",
     descKey: "settings.nav.usageDesc",
@@ -229,6 +222,13 @@ const SETTINGS_BLOCKS: {
     descKey: "settings.nav.remoteDesc",
     icon: Smartphone,
     sections: ["remote", "signal", "audit"],
+  },
+  {
+    id: "tools",
+    labelKey: "settings.nav.tools",
+    descKey: "settings.nav.toolsDesc",
+    icon: Wrench,
+    sections: ["tools", "health"],
   },
   {
     id: "data",

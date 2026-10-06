@@ -90,7 +90,11 @@ export function AuditLogSection() {
             <span>{t("settings.audit.action")}</span>
             <span>{t("settings.audit.summary")}</span>
           </div>
-          <ul>
+          {/* `max-h` + 内滚只加在**行列表**上，表头留在滚动区外 ⇒ 滚到底也看得见列名
+              （2026-10-07 用户裁决：「注入审计的窗口有点过长了，限定一个高度，在里面做滚轮」）。
+              `60vh` 的取法：设置窗口 880×640 ⇒ 约 384px 高，一屏能看到表头 + 6~7 行；
+              再高就会把同块内的「远程服务 / 信号健康度」两张卡整个顶出视野。 */}
+          <ul className="max-h-[60vh] overflow-y-auto">
             {items.map((r, i) => (
               <li
                 // AuditRow 无唯一 id（ts 理论可撞），拼 index 兜底键稳定

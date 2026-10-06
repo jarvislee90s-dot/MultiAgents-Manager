@@ -60,6 +60,45 @@ fn clear_pet_window(app: &AppHandle) {
     }
 }
 
+/// **启动兜底**（2026-10-07 用户裁决 E2）：宠物窗口是**隐藏态**建的，而把它显示出来的**唯一**
+/// 路径是宠物页面自己的 JS（`pet.tsx` 那条 `invoke("set_pet_visible", …)`）。
+///
+/// 实机证据（本机日志，同一晚三次启动）：窗口建成功且 `is_visible=false`，此后到用户手动开之前
+/// **一次 `set_pet_visible` 都没有**；而手动一开就 `false → true` 立刻成功。这指向一个死锁——
+/// **隐藏窗口的 WebView 不执行页面 ⇒ 页面没机会显示自己**。
+///
+/// 兜底策略：建窗后等 `PET_SHOW_FALLBACK_MS`，若窗口**仍**隐藏，就由 Rust 侧直接 `show()`。
+/// 窗口一旦可见，页面就会跑起来，随后它自己的 `set_pet_visible(loadVisible())` 会**权威纠正**
+/// 最终状态（关掉宠物的用户会被立刻 `hide()` 回去）。
+///
+/// **为什么不干脆「建窗即可见」**：那会让**每个**关掉宠物的用户在每次启动时都看到一闪；
+/// 本兜底只在「页面没干活」的故障路径上生效，正常路径**零行为变化**。
+///
+/// 这个 warn 日志本身就是判据：**看到它就证明页面没有自显示**（配合紧随其后的
+/// `set_pet_visible` 行，就能确认「页面在窗口可见后才真正跑起来」）。
+fn schedule_show_fallback(app: &AppHandle) {
+    /// 给页面留的时间：足够它 mount + 发 IPC（实机在秒级内），又不至于让人觉得启动卡了
+    const PET_SHOW_FALLBACK_MS: u64 = 5000;
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(PET_SHOW_FALLBACK_MS));
+        let Some(w) = handle.get_webview_window("pet") else {
+            return;
+        };
+        // 正常路径：页面已经自己显示过了（那就什么都不做）。窗口没了也别碰。
+        if !window_alive(&w) || w.is_visible().unwrap_or(false) {
+            return;
+        }
+        log::warn!(
+            "pet window 建窗 {}ms 后仍隐藏（页面未自显示）→ 启动兜底 show()",
+            PET_SHOW_FALLBACK_MS
+        );
+        if let Err(e) = w.show() {
+            log::error!("pet window 启动兜底 show() 失败：{}", e);
+        }
+    });
+}
+
 /// 创建桌宠窗口（隐藏态；前端加载后按 localStorage 决定显隐，避免启动闪现）。
 /// 带落地校验与重试：已存在且真实落地则直接复用；幽灵或创建失败则销毁重建
 pub fn create_pet_window(app: &AppHandle) -> Result<(), String> {
@@ -72,6 +111,8 @@ pub fn create_pet_window(app: &AppHandle) -> Result<(), String> {
                 "pet window 复用已落地窗口（branch=reused existing, attempt=0, is_visible={}）",
                 visible_text(&existing)
             );
+            // 复用分支同样要挂兜底：窗口活着但隐藏 + 页面没跑 = 同一个死锁
+            schedule_show_fallback(app);
             return Ok(());
         }
         log::warn!("pet window 未落地（启动竞态幽灵），销毁重建");
@@ -94,6 +135,7 @@ pub fn create_pet_window(app: &AppHandle) -> Result<(), String> {
                     if attempt > 1 {
                         log::info!("pet window 第 {} 次尝试创建成功", attempt);
                     }
+                    schedule_show_fallback(app);
                     return Ok(());
                 }
                 last_err = "窗口未落地（幽灵）".to_string();
