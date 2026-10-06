@@ -34,6 +34,7 @@ import {
   Smartphone,
   ScrollText,
   Activity,
+  BarChart3,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -67,6 +68,7 @@ import { AuditLogSection } from "@/components/settings/AuditLogSection";
 import { SignalHealthSection } from "@/components/settings/SignalHealthSection";
 import { DataManagementSection } from "@/components/settings/DataManagementSection";
 import { UsageStatusSection } from "@/components/settings/UsageStatusSection";
+import { UsageSection } from "@/components/settings/UsageSection";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { ToolIcon } from "@/components/common/ToolIcon";
@@ -157,6 +159,7 @@ type SettingSection =
   | "remote"
   | "audit"
   | "data"
+  | "usage"
   | "usageStatus";
 
 // 工具管理行（后端 ToolSetting，serde camelCase）
@@ -454,6 +457,13 @@ export default function SettingsPage() {
       id: "pet" as SettingSection,
       label: t("settings.pet.title"),
       icon: Dog,
+    },
+    {
+      // 计划② Task 14：用量设置分组（id "usage" + UsageSection + BarChart3；8 项设置，
+      // 不含「采集状态 / 立即采集」——那是下面 usageStatus 的验收面，见契约 §5「设置页的分工」）
+      id: "usage" as SettingSection,
+      label: t("settings.usage.title"),
+      icon: BarChart3,
     },
     {
       id: "tools" as SettingSection,
@@ -901,6 +911,8 @@ export default function SettingsPage() {
           {activeSection === "audit" && <AuditLogSection />}
           {/* 2026-09-20：数据管理首版（移动端附件占用列出/清理，C5） */}
           {activeSection === "data" && <DataManagementSection />}
+          {/* 计划② Task 14：用量统计设置分组（8 项设置；① 的采集验收面在下面的 usageStatus 分支） */}
+          {activeSection === "usage" && <UsageSection />}
           {/* 计划① Task 24：用量采集状态（最小可见验收面；② 上线后可保留为调试入口或删除） */}
           {activeSection === "usageStatus" && <UsageStatusSection />}
         </div>
