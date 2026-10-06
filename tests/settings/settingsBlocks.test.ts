@@ -14,11 +14,15 @@ import { describe, expect, it } from "vitest";
 
 const SRC = readFileSync(path.join(process.cwd(), "src/pages/settings.tsx"), "utf8");
 
-/** 13 个分区（联合类型的**唯一出处**就是这张表；与 `SettingSection` 逐字对齐） */
+/**
+ * **12 个分区**（联合类型的唯一出处就是这张表；与 `SettingSection` 逐字对齐）。
+ * 2026-10-07 D4：`shortcut`（全局快捷键）随功能一起移除 ⇒ 13 → 12，块表里也不再挂它。
+ * 本锁的判据（各挂且只挂一次 / 联合类型逐字对齐 / 每分区一处守卫）**一个字都没改**，
+ * 只是清单少一项 —— 这正是它该有的行为：删分区必须同时改三处，少改一处就红。
+ */
 const SECTIONS = [
   "appearance",
   "skin",
-  "shortcut",
   "notifications",
   "pet",
   "tools",
@@ -47,7 +51,7 @@ function declaredSections(): string[] {
 }
 
 describe("设置页两级导航：块表与渲染守卫的可达性锁", () => {
-  it("① 13 个分区**各挂且只挂一个块**（漏挂 ⇒ 该分区在界面上永远看不见）", () => {
+  it("① 12 个分区**各挂且只挂一个块**（漏挂 ⇒ 该分区在界面上永远看不见）", () => {
     const declared = declaredSections();
     // 逐分区计数：重复挂载（同一个分区出现在两个块里）与漏挂都是回归
     for (const id of SECTIONS) {
@@ -57,7 +61,7 @@ describe("设置页两级导航：块表与渲染守卫的可达性锁", () => {
     expect([...declared].sort()).toEqual([...SECTIONS].sort());
   });
 
-  it("② 联合类型恰好就是这 13 个分区（加/删分区必须同时改块表）", () => {
+  it("② 联合类型恰好就是这 12 个分区（加/删分区必须同时改块表）", () => {
     const m = /type SettingSection =([\s\S]*?);/.exec(SRC);
     expect(m, "找不到 `type SettingSection`").toBeTruthy();
     const union = [...(m as RegExpExecArray)[1].matchAll(/"(\w+)"/g)].map((x) => x[1]);

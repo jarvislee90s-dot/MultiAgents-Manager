@@ -144,15 +144,7 @@
       "allow": "Allow",
       "deny": "Deny"
     },
-    "shortcut": {
-      "title": "Shortcuts",
-      "description": "Configure global shortcuts",
-      "placeholder": "Press key combination",
-      "showMain": "Show Main Window",
-      "showMainDesc": "Use shortcut to quickly show the main window",
-      "setSuccess": "Shortcut set to {{shortcut}}!",
-      "cleared": "Shortcut cleared!"
-    },
+
     "notifications": {
       "title": "Notifications",
       "heading": "Notification Settings",

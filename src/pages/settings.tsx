@@ -7,7 +7,6 @@ import {
 } from "@/components/settings/typography";
 import { useCallback, useEffect, useRef, useState } from "react";
 import RemoteAppearanceSection from "@/components/settings/RemoteAppearanceSection";
-import { emit } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,7 +22,6 @@ import { useTheme } from "@/components/common/theme-provider";
 import { TitleBar } from "@/components/common/title-bar";
 import { WindowFrame } from "@/components/common/window-frame";
 import { LanguageToggle } from "@/components/common/language-toggle";
-import { ShortcutInput } from "@/components/common/shortcut-input";
 // 一级导航只有 6 个块，故**只保留 6 个块图标**（Palette / Bell / Wrench / BarChart3 /
 // Smartphone / Database）+ 页内仍在用的功能图标。原先 12 个分区图标里
 // `Keyboard` / `Dog` / `HeartPulse` / `RadioTower` / `ScrollText` / `Activity` 已成未使用导入
@@ -61,8 +59,6 @@ import {
   playSound,
   type SoundConfig,
 } from "@/lib/audio";
-import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
-import { toggleWindow } from "@/lib/window";
 import { PetSwitchDialog } from "@/components/pet/manage/PetSwitchDialog";
 import { PetImportDialog } from "@/components/pet/manage/PetImportDialog";
 import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
@@ -80,8 +76,6 @@ import { formatInvokeError } from "@/lib/invokeError";
 import { ToolIcon } from "@/components/common/ToolIcon";
 import { Toaster } from "@/components/ui/sonner";
 import { useAppTranslation } from "@/hooks/use-app-translation";
-
-const SHORTCUT_KEY = "global-shortcut-show-main";
 
 // 一致性体检只读摘要（spec §13 设置页「立即体检」）：各源计数 + 前几条文本 + refetch。
 // 与资源页 HealthCheckCard 共用 ["preset-health"] query key（设置窗口独立 WebView，各自取数）
@@ -160,7 +154,6 @@ type SettingSection =
   // 它本来就是一个完整的折叠配置器（字体/皮肤/圆角/品牌色 + 预览），与「本机外观（主题+语言）」
   // 不是一件事。块 = 「外观与皮肤」，块内两张卡。
   | "skin"
-  | "shortcut"
   | "notifications"
   | "pet"
   | "tools"
@@ -214,7 +207,7 @@ const SETTINGS_BLOCKS: {
     labelKey: "settings.nav.desktop",
     descKey: "settings.nav.desktopDesc",
     icon: Bell,
-    sections: ["shortcut", "notifications", "pet"],
+    sections: ["notifications", "pet"],
   },
   {
     id: "usage",
@@ -247,7 +240,6 @@ const SETTINGS_BLOCKS: {
 ];
 
 export default function SettingsPage() {
-  const [shortcut, setShortcut] = useState<string>("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [soundConfig, setSoundConfig] = useState<SoundConfig>(() => getSoundConfig());
   // 一级导航状态 = 当前**块**。块内所有卡片同时渲染（用户裁决的形态），故不再有
@@ -287,25 +279,15 @@ export default function SettingsPage() {
   const enabledToolsQuery = useEnabledToolsQuery();
   const enabledTools = enabledToolsQuery.data ?? [];
 
-  const handleShowMainWindow = useCallback(async () => {
-    await toggleWindow("main");
-  }, []);
-
-  // 更新音效配置并持久化
+  // 更新音效配置并持久化。
+  // ⚠️ 2026-10-07 D4 手术追记：本函数**被我删快捷键的那条正则误吞过**（`handleShowMainWindow`
+  // 的正则没在 `}, []);` 处收住，一路吃到下一个 `};`），靠 eslint 的两条
+  // `setSoundConfig/saveSoundConfig is never used` 才暴露；此处按 `git show HEAD:` 的原文恢复。
   const updateSound = (patch: Partial<SoundConfig>) => {
     const next = { ...soundConfig, ...patch };
     setSoundConfig(next);
     saveSoundConfig(next);
   };
-
-  useEffect(() => {
-    // Load saved shortcut
-    const savedShortcut = localStorage.getItem(SHORTCUT_KEY);
-    if (savedShortcut) {
-      setShortcut(savedShortcut);
-      registerShortcut(savedShortcut, handleShowMainWindow);
-    }
-  }, [handleShowMainWindow]);
 
   useEffect(() => {
     const loadNotificationSetting = async () => {
@@ -471,27 +453,6 @@ export default function SettingsPage() {
     }
   };
 
-  const handleShortcutChange = async (newShortcut: string) => {
-    const oldShortcut = shortcut;
-    setShortcut(newShortcut);
-
-    if (newShortcut) {
-      localStorage.setItem(SHORTCUT_KEY, newShortcut);
-      await registerShortcut(newShortcut, handleShowMainWindow, oldShortcut);
-      // Notify main window to update shortcut
-      await emit("shortcut-changed", { shortcut: newShortcut });
-      toast.success(t("settings.shortcut.setSuccess", { shortcut: newShortcut }));
-    } else {
-      localStorage.removeItem(SHORTCUT_KEY);
-      if (oldShortcut) {
-        await unregisterShortcut(oldShortcut);
-      }
-      // Notify main window to clear shortcut
-      await emit("shortcut-changed", { shortcut: "" });
-      toast.info(t("settings.shortcut.cleared"));
-    }
-  };
-
   const toggleNotifications = async () => {
     const newValue = !notificationsEnabled;
     setNotificationsEnabled(newValue);
@@ -633,26 +594,10 @@ export default function SettingsPage() {
               它自带卡壳与折叠头，故这里**不再套一层卡**（套了就成卡中卡）。 */}
           {visibleIds.has("skin") && <RemoteAppearanceSection />}
 
-          {visibleIds.has("shortcut") && (
-            <div className="space-y-4">
-              <div>
-                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("settings.shortcut.title")}</h2>
-                <p className={SETTINGS_SUBTITLE}>{t("settings.shortcut.description")}</p>
-              </div>
-
-              <div className="space-y-0">
-                <div className="flex items-center justify-between py-2.5">
-                  <div className="flex-1">
-                    <label className={SETTINGS_FIELD}>{t("settings.shortcut.showMain")}</label>
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      {t("settings.shortcut.showMainDesc")}
-                    </p>
-                  </div>
-                  <ShortcutInput value={shortcut} onChange={handleShortcutChange} />
-                </div>
-              </div>
-            </div>
-          )}
+          {/* 快捷键分区**整节已移除**（2026-10-07 用户裁决 D4：UI 与功能一起去掉）。
+              原来这里是一个 ShortcutInput（全局快捷键，默认 Cmd+Shift+M，用于唤起主窗口）。
+              移除后：`lib/shortcut.ts`、`components/common/shortcut-input.tsx` 一并删除，
+              设置块表里也不再有 `shortcut` 这一节。 */}
 
           {visibleIds.has("notifications") && (
             <div className="space-y-4">
