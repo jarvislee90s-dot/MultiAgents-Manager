@@ -174,25 +174,34 @@ pub fn opencode_question_screen_snapshot(lines: &[String]) -> Option<QuestionScr
 /// 无 checkbox 行 → None（非 kimi 多选页：单选页/会话正文）。误报面 = GET
 /// pending 门 + 前端 heading 对位双重兜底（同单选分支）。
 pub fn kimi_question_screen_snapshot(lines: &[String]) -> Option<QuestionScreenSnapshot> {
-    // kimi 不在 OwnAnswerDialect（own answer 编排未接入）——标记直接内联
-    // （K2 定案：`[ ]` 未选 / `[?]` 已选）
-    const KIMI_CHECKED: &[&str] = &["[?]"];
+    // kimi 不在 OwnAnswerDialect（own answer 编排未接入）——标记直接内联。
+    // **已选字形多候选**（账本吸收文案漂移的同一口径）：`[?]`=探测批 K（2.x），
+    // `[✓]`=戊探B（2.0.2 空格/回车切勾实录），`[√]`=2.1.1 用户实机（2026-10-06
+    // 截图）——三版本三字形，逐行任一命中即已选。未选恒 `[ ]`。
+    const KIMI_CHECKED: &[&str] = &["[?]", "[✓]", "[√]"];
     const KIMI_UNCHECKED: &[&str] = &["[ ]"];
     let mut checked: Vec<Option<bool>> = Vec::new();
     let mut free_text: Option<String> = None;
     let mut other_seen = false;
-    let mut heading_parts: Vec<&str> = Vec::new();
+    // **heading = `? ` 题干行**（2026-10-06 刷新对位修复）：旧形态「checkbox 行
+    // 之前的非空行拼接」会把页头杂讯（`question` 标题、tab 栏 `优化方向 新增能力
+    // …`、footer 片段）拼进 heading → 前端 findQuestionByHeading 对位必然失败 →
+    // GET 刷新永远不知道终端停在第几题（用户实录）。2.1.1 活体定案：题干行形
+    // `? <题干>`（单选/多选页同形，夹具 kimi-211-question-single.txt）——以它为
+    // heading，剥掉 `? ` 前缀后与载荷 question 字段对位（前端 exact/partial 单一
+    // 命中判据）。无 `? ` 行 → heading 空（对位自然放弃，保守不猜）。
+    let mut heading: String = String::new();
     for l in lines {
         let t = strip(l);
+        if heading.is_empty() && t.starts_with("? ") {
+            heading = t[2..].trim().to_string();
+        }
         let lower = t.to_lowercase();
         let boxed = KIMI_CHECKED
             .iter()
             .chain(KIMI_UNCHECKED.iter())
             .any(|m| lower.contains(m));
         if !boxed {
-            if checked.is_empty() && !t.is_empty() {
-                heading_parts.push(t);
-            }
             continue;
         }
         // 内容 = 勾选标记之后的部分
@@ -222,7 +231,7 @@ pub fn kimi_question_screen_snapshot(lines: &[String]) -> Option<QuestionScreenS
         checked,
         free_text,
         free_text_present: other_seen,
-        heading: heading_parts.join(" "),
+        heading,
     })
 }
 
@@ -378,7 +387,14 @@ mod tests {
         );
         assert_eq!(snap.free_text.as_deref(), Some("有个想法"), "Other 残留同步");
         assert!(snap.free_text_present);
-        assert!(snap.heading.contains("Shui guo"));
+        // heading = `? ` 题干行（2026-10-06 刷新对位修复：不再拼 tab 栏杂讯——
+        // 前端 findQuestionByHeading 拿它与载荷 question 字段 exact/partial 对位）
+        assert!(
+            snap.heading.contains("ni xi huan na xie shui guo"),
+            "heading 应为题干行剥 ? 前缀：{:?}",
+            snap.heading
+        );
+        assert!(!snap.heading.contains("Submit"), "不含 tab 栏杂讯");
     }
 
     #[test]

@@ -4002,7 +4002,9 @@ pub async fn session_question(
     // 推进行 `Next` + 回车 + 读屏分类，阶段机 run_advance_stages）。kimi/codex 的
     // 多题切页键未验 → 旗标 false，前端对这两家的多选题渲染「请到终端切题」引导。
     // 单题卡无页可切，恒 false。
-    let advance = matches!(tool_id.as_str(), "opencode" | "claude") && questions.len() > 1;
+    // kimi 加入（2026-10-06，2.1.1 活体定案 `→`/`←` 切题 + Review 返回修改）
+    let advance = matches!(tool_id.as_str(), "opencode" | "claude" | "kimi")
+        && questions.len() > 1;
     // **←/→ 双向导航 + 多选自由作答**（2026-10-02/03，用户裁决 ←/→ 通用对应上一题/
     // 下一题）：仅 claude 的 ←/→ 键序已活体取证（含 Review 导航环）。opencode 的切页
     // 是 tab **前向**（会回绕），prev 语义不成立——前端据本旗标分流：navBoth=true
@@ -4117,8 +4119,12 @@ pub async fn session_question(
             // **多选卡自由作答**旗标（缺省 false → 旧后端前向兼容）。claude 此前经
             // navBoth 间接点亮，本旗标为显式能力位（前端判 `navBoth ∨ multiFreeText`，
             // 两旗任一即可）。2026-10-05 codex 实测点亮（Space 选中 + Tab notes 在
-            // 多选题全链实证——探测批 C）；kimi 多选形态未定案（探测批 K），恒 false
-            "multiFreeText": matches!(tool_id.as_str(), "claude" | "opencode" | "codex"),
+            // 多选题全链实证——探测批 C）；**2026-10-06 kimi 点亮**（用户指令：多题
+            // 卡要有文字填写行——Other 输入格 + 发送 + 覆盖写入/清空按钮组。键序
+            // 走 KimiFreeText 阶段机：Other 行编号**按屏自适应**——单选子题 Other
+            // 有编号 → 全链通；多选 Other 无编号 → 第 1 段如实中止引导终端，
+            // 「未验不出手」由阶段机本身把守而非旗标一刀切）
+            "multiFreeText": matches!(tool_id.as_str(), "claude" | "opencode" | "codex" | "kimi"),
             // **覆盖写入/清空能力位**（2026-10-05 深夜）：这两个按钮的键序语义须逐
             // 工具实机取证才可出手——opencode 已取证（enter 探针走位 + 退格清空闭环，
             // 本机自建会话活体验证）；codex 的 notes 覆盖语义未取证、kimi 多选自由
@@ -4127,7 +4133,9 @@ pub async fn session_question(
             // 覆盖写入/清空能力位（2026-10-06 扩 codex）：opencode=多选回删语义
             // （1754 行）；codex=Tab 清空备注（footer 活体明文「tab or esc to
             // clear note」）。kimi 多选 Other 未点亮（multiFreeText=false 无面）
-            "freeTextOverwrite": matches!(tool_id.as_str(), "opencode" | "codex"),
+            // kimi 加入（2026-10-06，2.1.1 定案 K7 重进带旧文本 + 退格可清；清空面
+    // 因「空回车 no-op」定案如实前置拒——前端收到失败回执引导终端操作）
+            "freeTextOverwrite": matches!(tool_id.as_str(), "opencode" | "codex" | "kimi"),
             // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
             // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
             "screen": screen_snapshot,
@@ -4404,6 +4412,12 @@ pub async fn session_question_answer(
             | crate::inject::question::AnswerAction::FreeText => Vec::new(),
             crate::inject::question::AnswerAction::Toggle if tool_id == "claude" => Vec::new(),
             crate::inject::question::AnswerAction::Advance if tool_id == "claude" => Vec::new(),
+            // **kimi advance 免静态序列**（2026-10-06 用户实录 bug：门
+            // `action_supported` 已放行 kimi 切题，但此处缺分支 → 落兜底
+            // `answer_key_sequence_for` → TwoPhaseSelect 的 Advance arm 如实拒绝
+            // → 映射成 bad_index 400——「选项序号无效」红字，KimiAdvance 臂从未
+            // 执行到。方向键在臂内参数化，序列留空同 claude）
+            crate::inject::question::AnswerAction::Advance if tool_id == "kimi" => Vec::new(),
             crate::inject::question::AnswerAction::Select
                 if tool_id == "kimi" && multi_question =>
             {
@@ -4748,6 +4762,12 @@ pub async fn session_question_answer(
 enum StagePlan {
     /// 单键动作（select/toggle/cancel）：一次投递一个键，无后续阶段
     SingleKey,
+    /// **kimi 切题**（2026-10-06，2.1.1 活体定案）：`→`（Next）/`←`（Prev，Review
+    /// 页 = 返回修改）单键 + 屏读到达验证（poll_screen_changed：变化即停/窗尽
+    /// 未生效如实 Failed）→ AdvanceDone 带到达后 kimi 快照
+    KimiAdvance {
+        direction: crate::inject::question::NavDirection,
+    },
     /// **opencode 切题**（2026-10-05 ◀/▶ 双向）：tab×tabs 前向循环（next=1 /
     /// prev=pages-1 等效回退；逐键 settle）+ 前后读屏到达验证（屏相同 = tab 未
     /// 生效 → Failed 可重试），回执 AdvanceDone 带到达后快照
@@ -4788,8 +4808,14 @@ enum StagePlan {
     /// Review 汇总屏 → 屏上编号确认 → 终态
     KimiSubmit,
     /// **kimi Other 自由作答阶段机**（批次戊 E4）：Other 行数字 → 打字 → 回车保存
-    /// → Review 汇总屏 → 确认
-    KimiFreeText,
+    /// → Review 汇总屏 → 确认。`overwrite` = 进编辑器后先退格删净旧文再打新文
+    /// （2026-10-06，2.1.1 定案 K7 重进带旧文本；空文本+overwrite 前置拒——空回车
+    /// no-op 定案，置空语义不存在）
+    KimiFreeText {
+        overwrite: bool,
+        /// 多题流：保存后**不代发确认键**（单题 E-B8 语义在多题流会把未答题一并提交）
+        multi_question: bool,
+    },
     /// **codex Tab 备注阶段机**（批次戊 E5）：弹窗 footer 锚判读 → Tab → 打字 →
     /// Enter 提交（当前高亮项+备注）→ 终态。`overwrite` = 已在备注态时**再按
     /// Tab 清空旧备注**（footer 活体明文「tab or esc to clear note」）→ 重打
@@ -4848,10 +4874,17 @@ impl StagePlan {
             (A::Advance, "claude") => Self::ClaudeAdvance { direction },
             // E4：kimi 的两条阶段机（键序依赖屏读，由编排产生）
             (A::Submit, "kimi") => Self::KimiSubmit,
+            // **kimi 切题**（2026-10-06，2.1.1 活体定案）：`→`/`←` 单键 + 屏读
+            // 到达验证（Review 页 `←` = 返回修改；首题 `←` TUI 不动 → 窗尽如实
+            // Failed「未生效」）
+            (A::Advance, "kimi") => Self::KimiAdvance { direction },
             // E6：opencode 多选提交阶段机（2026-09-23 接线——此前 opencode 的 Submit
             // 误落下面的 claude Submit 行走位形态，屏读判据在 opencode 屏上必失败）
             (A::Submit, "opencode") => Self::OpencodeSubmit,
-            (A::FreeText, "kimi") => Self::KimiFreeText,
+            (A::FreeText, "kimi") => Self::KimiFreeText {
+                overwrite,
+                multi_question: multi_flow,
+            },
             (A::FreeText, "codex") => Self::CodexNotes { overwrite },
             (A::FreeText, "opencode") => Self::OpencodeOwnAnswer { overwrite },
             // 2026-10-02/03：claude 自由作答路由——**多题流子题（含单选）与单题多选**
@@ -5912,6 +5945,47 @@ fn dispatch_question_action(
             }
         }
         // ===== 批次戊 E4：kimi 多选/多题提交阶段机 =====
+        StagePlan::KimiAdvance { direction } => {
+            // **kimi 切题**（2026-10-06，2.1.1 活体定案）：题页 `→`/tab = 进
+            // Review/下一题，`←` = 上一题/Review 返回修改（→ 已选行保留高亮、
+            // (✓) 撤销）。单键投递 + **屏读到达验证**（poll_screen_changed：键
+            // 生效必带来页切换/高亮移动 → 屏面变化；首题 `←` TUI 不动 → 窗尽
+            // Unchanged → 如实 Failed 可重试）；到达后快照随回执回传（卡面
+            // heading/checked 对位，快照解析不出 = None 如实）。
+            let probe = question_probe(st, tool, pid);
+            let key = match direction {
+                crate::inject::question::NavDirection::Next => "right",
+                crate::inject::question::NavDirection::Prev => "left",
+            };
+            let before = probe("adv-pre");
+            if let Err(e) = injector.locate_and_send_key_spec(pid, key, spec) {
+                return QuestionDispatch::Failed(e);
+            }
+            if let Some(b) = &before {
+                let rounds = crate::inject::timing::poll_rounds(
+                    crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                );
+                if let ScreenChange::Unchanged = poll_screen_changed(
+                    &probe,
+                    "adv-post",
+                    b,
+                    rounds,
+                    crate::inject::timing::POLL_STEP_MS,
+                ) {
+                    return QuestionDispatch::Failed(format!(
+                        "按键 {key} 未生效（屏面未变化——可能已在边界页）——请人工核对终端后重试"
+                    ));
+                }
+            }
+            let snapshot = probe("adv-snapshot").and_then(|l| {
+                crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l)
+            });
+            QuestionDispatch::AdvanceDone {
+                advanced: true,
+                direction: *direction,
+                snapshot,
+            }
+        }
         StagePlan::KimiSubmit => {
             let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::mode::Closures {
@@ -5946,7 +6020,10 @@ fn dispatch_question_action(
             }
         }
         // ===== 批次戊 E4：kimi Other 自由作答阶段机 =====
-        StagePlan::KimiFreeText => {
+        StagePlan::KimiFreeText {
+            overwrite,
+            multi_question,
+        } => {
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
@@ -5978,6 +6055,8 @@ fn dispatch_question_action(
             };
             let out = crate::inject::question::run_kimi_free_text_stages(
                 text,
+                *overwrite,
+                *multi_question,
                 || probe("kimi-other"),
                 || poll_question_stage(|| probe("kimi-review"), QUESTION_STAGE_POLL_TOTAL_MS),
                 || poll_receipt_stage(|| probe("kimi-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
@@ -9111,6 +9190,61 @@ mod tests {
     use super::*;
     use crate::remote::content::SessionMessage;
 
+    /// **poll_screen_changed 三态**（2026-10-06 SingleKey/KimiToggle 轮询升级的
+    /// 回归锁）：变化即停（不带多余等待）；窗尽原样 → Unchanged（= 如实 Failed
+    /// 的依据）；途中读不到屏 → Unreadable（不谎报）。
+    #[test]
+    fn poll_screen_changed_three_outcomes() {
+        let base = vec!["a".to_string(), "b".to_string()];
+        // ① 第 2 拍变化 → Changed 且只读 2 拍
+        let seq = std::cell::RefCell::new(vec![
+            Some(base.clone()),
+            Some(vec!["a".to_string(), "b2".to_string()]),
+        ]);
+        let n = std::cell::Cell::new(0u32);
+        let out = poll_screen_changed(
+            &|_| {
+                let i = n.get() as usize;
+                n.set(n.get() + 1);
+                seq.borrow_mut().get(i).cloned().flatten()
+            },
+            "t",
+            &base,
+            15,
+            0,
+        );
+        assert!(matches!(out, ScreenChange::Changed(_)));
+        assert_eq!(n.get(), 2, "命中即停");
+        // ② 窗尽原样 → Unchanged（读满窗）
+        let n2 = std::cell::Cell::new(0u32);
+        let out2 = poll_screen_changed(
+            &|_| {
+                n2.set(n2.get() + 1);
+                Some(base.clone())
+            },
+            "t",
+            &base,
+            5,
+            0,
+        );
+        assert!(matches!(out2, ScreenChange::Unchanged));
+        assert_eq!(n2.get(), 5, "窗尽读满");
+        // ③ 第 1 拍读不到屏 → Unreadable（不轮到第 2 拍）
+        let n3 = std::cell::Cell::new(0u32);
+        let out3 = poll_screen_changed(
+            &|_| {
+                n3.set(n3.get() + 1);
+                None
+            },
+            "t",
+            &base,
+            5,
+            0,
+        );
+        assert!(matches!(out3, ScreenChange::Unreadable));
+        assert_eq!(n3.get(), 1);
+    }
+
     /// §4.4 证据落档（2026-10-03 用户裁决补实现）：tempdir 基座下快照文件落盘、
     /// 内容带现场头与逐行原文；base=None（测试缝禁用形态）不落档返回 None
     #[test]
@@ -9285,6 +9419,22 @@ mod tests {
                 direction: crate::inject::question::NavDirection::Next,
             },
             "opencode advance 走切题臂（前后读屏到达验证，2026-10-05 屏读标准补齐）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Advance,
+                None,
+                crate::inject::question::NavDirection::Prev,
+                false,
+                false,
+                &q,
+                "kimi",
+                4,
+            ),
+            StagePlan::KimiAdvance {
+                direction: crate::inject::question::NavDirection::Prev,
+            },
+            "kimi 切题走 KimiAdvance 臂（2026-10-06，2.1.1 ←/→ 活体定案：← = 上一题/Review 返回修改）"
         );
     }
 

@@ -7876,14 +7876,13 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 409, "kimi 多选自由作答仍拒（形态未取证）");
-        assert!(
-            body_string(r).await.contains("tool_readonly"),
-            "拒绝码须可程序分诊"
-        );
+        // 2026-10-06 语义变更：multiFreeText 点亮 + 门同面放行——freeText 走
+        // KimiFreeText 阶段机（Other 计数位直达；本测试假体屏读 Other 行不在场
+        // → 阶段机第 1 段如实中止 = 零投递，「未验不出手」由屏读把守）
+        assert_eq!(r.status(), 200, "门与旗标同面（不再 409 一刀切）");
         assert!(
             inner.recorded_keys().is_empty() && inner.recorded().is_empty(),
-            "拒绝路径零投递"
+            "假体屏读无 Other 行 → 阶段机第 1 段如实中止、零投递"
         );
     }
 

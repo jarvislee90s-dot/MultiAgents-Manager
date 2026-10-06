@@ -171,16 +171,18 @@ pub fn parse_questions(tool_input_json: &str) -> Option<Vec<Question>> {
                 .and_then(|x| x.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            // 多选标志**按工具双字段兼容**：claude 口径 `multiSelect`；opencode 的
-            // 字段名是 **`multiple`**（戊探A ⑥定案：state.input.questions[] 每题
-            // `{header, question, options[…], multiple: bool}`）——只读 multiSelect
-            // 会让 opencode 多选题在整条链路恒显单选（前端发 select+推进 = 手机端
-            // 与终端错位，2026-09-23 用户实机复现）。`multiple` 的**数组形态**
-            // （question_renamed 工具的选项列表，T3 口径外）经 as_bool() 恒 None，
-            // 不会误判成标志。
+            // 多选标志**按工具三字段兼容**：claude 口径 `multiSelect`；opencode 的
+            // 字段名是 **`multiple`**（戊探A ⑥定案）；**kimi 是 `multi_select`
+            // （下划线，2026-10-06 用户实机 wire 取证：4 题 tool-call args 前两题
+            // `multi_select: true`）**——漏认会让 kimi 多选题整条链路恒显单选（前端
+            // 发 select=数字+enter 替代 toggle=纯数字，enter 在多题流推进下一题 →
+            // 手机端与终端割裂，16:05 用户实录，与 opencode 2026-09-23 事故同构）。
+            // `multiple` 的**数组形态**（question_renamed 工具的选项列表，T3 口径外）
+            // 经 as_bool() 恒 None，不会误判成标志。
             multi_select: q
                 .get("multiSelect")
                 .and_then(|m| m.as_bool())
+                .or_else(|| q.get("multi_select").and_then(|m| m.as_bool()))
                 .or_else(|| q.get("multiple").and_then(|m| m.as_bool()))
                 .unwrap_or(false),
             options,
@@ -447,8 +449,13 @@ pub fn answer_key_sequence_for(
                 Err("kimi 自由作答必须经阶段机（run_kimi_free_text_stages）".to_string())
             }
             // kimi 多题的**切页键**未实测（K-5 定案的是数字直选自动推进——单选题
-            // 不需要显式切页；多选题切页键无实机样本）→ 不出键，多选题切题引导终端
-            AnswerAction::Advance => Err("kimi 多题切页键序未实测，不出键".to_string()),
+            // 不需要显式切页；多选题切页键无实机样本）→ 不出键，多选题切题引导终端。
+            // **2026-10-06 放开（2.1.1 活体定案）**：题页 `→`/tab = 进 Review/下一题、
+            // Review/题页 `←` = 返回修改/上一题（→ 已选行保留高亮、(✓) 撤销），键序
+            // 走 KimiAdvance 臂（屏读到达验证 + 快照回执）——静态序列仍不出（方向
+            // 参数化，唯一实现在臂内）
+            #[allow(unused_variables)]
+            AnswerAction::Advance => Err("kimi 切题走 KimiAdvance 阶段臂（静态序列不出）".to_string()),
         },
         QuestionKeyProfile::ReadOnly => Err(format!("{tool} 问答键序未实测，只读展示")),
     }
@@ -521,11 +528,55 @@ pub fn kimi_review_confirm_digit(lines: &[String]) -> Option<String> {
 /// kimi **Other 行定位**（自由作答入口）：`[N] Other` 行形 → 定位数字键（如 `"5"`）。
 /// 多选形态的 Other 行无编号（`[/] Other`）→ None（调用方如实拒绝：自由作答仅单选）。
 pub fn locate_kimi_other_digit(lines: &[String]) -> Option<String> {
-    lines
+    // 形态①：显示编号 `[5] Other`（单选/单题页——戊探B E-B8）→ 直接取编号
+    if let Some(d) = lines
         .iter()
         .filter_map(|l| parse_kimi_bracket_row(l))
         .find(|(_, text)| text.to_lowercase().trim().starts_with(KIMI_OTHER_ROW_LABEL))
         .map(|(digit, _)| digit)
+    {
+        return Some(d);
+    }
+    // 形态②：多选页 Other **无编号显示**（探测批 K2）→ **按 checkbox 计数位**
+    // （K4 定案 + 2026-10-06 用户实测：Other 是第 5 个方括号 → 按数字 5 直达
+    // 编辑态）。勾选字形三候选与快照解析同源（[?]/[✓]/[√] 已选、[ ] 未选）。
+    const BOXED: &[&str] = &["[ ]", "[?]", "[✓]", "[√]"];
+    let mut count = 0usize;
+    for l in lines {
+        let lower = l.to_lowercase();
+        let text_after_box = BOXED.iter().find_map(|m| {
+            lower.find(m).and_then(|i| {
+                l.get(i + m.len()..).map(|rest| rest.trim().to_lowercase())
+            })
+        });
+        if let Some(text) = text_after_box {
+            count += 1;
+            if text.starts_with(KIMI_OTHER_ROW_LABEL) {
+                return digit_key(count - 1);
+            }
+        }
+    }
+    None
+}
+
+/// kimi Other **编辑行残留长度**（覆盖写入的删除量判据，2026-10-06）：
+/// 编辑态行形 `→ [4] Other: <残留>`（K7 定案：重进带旧文本）→ Some(残留字符数)；
+/// 鲜态 `→ [4] Other:`（冒号后空白）→ Some(0)；编辑行不在场 → None（调用方如实中止）。
+///
+/// 「恰为 Other 行」判据与 [`locate_kimi_other_digit`] 同源（方括号行形 + other 开头），
+/// 取**最后一个** Other 行（Review 页 Other 是答案回显、编辑页才是输入行——两页不同时
+/// 在场，倒序取是纵深防御）。
+pub fn locate_kimi_other_residue_len(lines: &[String]) -> Option<usize> {
+    lines
+        .iter()
+        .rev()
+        .filter_map(|l| parse_kimi_bracket_row(l))
+        .find(|(_, text)| text.to_lowercase().trim().starts_with(KIMI_OTHER_ROW_LABEL))
+        .map(|(_, text)| {
+            text.split_once(':')
+                .map(|(_, v)| v.trim().chars().count())
+                .unwrap_or(0)
+        })
 }
 
 /// kimi 终态在场（提交完成判据）
@@ -662,6 +713,8 @@ where
 /// [`locate_kimi_other_digit`] 恒 None → 第 1 段如实中止）。
 pub fn run_kimi_free_text_stages<Rd, P, Q, T>(
     text: &str,
+    overwrite: bool,
+    multi_question: bool,
     mut read: Rd,
     mut poll_review: P,
     mut poll_receipt: Q,
@@ -673,7 +726,15 @@ where
     Q: FnMut() -> Result<Option<Vec<String>>, String>,
     T: FreeTextTerminal,
 {
+    // **覆盖写入的空文本前置拒**（2026-10-06 2.1.1 活体定案）：kimi Other 编辑器
+    // 「空内容回车 = no-op」（不保存、编辑器原地不动）——置空语义不存在，如实拒绝
+    // 引导终端操作，绝不盲发（退格清掉旧文后留在一个未定案的编辑器态）。
     if text.trim().is_empty() {
+        if overwrite {
+            return Err(StageAbort::screen(
+                "kimi 的 Other 编辑器无法置空保存（2.1.1 实测定案：空内容回车 = 无操作）——清空请到终端退格后操作；已中止，未发任何键",
+            ));
+        }
         return Err(StageAbort::screen("自由作答文本为空——已中止，未发任何键"));
     }
     let mut sent_keys: Vec<String> = Vec::new();
@@ -691,18 +752,67 @@ where
         .map_err(|e| StageAbort::delivery(format!("Other 定位键投递失败（{e}）")))?;
     sent_keys.push(other_digit);
     terminal.settle();
+    // 1.5 **覆盖写入：先删净旧文再打新文**（2026-10-06 接入；2.1.1 定案 = K7 重进
+    // 带旧文本、退格逐字符可清）。复用多选覆盖参照块的长度口径（min 400 防marker
+    // 长度误读无限循环）：进编辑器后读屏取 `Other: <残留>` 长度 → 退格 ×len →
+    // 重读屏验证残留已清（未清 = 如实中止——不盲打新文叠在旧文上）。
+    if overwrite {
+        let editor = read().ok_or_else(|| {
+            StageAbort::screen(
+                "覆盖写入：进编辑器后读不到屏幕——已中止，未发退格；请人工核对终端",
+            )
+        })?;
+        let residue_len = locate_kimi_other_residue_len(&editor).ok_or_else(|| {
+            StageAbort::screen(
+                "覆盖写入：屏上读不到 Other 编辑行（可能未进入编辑态）——已中止，未发退格；请人工核对终端",
+            )
+        })?;
+        let bp = residue_len.min(400);
+        for _ in 0..bp {
+            terminal
+                .send("backspace")
+                .map_err(|e| StageAbort::delivery(format!("退格投递失败（{e}）")))?;
+        }
+        if bp > 0 {
+            sent_keys.push(format!("<backspace×{bp}>"));
+        }
+        terminal.settle();
+        let cleared = read().ok_or_else(|| {
+            StageAbort::screen(
+                "覆盖写入：退格后读不到屏幕——已中止，未发新文本；请人工核对终端",
+            )
+        })?;
+        if locate_kimi_other_residue_len(&cleared).is_some_and(|l| l > 0) {
+            return Err(StageAbort::screen(
+                "覆盖写入：退格后 Other 行仍有残留（屏读核验未过）——已中止，未发新文本；请人工核对终端",
+            ));
+        }
+    }
     // 2. 打字（字符通道——用户文本绝不进键通道）
     terminal
         .send_text(text)
         .map_err(|e| StageAbort::delivery(format!("作答文本投递失败（{e}）")))?;
     sent_keys.push("<text>".to_string());
     terminal.settle();
-    // 3. 回车保存（自动进 Review）
+    // 3. 回车保存（单题：自动进 Review；多题：推进下一题/进 Review——由屏读定）
     terminal
         .send("enter")
         .map_err(|e| StageAbort::delivery(format!("保存回车投递失败（{e}）")))?;
     sent_keys.push("enter".to_string());
     terminal.settle();
+    // **多题分流**（2026-10-06 17:00 用户实录事故修复）：单题 E-B8 的「保存即确认」
+    // 语义在多题流是错的——保存后 kimi 推进新题页或进 Review，阶段机若沿用单题
+    // 行为读确认编号**代发确认键**，会把未答题一并提交（用户实录：第 3 题 Other
+    // 保存 → Review 被代提交 → 第 4 题跳过）。多题流保存后即停：确认提交永远
+    // 交还用户显式触发（确认卡 Submit 钮），新页状态由 GET 屏读快照链回显。
+    if multi_question {
+        return Ok(FreeTextOutcome {
+            sent_keys,
+            receipt_seen: None,
+            screen_text: None,
+            screen_checked: None,
+        });
+    }
     // 4. Review 汇总屏（未见即中止，不发确认键）
     let review = poll_review().map_err(StageAbort::screen)?.ok_or_else(|| {
         StageAbort::screen(format!(
@@ -3995,8 +4105,11 @@ pub fn action_supported(
         )));
     }
     match action {
+        // kimi 多题切题（2026-10-06，2.1.1 活体定案）：`→`/tab 前向、`←` 后向
+        // （Review 页 `←` = 返回修改）——走 KimiAdvance 臂（屏读到达验证），门放行
+        AnswerAction::Advance if tool == "kimi" => Ok(()),
         // claude 的多题切题（2026-09-24 起）：走阶段机（走位到 Next + 回车 + 分类）。
-        // 其余工具维持既有档（opencode=tab 单键；kimi/codex 未实测 → 拒）
+        // 其余工具维持既有档（opencode=tab 单键；codex 未实测 → 拒）
         AnswerAction::Advance => match question_key_profile(tool) {
             QuestionKeyProfile::ClaudeFull => Ok(()),
             _ => answer_key_sequence_for(tool, action, index, q)
@@ -4062,9 +4175,14 @@ pub fn action_supported(
             //   2026-10-04 用户活体双段 toggle 语义定案——OpencodeOwnAnswer 编排）；
             // - codex：Space 选中 + Tab notes 在多选题全链实证（探测批 C 定案——
             //   CodexNotes 编排，footer 锚定位与题型无关）；
-            // - kimi：多选自由作答不接入（探测批 K 定案：Other 走数字直选、多选
-            //   形态无样本）→ 维持拒绝。
-            if matches!(tool, "claude" | "opencode" | "codex") {
+            // - kimi：2026-10-06 用户指令点亮（推翻探测批 K「多选不接入」裁决，
+            //   multiFreeText 旗标同批点亮）：走 KimiFreeText 阶段机——Other 行
+            //   编号**按屏自适应**（显示编号 `[N]` 优先；多选无编号形态按 checkbox
+            //   计数位直达，K4 定案 + 用户实测数字 5 直进编辑态）；多题流保存后
+            //   **不代发确认键**（单题 E-B8 的「保存即确认」语义在多题流会把未答
+            //   题一并提交——17:00 用户实录事故）。可达性与形态把守都在阶段机
+            //   内（屏读定位失败 = 如实中止），门不再一刀切。
+            if matches!(tool, "claude" | "opencode" | "codex" | "kimi") {
                 let _ = &q; // 多选形态由编排屏读判定（free-row 解析不出即中止）
             } else if !free_text_shape_supported(q) {
                 return Err(ActionRefusal::ToolUnverified(
@@ -4169,6 +4287,22 @@ mod tests {
         let qs = parse_questions(r#"{"questions":[{"question":"q","options":[{"label":"a"}]}]}"#)
             .unwrap();
         assert!(!qs[0].multi_select);
+    }
+
+    /// kimi 的多选标志字段名是 **`multi_select`**（下划线；2026-10-06 用户实机
+    /// wire 取证：4 题 AskUserQuestion tool-call args 前两题带
+    /// `multi_select: true`、单选题无此字段）。漏认 → 多选题恒显单选 → 前端发
+    /// select（数字+enter）替代 toggle（纯数字），enter 在多题流推进下一题 →
+    /// 手机端与终端割裂（16:05 用户实录，与 opencode 2026-09-23 事故同构）。
+    #[test]
+    fn parse_kimi_multi_select_snake_field() {
+        // 形态逐字取自 2026-10-06 16:0x 用户 wire（q0 = 第 1 题多选）
+        let qs = parse_questions(
+            r#"{"questions":[{"header":"优化方向","multi_select":true,"options":[{"description":"落日","label":"视觉光影与色彩（推荐）"},{"description":"海浪","label":"交互动效"}],"question":"这次优化主要想动哪几块？（可多选，1-4 项）"},{"header":"允许","options":[{"description":"少量","label":"允许内联少量原生JS"}],"question":"优化时允许用什么？（单选）"}]}"#,
+        )
+        .expect("kimi 4 题夹具必须可解析");
+        assert!(qs[0].multi_select, "kimi multi_select: true → 多选");
+        assert!(!qs[1].multi_select, "kimi 单选题无该字段 → 单选");
     }
 
     #[test]
@@ -4696,8 +4830,13 @@ mod tests {
         assert!(action_supported("claude", AnswerAction::FreeText, None, &m).is_ok());
         assert!(action_supported("opencode", AnswerAction::FreeText, None, &m).is_ok());
         assert!(action_supported("codex", AnswerAction::FreeText, None, &m).is_ok());
-        let err = action_supported("kimi", AnswerAction::FreeText, None, &m).unwrap_err();
-        assert!(matches!(err, ActionRefusal::ToolUnverified(_)), "{err:?}");
+        // kimi 2026-10-06 点亮（用户指令，推翻探测批 K「多选不接入」裁决）——门与
+        // GET multiFreeText 旗标**同面**是本测试的存在意义：旗标开而门拒 = 用户
+        // 必撞 409（2026-10-05 实机回归即此形态）
+        assert!(
+            action_supported("kimi", AnswerAction::FreeText, None, &m).is_ok(),
+            "kimi 多选 freeText 与 multiFreeText 旗标同面放行（可达性由阶段机屏读把守）"
+        );
         // 单选面零变化（各家单选自由作答的既有定案维持放行）
         let s = single();
         assert!(action_supported("kimi", AnswerAction::FreeText, None, &s).is_ok());
@@ -5781,11 +5920,13 @@ mod tests {
             "   → [5] Other:",
         ]);
         assert_eq!(locate_kimi_other_digit(&screen).as_deref(), Some("5"));
+        // 多选 Other 无编号显示 → **checkbox 计数位**（2026-10-06 用户实测：数字 5
+        // 直达编辑态；探测批 K「不可达」裁决被同日实测推翻）
         let multi = e_stage2_screen("kimi-question-multiselect.txt");
         assert_eq!(
-            locate_kimi_other_digit(&multi),
-            None,
-            "多选 Other 行无编号 → 自由作答不可达（到终端作答）"
+            locate_kimi_other_digit(&multi).as_deref(),
+            Some("5"),
+            "多选 Other = 第 5 个 checkbox → 计数位数字直达"
         );
     }
 
@@ -5872,6 +6013,8 @@ mod tests {
         };
         let out = run_kimi_free_text_stages(
             "atlantis",
+            false,
+            false,
             || Some(screen.clone()),
             || Ok(Some(review.clone())),
             || Ok(Some(lines(&["● Collected your answers"]))),
@@ -5894,16 +6037,158 @@ mod tests {
             send_text: |_: &str| Ok(()),
             settle: || {},
         };
-        let err = run_kimi_free_text_stages(
+        // 多选 Other 计数位可达（2026-10-06 语义变更）→ 走全链且**保存即停**
+        // （multi_question=true：enter 后零确认键）
+        let out2 = run_kimi_free_text_stages(
             "x",
+            false,
+            true,
             || Some(multi.clone()),
             || Ok(None),
             || Ok(None),
             &mut terminal2,
         )
-        .expect_err("多选 Other 无编号 → 中止");
-        assert!(err.message.contains("Other 行"), "{err:?}");
-        assert!(sent2.is_empty(), "中止零按键");
+        .expect("多选 Other 计数位可达 → 全链");
+        assert_eq!(
+            out2.sent_keys,
+            vec!["5", "<text>", "enter"],
+            "计数位 5 直达 + 保存即停（不代发确认键）"
+        );
+    }
+
+    /// **多题 Other 保存即停**（2026-10-06 17:00 用户实录事故锁）：多题流 enter
+    /// 保存后**零确认键**——绝不代发 Review 确认（单题语义会把未答题一并提交）。
+    #[test]
+    fn e4_kimi_free_text_multi_question_never_confirms() {
+        let screen = lines(&["   → [1] red", "   → [4] Other:"]);
+        let review = e_stage2_screen("kimi-question-review.txt");
+        let mut sent: Vec<String> = Vec::new();
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: || Some(screen.clone()),
+            send: |k: &str| {
+                sent.push(k.to_string());
+                Ok(())
+            },
+            send_text: |_: &str| Ok(()),
+            settle: || {},
+        };
+        let out = run_kimi_free_text_stages(
+            "ans",
+            false,
+            true,
+            || Some(screen.clone()),
+            || Ok(Some(review.clone())),
+            || Ok(Some(lines(&["● Collected your answers"]))),
+            &mut terminal,
+        )
+        .expect("多题保存即停");
+        assert_eq!(
+            out.sent_keys,
+            vec!["4", "<text>", "enter"],
+            "保存回车是最后一个键——确认键绝不代发"
+        );
+        assert_eq!(out.receipt_seen, None, "多题流不追终态锚");
+    }
+
+    /// **多选 Other 无编号 → checkbox 计数位**（K4 定案 + 2026-10-06 用户实测
+    /// 「Other 是第 5 个方括号、按数字 5 直达编辑态」）：定位返回计数值 5。
+    #[test]
+    fn e4_kimi_other_digit_by_checkbox_count_multi_select() {
+        // 2026-10-06 用户终端实拍词形（多选页：4 选项 + Other，全部无编号）
+        let screen = lines(&[
+            " [ ] 视觉光影与色彩（推荐）",
+            " [ ] 交互动效",
+            " [ ] 响应式与机型适配",
+            " [ ] 代码结构与无障碍",
+            " [ ] Other",
+        ]);
+        assert_eq!(
+            locate_kimi_other_digit(&screen).as_deref(),
+            Some("5"),
+            "Other = 第 5 个 checkbox → 数字 5"
+        );
+        // 已选字形混排也计数（[√] 2.1.1 / [?] 批 K）
+        let mixed = lines(&[
+            " [√] 视觉光影与色彩（推荐）",
+            " [?] 交互动效",
+            " [ ] 响应式与机型适配",
+            " [ ] 代码结构与无障碍",
+            " [ ] Other",
+        ]);
+        assert_eq!(locate_kimi_other_digit(&mixed).as_deref(), Some("5"));
+    }
+
+    /// **kimi Other 覆盖写入脚本锁**（2026-10-06，2.1.1 定案 = K7 重进带旧文本 +
+    /// 退格逐字符可清）：进编辑器 → 读残留 8 字符 → 退格 ×8 → 重读验证清空 →
+    /// 打新文 → 保存。空文本 + overwrite → 前置拒（空回车 no-op 定案，零按键）。
+    #[test]
+    fn e4_kimi_free_text_overwrite_stage_scripted() {
+        // 阶段机 read 序列：①带残留 Other 行（定位入口）→ ②进编辑器后仍带残留
+        // （取删除量）→ ③退格后清空（核验通过）
+        let with_residue = lines(&["   → [1] red", "   → [4] Other: old-text"]);
+        let cleared = lines(&["   → [1] red", "   → [4] Other:"]);
+        let reads = std::cell::RefCell::new(vec![
+            cleared.clone(),
+            with_residue.clone(),
+            with_residue.clone(),
+        ]);
+        let stage_read = || {
+            reads
+                .borrow_mut()
+                .pop()
+                .or_else(|| Some(cleared.clone()))
+        };
+        let review = e_stage2_screen("kimi-question-review.txt");
+        let mut sent: Vec<String> = Vec::new();
+        let mut texts: Vec<String> = Vec::new();
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: || None,
+            send: |k: &str| {
+                sent.push(k.to_string());
+                Ok(())
+            },
+            send_text: |t: &str| {
+                texts.push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let _out = run_kimi_free_text_stages(
+            "new-answer",
+            true,
+            false,
+            stage_read,
+            || Ok(Some(review.clone())),
+            || Ok(Some(lines(&["● Collected your answers"]))),
+            &mut terminal,
+        )
+        .expect("覆盖写入全链走通");
+        assert_eq!(
+            sent.iter().filter(|k| k.as_str() == "backspace").count(),
+            8,
+            "残留 8 字符 → 退格 ×8：{sent:?}"
+        );
+        assert_eq!(texts, vec!["new-answer"], "删净后才打新文");
+        // 空文本 + overwrite → 前置拒、零按键
+        let sent_before = sent.len();
+        let mut terminal2 = crate::inject::question::FreeTextClosures {
+            read: || None,
+            send: |_: &str| Ok(()),
+            send_text: |_: &str| Ok(()),
+            settle: || {},
+        };
+        let err = run_kimi_free_text_stages(
+            "  ",
+            true,
+            false,
+            || Some(with_residue.clone()),
+            || Ok(None),
+            || Ok(None),
+            &mut terminal2,
+        )
+        .expect_err("空文本覆盖写入 → 前置拒（kimi 空回车 no-op 定案）");
+        assert!(err.message.contains("无法置空"), "{err:?}");
+        assert_eq!(sent.len(), sent_before, "前置拒零按键");
     }
 
     fn lines(v: &[&str]) -> Vec<String> {
