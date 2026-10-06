@@ -355,6 +355,31 @@
       "disabledNotice": "The usage statistics switch is off: nothing is collected or stored, so today's totals below are necessarily empty (CSV export is not gated by that switch)",
       "emptyDisabled": "Today's totals are empty — the usage statistics switch is off (see the notice above)",
       "revealFailed": "Exported to {{path}}, but could not open its folder automatically (open it manually in your system file manager)"
+    },
+    "usage": {
+      "title": "Usage statistics",
+      "desc": "Eight settings for usage collection, the pet mini bar and the share image.",
+      "enabled": "Enable usage statistics",
+      "enabledHint": "When off, no session file is scanned; the dashboard and mini bar keep showing the already-collected ledger.",
+      "miniBarRange": "Mini bar range",
+      "miniBarToolRows": "Mini bar tool rows",
+      "miniBarToolRowsHint": "How many tools the mini bar's third line lists, 1–7 (3 by default).",
+      "detailRetentionDays": "Detail retention (days)",
+      "detailRetentionHint": "Details older than {{days}} days are not kept (1–3650 days).",
+      "collectIntervalMin": "Fallback collect interval (minutes)",
+      "collectIntervalHint": "The dashboard and mini bar collect when they open; this interval only floors the background fallback ticker, 1–1440 minutes.",
+      "providerMapRules": "Provider mapping rules (JSON)",
+      "providerMapRulesPlaceholder": "{\"rules\":[{\"prefix\":\"deepseek-\",\"provider\":\"volcengine\"}]}",
+      "providerMapRulesHint": "Only the {\"rules\":[{\"prefix\":…,\"provider\":…}]} shape is accepted; an invalid value is only flagged here and the save is still sent.",
+      "providerMapRulesInvalid": "Not the {\"rules\":[{\"prefix\":…,\"provider\":…}]} shape: the backend will reject the save (warning only, submission is not blocked).",
+      "exportQuote": "Share-image caption",
+      "exportQuotePlaceholder": "Leave empty for the default caption pool; {range} {tokens} {hitPct} {models} are available",
+      "exportPose": "Share-image pose",
+      "poseResetOnSwitch": "The pose fell back to Random because the pet changed: pose keys follow the sheet's row count and may not exist on the new sheet.",
+      "saveFailed": "Failed to save usage settings",
+      "rangeToday": "Today",
+      "rangeLast5h": "Last 5 hours",
+      "rangeLast7d": "Last 7 days"
     }
   },
   "home": {
@@ -915,6 +940,162 @@
     },
     "label": {
       "unknownProvider": "Unknown"
+    },
+    "title": "Usage Dashboard",
+    "menu": {
+      "dashboard": "📊 Usage Dashboard",
+      "usage": "🏷 Today's Usage"
+    },
+    "mini": {
+      "requestInput": "Request input",
+      "hitRate": "Hit rate",
+      "cacheHit": "Cache hit",
+      "output": "Output",
+      "session": "This session",
+      "noSession": "No session",
+      "untitled": "Untitled",
+      "sessionEmptyHint": "This row is empty in two cases: (1) no recently active session in the current range yet (including never collected); (2) day tiers (last 7 days / 30 days / custom) aggregate without a session id, so the row cannot be computed.",
+      "sessionHint": "“This session” = the most recently active session within the current range, not the one you have open",
+      "toolsBasis": "By tool · request input: ",
+      "detail": "Details »",
+      "loading": "Loading usage…",
+      "error": "Failed to load usage — open the dashboard via “Details »” to retry",
+      "truncated": "The float clips when space runs out — open the dashboard for the full picture"
+    },
+    "tab": {
+      "board": "Board",
+      "records": "Records"
+    },
+    "export": {
+      "copyText": "Copy text",
+      "copyImage": "Copy image",
+      "image": "Export image",
+      "csv": "Export CSV",
+      "copied": "Copied",
+      "copiedImage": "Image copied",
+      "savedTo": "Saved to {{path}}",
+      "openDir": "Open containing folder",
+      "saveFailed": "Export failed: {{error}}"
+    },
+    "range": {
+      "last5h": "Last 5 hours",
+      "today": "Today",
+      "last7d": "Last 7 days",
+      "last30d": "Last 30 days",
+      "custom": "Custom",
+      "from": "From",
+      "to": "To"
+    },
+    "rangeClamped": "Truncated to the most recent 31 days",
+    "empty": "No data",
+    "error": {
+      "title": "Failed to load usage data"
+    },
+    "hero": {
+      "label": "{{range}} token total",
+      "sub": "Request input + output (excludes cache writes and estimated user input)"
+    },
+    "grid": {
+      "userEst": "User input (est.) · incl. subagents",
+      "output": "Output",
+      "requestTotal": "Request input (full cumulative)",
+      "cacheRead": "Cache read",
+      "hitRate": "Cache hit rate",
+      "requests": "Requests",
+      "asOf": "Data as of"
+    },
+    "pose": {
+      "random": "Random",
+      "idle": "Idle",
+      "run-right": "Run right",
+      "run-left": "Run left",
+      "waving": "Wave",
+      "jumping": "Jump",
+      "failed": "Failed",
+      "waiting": "Wait",
+      "running": "Busy",
+      "review": "Review",
+      "look": "Look around (needs an 11-row sheet; falls back to idle on a 9-row sheet)"
+    },
+    "card": {
+      "trend": "Usage trend",
+      "distribution": "Group distribution",
+      "peak": "Peak {{v}}",
+      "compareSubject": "Range total"
+    },
+    "group": {
+      "tool": "By tool",
+      "project": "By project",
+      "provider": "By provider",
+      "model": "By model"
+    },
+    "records": {
+      "cardDim": "Card grouping",
+      "dim": {
+        "tool": "By tool",
+        "project": "By project"
+      },
+      "filterTools": "Tools",
+      "subagentInclude": "Incl. subagents",
+      "subagentParentsOnly": "Parent sessions only",
+      "subagentUnavailable": "Daily aggregate rows carry no session id → switch to Today or Last 5 hours first",
+      "caliberInclude": "Tokens only · incl. subagents",
+      "caliberParentsOnly": "Tokens only · excl. subagents",
+      "cardTotal": "Total {{v}}",
+      "moreRows": "Show {{n}} more rows",
+      "collapse": "Collapse",
+      "retention": "Keeps detail for the last {{days}} days",
+      "empty": "No data"
+    },
+    "source": {
+      "measured": "Measured",
+      "inferred": "Inferred",
+      "unknown": "Unknown"
+    },
+    "moreN": "+{{n}}",
+    "exact": "Exact value {{value}}",
+    "compare": " (prev {{prev}} · {{delta}})",
+    "compare.new": "new",
+    "turnBasis": {
+      "claude": "Counts started turns (user rows with no toolUseResult and not meta); assistant rows are never counted (2.68x streaming duplicates)",
+      "codex": "Counts event_msg.task_started; turn_context is unusable (11 rows vs 1 task_started in a single file)",
+      "kimi": "Distinct append_loop_event turnId across all subagent dirs; usageScope=\"turn\" is per-LLM-step (9.14x inflated) and unusable",
+      "opencode": "Counts user rows (assistant rows are steps and would inflate the count); V1/V2 differ in table and column names",
+      "workbuddy": "No turn concept — no value is shown (traceId counts model requests, not turns)",
+      "zcode": "Counts turn_usage rows (authoritative); sessions without turn rows count as 0; do not merge model_usage.turn_id (over-counts)",
+      "dsh": "Reads sessionStats.turns directly; subagent sessions are layered out per D17"
+    },
+    "work": {
+      "title": "Work summary",
+      "sessions": "Sessions",
+      "sessionsHint": "Layered by subagent: parent sessions only — subagent sessions are not counted twice",
+      "turns": "Turns",
+      "turnsHint": "Split by tool; never summed across tools (per-source turn criteria are not comparable)",
+      "errors": "Errors (three layers, no total)",
+      "errorModel": "Model / transport",
+      "errorTurn": "Turn failure",
+      "errorTool": "Tool failure",
+      "interrupted": "User interrupted (not an error)",
+      "partialSources": "{{sources}} not counted in this row (sources without this field)",
+      "longest": "Longest turn",
+      "longestHint": "Includes idle time; idle is not excluded",
+      "p50": "p50",
+      "max": "Max",
+      "toolCalls": "Tool calls",
+      "toolCallsTotal": "Total calls",
+      "toolAvg": "Avg duration",
+      "topToolCount": "Top by calls",
+      "topToolMs": "Top by duration",
+      "topList": "Top tools",
+      "unavailable": "Not available",
+      "unavailableAll": "Not available in any source",
+      "subagentLayer": "Counts are layered (parent sessions only); token totals include subagents"
+    },
+    "notCollected": "Not collected yet",
+    "footer": {
+      "caliber": "Tokens only · incl. subagents · aggregated locally",
+      "freshness": "Data freshness: {{time}}",
+      "retention": "No detail older than {{days}} days"
     }
   },
   "errors": {
