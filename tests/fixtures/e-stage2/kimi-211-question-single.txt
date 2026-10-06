@@ -1,0 +1,20 @@
+# kimi 2.1.1 单选题页 · 活体 dump 2026-10-06 探针会话（→ 前缀=高亮/已选行，字符层可见；[N] 方括号行形；[4] Other）
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ question
+
+  Intent    Submit
+
+ ? What did you mean by "plan off"?
+
+  → [1] Exit plan mode
+        Leave plan mode so I can edit files and run commands without per-action planning. I'll request approval to
+        exit.
+    [2] Start a task first
+        You have actual work in mind — tell me what it is and I'll explore and write a plan for it before exiting.
+    [3] Nothing / accidental
+        The message was a typo or pasted by mistake. I'll take no action and wait for your next instruction.
+    [4] Other
+
+  ↑↓ select  1-4 / ↵ choose  ←/→/tab switch  esc cancel
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+plan  DeepSeek V4.1 Flash thinking: high  C:\Users\bunny\AppData\Local\Temp\probe-kimi-211

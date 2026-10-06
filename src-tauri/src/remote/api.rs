@@ -5100,6 +5100,50 @@ fn question_probe<'a>(
     }
 }
 
+/// 发键后屏面变化的有界轮询产物（D20 形状：命中即停、窗尽如实、读不到不谎报）。
+enum ScreenChange {
+    /// 屏面已变化（携带最后一拍原文）
+    Changed(Vec<String>),
+    /// 窗尽屏面仍与基准原样（= 按键未生效的如实证据）
+    Unchanged,
+    /// 途中读不到屏（无法验证——调用方保持既有「读不到不误报」口径）
+    Unreadable,
+}
+
+/// **发键后的屏面变化轮询**（2026-10-06，用户实机 bug 修复的共用内核）：
+/// 旧形态是「发键后立即读一拍与基准比对」——TUI 未及重绘时前后两屏原样，误报
+/// 「按键未生效」（用户重试反而翻转已生效的勾选）。本助手逐拍读屏直到屏面
+/// **变化**（D20(a) 命中即停）；窗尽原样 → [`ScreenChange::Unchanged`]；任一拍
+/// 读不到屏 → [`ScreenChange::Unreadable`]（不谎报）。
+fn poll_screen_changed(
+    probe: &impl Fn(&'static str) -> Option<Vec<String>>,
+    stage: &'static str,
+    baseline: &[String],
+    rounds: u32,
+    step_ms: u64,
+) -> ScreenChange {
+    let mut last: Option<Vec<String>> = None;
+    for i in 0..rounds.max(1) {
+        match probe(stage) {
+            Some(lines) => {
+                if lines != baseline {
+                    return ScreenChange::Changed(lines);
+                }
+                last = Some(lines);
+            }
+            None => {
+                log::debug!("屏面变化轮询：{stage} 第 {}/{} 拍读不到屏", i + 1, rounds);
+                return ScreenChange::Unreadable;
+            }
+        }
+        if i + 1 < rounds.max(1) {
+            std::thread::sleep(std::time::Duration::from_millis(step_ms));
+        }
+    }
+    let _ = last;
+    ScreenChange::Unchanged
+}
+
 /// 阶段机臂共用的**终端缝**构造（发键后固定 `SUBMIT_DELAY_MS` 等重绘）。
 #[allow(clippy::type_complexity)] // Closures 三泛型是 mode::Closures 的固有形态
 fn question_terminal<'a>(
@@ -5373,18 +5417,46 @@ fn dispatch_question_action(
             // （有界 4 轮 = Other 编辑行上下可达范围）；走满 → 不谎报。
             let probe = question_probe(st, tool, pid);
             let digit = format!("{}", index + 1);
-            let before = probe("pre").and_then(|l| {
-                crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l)
+            // 一次屏读双份消费：原始行作轮询基准，快照作翻转/污染判定
+            let before_lines = probe("pre");
+            let before = before_lines.as_ref().and_then(|l| {
+                crate::inject::question_screen_oc::kimi_question_screen_snapshot(l)
             });
             for _round in 0..=4 {
                 // 发数字（kimi 数字直选 = 编号行 toggle，与高亮无关）
                 if let Err(e) = injector.locate_and_send_key_spec(pid, &digit, spec) {
                     return QuestionDispatch::Failed(e);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(
-                    crate::inject::families::SUBMIT_DELAY_MS,
-                ));
-                let after = probe("post").and_then(|l| {
+                // **有界轮询等屏面变化**（2026-10-06 升级：旧形态发键后固定睡 150ms
+                // 读一拍——重绘慢时读到旧屏误走 ↓ 重试，把已勾上的项翻回去；机理与
+                // SingleKey 臂误报同源）。变化判据 = 整屏与基准不同（快照级翻转/污染
+                // 判定在下方消费拿到的那一拍屏）；读不到屏 → 走不谎报回执。
+                let after_lines = match &before_lines {
+                    Some(b) => {
+                        let rounds = crate::inject::timing::poll_rounds(
+                            crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                        );
+                        match poll_screen_changed(
+                            &probe, "post", b, rounds, crate::inject::timing::POLL_STEP_MS,
+                        ) {
+                            ScreenChange::Changed(lines) => Some(lines),
+                            other => {
+                                if matches!(other, ScreenChange::Unchanged) {
+                                    // 窗尽原样：本拍数字确实未生效 → ↓ 换位重试（外层有界）
+                                    if let Err(e) =
+                                        injector.locate_and_send_key_spec(pid, "down", spec)
+                                    {
+                                        return QuestionDispatch::Failed(e);
+                                    }
+                                    continue;
+                                }
+                                None // Unreadable → 快照不可读 → 走不谎报回执
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                let after = after_lines.and_then(|l| {
                     crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l)
                 });
                 // Other 行污染（K4：Other 编辑态下数字会打进文本）：free_text 出现/变化 → 退格清掉
@@ -5521,8 +5593,11 @@ fn dispatch_question_action(
             }
             // **后置屏读到达验证**（2026-10-05 屏读标准补齐——kimi/codex select）：
             // kimi 数字+enter 后终端推进到 Review 汇总屏；codex 数字即答后弹窗
-            // 推进。前后各读一屏——完全相同 = 按键未生效 → Failed 可重试。
-            // 读不到屏 → 保持既有盲发行为（不误报）。
+            // 推进。**2026-10-06 升级为有界轮询**（用户实机 bug：单拍比对发键后
+            // 立即读屏，TUI 未及重绘 → 前后两屏原样 → 误报「按键未生效」，用户
+            // 重试反把勾选翻回去；D20 同款机理）。发键 → 等待+逐拍读屏比对，
+            // 屏面变化即停；窗尽原样 → Failed 可重试。读不到屏 → 保持既有盲发
+            // 行为（不误报）。
             let pre_select = if tool == "kimi" || tool == "codex" {
                 let probe = question_probe(st, tool, pid);
                 probe("pre-select")
@@ -5537,9 +5612,18 @@ fn dispatch_question_action(
                 }
             }
             if (tool == "kimi" || tool == "codex") && !sequence.is_empty() {
-                let probe = question_probe(st, tool, pid);
-                if let (Some(pre), Some(post)) = (&pre_select, probe("post-select")) {
-                    if pre == &post {
+                if let Some(pre) = &pre_select {
+                    let probe = question_probe(st, tool, pid);
+                    let rounds = crate::inject::timing::poll_rounds(
+                        crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                    );
+                    if let ScreenChange::Unchanged = poll_screen_changed(
+                        &probe,
+                        "post-select",
+                        pre,
+                        rounds,
+                        crate::inject::timing::POLL_STEP_MS,
+                    ) {
                         return QuestionDispatch::Failed(
                             "按键未生效（屏面未变化）——请人工核对终端后重试".to_string(),
                         );
@@ -6439,6 +6523,8 @@ struct ModeScanHit {
     kind: crate::inject::mode::ModeSwitchKind,
     /// 模式栏结构（裁5：二维两组 / 单轴一组 / 无）
     structure: crate::inject::mode::ModeStructure,
+    /// 会话快照（权限轴屏读复用：kimi 权限组 GET 当前档 = 底栏屏读优先）
+    session: crate::session::Session,
 }
 
 /// 模式扫描（同步，spawn_blocking 内调用）：会话查找 → 结构表 → 屏读（一次）解析
@@ -6462,6 +6548,7 @@ fn mode_scan_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<ModeScanHit
         readback,
         kind,
         structure,
+        session,
     })
 }
 
@@ -6482,13 +6569,25 @@ fn read_mode_from_screen(
     tool: &str,
     readback: bool,
 ) -> Option<crate::inject::mode::MamMode> {
+    read_axis_from_screen(st, session, tool, readback, crate::inject::mode::ModeGroupId::Mode)
+}
+
+/// 按组版屏读（权限轴消费：kimi 权限组 2.1.1 起底栏有权限标签——GET 当前档与
+/// 注入前快照共用这一入口；模式轴包装 = [`read_mode_from_screen`]）。
+fn read_axis_from_screen(
+    st: &Arc<RemoteState>,
+    session: &crate::session::Session,
+    tool: &str,
+    readback: bool,
+    group: crate::inject::mode::ModeGroupId,
+) -> Option<crate::inject::mode::MamMode> {
     if !readback {
         return None;
     }
     match (st.screen_probe)(session.id.as_str(), session.pid) {
         Some(lines) => {
-            let m = crate::inject::mode::parse_mode_from_screen(tool, &lines);
-            log::debug!("模式屏读（{tool} pid={}）→ {:?}", session.pid, m);
+            let m = crate::inject::mode::parse_axis_from_screen(tool, group, &lines);
+            log::debug!("模式屏读（{tool}/{} pid={}）→ {:?}", group.wire(), session.pid, m);
             m
         }
         None => {
@@ -6598,8 +6697,11 @@ pub async fn session_mode(
         crate::inject::mode::ModeSwitchKind::SlashCommand => "slashCommand",
         crate::inject::mode::ModeSwitchKind::Unsupported => "unsupported",
     };
-    // 组载荷：模式组带屏读到的当前档；权限组从「上次切换」记忆回放
-    // （无被动回读源——verified 切换写入 [`PERMISSION_TIER_MEMORY`]，无记录 = null）
+    // 组载荷：模式组带屏读到的当前档；权限组 = **kimi 底栏屏读优先**（2.1.1 起底栏
+    // 含权限标签——卡面权威源=屏读的同一架构），屏读不可用回落「上次切换」记忆
+    // （codex 无底栏回读源，维持记忆回放；屏读与记忆都无 = null）
+    let hit_session = hit.session.clone();
+    let hit_tool = hit.tool.clone();
     let groups: Vec<serde_json::Value> = hit
         .structure
         .groups()
@@ -6608,7 +6710,8 @@ pub async fn session_mode(
             let current = if g.id == crate::inject::mode::ModeGroupId::Mode {
                 hit.current
             } else {
-                recall_permission_tier(&st.store, &sid)
+                read_axis_from_screen(&st, &hit_session, &hit_tool, g.readback, g.id)
+                    .or_else(|| recall_permission_tier(&st.store, &sid))
             };
             serde_json::json!({
                 "id": g.id.wire(),
@@ -6730,9 +6833,10 @@ pub use crate::inject::timing::RECEIPT_POLL_TOTAL_MS;
 ///
 /// - **步进组**（claude/opencode）：注入 **shift+tab 单键**（一次切一档，目标档不
 ///   参与按键构造）；切完**回读**，与环序推算的应到档比对；
-/// - **直达文本**（codex 模式组 `/plan`；kimi 模式组 `/plan on|off`；kimi 权限组
-///   `/yolo`、`/auto`）：文本注入 + 回车提交；
-/// - **菜单两段式/三段式**（codex 权限组 `/permissions`；kimi 权限组「总是询问」）：
+/// - **直达文本**（codex 模式组 `/plan`；kimi 模式组 `/plan on|off`）：文本注入 + 回车
+///   提交；
+/// - **菜单两段式/三段式**（codex 权限组 `/permissions`；kimi 权限组三档全部——
+///   `/permission`、`/yolo`、`/auto` 各自开菜单并预选，屏读确认高亮后才回车）：
 ///   见下节；
 /// - **无机制**（含 codex「退出计划模式」、退役档）：409 `no_mechanism` + `reason`.
 ///
@@ -7599,16 +7703,21 @@ pub async fn session_mode_switch(
                         &injector,
                     )
                 } else {
-                    // kimi 等：第一段先开菜单（命令 + 回车），再进闭环编排
-                    let opened = injector
+                    // kimi（2026-10-06 探针会话 2.1.1 定案）：第一段 = **文本 + 提交
+                    // 回车①**——2.1.1 实测：键入斜杠文本只出现**行内自动补全**（完整
+                    // 权限菜单不出现），回车①执行命令后**完整菜单才打开并停留**
+                    // （❯ 预选目标档、← current 恒标当前档），回车②（闭环导航发出）
+                    // 确认生效。曾短暂改为「纯文本不回车」（5744e45）——探针证实纯
+                    // 文本态菜单永不出现、轮询必然扑空，已回退。菜单轮询窗 3s（见
+                    // timing::MENU_POLL_TOTAL_MS 的实测依据）。
+                    match injector
                         .locate_and_inject_spec(pid, open, &spec)
                         .and_then(|()| {
                             std::thread::sleep(std::time::Duration::from_millis(
                                 crate::inject::families::SUBMIT_DELAY_MS,
                             ));
                             injector.locate_and_send_key_spec(pid, "enter", &spec)
-                        });
-                    match opened {
+                        }) {
                         Ok(()) => menu_stages(
                             &tool_for_inject,
                             group_for_inject,
@@ -7705,6 +7814,7 @@ pub async fn session_mode_switch(
             let outcome = match tokio::task::spawn_blocking(move || {
                 crate::inject::mode::poll_mode_readback(
                     verify_tool.as_str(),
+                    group,
                     expected,
                     rounds,
                     || {
@@ -7940,6 +8050,18 @@ fn menu_stages(
                 crate::inject::families::SUBMIT_DELAY_MS,
             ))
         };
+        // 每步落定后的**硬性 ≥500ms**（2026-10-06 用户指令：kimi 每步间隔要长一点、
+        // 不要连续操作——对齐 codex 数字直达「轮询+硬控并存取最大」先例）：闭环导航
+        // 每键后 settle 再重读屏，多出的等待就是给 TUI 重绘的观察窗
+        let settle = || {
+            log::info!(
+                "kimi 权限菜单：步骤间硬性等待 {}ms",
+                crate::inject::timing::MODE_STEP_MIN_GAP_MS
+            );
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::timing::MODE_STEP_MIN_GAP_MS,
+            ));
+        };
         // **段编排在内核**（`mode::run_menu_stages`）——「第三段只对 codex×Full Access
         // 走」「确认框缺席不算失败」「回执核验」这些控制流是判据的一部分，写在
         // `#[cfg(windows)]` 里就只剩实机能覆盖。此处只提供**生产侧的能力**：
@@ -7957,7 +8079,7 @@ fn menu_stages(
                 }
                 r
             },
-            settle: key_delay,
+            settle,
         };
         let outcome = crate::inject::mode::run_menu_stages(
             tool,

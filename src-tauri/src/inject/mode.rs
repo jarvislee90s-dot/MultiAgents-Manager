@@ -66,7 +66,9 @@
 //!
 //! `命令 → 菜单 → 屏读定位 → 闭环导航 →（codex Full Access：二次确认框）→ 成功回执核验`：
 //!
-//! - **第一段**投递 `/permissions`（codex）或 `/permission`（kimi）打开菜单；
+//! - **第一段**投递开菜单命令：`/permissions`+回车（codex）、`/permission`/`/yolo`/
+//!   `/auto`+回车（kimi）——kimi 2.1.1 实测：键入文本只出**行内自动补全**，回车①
+//!   执行命令后完整菜单才打开并停留（❯ 预选目标档），回车②由闭环导航确认；
 //! - **第二段**屏读菜单定位目标档，**每发一个方向键就重新屏读复核**（高亮确实移到了
 //!   相邻项）——见 [`navigate_until_highlighted`]；**只有**高亮确实落在目标档行时才发
 //!   `enter`。依据 = 用户实机取证档案 §8 的方法论原文：「每按一次 ↓ 或者 ↑ 就重新
@@ -582,8 +584,13 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 id: ModeGroupId::Permission,
                 label: ModeGroupId::Permission.label(),
                 step: false,
-                // kimi 底栏**不含**权限档文本（实测：`plan  <模型> thinking: high  <cwd>`）
-                readback: false,
+                // **2.1.1 起有底栏回读源**（2026-10-06 活体实测：非 manual 档底栏
+                // 行首段为权限英文标签 `Always Ask`/`Ask When Needed`/`Never Ask`，
+                // manual 不渲染标签=缺席推断 Default——夹具
+                // kimi-211-bar-{manual,yolo,auto}-plan.txt 三态锁定）。旧实测
+                // 「底栏只有模式文本」在 2.0.x 成立、已过期。解析 =
+                // [`parse_kimi_permission_footer`]
+                readback: true,
                 layout: GroupLayout::Tiers,
                 tiers: &KIMI_PERMISSION_TIERS,
                 legacy: &[],
@@ -646,7 +653,8 @@ pub enum ModeSwitchKind {
 /// 会话工具 → 旧 `switchKind` 字段值（纯函数，可测）。
 ///
 /// **T4 起 kimi 归 `SlashCommand`**：§2.6 给 kimi 的模式组是 `/plan on|off`（带参
-/// 直达），不再是「盲切一档」；权限组是 `/permission` + `/yolo`/`/auto`。旧值
+/// 直达），不再是「盲切一档」；权限组三档都是两段式（命令只负责开菜单并预选：
+/// `/permission`、`/yolo`、`/auto`，屏读确认高亮后才回车）。旧值
 /// `ShiftTabCycle` 会让前端渲染「循环一步」钮（新结构下已由 `groups[].step` 驱动），
 /// 故此处与事实对齐——本字段现在是**旧客户端的降级路径**，不是机制的唯一来源。
 /// codex 保持 `SlashCommand`：其权限组仍是 `/permissions` 两段式（模式组 2026-09-23
@@ -742,16 +750,27 @@ pub fn mode_switch_plan(
         // kimi 模式组：`/plan on|off` 带参直达（TUI 内嵌实现：subcmd on/off/clear）
         ("kimi", ModeGroupId::Mode, MamMode::Plan) => Ok(ModeSwitchPlan::Text("/plan on")),
         ("kimi", ModeGroupId::Mode, MamMode::Default) => Ok(ModeSwitchPlan::Text("/plan off")),
-        // kimi 权限组：`/yolo`、`/auto` 预选直达变体（§2.6）；「总是询问」无直达命令
-        // → `/permission` 两段式
+        // kimi 权限组：三档**全部两段式**（2026-10-06 探针会话 2.1.1 定案）：命令
+        // 文本+回车①开菜单（❯ 预选目标档、`← current` 恒标当前档、菜单停留等确认）
+        // → 轮询等菜单画出 → **屏读确认高亮（❯/▶ 可 `strip_cursor_marker` 读）落在
+        // 目标档才发回车②**（预选直通 = 0 方向键）→ 回执核验（`Permission mode:
+        // <档>` 锚）→ verified 写档位记忆。三个命令的开菜单预选：`/permission`
+        // 预选当前档、`/yolo` 预选「按需询问」、`/auto` 预选「永不询问」（2.1.1
+        // 活体夹具 kimi-211-perm-menu-{yolo,auto}.txt）。历史备注：曾按「回车消费
+        // picker」误诊改为纯文本首段（5744e45），2.1.1 探针证实纯文本态只有行内
+        // 自动补全、菜单永不出现——已回退（本表即回退后形态）。
         ("kimi", ModeGroupId::Permission, MamMode::Default) => Ok(ModeSwitchPlan::Menu {
             open: "/permission",
             target: MamMode::Default,
         }),
-        ("kimi", ModeGroupId::Permission, MamMode::AcceptEdits) => {
-            Ok(ModeSwitchPlan::Text("/yolo"))
-        }
-        ("kimi", ModeGroupId::Permission, MamMode::Bypass) => Ok(ModeSwitchPlan::Text("/auto")),
+        ("kimi", ModeGroupId::Permission, MamMode::AcceptEdits) => Ok(ModeSwitchPlan::Menu {
+            open: "/yolo",
+            target: MamMode::AcceptEdits,
+        }),
+        ("kimi", ModeGroupId::Permission, MamMode::Bypass) => Ok(ModeSwitchPlan::Menu {
+            open: "/auto",
+            target: MamMode::Bypass,
+        }),
         ("kimi", ModeGroupId::Permission, _) => Err(SwitchRefusal::NoMechanism(
             "kimi 权限档无实测机制（实测三档：总是询问 / 按需询问 / 永不询问）",
         )),
@@ -952,21 +971,81 @@ fn parse_opencode_footer(lines: &[String]) -> Option<MamMode> {
     None
 }
 
-/// kimi 底栏（最后一条含 `thinking:` 的行；首词 `plan` → Plan，否则 Default）
-fn parse_kimi_footer(lines: &[String]) -> Option<MamMode> {
-    // 识别标记：底栏形如 `<[plan]  ><模型> thinking: <effort>  <工作目录>`。用
-    // `thinking:` 作锚——它是四份真机快照里共同的、与模式无关的稳定段；认不出锚
-    // 即返回 None（宁可「未知」，不把没读到的屏说成 Default）
-    let footer = lines
+/// kimi 底栏行（**最后一条含 `thinking:` 的行**——2.1.1 活体仍稳定携带；认不出锚
+/// 返回 None，宁可「未知」不猜）
+fn kimi_footer_line(lines: &[String]) -> Option<&String> {
+    lines
         .iter()
         .rev()
-        .find(|l| l.to_lowercase().contains("thinking:"))?;
-    let first = footer.split_whitespace().next()?;
-    if first.eq_ignore_ascii_case("plan") {
+        .find(|l| l.to_lowercase().contains("thinking:"))
+}
+
+/// kimi 底栏 → **模式轴**（分词含独立词 `plan` → Plan，否则 Default 缺席推断）。
+///
+/// **2026-10-06 重写（2.1.1 实测过期修复）**：旧判据「行首词 == plan」按 2.0.x 底栏
+/// 形态（`plan  <模型> thinking: …`，plan 恒首词）写死；2.1.1 起**非 manual 权限档
+/// 时底栏以权限英文标签开头**（`Never Ask  plan  DeepSeek … thinking: …`），首词
+/// 变成 `Never`/`Ask` → 旧判据恒误读 Default（用户实机「切计划报预期计划实际默认」
+/// 的根因）。新判据改为**整行分词找独立词 `plan`**——新旧两种版式通吃：
+/// - `plan  DeepSeek…`（manual / 2.0.x）→ Plan；
+/// - `Never Ask  plan  DeepSeek…`（2.1.1 × 非 manual × plan ON）→ Plan；
+/// - `Ask When Needed  DeepSeek…`（2.1.1 × 非 manual × plan OFF）→ Default；
+/// - `DeepSeek…`（manual × plan OFF）→ Default。
+fn parse_kimi_footer(lines: &[String]) -> Option<MamMode> {
+    let footer = kimi_footer_line(lines)?;
+    if footer.to_lowercase().split_whitespace().any(|w| w == "plan") {
         Some(MamMode::Plan)
     } else {
-        // 缺席推断（§2.6 表末）：底栏在、没写 plan → 默认档
+        // 缺席推断（§2.6 表末）：底栏在、没有独立词 plan → 默认档
         Some(MamMode::Default)
+    }
+}
+
+/// kimi 底栏 → **权限轴**（2.1.1 实测：非 manual 档时底栏行首段为权限英文标签，
+/// manual **不渲染标签** → 缺席推断 Default）。
+///
+/// 判据 = 底栏行**分词序列的前缀**恰为标签词（Title Case 转小写比对）：
+/// - `ask when needed …` → AcceptEdits（三词，必须先于 always/never 判——同为 ask 开头）；
+/// - `never ask …` → Bypass；
+/// - `always ask …` → Default；
+/// - 其余（`plan …` / `<模型>…`）→ Default（manual 缺席推断）。
+///
+/// 这让 kimi 权限组从「无回读源、verified 只能靠回执自证」升级为**底栏可回读**
+/// （`readback: true`）：切档回执与 GET 当前档都有一手屏读证据（2.1.1 活体夹具
+/// `kimi-211-bar-{manual,yolo,auto}-plan.txt` 三态锁定）。
+fn parse_kimi_permission_footer(lines: &[String]) -> Option<MamMode> {
+    let footer = kimi_footer_line(lines)?;
+    let lower = footer.to_lowercase();
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    let starts_with = |label: &[&str]| {
+        words.len() >= label.len() && words.iter().zip(label).all(|(w, l)| w == l)
+    };
+    if starts_with(&["ask", "when", "needed"]) {
+        Some(MamMode::AcceptEdits)
+    } else if starts_with(&["never", "ask"]) {
+        Some(MamMode::Bypass)
+    } else {
+        // always ask（Default）与 manual（无标签）在此汇合——两者同档
+        Some(MamMode::Default)
+    }
+}
+
+/// 屏读文本 → **指定组的当前档**（模式轴 / 权限轴分发的单一入口）。
+///
+/// - 模式轴：四家各自底栏（[`parse_mode_from_screen`]）；
+/// - 权限轴：**仅 kimi 有底栏回读源**（2.1.1 起）；codex 权限组底栏仍只有模式文本
+///   → None；其余工具无两轴结构 → None。
+pub fn parse_axis_from_screen(
+    tool: &str,
+    group: ModeGroupId,
+    lines: &[String],
+) -> Option<MamMode> {
+    match group {
+        ModeGroupId::Mode => parse_mode_from_screen(tool, lines),
+        ModeGroupId::Permission => match tool {
+            "kimi" => parse_kimi_permission_footer(lines),
+            _ => None,
+        },
     }
 }
 
@@ -1119,6 +1198,7 @@ pub struct ModeReadbackOutcome {
 /// 步长 × 拍数——**窗 = 步长 × 轮数**，D20(b) 的「有界」就体现在这两项上）。
 pub fn poll_mode_readback<Rd, Sl>(
     tool: &str,
+    group: ModeGroupId,
     expected: Option<MamMode>,
     rounds: u32,
     mut read: Rd,
@@ -1136,7 +1216,8 @@ where
         reads: 0,
     };
     for i in 0..effective {
-        let observed = read().and_then(|lines| parse_mode_from_screen(tool, &lines));
+        let observed =
+            read().and_then(|lines| parse_axis_from_screen(tool, group, &lines));
         let verdict = verify_mode_switch(expected, observed);
         last = ModeReadbackOutcome {
             verdict,
@@ -2890,7 +2971,8 @@ mod tests {
         ));
     }
 
-    /// kimi：模式组 `/plan on|off` 直达；权限组 `/permission` 两段式 + `/yolo`、`/auto` 直达变体
+    /// kimi：模式组 `/plan on|off` 直达；权限组三档全部两段式（2026-10-06：命令只开
+    /// 菜单并预选，屏读确认高亮后才回车——`/permission`/`/yolo`/`/auto` 各自开菜单）
     #[test]
     fn kimi_switch_mechanisms() {
         assert_eq!(
@@ -2907,17 +2989,23 @@ mod tests {
                 open: "/permission",
                 target: MamMode::Default
             },
-            "「总是询问」无直达命令 → 两段式"
+            "「总是询问」→ /permission 开菜单"
         );
         assert_eq!(
             mode_switch_plan("kimi", ModeGroupId::Permission, MamMode::AcceptEdits).unwrap(),
-            ModeSwitchPlan::Text("/yolo"),
-            "「按需询问」= yolo 的预选直达变体（§2.6）"
+            ModeSwitchPlan::Menu {
+                open: "/yolo",
+                target: MamMode::AcceptEdits
+            },
+            "「按需询问」→ /yolo 开菜单并预选（不再盲发确认回车）"
         );
         assert_eq!(
             mode_switch_plan("kimi", ModeGroupId::Permission, MamMode::Bypass).unwrap(),
-            ModeSwitchPlan::Text("/auto"),
-            "「永不询问」= auto 的预选直达变体（§2.6）"
+            ModeSwitchPlan::Menu {
+                open: "/auto",
+                target: MamMode::Bypass
+            },
+            "「永不询问」→ /auto 开菜单并预选（不再盲发确认回车）"
         );
     }
 
@@ -3093,15 +3181,15 @@ mod tests {
             ),
             Some(MamMode::Plan)
         );
-        // codex 权限组：直达但**无回读源** → None（端点如实说「请人工核对」）
+        // codex 权限组：直达但**无回读源**（底栏只有模式文本）→ None
         assert_eq!(
             expected_mode_after("codex", ModeGroupId::Permission, MamMode::Bypass, None),
             None
         );
-        // kimi 权限组同样无回读源
+        // kimi 权限组 **2.1.1 起有回读源**（底栏权限标签）→ Some（旧值 None 已过期）
         assert_eq!(
             expected_mode_after("kimi", ModeGroupId::Permission, MamMode::Bypass, None),
-            None
+            Some(MamMode::Bypass)
         );
         // kimi 模式组有回读源
         assert_eq!(
@@ -3157,11 +3245,24 @@ mod tests {
         rounds: u32,
         screens: &[Option<&[String]>],
     ) -> (ModeReadbackOutcome, u32, u32) {
+        run_readback_script_group(tool, ModeGroupId::Mode, expected, rounds, screens)
+    }
+
+    /// 按组版驱动器（模式轴测试走 [`run_readback_script`] 便捷包装；权限轴回读测试
+    /// 直接用本函数——kimi 权限组 2.1.1 起有底栏回读源）
+    fn run_readback_script_group(
+        tool: &str,
+        group: ModeGroupId,
+        expected: Option<MamMode>,
+        rounds: u32,
+        screens: &[Option<&[String]>],
+    ) -> (ModeReadbackOutcome, u32, u32) {
         use std::cell::Cell;
         let reads = Cell::new(0u32);
         let settles = Cell::new(0u32);
         let out = poll_mode_readback(
             tool,
+            group,
             expected,
             rounds,
             || {
@@ -3553,6 +3654,73 @@ mod tests {
         // 未实测工具恒 None（旧实现会对任意工具跑词表）
         assert_eq!(parse_mode_from_screen("zcode", &claude_plan_screen), None);
         assert_eq!(parse_mode_from_screen("", &codex_screen), None);
+    }
+
+    /// **kimi 2.1.1 底栏双轴解析**（2026-10-06 活体夹具）：底栏以权限英文标签开头
+    /// （非 manual 档），`plan` 不再是首词——旧「首词==plan」判据在此恒误读 Default
+    /// （用户实机「切计划报预期计划实际默认」的根因）。模式轴 = 分词找独立词 plan；
+    /// 权限轴 = 行首标签前缀（manual 不渲染标签 → Default 缺席推断）。
+    #[test]
+    fn kimi_211_bar_dual_axis_parsing() {
+        let manual = e_stage2_screen("kimi-211-bar-manual-plan.txt");
+        let yolo = e_stage2_screen("kimi-211-bar-yolo-plan.txt");
+        let auto = e_stage2_screen("kimi-211-bar-auto-plan.txt");
+        // 模式轴：三态底栏都含独立词 plan → 全 Plan（旧判据对 yolo/auto 态会误读 Default）
+        for (name, screen) in [("manual", &manual), ("yolo", &yolo), ("auto", &auto)] {
+            assert_eq!(
+                parse_mode_from_screen("kimi", screen),
+                Some(MamMode::Plan),
+                "{name} × plan ON → 模式轴 Plan"
+            );
+        }
+        // 权限轴：manual 缺席推断 Default；yolo → AcceptEdits；auto → Bypass
+        assert_eq!(
+            parse_axis_from_screen("kimi", ModeGroupId::Permission, &manual),
+            Some(MamMode::Default),
+            "manual 不渲染权限标签 → Default"
+        );
+        assert_eq!(
+            parse_axis_from_screen("kimi", ModeGroupId::Permission, &yolo),
+            Some(MamMode::AcceptEdits)
+        );
+        assert_eq!(
+            parse_axis_from_screen("kimi", ModeGroupId::Permission, &auto),
+            Some(MamMode::Bypass)
+        );
+        // 模式轴在无 plan 词的新版式下 → Default（2.1.1 × yolo × plan OFF 由分词判）
+        let plan_off = lines(&["Ask When Needed  DeepSeek V4.1 Flash thinking: high  C:\\p"]);
+        assert_eq!(parse_mode_from_screen("kimi", &plan_off), Some(MamMode::Default));
+        // codex 无权限轴回读源（其底栏仍只有模式文本）→ None
+        assert_eq!(
+            parse_axis_from_screen("codex", ModeGroupId::Permission, &yolo),
+            None
+        );
+        // 无 thinking: 锚 → 两轴都 None（宁可未知不猜）
+        let bare = lines(&["Ask When Needed DeepSeek V4.1 Flash"]);
+        assert_eq!(parse_mode_from_screen("kimi", &bare), None);
+        assert_eq!(
+            parse_axis_from_screen("kimi", ModeGroupId::Permission, &bare),
+            None
+        );
+    }
+
+    /// **kimi 权限组底栏回读轮询**（readback:true 放开后的主回归锁）：切到 Never Ask，
+    /// 第一拍屏上还是旧档（Ask When Needed）、第二拍底栏刷出 `Never Ask` → Confirmed
+    /// （旧版无回读源时此场景恒 Unverifiable、档位记忆永不写入）。
+    #[test]
+    fn kimi_211_permission_readback_poll_confirms() {
+        let stale = e_stage2_screen("kimi-211-bar-yolo-plan.txt");
+        let fresh = e_stage2_screen("kimi-211-bar-auto-plan.txt");
+        let (out, reads, _) = run_readback_script_group(
+            "kimi",
+            ModeGroupId::Permission,
+            Some(MamMode::Bypass),
+            15,
+            &[Some(stale.as_slice()), Some(fresh.as_slice())],
+        );
+        assert_eq!(out.verdict, ModeVerify::Confirmed, "第二拍命中");
+        assert_eq!(out.observed, Some(MamMode::Bypass));
+        assert_eq!(reads, 2, "第一拍旧档继续轮询、第二拍命中即停");
     }
 
     // ==== 丁T4 收尾：权限菜单真机夹具（**逐字抄自用户实机取证档案**）====
@@ -5909,6 +6077,48 @@ mod tests {
         }
     }
 
+    /// **kimi 只读屏读探针（#[ignore]）**：dump 指定 pid 的整屏原文，并跑一遍
+    /// kimi 权限菜单定位器，输出「屏上有什么 / 现有判据认不认」——屏读故障诊断与
+    /// 版本复验的活体取证入口（四闸门 Gate-1：判据结论前必有活体 dump）。
+    ///
+    /// 跑法：`MAM_PROBE_PID=<pid> cargo test --lib kimi_screen_live_dump -- --ignored --nocapture`
+    ///
+    /// **只读零注入**（不碰 CONIN$、不 Flush、不发键）；输出进探针控制台，
+    /// 不落测试夹具（红线：用户会话屏面不进夹具）。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "只读活体 dump（MAM_PROBE_PID=<pid>）"]
+    fn kimi_screen_live_dump() {
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（只读探针不猜 pid）");
+            return;
+        };
+        let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) else {
+            eprintln!("pid={pid} 屏读失败（无控制台/权限不足）");
+            return;
+        };
+        eprintln!("==== pid={pid} 整屏 {} 行 ====", lines.len());
+        for (i, l) in lines.iter().enumerate() {
+            eprintln!("FIXTURE|{i:02}|{l}");
+        }
+        let items = locate_menu_items(&lines, menu_labels("kimi"));
+        match items {
+            Some(opts) => {
+                eprintln!("==== kimi 权限菜单定位器：命中 {} 项 ====", opts.len());
+                for o in &opts {
+                    eprintln!(
+                        "  编号 {} | 高亮={} | {:?}",
+                        o.number, o.highlighted, o.label
+                    );
+                }
+            }
+            None => eprintln!("==== kimi 权限菜单定位器：未命中（标题/footer 锚或行形不匹配）===="),
+        }
+    }
+
     /// **数字直达的输入行残留现场（真机夹具）**：用户走查截图里堆积的
     /// `/permissions/permissions` 与 `Plan mode` 底栏——同屏条件下 footer 解析
     /// 仍判 Plan（残留不干扰回读）、菜单判据不受历史回显影响。
@@ -6018,6 +6228,45 @@ mod tests {
             }
         }
         screen
+    }
+
+    /// **kimi 预选直通**（2026-10-06 权限组全两段式的关键收益）：`/yolo`/`/auto` 开菜单
+    /// 后高亮（❯/▶）已在目标档（戊探D 夹具锁 `e3_kimi_yolo_auto_fixtures_highlight_preselect`）
+    /// → 闭环 **0 方向键**直接回车，随后回执核验命中（`Permission mode: <档>` 锚）。
+    #[test]
+    fn stage_flow_kimi_preselected_goes_straight_to_enter() {
+        // /yolo：预选第 2 档（Ask When Needed）
+        let (r, sent, _) = run_stage_script(
+            vec![
+                kimi_menu_highlight(2),
+                lines(&["Permission mode: Ask When Needed"]),
+            ],
+            "kimi",
+            ModeGroupId::Permission,
+            MamMode::AcceptEdits,
+        );
+        let out = r.expect("预选直通（yolo）");
+        assert_eq!(
+            out.menu_keys,
+            vec!["enter"],
+            "高亮已在目标档 → 不发任何方向键，唯一动作是回车"
+        );
+        assert_eq!(sent, vec!["enter"]);
+        assert_eq!(out.receipt_seen, Some(true), "回执核验接上（锚+档标签）");
+        // /auto：预选第 3 档（Never Ask）
+        let (r, sent, _) = run_stage_script(
+            vec![
+                kimi_menu_highlight(3),
+                lines(&["Permission mode: Never Ask"]),
+            ],
+            "kimi",
+            ModeGroupId::Permission,
+            MamMode::Bypass,
+        );
+        let out = r.expect("预选直通（auto）");
+        assert_eq!(out.menu_keys, vec!["enter"]);
+        assert_eq!(sent, vec!["enter"]);
+        assert_eq!(out.receipt_seen, Some(true));
     }
 
     /// **菜单不出现（窗尽 `Ok(None)`）→ 整条编排 Err**（第二段是「必须出现」的门，

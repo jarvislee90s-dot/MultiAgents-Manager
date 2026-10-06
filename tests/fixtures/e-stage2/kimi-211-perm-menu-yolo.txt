@@ -1,0 +1,14 @@
+# kimi 2.1.1 权限菜单 · /yolo+enter① 打开（预选 ❯ Ask When Needed、← current 恒标 Always Ask）· 活体 dump 2026-10-06 探针会话
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Select permission mode
+ ↑↓ navigate · Enter select · Esc cancel
+
+    Always Ask ← current
+    Auto-read only; everything else needs your approval first.
+  ❯ Ask When Needed
+    Routine edits and commands run automatically; risky actions, questions, and plans still ask.
+    Never Ask
+    Never interrupts you; everything runs and is decided automatically.
+
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+plan  DeepSeek V4.1 Flash thinking: high  C:\Users\bunny\AppData\Local\Temp\probe-kimi-211               ctrl+o expand

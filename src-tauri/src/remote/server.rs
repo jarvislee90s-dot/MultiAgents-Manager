@@ -13370,18 +13370,20 @@ mod tests {
         );
     }
 
-    /// **无判据可读 → 不轮询**（D20(a)：判据不存在就没有轮询可做）：kimi 权限组的
-    /// `spec.readback == false`（实测底栏不含权限档文本）→ `expected_mode_after` 给
-    /// `None` → 内核只读一拍（`mode::poll_mode_readback` 的「短路径 ②」）。
+    /// **kimi 权限组全两段式**（2026-10-06 探针会话 2.1.1 定案）：`/auto`（Bypass，
+    /// `/yolo` 同理）的第一段 = **文本 + 提交回车①**——2.1.1 实测：键入文本只出行内
+    /// 自动补全，回车①执行命令后完整菜单才打开并停留；确认回车②由闭环导航发（屏读
+    /// 确认高亮才发）。历史备注：曾误诊「回车消费 picker」改为纯文本首段（5744e45），
+    /// 探针证实纯文本态菜单永不出现——已回退，本测试钉回退后的正确形态。
     ///
-    /// 读数断言 = **2**：① 注入前的 `before` 快照 1 次（D20(c) 的瞬时快照，kimi 整体
-    /// 支持回读故这一次会读）+ ② 回读一拍。若是 16（= 1 + 15 拍睡满窗）说明有人把
-    /// 短路径拆了——那正是 D20(a) 禁止的「固定睡眠」。
+    /// 假体环境屏读不可用（菜单轮询的真 conhost 读失败）→ 恰好钉住**不盲发红线**：
+    /// 注入动作 = `/auto` 文本 + 命令提交回车①，**到此为止**——无导航键、无第二次
+    /// 确认回车；回执 `status=failed` 且说明「命令已发送」请人工核对。屏读探针读数
+    /// = **1**（before 快照；投递未成功 → 回读段不启动）。
     ///
-    /// 还原动作：把内核的 `if expected.is_some() { rounds.max(1) } else { 1 }` 改回
-    /// `rounds.max(1)` → 本测试先红（读数 16）。
+    /// 还原动作：把 kimi 第一段改回纯文本（不带回车）→ 本测试先红（keys 变空）。
     #[tokio::test]
-    async fn session_mode_switch_does_not_spin_when_group_has_no_readback_source() {
+    async fn session_mode_switch_kimi_permission_bypass_is_menu_two_stage_not_blind_confirm() {
         let fake = FakeInjector::ok();
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reads_for_probe = reads.clone();
@@ -13414,21 +13416,34 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
         assert_eq!(
-            fake.recorded(), // `/auto` 是 kimi 权限组 Bypass 的直达命令
+            fake.recorded(), // `/auto` 现在是 kimi 权限组 Bypass 的**开菜单命令**（全两段式）
             vec![(97u32, "/auto".to_string())],
-            "kimi 权限组 Bypass = /auto 直达：{v}"
+            "kimi 权限组 Bypass = /auto 开菜单并预选：{v}"
+        );
+        // 屏读不可用 → 菜单轮询如实失败：除命令提交回车①外**零按键**（无导航键、
+        // 无第二次确认回车——「不盲发」红线在端点级钉住）
+        let keys: Vec<String> = fake
+            .recorded_key_specs()
+            .into_iter()
+            .map(|(_, k, _)| k)
+            .collect();
+        assert_eq!(keys, vec!["enter".to_string()], "只有命令提交回车①：{v}");
+        assert_eq!(
+            v["status"].as_str(),
+            Some("failed"),
+            "菜单无法定位 = 如实失败（不假装成功）：{v}"
+        );
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("命令已发送"),
+            "失败回执说明命令已投递、请人工核对终端：{v}"
         );
         assert_eq!(
             reads.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "① before 快照 1 次 + ② 无判据时只读一拍（不是 15 拍睡满窗）：{v}"
-        );
-        assert!(
-            v["hint"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("无法自动确认"),
-            "无回读源 → 回执如实说「无法自动确认」（不假装）：{v}"
+            1,
+            "before 快照 1 次；投递未成功 → 回读段不启动（旧 Text 路径的 2 次不再适用）：{v}"
         );
     }
 
