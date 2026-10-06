@@ -17,24 +17,23 @@ import { TitleBar } from "@/components/common/title-bar";
 import { WindowFrame } from "@/components/common/window-frame";
 import { LanguageToggle } from "@/components/common/language-toggle";
 import { ShortcutInput } from "@/components/common/shortcut-input";
+// 一级导航只有 6 个块，故**只保留 6 个块图标**（Palette / Bell / Wrench / BarChart3 /
+// Smartphone / Database）+ 页内仍在用的功能图标。原先 12 个分区图标里
+// `Keyboard` / `Dog` / `HeartPulse` / `RadioTower` / `ScrollText` / `Activity` 已成未使用导入
+// （`noUnusedLocals` 会当场报错）——分区不再各自出现在侧栏，就没有「分区图标」这个概念了。
 import {
   Moon,
   Sun,
   Monitor,
   Palette,
-  Keyboard,
   Bell,
   Volume2,
   Database,
-  Dog,
   Wrench,
-  HeartPulse,
   RefreshCw,
-  RadioTower,
   Smartphone,
-  ScrollText,
-  Activity,
   BarChart3,
+  type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -150,6 +149,10 @@ function HealthSummary() {
 
 type SettingSection =
   | "appearance"
+  // 2026-10-06 两级导航：远程端外观（皮肤）从 `appearance` 里拆出来独立成卡——
+  // 它本来就是一个完整的折叠配置器（字体/皮肤/圆角/品牌色 + 预览），与「本机外观（主题+语言）」
+  // 不是一件事。块 = 「外观与皮肤」，块内两张卡。
+  | "skin"
   | "shortcut"
   | "notifications"
   | "pet"
@@ -171,11 +174,85 @@ type ToolRow = {
   managed: boolean;
 };
 
+/**
+ * 一级导航 = **功能大块**（2026-10-06 用户裁决「按大的功能区块做一个切换，点进大块再分小卡片」）。
+ * 每个分区（`SettingSection`）**恰好挂在一个块里**——有测试遍历它来防「重构漏挂一节 ⇒ 该分区
+ * 在界面上永远看不见」。
+ *
+ * 分块依据（修的是三条具体缺陷）：
+ *  * **同族不再被拆到两端**：`usage`（用量设置）与 `usageStatus`（采集状态/导出）原先隔了 7 项，
+ *    现在同属「用量统计」块；`remote`/`signal`/`audit` 同属「远程接入」块。
+ *  * **只读查看面与手动设置项分开**：审计/体检/信号/数据这些「平时就看一看」的面各自归到
+ *    语义相邻的块里，不再与开关项平铺混列。
+ *  * **皮肤有自己的位置**：远程端外观整节原本塞在「外观」里，现在与「本机外观」并列为两张卡。
+ */
+type SettingBlock = "appearance" | "desktop" | "tools" | "usage" | "remote" | "data";
+
+const SETTINGS_BLOCKS: {
+  id: SettingBlock;
+  labelKey: string;
+  descKey: string;
+  icon: LucideIcon;
+  sections: SettingSection[];
+}[] = [
+  {
+    id: "appearance",
+    labelKey: "settings.nav.appearance",
+    descKey: "settings.nav.appearanceDesc",
+    icon: Palette,
+    sections: ["appearance", "skin"],
+  },
+  {
+    id: "desktop",
+    labelKey: "settings.nav.desktop",
+    descKey: "settings.nav.desktopDesc",
+    icon: Bell,
+    sections: ["shortcut", "notifications", "pet"],
+  },
+  {
+    id: "tools",
+    labelKey: "settings.nav.tools",
+    descKey: "settings.nav.toolsDesc",
+    icon: Wrench,
+    sections: ["tools", "health"],
+  },
+  {
+    id: "usage",
+    labelKey: "settings.nav.usage",
+    descKey: "settings.nav.usageDesc",
+    icon: BarChart3,
+    sections: ["usage", "usageStatus"],
+  },
+  {
+    id: "remote",
+    labelKey: "settings.nav.remote",
+    descKey: "settings.nav.remoteDesc",
+    icon: Smartphone,
+    sections: ["remote", "signal", "audit"],
+  },
+  {
+    id: "data",
+    labelKey: "settings.nav.data",
+    descKey: "settings.nav.dataDesc",
+    icon: Database,
+    sections: ["data"],
+  },
+];
+
 export default function SettingsPage() {
   const [shortcut, setShortcut] = useState<string>("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [soundConfig, setSoundConfig] = useState<SoundConfig>(() => getSoundConfig());
-  const [activeSection, setActiveSection] = useState<SettingSection>("appearance");
+  // 一级导航状态 = 当前**块**。块内所有卡片同时渲染（用户裁决的形态），故不再有
+  // 「当前分区」这一层状态 —— 删掉 `activeSection` 是刻意的：留着一个不参与渲染的旧状态，
+  // 会造出「工具卡已脏但守卫不触发」的空档（见 `switchBlock`）。
+  const [activeBlock, setActiveBlock] = useState<SettingBlock>("appearance");
+  /** 当前块要渲染的 12 个分区集合（JSX 里 12 处守卫都读它） */
+  /** 当前块的元数据（侧栏与块标题共用同一张表；`??` 只为类型收窄，`activeBlock` 恒在表内） */
+  const activeBlockMeta = SETTINGS_BLOCKS.find((b) => b.id === activeBlock) ?? SETTINGS_BLOCKS[0];
+  const visibleIds = new Set(
+    (SETTINGS_BLOCKS.find((b) => b.id === activeBlock) ?? SETTINGS_BLOCKS[0]).sections
+  );
   // 桌宠状态：复用 petConfig（localStorage 单后端），跨窗口改动经 subscribeConfig 回流
   const [petVisible, setPetVisible] = useState(() => loadVisible());
   const [petCfg, setPetCfg] = useState(() => loadConfig());
@@ -261,8 +338,9 @@ export default function SettingsPage() {
 
   // 进入工具分区时拉取勾选状态
   useEffect(() => {
-    if (activeSection === "tools") void loadToolSettings();
-  }, [activeSection, loadToolSettings]);
+    if (visibleIds.has("tools")) void loadToolSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBlock, loadToolSettings]);
 
   // 脏标记时拦截窗口关闭（P2-2）：Tauri 2 onCloseRequested → preventDefault 后走既有
   // 三选弹窗（保存 / 放弃更改 / 继续编辑）。浏览器/jsdom 下 getCurrentWindow 未实现
@@ -320,17 +398,19 @@ export default function SettingsPage() {
     (r) => r.enabled !== (savedToolEnabled[r.toolId] ?? r.enabled)
   );
 
-  // 分区切换守卫：工具分区有未保存更改时先弹三选拦截
-  const switchSection = (next: SettingSection) => {
-    if (next === activeSection) return;
-    if (activeSection === "tools" && toolDirty) {
+  // 块切换守卫：工具卡有未保存更改时先弹三选拦截。
+  // `visibleIds.has("tools")` = 「当前这一块里正显示着工具卡」——块内多卡并置后这比原来的
+  // `activeSection === "tools"` 更准（工具卡可见 ⇒ 脏标记必须拦）。
+  const switchBlock = (next: SettingBlock) => {
+    if (next === activeBlock) return;
+    if (visibleIds.has("tools") && toolDirty) {
       setLeaveGuard(() => () => {
         setToolDirty(false);
-        setActiveSection(next);
+        setActiveBlock(next);
       });
       return;
     }
-    setActiveSection(next);
+    setActiveBlock(next);
   };
 
   // 批量应用变更；成功后复位草稿、失效缓存并执行缓存跳转。
@@ -437,73 +517,6 @@ export default function SettingsPage() {
     }
   };
 
-  const menuItems = [
-    {
-      id: "appearance" as SettingSection,
-      label: t("settings.appearance.title"),
-      icon: Palette,
-    },
-    {
-      id: "shortcut" as SettingSection,
-      label: t("settings.shortcut.title"),
-      icon: Keyboard,
-    },
-    {
-      id: "notifications" as SettingSection,
-      label: t("settings.notifications.title"),
-      icon: Bell,
-    },
-    {
-      id: "pet" as SettingSection,
-      label: t("settings.pet.title"),
-      icon: Dog,
-    },
-    {
-      // 计划② Task 14：用量设置分组（id "usage" + UsageSection + BarChart3；8 项设置，
-      // 不含「采集状态 / 立即采集」——那是下面 usageStatus 的验收面，见契约 §5「设置页的分工」）
-      id: "usage" as SettingSection,
-      label: t("settings.usage.title"),
-      icon: BarChart3,
-    },
-    {
-      id: "tools" as SettingSection,
-      label: t("settings.tools.title"),
-      icon: Wrench,
-    },
-    {
-      id: "health" as SettingSection,
-      label: t("resources.health.title"),
-      icon: HeartPulse,
-    },
-    {
-      id: "signal" as SettingSection,
-      label: t("settings.signalHealth.title"),
-      icon: RadioTower,
-    },
-    {
-      id: "remote" as SettingSection,
-      label: t("settings.remote.title"),
-      icon: Smartphone,
-    },
-    {
-      id: "audit" as SettingSection,
-      label: t("settings.audit.title"),
-      icon: ScrollText,
-    },
-    {
-      id: "data" as SettingSection,
-      label: t("settings.dataManagement.title"),
-      icon: Database,
-    },
-    {
-      // 计划① Task 24：最小可见验收面（② 的正式用量设置分组用 id "usage" + 组件 UsageSection
-      // + 图标 BarChart3，勿与本节撞名——见契约 §5「设置页的分工」）
-      id: "usageStatus" as SettingSection,
-      label: t("settings.usageStatus.title"),
-      icon: Activity,
-    },
-  ];
-
   return (
     <WindowFrame
       titleBar={<TitleBar title={t("settings.title")} showMaximize={false} />}
@@ -512,21 +525,22 @@ export default function SettingsPage() {
       <Toaster />
       <aside className="border-border flex w-40 flex-col border-r p-4">
         <nav className="flex-1 space-y-1">
-          {menuItems.map((item) => {
-            const Icon = item.icon;
+          {SETTINGS_BLOCKS.map((block) => {
+            const Icon = block.icon;
             return (
               <button
-                key={item.id}
-                onClick={() => switchSection(item.id)}
+                key={block.id}
+                data-testid={`settings-nav-${block.id}`}
+                onClick={() => switchBlock(block.id)}
                 className={cn(
                   "flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors",
-                  activeSection === item.id
+                  activeBlock === block.id
                     ? "bg-accent text-accent-foreground font-medium"
                     : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                 )}
               >
                 <Icon className="h-4 w-4" />
-                {item.label}
+                {t(block.labelKey)}
               </button>
             );
           })}
@@ -534,8 +548,13 @@ export default function SettingsPage() {
       </aside>
 
       <div className="flex-1 overflow-auto">
-        <div className="max-w-3xl p-4">
-          {activeSection === "appearance" && (
+        <div className="max-w-3xl space-y-4 p-4">
+          {/* 一级导航选中的那一块的标题 + 一句话说明（块内各节自带 h2，故这里是 h2 之上的块头） */}
+          <div>
+            <h2 className="mb-1 text-lg font-semibold">{t(activeBlockMeta.labelKey)}</h2>
+            <p className="text-muted-foreground text-sm">{t(activeBlockMeta.descKey)}</p>
+          </div>
+          {visibleIds.has("appearance") && (
             <div className="space-y-4">
               <div>
                 <h2 className="mb-1 text-lg font-semibold">{t("settings.appearance.title")}</h2>
@@ -603,13 +622,17 @@ export default function SettingsPage() {
                   </div>
                 </div>
               </div>
-
-              {/* 框二 · 远程端外观（保存后下发；折叠配置器，spec §5） */}
-              <RemoteAppearanceSection />
             </div>
           )}
 
-          {activeSection === "shortcut" && (
+          {/* 远程端外观（皮肤）：**独立成卡**（2026-10-06 两级导航）。原先它是「外观」框二，
+              与「本机外观（主题 + 语言）」挤在同一个分区里；它本身就是一个完整的折叠配置器
+              （字体气质 / 皮肤底色 / 卡片圆角 / 品牌色 + 双列预览），拆开才与「外观与皮肤」这个
+              块名对得上，也才让「皮肤相关」在导航里有一处可指的位置。
+              它自带卡壳与折叠头，故这里**不再套一层卡**（套了就成卡中卡）。 */}
+          {visibleIds.has("skin") && <RemoteAppearanceSection />}
+
+          {visibleIds.has("shortcut") && (
             <div className="space-y-4">
               <div>
                 <h2 className="mb-1 text-lg font-semibold">{t("settings.shortcut.title")}</h2>
@@ -632,7 +655,7 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {activeSection === "notifications" && (
+          {visibleIds.has("notifications") && (
             <div className="space-y-4">
               <div>
                 <h2 className="mb-1 text-lg font-semibold">
@@ -786,7 +809,7 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {activeSection === "pet" && (
+          {visibleIds.has("pet") && (
             <div className="space-y-4">
               <div>
                 <h2 className="mb-1 text-lg font-semibold">{t("settings.pet.title")}</h2>
@@ -858,7 +881,7 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {activeSection === "tools" && (
+          {visibleIds.has("tools") && (
             <div className="space-y-4">
               <div>
                 <h2 className="mb-1 text-lg font-semibold">{t("settings.tools.title")}</h2>
@@ -896,7 +919,7 @@ export default function SettingsPage() {
           )}
 
           {/* 一致性体检（spec §13）：同 query 数据只读摘要 + 立即体检（处置入口在资源页卡片） */}
-          {activeSection === "health" && (
+          {visibleIds.has("health") && (
             <div className="space-y-4">
               <div>
                 <h2 className="mb-1 text-lg font-semibold">{t("resources.health.title")}</h2>
@@ -904,17 +927,17 @@ export default function SettingsPage() {
               <HealthSummary />
             </div>
           )}
-          {activeSection === "remote" && <RemoteSection />}
+          {visibleIds.has("remote") && <RemoteSection />}
           {/* T5：信号健康度（hook 通道自查 + codex 信任门引导，与 RemoteSection 同级独立分区） */}
-          {activeSection === "signal" && <SignalHealthSection />}
+          {visibleIds.has("signal") && <SignalHealthSection />}
           {/* M7 W5：注入审计桌面查看入口（与 RemoteSection 同级独立分区） */}
-          {activeSection === "audit" && <AuditLogSection />}
+          {visibleIds.has("audit") && <AuditLogSection />}
           {/* 2026-09-20：数据管理首版（移动端附件占用列出/清理，C5） */}
-          {activeSection === "data" && <DataManagementSection />}
+          {visibleIds.has("data") && <DataManagementSection />}
           {/* 计划② Task 14：用量统计设置分组（8 项设置；① 的采集验收面在下面的 usageStatus 分支） */}
-          {activeSection === "usage" && <UsageSection />}
+          {visibleIds.has("usage") && <UsageSection />}
           {/* 计划① Task 24：用量采集状态（最小可见验收面；② 上线后可保留为调试入口或删除） */}
-          {activeSection === "usageStatus" && <UsageStatusSection />}
+          {visibleIds.has("usageStatus") && <UsageStatusSection />}
         </div>
       </div>
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />

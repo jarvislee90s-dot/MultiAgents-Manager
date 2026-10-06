@@ -69,6 +69,20 @@
     "title": "Settings",
     "button": "Settings",
     "close": "Close",
+    "nav": {
+      "appearance": "Appearance & skin",
+      "appearanceDesc": "Local theme and language, plus fonts, skins, corners and accent for the remote board / web",
+      "desktop": "Desktop & alerts",
+      "desktopDesc": "Global shortcut, desktop notifications and sounds, and the Foxbell pet itself",
+      "tools": "Tools & health",
+      "toolsDesc": "Enable or disable each CLI tool, and run the skill / link health check",
+      "usage": "Usage",
+      "usageDesc": "Collection and mini-bar settings, plus collection status, today's numbers and export",
+      "remote": "Remote access",
+      "remoteDesc": "Remote service and channels, access and security, paired devices, signal health and injection audit",
+      "data": "Data",
+      "dataDesc": "Mobile attachment footprint and cleanup"
+    },
     "appearance": {
       "title": "Appearance",
       "description": "Customize the appearance and language of the app",
@@ -623,15 +637,6 @@
     "toDisableCount": "To disable ({{n}})",
     "residentExemptCount": "Resident-exempt ({{n}})",
     "saveAsPreset": "Save as Preset"
-  },
-  "screenshot": {
-    "saved": "Screenshot saved: {{path}}",
-    "failed": "Screenshot failed: {{error}}",
-    "title": "Screenshot Tool",
-    "capturing": "Capturing...",
-    "capture": "Capture",
-    "refreshList": "Refresh list",
-    "recent": "Recent screenshots"
   },
   "manifest": {
     "installConfirm": "Confirm installation",

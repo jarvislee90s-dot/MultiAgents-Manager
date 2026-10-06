@@ -553,15 +553,19 @@ describe("UsageStatusSection 导出与打开所在目录（Task 24）", () => {
 describe("UsageStatusSection 设置页接线（Task 24）", () => {
   const src = readFileSync(path.join(process.cwd(), "src/pages/settings.tsx"), "utf8");
 
-  it("四处接线齐备（联合类型 / import / 菜单项 / 渲染分支）", () => {
+  it("四处接线齐备（联合类型 / import / 块表 / 渲染守卫）", () => {
     expect(src).toContain('| "usageStatus";');
     expect(src).toContain(
       'import { UsageStatusSection } from "@/components/settings/UsageStatusSection";'
     );
-    expect(src).toContain('id: "usageStatus" as SettingSection');
-    expect(src).toMatch(/activeSection === "usageStatus" && <UsageStatusSection \/>/);
-    // 本分区自己的图标是 Activity（名字在 lucide 具名导入里）
-    expect(src).toMatch(/^\s+Activity,$/m);
+    // ⚠️ **2026-10-06 两级导航重构**：侧栏不再有「每个分区一个菜单项」这一层，`menuItems` 被
+    // `SETTINGS_BLOCKS`（6 大块，每块带 `sections` 列表）取代 ⇒ 原先锁的两条**已随结构消失**，
+    // 不是接线被删：`id: "usageStatus" as SettingSection`（分区不再有菜单项）与
+    // `/^\s+Activity,$/m`（分区不再各自有图标，导航只有 6 个块图标）。
+    // 取而代之锁**同一件事的两个新形态**：它必须挂在某个块的 `sections` 里（漏挂 ⇒ 该分区在
+    // 界面上**永远看不见**，这是重构最真实的回归面），且渲染守卫必须在位。
+    expect(src).toMatch(/sections: \["usage", "usageStatus"\]/);
+    expect(src).toMatch(/\{visibleIds\.has\("usageStatus"\) && <UsageStatusSection \/>\}/);
   });
 });
 

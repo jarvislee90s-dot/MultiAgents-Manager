@@ -131,7 +131,8 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
     renderWithClient(<SettingsPage />);
     // ② 的四处改动（联合类型 / menuItems / 渲染分支 / lucide 导入）在**运行时**一起被这条用例走过：
     // 少任何一处，菜单点开就是空分区或直接编译不过
-    fireEvent.click(await screen.findByRole("button", { name: "Usage statistics" }));
+    // 2026-10-06 两级导航：用量设置与采集状态现在同属「用量统计」块 ⇒ 点块（testid），两卡并置
+    fireEvent.click(await screen.findByTestId("settings-nav-usage"));
 
     expect(await screen.findByTestId("usage-enabled")).toBeTruthy();
     expect(screen.getByTestId("usage-minibar-range")).toBeTruthy();
@@ -156,9 +157,24 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
       expect(screen.getByText(label)).toBeTruthy();
     }
 
-    // 与计划① 的验收面**不重复**：本分区里没有「采集状态 / 立即采集」（那是 UsageStatusSection 的面）
-    expect(screen.queryByTestId("usage-status-collect")).toBeNull();
+    // **不重复**（2026-10-06 两级导航后判据换了形态）：用量设置与采集状态现在**同属「用量统计」
+    // 块、两卡并置**（用户裁决：同族功能要挨着）⇒ 原先「本分区里没有采集状态」这条**已不成立**，
+    // 但它守的那件事仍然要守：**同一个控件不得出现两次**（重复实现才是原判据的真实关切）。
+    expect(screen.getAllByTestId("usage-status-collect")).toHaveLength(1);
     expect(screen.queryByTestId("usage-status-collecting")).toBeNull();
+    // 8 项设置也各**恰好一个**（块内并置最容易引入的就是「两卡各渲染一遍」）
+    for (const id of [
+      "usage-enabled",
+      "usage-minibar-range",
+      "usage-minibar-tool-rows",
+      "usage-detail-retention-days",
+      "usage-collect-interval-min",
+      "usage-provider-map-rules",
+      "usage-export-quote",
+      "usage-export-pose",
+    ]) {
+      expect(screen.getAllByTestId(id)).toHaveLength(1);
+    }
 
     // 首帧值来自后端（不是前端硬编码默认值）
     expect(select("usage-minibar-range").value).toBe("today");

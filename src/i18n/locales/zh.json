@@ -69,6 +69,20 @@
     "title": "设置",
     "button": "设置",
     "close": "关闭",
+    "nav": {
+      "appearance": "外观与皮肤",
+      "appearanceDesc": "本机主题与语言，以及远程端（手机看板 / 网页）的字体、皮肤、圆角与品牌色",
+      "desktop": "桌面与提醒",
+      "desktopDesc": "全局快捷键、桌面通知与音效，以及 Foxbell 桌宠本体",
+      "tools": "工具与体检",
+      "toolsDesc": "各 CLI 工具的启停，以及技能 / 链接一致性体检",
+      "usage": "用量统计",
+      "usageDesc": "采集口径与浮窗设置，以及采集状态、今日口径与导出",
+      "remote": "远程接入",
+      "remoteDesc": "远程服务与通道、访问与安全、已接入设备，以及信号健康度与注入审计",
+      "data": "数据管理",
+      "dataDesc": "移动端附件占用与清理"
+    },
     "appearance": {
       "title": "外观",
       "description": "自定义应用的外观和语言",
@@ -623,15 +637,6 @@
     "toDisableCount": "将停用 ({{n}})",
     "residentExemptCount": "常驻豁免 ({{n}})",
     "saveAsPreset": "存为预设"
-  },
-  "screenshot": {
-    "saved": "截图已保存: {{path}}",
-    "failed": "截图失败: {{error}}",
-    "title": "截图工具",
-    "capturing": "截图中...",
-    "capture": "截图",
-    "refreshList": "刷新列表",
-    "recent": "最近截图"
   },
   "manifest": {
     "installConfirm": "安装确认",

@@ -88,7 +88,8 @@ window.matchMedia = ((query: string) => ({
 
 async function gotoToolsAndToggleOpenCode() {
   renderPage();
-  fireEvent.click(await screen.findByRole("button", { name: "Tool Management" }));
+  // 2026-10-06 两级导航：侧栏点击目标由「分区名」变为「块」（块内多卡并置），用 testid 更稳
+  fireEvent.click(await screen.findByTestId("settings-nav-tools"));
   const opencode = await screen.findByText("OpenCode");
   const row = opencode.closest("div[class*='justify-between']") as HTMLElement;
   fireEvent.click(row.querySelector('[role="switch"]') as HTMLElement);
@@ -120,15 +121,16 @@ describe("工具管理（review F7①②）", () => {
 
   it("F7② 未保存切分区 → 放弃更改：不持久化且开关回到已保存状态", async () => {
     await gotoToolsAndToggleOpenCode();
-    // 切分区触发三选拦截
-    fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
+    // 切**块**触发三选拦截（2026-10-06 两级导航：导航单位由分区变为块，工具卡住在「工具与体检」块）
+    fireEvent.click(screen.getByTestId("settings-nav-appearance"));
     expect(await screen.findByText("Unsaved Changes")).toBeInTheDocument();
     // 放弃更改 → 不落盘
     fireEvent.click(screen.getByText("Discard Changes"));
     await waitFor(() => expect(screen.queryByText("Unsaved Changes")).not.toBeInTheDocument());
     expect(invokeMock).not.toHaveBeenCalledWith("update_tool_settings", expect.anything());
     // 回到工具分区：开关为已保存状态（checked）、dirty 已重置（无保存按钮）
-    fireEvent.click(await screen.findByRole("button", { name: "Tool Management" }));
+    // 2026-10-06 两级导航：侧栏点击目标由「分区名」变为「块」（块内多卡并置），用 testid 更稳
+  fireEvent.click(await screen.findByTestId("settings-nav-tools"));
     const opencode = await screen.findByText("OpenCode");
     const row = opencode.closest("div[class*='justify-between']") as HTMLElement;
     expect(row.querySelector('[role="switch"]')).toHaveAttribute("data-state", "checked");
