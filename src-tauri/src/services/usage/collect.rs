@@ -1816,12 +1816,14 @@ mod tests {
     ///     `let label = …` / `(label.clone(), label, …)` / `}`）；
     ///   * `records_with_conn` 卡内行：原来**内联的 9 行 if/else** 删掉，换成**一行**
     ///     `let (k, label) = (route_label(r), route_label(r));`。
-    ///   净行数 = 8 + 4 − 1 − 1 − 9 = **+1 代码行 + 1 空行 = +4**（与实测逐字对上）；
-    ///   字符数 +32 是三者相抵后的净值（新增的 `route_label` 与 `format!` 被删掉的那份重复
-    ///   `format!` 抵掉了大半）。**归属**：本轮的另外几处改动都不在面内——`query.rs` 的模块头说明
-    ///   与函数内注释是**整行 `//`**（判据面剥掉，**不进面**）、新增用例在 BEGIN..END 排除区内；
-    ///   前端（`UsageDistributionCard.tsx` / `i18n` / 测试）根本不在面内。
-    ///   面**没有新增文件**、排除区标记未动、其余 23 个文件逐字未改。
+    ///
+    /// 净行数 = 8 + 4 − 1 − 1 − 9 = **+1 代码行 + 1 空行 = +4**（与实测逐字对上）；字符数 +32 是
+    /// 三者相抵后的净值（新增的 `route_label` 与 `format!` 被删掉的那份重复 `format!` 抵掉了大半）。
+    ///
+    /// **归属**：本轮的另外几处改动都不在面内——`query.rs` 的模块头说明与函数内注释是
+    /// **整行 `//`**（判据面剥掉，**不进面**）、新增用例在 BEGIN..END 排除区内；
+    /// 前端（`UsageDistributionCard.tsx` / `i18n` / 测试）根本不在面内。
+    /// 面**没有新增文件**、排除区标记未动、其余 23 个文件逐字未改。
     #[test]
     fn scan_face_size_is_pinned() {
         let (mut lines, mut chars) = (0usize, 0usize);
