@@ -88,6 +88,8 @@ fn set_run_cli_override(f: Option<Box<RunCliFake>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 发现链测试要构造候选路径（`super::*` 只带进 tailscale 模块自己的名字）
+    use std::path::PathBuf;
 
     /// 实测样本（2026-10-06，macOS 1.102.4 真机 `status --json` 截取关键字段）。
     /// 注意 `Self.DNSName` **带结尾点**——这是解析必须处理的真实形态。
@@ -2593,8 +2595,15 @@ mod tests {
     /// A5 **变异锚点**（2026-10-07 Windows 实测）：CLI 只在**完整安装路径**上找——
     /// `Get-Command tailscale` 为空（不在 PATH）、卸载登记项 `InstallLocation=（空）`
     /// （`WindowsInstaller=1` + `UninstallString=MsiExec.exe /X{...}` = MSI 版）。
-    /// 故 find_cli 只认标准安装位置：**不得**回落 PATH 查找，**不得**读 InstallLocation。
-    /// 变异：Windows 候选改成裸命令名 "tailscale"（PATH 查找）→ 本测试必红。
+    /// 故候选表只装标准安装位置的完整路径：**不得**回落 PATH 查找，**不得**读
+    /// InstallLocation。变异：Windows 候选改成裸命令名 "tailscale"（PATH 查找）→ 本测试必红。
+    ///
+    /// ⚠️ 2026-10-08 补：本测试锁的是**这张静态表**（仍为"逐平台固定完整路径"）。候选链
+    /// 自本日起多了一段**动态**来源（Windows = 服务登记 `ImagePath`，见
+    /// [`status::discovered_cli`]）——动态来源**不进这张表**（它依赖运行时注册表读数，
+    /// 塞进 `&'static [&'static str]` 既装不下、也会把"表 = 事实"这个前提弄脏）；
+    /// 顺序/fail-closed 契约由 `default_install_path_still_wins_and_second_source_stays_lazy`
+    /// 与 `cli_discovery_fails_closed_when_no_source_matches` 单独锁。
     #[test]
     fn cli_candidates_are_full_paths_only() {
         assert_eq!(
@@ -2614,6 +2623,371 @@ mod tests {
         for p in [Platform::Mac, Platform::Windows, Platform::Other] {
             assert!(!cli_candidates(p).is_empty(), "{p:?} 候选表不得为空");
         }
+    }
+
+    // ==== 2026-10-08：CLI 发现链补「服务登记」第二来源（治本）====
+    //
+    // **缺口（用户实测）**：Windows MSI 让用户自选安装路径（MAM 执行 `msiexec /i <包>`，
+    // **刻意不加 /qn**——选择权本就该给用户），而 find_cli 只在
+    // `C:\Program Files\Tailscale` 找。用户装到 `D:\软件\Tailscale`（带中文）⇒ 找不到
+    // ⇒ detect 判「没装」⇒ 向导又下载又安装 ⇒ 装完还是找不到（可能死循环）。
+    // 讽刺之处：路径选择框是 MAM 自己弹出来的，用户照做之后 MAM 就瞎了。
+    //
+    // **治本判据**：服务登记 `HKLM\SYSTEM\CurrentControlSet\Services\Tailscale\ImagePath`
+    // 指向**真实安装位置**，与盘符/目录名/中文都无关。**为什么选注册表而不是 `sc qc`**：
+    // 见 `status.rs::service_image_path` 的文档（`sc qc` 的字段名随系统显示语言本地化，
+    // 中文机上根本不是 `BINARY_PATH_NAME`；且它要派生子进程）。卸载登记的
+    // `InstallLocation` 实测为**空**，那条路已被 2026-10-07 真机排除。
+    //
+    // **本机（macOS）无法验证 Windows 注册表值的真实形态** ⇒ 解析写成**注入式纯函数**
+    // （存在性判据由调用方注入），全部形态在本组注入测试里锁死；唯一接触注册表的
+    // `service_image_path`（`#[cfg(windows)]`）只能由真机复核。
+
+    /// **形态锚点**：注册表子键路径逐字锁死（改路径 = 找不到服务 = 本测试必红）。
+    /// 末段 `Tailscale` 即 MSI 装出来的服务名（改了同样必红）。
+    #[test]
+    fn service_image_path_registry_key_is_the_real_one() {
+        assert_eq!(
+            TS_SERVICE_REG_PATH, r"SYSTEM\CurrentControlSet\Services\Tailscale",
+            "服务登记的注册表子键（HKLM 下），末段是服务名"
+        );
+    }
+
+    /// 带引号 + 带参数（MSI 装出来的常态形态）：取**第一对引号内**的内容——路径里的
+    /// 空格因此不构成歧义；**且不得为此触碰文件系统**（引号形态零歧义，注入的存在性
+    /// 判据一旦被调用就该炸）。
+    #[test]
+    fn image_path_quoted_with_args_parses_exe_without_fs_probe() {
+        let raw = r#""C:\Program Files\Tailscale\tailscaled.exe" --state=C:\ProgramData\Tailscale\tailscaled.state --port=0"#;
+        let got = parse_service_image_path_with(raw, |_| {
+            panic!("带引号形态无歧义，解析不得触碰文件系统")
+        });
+        assert_eq!(
+            got.as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscaled.exe"),
+            "引号内即 exe 路径，参数（含路径形态的参数）一概不吃进来"
+        );
+    }
+
+    /// 带引号 + 不带参数：同样只取引号内内容。
+    #[test]
+    fn image_path_quoted_without_args_parses_exe() {
+        let raw = r#""D:\软件\Tailscale\tailscaled.exe""#;
+        let got = parse_service_image_path_with(raw, |_| panic!("带引号形态不得触碰文件系统"));
+        assert_eq!(
+            got.as_deref(),
+            Some(r"D:\软件\Tailscale\tailscaled.exe"),
+            "用户实测的非默认路径（带中文）必须原样解析出来"
+        );
+    }
+
+    /// 不带引号 + 带参数（路径无空格）：按 Windows 的 `CreateProcess` 语义在**空白处**
+    /// 逐个加长成候选，取**真实存在**者——参数不得混进 exe 路径。
+    #[test]
+    fn image_path_unquoted_with_args_parses_exe() {
+        let raw = r"C:\Tailscale\tailscaled.exe --port=0";
+        let exists = |p: &str| p == r"C:\Tailscale\tailscaled.exe";
+        assert_eq!(
+            parse_service_image_path_with(raw, exists).as_deref(),
+            Some(r"C:\Tailscale\tailscaled.exe"),
+            "无引号时必须靠「存在性」把参数切掉"
+        );
+    }
+
+    /// 不带引号 + **路径含空格** + 不带参数（Windows 的经典歧义形态）：整串就是那个
+    /// 存在的文件 ⇒ 必须解析出完整路径，不能截成 `C:\Program`。
+    #[test]
+    fn image_path_unquoted_path_with_spaces_parses_whole_exe() {
+        let raw = r"C:\Program Files\Tailscale\tailscaled.exe";
+        let exists = |p: &str| p == r"C:\Program Files\Tailscale\tailscaled.exe";
+        assert_eq!(
+            parse_service_image_path_with(raw, exists).as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscaled.exe"),
+            "含空格的整串存在 ⇒ 整串就是 exe（不得截成第一个空白前的段）"
+        );
+    }
+
+    /// 不带引号 + **路径含空格** + 带参数：最长存在候选 = exe。
+    #[test]
+    fn image_path_unquoted_path_with_spaces_and_args_parses_exe() {
+        let raw = r"C:\Program Files\Tailscale\tailscaled.exe --state=C:\ProgramData\Tailscale\tailscaled.state";
+        let exists = |p: &str| p == r"C:\Program Files\Tailscale\tailscaled.exe";
+        assert_eq!(
+            parse_service_image_path_with(raw, exists).as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscaled.exe"),
+            "含空格 + 带参数：取「存在且最长」的候选"
+        );
+    }
+
+    /// 前后空白（含 CRLF / Tab）：注册表值实测可能带尾随空格 ⇒ 一律先 trim。
+    #[test]
+    fn image_path_trims_surrounding_whitespace() {
+        let raw = "  \t\"C:\\Program Files\\Tailscale\\tailscaled.exe\" --port=0\r\n ";
+        assert_eq!(
+            parse_service_image_path_with(raw, |_| panic!("trim 后仍是引号形态，不得触碰 FS"))
+                .as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscaled.exe"),
+            "首尾空白（空格/Tab/CRLF）必须先剥掉"
+        );
+    }
+
+    /// 大小写：解析**原样保留**大小写（Windows 路径大小写不敏感，但不得擅自改写用户机器上
+    /// 的真实拼写——路径要拿去原样启动进程）。
+    #[test]
+    fn image_path_keeps_original_case() {
+        let raw = r#""C:\PROGRAM FILES\TAILSCALE\TAILSCALED.EXE" --State=X"#;
+        assert_eq!(
+            parse_service_image_path_with(raw, |_| panic!("引号形态不得触碰 FS")).as_deref(),
+            Some(r"C:\PROGRAM FILES\TAILSCALE\TAILSCALED.EXE"),
+            "全大写形态必须原样解析（不得小写化/改写）"
+        );
+    }
+
+    /// **fail-closed**：形态不可解析 / 无存在者一律 `None`——**绝不返回一个猜的路径**
+    /// （返回猜的路径 = 把「没装」谎报成「装了」，随后 CLI 调用会以莫名错误失败）。
+    #[test]
+    fn image_path_unparsable_forms_yield_none() {
+        let never = |_: &str| false;
+        for raw in [
+            "",                                           // 空值
+            "   \r\n ",                                   // 全空白
+            "\"\"",                                       // 只有一对空引号
+            "\"   \"",                                    // 引号内全空白
+            r#""C:\Tailscale\tailscaled.exe"#,            // 只有开引号（形态残缺）
+            r"C:\Nope\tailscaled.exe --port=0",           // 无引号且候选都不存在
+            r"C:\Program Files\Tailscale\tailscaled.exe", // 无引号、含空格、整串不存在
+        ] {
+            assert_eq!(
+                parse_service_image_path_with(raw, never),
+                None,
+                "不可解析/无存在者的形态必须如实 None：{raw:?}"
+            );
+        }
+    }
+
+    /// **M6（2026-10-08 架构评审）：`REG_EXPAND_SZ` 必须展开 `%VAR%`。** 旧实现按字符串读
+    /// **但不展开** —— 于是 `ImagePath` 写成 `%ProgramFiles%\Tailscale\...` 的机器上，这条
+    /// "第二来源"会**静默失效**（fail-closed 成"未安装"：安全，但治不了本）。展开语义对齐
+    /// `ExpandEnvironmentStringsW`，**查找函数注入** ⇒ 任何宿主可测（本机只有 macOS）。
+    #[test]
+    fn image_path_expand_sz_is_expanded() {
+        let lookup = |n: &str| match n {
+            "ProgramFiles" => Some(r"C:\Program Files".to_string()),
+            _ => None,
+        };
+        let expanded = image_path_value(r"%ProgramFiles%\Tailscale\tailscaled.exe", true, lookup);
+        assert_eq!(
+            expanded, r"C:\Program Files\Tailscale\tailscaled.exe",
+            "REG_EXPAND_SZ ⇒ 必须展开成真实路径，否则第二来源静默失效"
+        );
+        // 与后面的解析链串起来：展开后的串必须还能推出同目录的 CLI
+        let exe = parse_service_image_path_with(&format!("\"{expanded}\" --port=0"), |_| {
+            panic!("带引号形态不得触碰 FS")
+        })
+        .expect("展开后的形态应当可解析");
+        assert_eq!(
+            cli_beside_service_exe(&exe).as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscale.exe"),
+            "展开 → 解析 exe → 同目录 CLI：整条第二来源在 REG_EXPAND_SZ 形态下必须仍然成立"
+        );
+    }
+
+    /// **按值的真实类型决定是否展开**（不是"凡串皆展开"）：`REG_SZ` 里合法出现的 `%`
+    /// 不得被改写——注入的查找函数一旦被调用就该炸。
+    #[test]
+    fn image_path_sz_is_not_expanded() {
+        let raw = r"C:\100%\Tailscale\tailscaled.exe";
+        assert_eq!(
+            image_path_value(raw, false, |_| panic!("REG_SZ 不得做变量查找")),
+            raw,
+            "值类型是 REG_SZ ⇒ 原样返回（不展开、不查环境变量）"
+        );
+    }
+
+    /// 展开的**边界语义**（对齐 `ExpandEnvironmentStringsW`：查不到 / 形态残缺一律
+    /// **原样保留**，绝不吞字符、绝不落空）：未知变量、缺配对的单个 `%`、空名 `%%`、
+    /// 无 `%` —— 四种都逐字保留；已知变量才替换。
+    #[test]
+    fn env_expansion_keeps_unknown_and_malformed_refs_verbatim() {
+        let lookup = |n: &str| (n == "Known").then(|| "V".to_string());
+        for raw in [
+            r"%Unknown%\x.exe",
+            r"C:\50%\x.exe",
+            r"%%\x.exe",
+            r"C:\Tailscale\tailscaled.exe",
+        ] {
+            assert_eq!(
+                image_path_value(raw, true, lookup),
+                raw,
+                "查不到/形态残缺的引用必须原样保留（Windows 语义）：{raw:?}"
+            );
+        }
+        assert_eq!(
+            image_path_value(r"%Known%\x.exe", true, lookup),
+            r"V\x.exe",
+            "已知变量必须替换"
+        );
+        // 多个引用 + 变量值里再带 `%`（替换结果不得被二次展开——单趟扫描）
+        assert_eq!(
+            image_path_value(r"%Known%\%Known%\x.exe", true, |_| Some("K".into())),
+            r"K\K\x.exe"
+        );
+    }
+
+    /// 形态针：唯一接触注册表的 `service_image_path`（Windows-only，本机跑不到）必须
+    /// **读原始值拿 vtype** 并**经纯函数展开**——接线断了上面那些纯函数测试就白测了。
+    /// 变异：退回 `get_value::<String,_>`（拿不到类型信息）/ 恒不展开 / 不接
+    /// `image_path_value` → 必红。
+    #[test]
+    fn registry_reader_wires_expand_sz_through_the_pure_expander() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/remote/tailscale/status.rs"
+        ))
+        .expect("读 status.rs");
+        let start = src
+            .find("fn service_image_path()")
+            .expect("注册表读取点必须存在（第二来源的第一跳）");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("函数体结束");
+        let body = &body[..end];
+        assert!(
+            body.contains("get_raw_value("),
+            "必须读**原始值**才拿得到 vtype（`get_value::<String,_>` 把 REG_SZ / \
+             REG_EXPAND_SZ 归一成同一个 String，类型信息就丢了）: {body}"
+        );
+        assert!(
+            body.contains("REG_EXPAND_SZ"),
+            "必须认出 REG_EXPAND_SZ（形态门）: {body}"
+        );
+        assert!(
+            body.contains("image_path_value("),
+            "展开必须经纯函数 image_path_value（否则上面几条纯函数测试与生产脱钩）: {body}"
+        );
+    }
+
+    /// 由服务本体的 exe 推 CLI 路径（纯函数）：Tailscale 的服务跑的是 **`tailscaled.exe`**，
+    /// CLI 是**同目录**下的 `tailscale.exe` 兄弟文件 ⇒ 取同目录 + 换名。
+    /// **不用 `std::path::Path`**：本函数处理的是 Windows 形态路径串（反斜杠分隔），而
+    /// `Path` 的分隔符语义**跟随编译宿主**——在 macOS/Linux 上 `\` 不是分隔符，
+    /// `parent()` 会返回空串，测试根本跑不了。故自己按 `\` / `/` 取最后一段分隔符。
+    #[test]
+    fn cli_beside_service_exe_uses_same_directory() {
+        assert_eq!(
+            cli_beside_service_exe(r"C:\Program Files\Tailscale\tailscaled.exe").as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscale.exe"),
+            "服务本体是同目录的 tailscaled.exe ⇒ CLI 是它的同目录兄弟"
+        );
+        // 用户实测场景：非默认盘符 + 中文目录名
+        assert_eq!(
+            cli_beside_service_exe(r"D:\软件\Tailscale\tailscaled.exe").as_deref(),
+            Some(r"D:\软件\Tailscale\tailscale.exe"),
+            "非默认路径 + 中文目录（用户实测形态）必须推到同目录 CLI"
+        );
+        // 服务若直接跑 CLI 本体（上游变更），同目录 + 换名仍得到同一条路径
+        assert_eq!(
+            cli_beside_service_exe(r"D:\软件\Tailscale\tailscale.exe").as_deref(),
+            Some(r"D:\软件\Tailscale\tailscale.exe"),
+            "服务跑的就是 CLI 本体时结果不变（对上游变更免疫）"
+        );
+    }
+
+    /// 大小写 + 正斜杠 + 根目录：同目录推导对形态不敏感。
+    #[test]
+    fn cli_beside_service_exe_handles_case_slashes_and_root() {
+        assert_eq!(
+            cli_beside_service_exe(r"C:\TAILSCALE\TAILSCALED.EXE").as_deref(),
+            Some(r"C:\TAILSCALE\tailscale.exe"),
+            "大写目录名必须原样保留（CLI 名按上游固定小写）"
+        );
+        assert_eq!(
+            cli_beside_service_exe("C:/Tailscale/tailscaled.exe").as_deref(),
+            Some("C:/Tailscale/tailscale.exe"),
+            "正斜杠形态（等价写法）同样要能推到同目录"
+        );
+        assert_eq!(
+            cli_beside_service_exe(r"C:\tailscaled.exe").as_deref(),
+            Some(r"C:\tailscale.exe"),
+            "盘根目录下的服务本体"
+        );
+    }
+
+    /// **fail-closed**：没有目录成分（裸文件名）= 无从知道装在哪 ⇒ `None`（不猜，
+    /// 绝不返回一个相对路径让调用方在当前工作目录里瞎找）。
+    #[test]
+    fn cli_beside_service_exe_rejects_bare_filename() {
+        assert_eq!(cli_beside_service_exe("tailscaled.exe"), None);
+        assert_eq!(cli_beside_service_exe(""), None);
+    }
+
+    /// **候选链顺序锚点（只增不改语义）**：默认位置**仍最优先**，且第二来源必须**惰性**
+    /// ——默认位置命中时**连读都不许去读**服务登记（`panic` 替身证明：一旦提前求值就炸）。
+    /// 变异：把服务登记排到默认位置之前 → 本测试立即红。
+    #[test]
+    fn default_install_path_still_wins_and_second_source_stays_lazy() {
+        let got = find_cli_with(
+            &[r"C:\Program Files\Tailscale\tailscale.exe"],
+            || panic!("默认位置已命中，不得求值第二来源（顺序锚点）"),
+            |p| p == std::path::Path::new(r"C:\Program Files\Tailscale\tailscale.exe"),
+        );
+        assert_eq!(
+            got,
+            Some(PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe")),
+            "默认位置命中时必须原样返回默认位置（第二来源只在前面全落空时才用）"
+        );
+    }
+
+    /// **治本**：默认位置落空时启用服务登记推出来的路径——这正是用户实测场景
+    /// （装到 `D:\软件\Tailscale`）。
+    #[test]
+    fn service_registration_is_used_when_default_is_missing() {
+        let service_cli = r"D:\软件\Tailscale\tailscale.exe";
+        let got = find_cli_with(
+            &[r"C:\Program Files\Tailscale\tailscale.exe"],
+            || Some(PathBuf::from(service_cli)),
+            |p| p == std::path::Path::new(service_cli),
+        );
+        assert_eq!(
+            got,
+            Some(PathBuf::from(service_cli)),
+            "默认位置落空 ⇒ 必须启用服务登记来源（否则向导会陷入又下载又安装的死循环）"
+        );
+    }
+
+    /// **fail-closed 收口**：第二来源给出路径后**仍要过存在性门**；两处都落空 ⇒ `None`。
+    /// 绝不把「猜的路径」交给调用方（随后 CLI 调用会以莫名错误失败，比如实报「没装」更坏）。
+    #[test]
+    fn cli_discovery_fails_closed_when_no_source_matches() {
+        // ① 服务读不到 / 形态不可解析 ⇒ 第二来源 None
+        let got = find_cli_with(
+            &[r"C:\Program Files\Tailscale\tailscale.exe"],
+            || None,
+            |_| false,
+        );
+        assert_eq!(got, None, "两处都没有必须如实 None");
+        // ② 第二来源给出路径但该文件不存在 ⇒ 同样 None（存在性门在链尾统一收口）
+        let got = find_cli_with(
+            &[r"C:\Program Files\Tailscale\tailscale.exe"],
+            || Some(PathBuf::from(r"D:\软件\Tailscale\tailscale.exe")),
+            |_| false,
+        );
+        assert_eq!(
+            got, None,
+            "第二来源给出的路径也必须过存在性门，不得直接采信"
+        );
+    }
+
+    /// **平台门控**：本机（非 Windows）第二来源恒 `None` ⇒ `find_cli` 的行为与改动前
+    /// **逐字相同**（macOS 是固定 .app 位置、Linux 走包管理器路径，不存在"用户自选路径"
+    /// 这个问题；也不该在非 Windows 上做任何多余 IO）。
+    #[cfg(not(windows))]
+    #[test]
+    fn second_source_is_absent_off_windows() {
+        assert_eq!(
+            discovered_cli(),
+            None,
+            "非 Windows 不得启用服务登记来源（发现链与改动前行为一致）"
+        );
     }
 
     /// A4 定性（二选一，**选 ②「保留以备上游变更」并写明实测依据**）。

@@ -133,6 +133,12 @@ pub(super) fn board_url_from_dns_name(dns: &str) -> String {
 /// - **不得**回落到 PATH 查找（实测找不到；且 PATH 命中还可能是冒名/旧版二进制）；
 /// - **不得**读卸载登记的 `InstallLocation`（实测为空——注册表是可变输入，不是安装事实）；
 /// - 只认标准安装位置的存在性。**探测不到 = 没装**，由调用方如实报「未检测到 Tailscale」。
+///
+/// ⚠️ **本表只是候选链的第一段**（2026-10-08 补）：它装的是「最常见/最快命中」的固定
+/// 位置，**不再是唯一来源**。用户在 MSI 里自选路径（MAM 刻意不加 `/qn`，选择权本就该
+/// 给用户）时这里必然落空，由 [`discovered_cli`]（Windows = 服务登记 `ImagePath`）兜底
+/// ——**顺序与 fail-closed 契约见 [`find_cli_with`]**。本表自身仍是"逐平台固定完整路径"
+/// （动态来源不进这张表，见其守卫测试）。
 pub(super) fn cli_candidates(p: super::wizard::Platform) -> &'static [&'static str] {
     use super::wizard::Platform;
     match p {
@@ -142,13 +148,265 @@ pub(super) fn cli_candidates(p: super::wizard::Platform) -> &'static [&'static s
     }
 }
 
-/// CLI 路径探测：装了才返回 Some。**只探测标准安装位置，不做全盘搜索、不看 PATH**
-///（依据见 [`cli_candidates`]）。
+/// CLI 路径探测（生产入口）：默认位置优先，落空才启用第二来源。契约见 [`find_cli_with`]。
+/// **不做全盘搜索、不看 PATH**（依据见 [`cli_candidates`]）。
 pub(super) fn find_cli() -> Option<PathBuf> {
-    cli_candidates(super::wizard::current_platform())
+    find_cli_with(
+        cli_candidates(super::wizard::current_platform()),
+        discovered_cli,
+        |p| p.exists(),
+    )
+}
+
+/// **候选链内核**（顺序即优先级；第二来源与存在性都注入，便于单测锁死顺序与 fail-closed）：
+/// 1. **默认安装位置**（[`cli_candidates`]）——最快、覆盖绝大多数用户，**语义保持不变**；
+/// 2. **第二来源**（[`discovered_cli`]；Windows = 服务登记）——**惰性**：默认位置一旦命中
+///    就**连读都不读**（`discovered` 取 `FnOnce`，测试用 panic 替身把这一点锁死）；
+/// 3. **链尾存在性门**：链上给出的任何路径都必须真实存在才返回；
+/// 4. 全落空 → `None`（**fail-closed**：绝不返回一个猜的路径）。
+///
+/// **只增不改语义**（2026-10-08 用户裁决「治本」）：默认位置仍最优先，新增来源只在前面
+/// 全部找不到时才用。
+pub(super) fn find_cli_with(
+    defaults: &[&str],
+    discovered: impl FnOnce() -> Option<PathBuf>,
+    exists: impl Fn(&std::path::Path) -> bool,
+) -> Option<PathBuf> {
+    defaults
         .iter()
         .map(PathBuf::from)
-        .find(|p| p.exists())
+        .find(|p| exists(p.as_path()))
+        .or_else(|| discovered().filter(|p| exists(p.as_path())))
+}
+
+// ------------------------------------------------------------
+// 第二来源（Windows 服务登记）：**治本**——安装路径由用户选，MAM 不得假定它在哪
+// ------------------------------------------------------------
+
+/// 服务登记的注册表子键（`HKLM\` 下；末段 `Tailscale` = MSI 装出来的**服务名**——
+/// `ServiceInstall.Name` / `ServiceControl.Name` 两者同名，实机侧另有
+/// `sc.exe stop Tailscale` 佐证）。**为什么读注册表而不是 `sc qc Tailscale`**：
+/// - `sc qc` 的字段标签（`BINARY_PATH_NAME`）**随系统显示语言本地化**——中文 Windows 上
+///   根本不是这个标签，按标签解析会在**恰好出问题的那台中文机**上失配；注册表的**值名
+///   `ImagePath` 是 ASCII、系统怎么本地化都不变**；
+/// - `sc qc` 要派生子进程（多一个进程、多一份等待/失败面），注册表直读零进程；
+/// - `winreg` **本仓已是 Windows 目标下的既有依赖**（`linker/detector.rs` 已用同一套读法），
+///   零新增依赖。
+///
+/// **非管理员可读**：`HKLM\SYSTEM\CurrentControlSet\Services` 子树默认对 Users 授
+/// `KEY_READ`，服务的默认安全描述符同样把 `SERVICE_QUERY_CONFIG` 交给已认证用户——
+/// 与 `sc qc` 的可读性同源，只是不弹子进程。
+///
+/// ⚠️ **本机无法验证**（2026-10-08：本机为 macOS）：子键路径与值的**真实形态**须由
+/// Windows 真机复核（见模块报告）。路径串逐字锁在测试
+/// `service_image_path_registry_key_is_the_real_one` 里，改错即红。
+#[cfg(any(windows, test))]
+pub(super) const TS_SERVICE_REG_PATH: &str = r"SYSTEM\CurrentControlSet\Services\Tailscale";
+
+/// 读服务登记的 `ImagePath`（**本模块唯一接触注册表的点**）。
+///
+/// 读不到一律 `None`——服务不存在（没装）/ 无权限 / 值不是字符串，三种情形一视同仁：
+/// **不猜、不回落别的来源**（fail-closed：宁可如实报「未检测到 Tailscale」）。
+///
+/// **M6（2026-10-08 架构评审）：`REG_EXPAND_SZ` 必须展开 `%VAR%`。** 旧实现按字符串读、
+/// **不展开**，于是 `ImagePath` 写成 `%ProgramFiles%\Tailscale\...` 的机器上这条第二来源
+/// 会**静默失效**（fail-closed 成"未安装"——安全，但治不了本：用户明明装在默认位置却看到
+/// 「未安装」）。现在读**原始值**拿 `vtype`，只有 `REG_EXPAND_SZ` 才展开（`REG_SZ` 里合法
+/// 出现的 `%` 不得被改写），展开走纯函数 [`image_path_value`]。
+#[cfg(windows)]
+fn service_image_path() -> Option<String> {
+    use winreg::enums::{HKEY_LOCAL_MACHINE, REG_EXPAND_SZ, REG_SZ};
+    use winreg::types::FromRegValue;
+    use winreg::RegKey;
+
+    let key = match RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(TS_SERVICE_REG_PATH) {
+        Ok(k) => k,
+        // 第二来源读不到不是故障（没装本来就该报没装）⇒ debug 级留痕即可，不打扰用户
+        Err(e) => {
+            log::debug!(
+                "读取服务登记 ImagePath 失败（{TS_SERVICE_REG_PATH}）: {e}——第二来源按空处理"
+            );
+            return None;
+        }
+    };
+    match key.get_raw_value("ImagePath") {
+        Ok(raw) if raw.vtype == REG_SZ || raw.vtype == REG_EXPAND_SZ => {
+            // 形态对：解码（FromRegValue 认 REG_SZ / REG_EXPAND_SZ），按类型决定展开
+            let s = String::from_reg_value(&raw).ok()?;
+            Some(image_path_value(&s, raw.vtype == REG_EXPAND_SZ, |n| {
+                std::env::var(n).ok()
+            }))
+        }
+        // 形态不对（REG_DWORD / REG_MULTI_SZ / …）：**不猜**——宁可如实报「未检测到」
+        Ok(other) => {
+            log::debug!(
+                "服务登记 ImagePath 的值类型不是字符串（{:?}）——第二来源按空处理",
+                other.vtype
+            );
+            None
+        }
+        Err(e) => {
+            log::debug!(
+                "读取服务登记 ImagePath 失败（{TS_SERVICE_REG_PATH}）: {e}——第二来源按空处理"
+            );
+            None
+        }
+    }
+}
+
+/// 注册表值 → 可交给 [`parse_service_image_path_with`] 的 `ImagePath` 串（**纯函数**，
+/// 变量查找注入 ⇒ 任何宿主可测）：`REG_EXPAND_SZ` 按 `ExpandEnvironmentStringsW` 语义展开
+/// `%VAR%`；其余形态**原样返回**（`REG_SZ` 里的 `%` 是路径的一部分，不是变量引用）。
+///
+/// "按类型决定"这条形态门是刻意的：无差别展开会把 `C:\100%\Tailscale\...` 这类合法路径
+/// 改写成别的东西——治本的方式是认对类型，而不是"凡串皆展开"。
+#[cfg(any(windows, test))]
+pub(super) fn image_path_value(
+    raw: &str,
+    expand_sz: bool,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> String {
+    if expand_sz {
+        expand_env_refs(raw, lookup)
+    } else {
+        raw.to_string()
+    }
+}
+
+/// 展开 `%VAR%` 引用（Windows `REG_EXPAND_SZ` / `ExpandEnvironmentStringsW` 语义；
+/// **纯函数**，单趟扫描、不递归展开替换结果）。
+///
+/// 边界（与上游语义对齐，逐条都有测试 `env_expansion_keeps_unknown_and_malformed_refs_verbatim`）：
+/// - `%NAME%` 成对且 `NAME` 非空：命中就替换；**查不到则原样保留**（Windows 对未知变量也是
+///   原样保留，不报错、不落空——这点很重要：fail-closed 的失败方式是"路径不存在"，不是
+///   "路径被吞成空串"）；
+/// - **没有配对的第二个 `%`**（如 `C:\50%\x.exe`）或**空名 `%%`**：原样保留，一个字符都不吞；
+/// - 无 `%`：恒等（零分配的短路在 [`image_path_value`] 的类型门上）。
+///
+/// 与 [`image_path_value`] 同一条 cfg 门（只服务 Windows 的第二来源与测试：非 Windows 的
+/// 生产构建里它若留着就是死代码）。
+#[cfg(any(windows, test))]
+fn expand_env_refs(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let bytes = raw.as_bytes();
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if bytes[idx] == b'%' {
+            if let Some(rel) = raw[idx + 1..].find('%') {
+                let end = idx + 1 + rel; // 配对 `%` 的下标
+                let name = &raw[idx + 1..end];
+                if !name.is_empty() {
+                    if let Some(val) = lookup(name) {
+                        out.push_str(&val);
+                        idx = end + 1;
+                        continue;
+                    }
+                }
+                // 未知变量 / 空名：整段原样保留（不吞字符、不报错）
+                out.push_str(&raw[idx..=end]);
+                idx = end + 1;
+                continue;
+            }
+        }
+        // 普通字符，或落单的 `%` ⇒ 原样推入一个字符（按 UTF-8 边界推进）
+        let ch = raw[idx..].chars().next().unwrap_or('\u{fffd}');
+        out.push(ch);
+        idx += ch.len_utf8();
+    }
+    out
+}
+
+/// 从服务登记的 `ImagePath` 原始值里解析出**服务可执行文件**的路径。
+///
+/// **纯函数**：不碰注册表、不碰文件系统——存在性判据 `exists` 由调用方注入。这样 Windows
+/// 的解析语义能在**任何宿主**上用注入测试锁死（2026-10-08 本仓只有 macOS 可用，真机形态
+/// 无从验证 ⇒ 注入测试是唯一可执行的证据）。
+///
+/// 形态规则（逐条对应 Windows 的 `CreateProcess` 解析语义）：
+/// 1. **前后空白先 trim**（空格 / Tab / CRLF）——注册表值可能带尾随空白；
+/// 2. **带引号**（`"C:\...\x.exe" <参数>`）：取**第一对引号内**的内容。这是唯一无歧义的
+///    形态（路径里的空格不再是问题），且**零 FS 访问**；引号内为空或**只有开引号**
+///    （残缺）→ `None`；
+/// 3. **不带引号**：Windows 会把命令行在**每个空白处**切开、把逐个加长的前缀当候选程序名。
+///    本实现取「**存在且最长**」的候选。与 Windows 的"由短到长取首个存在者"在常态下同解
+///    （`C:\Program.exe` 这类劫持位通常不存在），但在**劫持位真存在**时本实现**不会**被
+///    引到那个文件上：本函数的用途是定位 Tailscale 的安装目录，照搬由短到长就等于让一个
+///    人为放进 `C:\Program.exe` 的文件来决定 MAM 去哪里找 CLI（unquoted service path
+///    提权的同一机理）；退一步说，即便只剩下被劫持的短前缀存在，推出的
+///    `<目录>\tailscale.exe` 仍要过链尾存在性门 ⇒ 依旧 fail-closed；
+/// 4. **无存在者 / 形态残缺 → `None`**。**不猜**：宁可如实报「未检测到 Tailscale」，
+///    也不返回一个猜的路径让调用方以莫名错误失败。
+#[cfg(any(windows, test))]
+pub(super) fn parse_service_image_path_with(
+    raw: &str,
+    exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // ② 带引号：第一对引号内即 exe 路径
+    if let Some(rest) = s.strip_prefix('"') {
+        let (inner, _) = rest.split_once('"')?; // 残缺（无闭合引号）→ None
+        let inner = inner.trim();
+        return (!inner.is_empty()).then(|| inner.to_string());
+    }
+    // ③ 不带引号：由长到短取「存在」的候选前缀（空白即参数边界）
+    let mut end = s.len();
+    loop {
+        let cand = s[..end].trim_end();
+        if !cand.is_empty() && exists(cand) {
+            return Some(cand.to_string());
+        }
+        // 没有更短的空白边界了 ⇒ 候选已试尽，如实 None（不猜）
+        end = cand.rfind(char::is_whitespace)?;
+    }
+}
+
+/// 由服务本体的 exe 路径推出 **CLI 路径**（纯函数）。
+///
+/// 依据：Tailscale 的 Windows 服务跑的是 `tailscaled.exe`（守护进程），CLI 是**同一个安装
+/// 目录**里的 `tailscale.exe`——MSI 的 File 表里两者同装到 `[INSTALLDIR]`。**本推导对上游
+/// 变更免疫**：无论服务本体登记的是 `tailscaled.exe` 还是（有朝一日）`tailscale.exe`，
+/// 「同目录 + `tailscale.exe`」都给出同一条路径。
+///
+/// **为什么不用 `std::path::Path`**：本函数处理的是 **Windows 形态的路径串**（反斜杠分隔），
+/// 而 `Path` 的分隔符语义**跟随编译宿主**——在 macOS/Linux 上 `\` 不是分隔符，`parent()`
+/// 会返回空串，纯函数测试根本跑不起来（本仓只有 macOS 可用）。故这里自己按 `\` / `/` 取
+/// 最后一段分隔符；两种分隔符都认（在 Windows 上等价）。
+///
+/// 没有目录成分（裸文件名）→ `None`：无从知道装在哪，**不猜**（绝不返回一个相对路径，
+/// 让调用方在当前工作目录里瞎找）。
+#[cfg(any(windows, test))]
+pub(super) fn cli_beside_service_exe(service_exe: &str) -> Option<String> {
+    let s = service_exe.trim();
+    let cut = s.rfind(['\\', '/'])?;
+    let (dir, _file) = s.split_at(cut + 1); // dir 含结尾分隔符
+    Some(format!("{dir}tailscale.exe"))
+}
+
+/// **第二来源**（默认位置之外的唯一来源；**惰性**——只在默认位置全部落空时才求值，
+/// 见 [`find_cli_with`] 的顺序契约）。
+///
+/// 治本依据：Windows MSI 让用户自选安装路径（MAM 执行 `msiexec /i`，**刻意不加 `/qn`**），
+/// 装到哪由用户定；而**服务登记必然指向真实安装位置**，与盘符 / 目录名 / 中文都无关。
+///
+/// 返回的是**候选**（此处不判存在：存在性由 [`find_cli_with`] 在链尾统一收口，整条链上
+/// 只有一道门）；读不到登记 / 解析不出 exe / 推不出目录——任一步落空即 `None`（**不猜**）。
+#[cfg(windows)]
+pub(super) fn discovered_cli() -> Option<PathBuf> {
+    let raw = service_image_path()?; // ① 读服务登记
+    let exe = parse_service_image_path_with(&raw, |p| std::path::Path::new(p).exists())?; // ② 服务本体
+    cli_beside_service_exe(&exe).map(PathBuf::from) // ③ 同目录 CLI
+}
+
+/// **非 Windows：没有第二来源。** macOS 的 CLI 在固定 `.app` 位置、Linux 走包管理器路径，
+/// 不存在"用户自选安装路径"这个问题 ⇒ 恒 `None`，`find_cli` 的行为与改动前**逐字相同**。
+/// 平台门控写在这一层，好让上面那些 Windows 专用的解析/推导在非 Windows 的生产构建里
+/// **连编译都不参与**（它们标了 `#[cfg(any(windows, test))]`，只在 Windows 或测试构建存在）。
+#[cfg(not(windows))]
+pub(super) fn discovered_cli() -> Option<PathBuf> {
+    None
 }
 
 /// CLI 失败 → 错误文案（纯函数，可测）：stderr 非空用 stderr；**空串回落退出码 +
