@@ -191,13 +191,20 @@ pub(super) fn cli_timeout_for(args: &[&str]) -> std::time::Duration {
 
 /// 有界等待子进程（I-4 的核心，可测）→ (退出态, stdout, stderr)。
 ///
-/// **两条纪律**：
+/// **三条纪律**：
 /// 1. **超时即 kill + 收尸**（`wait_timeout` + `kill` + `wait`），错误文案如实写「调用
 ///    Tailscale 超时（N 秒未返回，已终止该子进程）」——由调用方写进快照 error（不静默）；
 /// 2. **wait 之前先把两条管道交给读线程**：若「先 wait 后读」，输出超过管道缓冲（~64KB）
 ///    的子进程会在我们 wait 时被写满而阻塞，从而**假性超时**（`approve.rs` 已如实登记该
 ///    边界）。`tailscale status --json` 在设备多的尾网里就可能超过 64KB，故本实现不接受
-///    那个边界（测试 `run_cli_bounded_wait_kills_on_timeout_and_drains_large_output` 锁）。
+///    那个边界（测试 `run_cli_bounded_wait_kills_on_timeout_and_drains_large_output` 锁）；
+/// 3. **超时分支绝不为「读完输出」而无限等待**（2026-10-07 Linux CI 抓获）：第 2 条的读
+///    线程要等**管道 EOF**，而 EOF 只由「所有持有写端的进程都退出」触发。若直接子进程
+///    fork 出了继承 stdout/stderr 的孙进程，kill 掉直接子进程后孙进程仍持有写端 ⇒ 读线程
+///    要等孙进程自己退出，**有界等待被打回无界**（实测：Linux 上 `sh -c "sleep 30"` 的
+///    200ms 超时窗耗了 30.0037s；macOS 的 `/bin/sh` 对单命令会 exec 故未暴露，但用
+///    `sleep N & wait` 强制 fork 后 macOS 同样复现 20.011s）。故超时分支的收线程走
+///    [`collect_bounded`]：只给有界宽限，拿不到就放弃（该分支输出本就丢弃）。
 ///
 /// 为什么不用 `Command::output()`：它同样无超时（A6 实测这条 CLI 会永久阻塞）。
 pub(super) fn wait_child_bounded(
@@ -205,23 +212,25 @@ pub(super) fn wait_child_bounded(
     dur: std::time::Duration,
 ) -> Result<(std::process::ExitStatus, String, String), String> {
     use wait_timeout::ChildExt;
-    // 先接管管道：读线程各自排空到 EOF（子进程被 kill 后也会 EOF，不会泄漏线程）
+    // 先接管管道：读线程各自排空到 EOF
     let out = child.stdout.take().map(drain_pipe);
     let err = child.stderr.take().map(drain_pipe);
-    let join = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
-        h.map(|h| h.join().unwrap_or_default()).unwrap_or_default()
+    // 正常退出：直接子进程已结束、自己的输出必然写完 ⇒ 无条件收，**不截断**大输出
+    let collect = |rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>| {
+        rx.map(|rx| rx.recv().unwrap_or_default())
+            .unwrap_or_default()
     };
     match child.wait_timeout(dur) {
         Ok(Some(status)) => Ok((
             status,
-            String::from_utf8_lossy(&join(out)).to_string(),
-            String::from_utf8_lossy(&join(err)).to_string(),
+            String::from_utf8_lossy(&collect(out)).to_string(),
+            String::from_utf8_lossy(&collect(err)).to_string(),
         )),
         Ok(None) => {
             let _ = child.kill();
             let _ = child.wait(); // 收尸（防僵尸）
-            let _ = join(out);
-            let _ = join(err);
+            let _ = collect_bounded(out);
+            let _ = collect_bounded(err);
             Err(format!(
                 "调用 Tailscale 超时（{} 秒未返回，已终止该子进程；该命令可能正在等待人工确认）",
                 dur.as_secs()
@@ -231,13 +240,34 @@ pub(super) fn wait_child_bounded(
     }
 }
 
-/// 管道排空线程（`wait_child_bounded` 用；见其注释的第 2 条纪律）
-fn drain_pipe(mut p: impl std::io::Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+/// 超时分支给读线程的**有界宽限**（见 [`wait_child_bounded`] 第 3 条纪律）。
+///
+/// 直接子进程已被 kill + 收尸，正常情形下管道立刻 EOF，本宽限只是让收线程有机会退出、
+/// 不泄漏 fd；一旦孙进程仍持有写端，绝不在此无限等待。
+const DRAIN_GRACE_AFTER_KILL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// 超时分支收输出：**只给有界宽限，拿不到就放弃**（输出本就随 Err 丢弃）。
+///
+/// 若孙进程仍持有管道写端，读线程会一直阻塞在 `read_to_end`；这里放弃后该线程被**游离**
+/// （detach），直到持有写端的进程退出才自然结束——这是"有界等待"与"不泄漏线程"之间
+/// 必须做的取舍：I-4 要求的是**等待有界**，不能为了收线程而把 UI 关键路径打回无界。
+fn collect_bounded(rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>) -> Vec<u8> {
+    rx.and_then(|rx| rx.recv_timeout(DRAIN_GRACE_AFTER_KILL).ok())
+        .unwrap_or_default()
+}
+
+/// 管道排空线程（`wait_child_bounded` 用；见其注释的第 2 条纪律）。
+///
+/// 返回 `Receiver` 而非 `JoinHandle`：调用方在超时分支需要一个**有界宽限**（见
+/// [`collect_bounded`]）——`JoinHandle::join` 没有超时版本，用它就会把无界等待引回来。
+fn drain_pipe(mut p: impl std::io::Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = std::io::Read::read_to_end(&mut p, &mut buf);
-        buf
-    })
+        let _ = tx.send(buf); // 只有读到 EOF 才送达；接收端已放弃则发送失败（忽略）
+    });
+    rx
 }
 
 /// 统一的 CLI 调用口。macOS 的 GUI 版兼作 CLI，**必须置 `TAILSCALE_BE_CLI=1`**

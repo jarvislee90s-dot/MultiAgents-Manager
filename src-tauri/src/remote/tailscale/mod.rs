@@ -474,6 +474,48 @@ mod tests {
         );
     }
 
+    /// **I-4 的边界：超时分支不得被「孙进程持有管道」拖住**（2026-10-07 Linux CI 抓获）。
+    ///
+    /// 机制（诊断结论）：`wait_child_bounded` 在 wait 前把两条管道交给读线程，读线程要等
+    /// **管道 EOF**；而 EOF 只由「所有持有写端的进程都退出」触发。若直接子进程 fork 出了
+    /// 继承 stdout/stderr 的孙进程，kill 掉直接子进程后孙进程仍持有写端 ⇒ 读线程要等孙
+    /// 进程自己退出 —— **有界等待被打回无界**（实测：Linux 上 `sh -c "sleep 30"` 的 200ms
+    /// 超时窗耗了 30.0037s，恰等于子进程自然结束的时间）。
+    ///
+    /// **为什么 macOS 上没暴露**：`/bin/sh`（bash 3.2）对**单条命令**会 exec 成直接子进程
+    /// （实测：spawn 出的 pid 本身就是 `sleep`，子进程数 0），没有孙进程持管；而 Linux 的
+    /// `/bin/sh` 在此 fork。故**本缺陷不属于 Linux、属于我们的实现**——凡 fork 的写法都能
+    /// 触发。本用例用 `&`（强制 fork，不给 shell exec 优化的机会）在**任何平台**复现该形状，
+    /// 因此在 macOS 上也能跑红。
+    ///
+    /// 变异：把超时分支的收线程改回无界 `JoinHandle::join` → 本用例必红（等满 sleep）。
+    #[cfg(unix)]
+    #[test]
+    fn bounded_wait_timeout_survives_forked_grandchild_holding_pipe() {
+        use std::process::{Command, Stdio};
+        // `&` 保证 shell 不把它 exec 成直接子进程 —— 孙进程继承管道写端
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 20 & wait")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn sh -c 'sleep 20 & wait'");
+        let t0 = std::time::Instant::now();
+        let e = wait_child_bounded(&mut child, std::time::Duration::from_millis(200))
+            .expect_err("超时必须 Err（不是静默挂着）");
+        assert!(e.contains("超时"), "超时文案必须如实点名: {e}");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(5),
+            "孙进程持有管道时，超时窗仍必须被真正执行（不得等管道 EOF）: {:?}",
+            t0.elapsed()
+        );
+        assert!(
+            matches!(child.try_wait(), Ok(Some(_))),
+            "超时分支必须 kill + 收尸（防僵尸进程）"
+        );
+    }
+
     /// I-4（用户可见行为）：**超时不是静默失败**——它经既有快照口径上墙（轮询轮
     /// `refresh_once` → `map_status`；开关路径 `record_ts_failure` 同一处 error 字段），
     /// 用户在卡面读得到「调用 Tailscale 超时」；同时 running 撤下（不宣称运行）。
@@ -1357,6 +1399,17 @@ mod tests {
     /// 逐步探测真值表（判据表 §C2）：每步都要能说出「怎么算完成」——全部就绪时
     /// 除 verify（Task 7 占位）外全 done；CLI 读不到时 fail-closed + blocked_reason
     /// 如实说明，绝不把读不到伪装成完成或卡死
+    ///
+    /// **平台门控（2026-10-07 存量债清理，Linux CI 门禁）**：本用例的期望建立在
+    /// **macOS/Windows 的步骤表**上——它按 id 取 `sys_ext` 步（一键配置特有），而
+    /// `current_platform()` 在 Linux 返回 `Platform::Other`，步骤表里没有该步 ⇒ 以
+    /// 「缺步骤 sys_ext」失败。一键配置向导只对 macOS/Windows 实现（产品只发这两个平台），
+    /// 故按平台门控。**不是静默跳过**：Linux 上它在 `cargo test` 里以 "N ignored" 可见，
+    /// 并可用 `--ignored` 显式跑（会如实失败，那正是本门控要记在案的那件事）。
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        ignore = "平台不适用：步骤表按平台给，sys_ext 只对 macOS/Windows 存在（current_platform() 在 Linux = Platform::Other）"
+    )]
     #[test]
     fn probe_steps_marks_each_criterion_honestly() {
         let _g = test_lock();
@@ -2268,6 +2321,15 @@ mod tests {
     /// 错误必须点名「校验失败」并指引重新走 download 步（幂等语义随之做实）。
     /// **变异锚点**：删掉 install 步的 `installer_file_ok` 分支 → panic 替身爆红
     /// （零进程红线：门禁拦截时安装器绝不被触达）
+    ///
+    /// **平台门控（2026-10-07 存量债清理，Linux CI 门禁）**：`ts_asset_name(Platform::Other)`
+    /// 返回**空串** ⇒ `dir.path().join("")` 就是临时目录**本身**，`std::fs::write` 撞
+    /// `Os 21 IsADirectory` 而 unwrap 恐慌（Linux CI 实测）。本用例考的是 sha 门禁，前提是
+    /// 「能在临时目录里落一个安装包文件」，而该前提只在有真实产物名的平台成立。
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        ignore = "平台不适用：ts_asset_name(Platform::Other) 为空串，join(\"\") 落到临时目录本身，fs::write 撞 IsADirectory"
+    )]
     #[test]
     fn install_step_refuses_tampered_installer_without_spawning() {
         let dir = tempfile::tempdir().unwrap();
@@ -2285,6 +2347,15 @@ mod tests {
     }
 
     /// install 步缺失包（exists 门禁在前）：文案指引先走 download 步，同样零触发
+    ///
+    /// **平台门控（2026-10-07 存量债清理，Linux CI 门禁）**：本用例期望「未就位 +
+    /// 下载安装包」文案，而 Linux 上 `current_platform()` = `Platform::Other`，**平台门
+    /// 先于 exists 门** ⇒ 返回的是「当前平台暂不支持一键配置」——那正是本模块在非产品
+    /// 平台上的如实行为，不是缺陷。
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        ignore = "平台不适用：平台门先于 exists 门，Linux 上如实返回「当前平台暂不支持一键配置」"
+    )]
     #[test]
     fn install_step_refuses_when_installer_absent() {
         let dir = tempfile::tempdir().unwrap();
@@ -2972,6 +3043,15 @@ mod tests {
     /// ② `Platform::Other`（无线程资产）不得先落到「sha256 校验失败」的误导文案，
     ///    应如实说「当前平台不支持一键配置」。
     /// 变异自证：把 install_step_with 的平台门去掉 → ②档红（文案变成 sha 失败）。
+    ///
+    /// **平台门控（2026-10-07 存量债清理，Linux CI 门禁）**：①档（流式/切片校验同判据）本身
+    /// 跨平台，但②档要先在临时目录落一个**带真实产物名**的包——`ts_asset_name(Platform::Other)`
+    /// 返回空串 ⇒ `join("")` 落到临时目录本身，`fs::write` 撞 `Os 21 IsADirectory`（Linux CI
+    /// 实测）。且②档期望的「不支持」文案正是非产品平台上的如实行为。
+    #[cfg_attr(
+        not(any(target_os = "macos", target_os = "windows")),
+        ignore = "平台不适用：②档落包路径的 ts_asset_name(Platform::Other) 为空串 ⇒ 撞 IsADirectory；且平台门文案本就是非产品平台的如实行为"
+    )]
     #[test]
     fn installer_hash_streams_and_platform_gate_says_unsupported() {
         use sha2::Digest;
