@@ -323,6 +323,8 @@
         "retry": "Retry",
         "step_autostart": "Auto-restore on launch (handled by MAM)",
         "actAdmin": "Your action: the system will prompt for the admin password — enter it to finish installing",
+        "actAdminWinMsi": "Your action: the installer lets you choose the install path, then the system prompts for the admin password — the default path is the easiest; installing elsewhere is fine, just remember where",
+        "installPathHint": "MAM looks for Tailscale in two places: the default install directory and the executable registered by the \"Tailscale\" service — a custom install path works too. If it still shows as not installed afterwards, click Refresh.",
         "actSysExt": "Your action: approve the Tailscale system extension in System Settings → Privacy & Security",
         "actLogin": "Your action: click \"Sign in\" and complete Tailscale login in your browser",
         "actFunnel": "Your action: if an approval link appears, approve it once in your browser (your tailnet may not require it)",

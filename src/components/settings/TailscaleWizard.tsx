@@ -294,6 +294,22 @@ export function TailscaleWizard() {
                     {actionText}
                   </p>
                 )}
+                {/* 2026-10-08（用户实测缺口）：Windows 走 MSI，**安装向导会让用户选安装
+                    路径**（MAM 执行 msiexec 刻意不加 /qn——「装在哪里」的选择权本就该给
+                    用户）。装到自定义路径时后端已能经「服务登记 ImagePath」找到 CLI，但
+                    用户不会知道，只会一直看到「未安装」→ 又下载又安装（用户实测的死循环）。
+                    故安装行常驻一条弱提示：说清 MAM 的**两个查找位置**，并给出「装完点
+                    刷新状态」的动作（重探时机 = 挂载/动作后，不点就一直显示旧结论）。
+                    macOS 的 .pkg 由 installer 固定装到 /Applications，用户无从选择
+                    ⇒ 不显示（与后端 actAdminWinMsi 的逐平台分叉同口径）。 */}
+                {step.id === "install" && !done && probe?.platform === "windows" && (
+                  <p
+                    data-testid="ts-install-path-hint"
+                    className="text-muted-foreground mt-0.5 text-[11px]"
+                  >
+                    {t("settings.remote.tsWizard.installPathHint")}
+                  </p>
+                )}
                 {step.needsHuman && step.humanOptional && (
                   <p
                     data-testid="ts-optional-step"

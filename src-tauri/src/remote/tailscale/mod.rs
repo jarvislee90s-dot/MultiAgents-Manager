@@ -1230,6 +1230,38 @@ mod tests {
         }
     }
 
+    /// **2026-10-08 缺口锚点（用户实测）**：Windows 走 MSI，**安装向导会让用户选安装路径**
+    /// （MAM 执行 `msiexec /i` **刻意不加 /qn**——选择权本就该给用户）⇒ 安装步的动作文案
+    /// 必须**逐平台分叉**：Windows 那份要事前点明「用默认路径最省事 / 装到别处也可以，
+    /// 请记住那个路径」；macOS 那份**不得夹带**（.pkg 由 `installer` 固定装到
+    /// /Applications，用户根本无从选择，套 Windows 的话就是张冠李戴的谎报）。
+    /// 变异：把 install 步的文案键改回两平台同值 → 本测试必红。
+    #[test]
+    fn install_step_action_key_warns_windows_users_about_the_install_path() {
+        let install_key = |p: Platform| {
+            wizard_steps(p)
+                .into_iter()
+                .find(|s| s.id == "install")
+                .expect("两平台都必有 install 步")
+                .human_action_key
+        };
+        assert_eq!(
+            install_key(Platform::Windows),
+            "settings.remote.tsWizard.actAdminWinMsi",
+            "Windows 的 MSI 会让用户选安装路径 ⇒ 动作文案必须点明（默认路径最省事）"
+        );
+        assert_eq!(
+            install_key(Platform::Mac),
+            "settings.remote.tsWizard.actAdmin",
+            "macOS 的 .pkg 固定装到 /Applications，不得套用 Windows 特有的路径提示"
+        );
+        assert_ne!(
+            install_key(Platform::Mac),
+            install_key(Platform::Windows),
+            "两平台文案必须分叉（同值 = 又把 Windows 特有的话塞给 mac 用户）"
+        );
+    }
+
     /// A1（2026-10-07 Windows 实测）**变异锚点**：Funnel 首次开通**不必然**要求浏览器
     /// 批准——Windows 11 家庭版 / Tailscale 1.102.4 MSI 实测 `funnel --bg 19999` 退出码 0、
     /// 0.1 秒返回、**零批准链接、零人工点击**（推测该尾网 ACL 已允许本节点 Funnel）；

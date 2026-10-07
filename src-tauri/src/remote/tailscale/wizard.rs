@@ -144,7 +144,17 @@ pub(super) fn wizard_steps(p: Platform) -> Vec<WizardStep> {
             id: "install",
             needs_human: true,
             human_optional: false,
-            human_action_key: "settings.remote.tsWizard.actAdmin",
+            // **2026-10-08（用户实测缺口）**：动作文案**逐平台分叉**。Windows 走的是 MSI，
+            // 而 MAM 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权本就该
+            // 给用户（用户裁决：「你不能限制用户安装在哪里」）。既然路径由用户定，就必须
+            // **事前**说清「用默认路径最省事；装到别处也可以，请记住那个路径」。
+            // macOS 的 .pkg 由 `installer` 固定装到 /Applications，用户无从选择 ⇒ 保持
+            // 原文案（把 Windows 特有的话塞给 mac 用户就是张冠李戴的谎报）。
+            human_action_key: if p == Platform::Windows {
+                "settings.remote.tsWizard.actAdminWinMsi"
+            } else {
+                "settings.remote.tsWizard.actAdmin"
+            },
         },
     ];
     if p == Platform::Mac {

@@ -120,6 +120,50 @@ describe("TailscaleWizard 步骤渲染与三态（§C2）", () => {
     expect(screen.getByText(/approve it once in your browser/i)).toBeTruthy();
   });
 
+  // ---- 2026-10-08：安装路径两道提示（用户实测缺口：装到非默认路径 ⇒ MAM 找不到 CLI）----
+  // MAM 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权给用户。缺口是
+  // MAM 原先只在 `C:\Program Files\Tailscale` 找 CLI：装到 `D:\软件\Tailscale` 就判「没装」，
+  // 向导又下载又安装、装完还是找不到。治本是后端补「服务登记 ImagePath」第二来源；
+  // 前端这两条是**提示**：① Windows 安装步的动作文案（后端 actAdminWinMsi 下发）点明
+  // 路径可自选、默认最省事；② 安装行常驻弱提示，说清 MAM 的**两个查找位置**并给出
+  // 「装完点刷新状态」的动作（重探时机 = 挂载/动作后，不点就一直显示旧结论）。
+  it("Windows 安装行常驻「查找位置」弱提示 + 动作文案点明路径可自选", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_ts_probe")
+        return macProbe({
+          platform: "windows",
+          windowsVerified: true,
+          windowsVerifiedFrom: null,
+          windowsUnverifiedSteps: [],
+          steps: [
+            step("detect"),
+            step("download"),
+            step("install", true, "settings.remote.tsWizard.actAdminWinMsi"),
+            step("login", true, "settings.remote.tsWizard.actLogin"),
+            step("shields_up"),
+            step("funnel", true, "settings.remote.tsWizard.actFunnel", true),
+            step("verify"),
+            step("autostart"),
+          ],
+        });
+      return null;
+    });
+    render(<TailscaleWizard />);
+    // ① 后端下发的 Windows 安装动作文案里必须点明「安装向导会让你选路径」
+    expect(await screen.findByText(/choose the install path/i)).toBeTruthy();
+    // ② 安装行弱提示：两个查找位置 + 装完点刷新
+    const hint = screen.getByTestId("ts-install-path-hint");
+    expect(hint.textContent).toMatch(/default install directory/i);
+    expect(hint.textContent).toMatch(/service/i);
+    expect(hint.textContent).toMatch(/refresh/i);
+  });
+
+  it("macOS 不显示安装路径提示（.pkg 固定装到 /Applications，用户无从选择）", async () => {
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    expect(screen.queryByTestId("ts-install-path-hint")).toBeNull();
+  });
+
   it("卡住必须点名原因：blockedReason 随行显示「Stuck at this step: 原因」，不许只转圈", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "remote_ts_probe")
@@ -718,9 +762,12 @@ describe("TailscaleWizard i18n zh/en（tsWizard 两级键）", () => {
     expect([...used].filter((k) => !zhKeys.has(k))).toEqual([]);
     expect([...used].filter((k) => !enKeys.has(k))).toEqual([]);
 
-    // Rust 端 wizard_steps 的 human_action_key 四值（随载荷下发，前端 t() 动态翻译）
+    // Rust 端 wizard_steps 的 human_action_key 五值（随载荷下发，前端 t() 动态翻译）。
+    // 第 5 个（actAdminWinMsi）是 2026-10-08 的安装路径分叉：Windows 的 MSI 会让用户
+    // 自选安装路径 ⇒ 动作文案点明「用默认路径最省事」；macOS 仍走 actAdmin。
     for (const k of [
       "settings.remote.tsWizard.actAdmin",
+      "settings.remote.tsWizard.actAdminWinMsi",
       "settings.remote.tsWizard.actSysExt",
       "settings.remote.tsWizard.actLogin",
       "settings.remote.tsWizard.actFunnel",

@@ -328,7 +328,21 @@
           <div class="tri">
             <div class="tri-label"><span class="badge b-violet">状态二 · 配置中</span><span class="side">每一步都能看出进展与卡点</span></div>
             <div class="step done">✓ 检测与下载（官方源 + sha256 校验通过）</div>
-            <div class="step done">✓ 安装 Tailscale（已获管理员确认）</div>
+            <!-- 2026-10-08 七次回写（用户实测缺口：Tailscale 装在非默认路径 ⇒ MAM 找不到）：
+                 MAM 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权本就该给
+                 用户（用户裁决原话：「你不能限制用户安装在哪里」）。但 MAM 原先只在
+                 `C:\Program Files\Tailscale` 找 CLI：用户装到 `D:\软件\Tailscale`（尤其
+                 路径带中文）⇒ detect 判「没装」⇒ 向导又下载又安装 ⇒ 装完还是找不到
+                 （可能死循环）。**治本**是补「服务登记 `ImagePath`」第二来源（与盘符 /
+                 目录名 / 中文无关）；线稿这里补的是两道**提示**（不是判据）：
+                 ① **事前提醒**——安装步的动作文案**逐平台分叉**：Windows 那份（MSI 才会
+                    让用户选路径）点明「用默认路径最省事；装到别处也可以，请记住那个路径」，
+                    macOS 那份（.pkg 由 installer 固定装到 /Applications，用户无从选择）
+                    保持原文案，不夹带 Windows 特有的话；
+                 ② **事后可查**——安装行的弱提示说清 MAM 的**两个查找位置**（默认安装目录 +
+                    「Tailscale」服务登记的可执行路径）并给出「装完点刷新状态」的动作，
+                    让"装完仍显示未安装"有据可查、不至于反复重装。 -->
+            <div class="step done">✓ 安装 Tailscale（已获管理员确认）<span class="side">（Windows MSI 版：安装向导会让你选安装路径——动作文案点明「用默认路径最省事」；安装行常驻弱提示，说明 MAM 的两个查找位置 + 装完点「刷新状态」）</span></div>
             <div class="step cur">⏳ 登录 Tailscale —— <button class="btn">打开登录页</button> 等待你在浏览器完成登录…</div>
             <!-- 2026-10-07 三次回写（A1 实测）：Windows 11 家庭版 / Tailscale 1.102.4 MSI
                  实测 `funnel --bg` 退出码 0、0.1 秒返回、**零批准链接、零人工点击**；而
