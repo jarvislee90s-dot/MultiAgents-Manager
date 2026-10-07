@@ -281,6 +281,11 @@ UsageCollectResult {
 >    **必然**收下这笔（「日档与小时档不得分叉」由此自动成立）。日档窗口（`近 7 天`/`近 30 天`
 >    /`自定义`）按 `day_key` 取数，照常包含它。
 >
+> **另见（2026-10-07 事故）**：本机 dsh 的历史行是**重建**出来的（dev 热重载用半成品采集器跑了
+> 真实采集；处置见用户 18:38 裁决）——事故、根因、回退点路径、重建后验收与**已知差异**
+> （counter 类事实仍按 `last_event_ms` 单点归桶、补录真机零实例、界面未表达 `backfill`）
+> 全部落成入库文档：`docs/release-notes/2026-10-07-dsh-ledger-rebuild-incident.md`。
+>
 > **配套不变量**（都有锁）：`hour_row_*` / `backfill_rows_are_day_only_and_never_land_in_an_hour_window`
 > （用真实 `resolve_range` 的键集合断言）、`hour_rows_plus_backfill_equal_the_projection_cache_delta`
 > （总量护栏）、`log_leading_the_projection_cache_is_never_counted_twice`（日志领先缓存一轮时
