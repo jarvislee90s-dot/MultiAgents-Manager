@@ -49,7 +49,7 @@ interface ProgressEventPayload {
 
 export async function downloadAndInstall(
   latestJsonUrl: string,
-  onProgress?: (progress: UpdateProgress) => void,
+  onProgress?: (progress: UpdateProgress) => void
 ): Promise<{ ok: boolean; message?: string }> {
   const unlisten: UnlistenFn = await listen<ProgressEventPayload>(
     "mam-updater-progress",
@@ -61,7 +61,7 @@ export async function downloadAndInstall(
           downloaded: event.payload.downloaded,
         },
       });
-    },
+    }
   );
   try {
     await invoke("install_github_update", { latestJsonUrl });

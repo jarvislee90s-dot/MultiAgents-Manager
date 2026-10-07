@@ -124,13 +124,13 @@ export function MainTitleBar() {
           {availableUpdate && (
             <button
               onClick={openUpdaterDialog}
-              className="title-bar-btn hover:bg-amber-500/15 hover:text-amber-500 relative mr-1 text-amber-500"
+              className="title-bar-btn relative mr-1 text-amber-500 hover:bg-amber-500/15 hover:text-amber-500"
               aria-label={t("updater.badgeTooltip", { version: availableUpdate.version })}
               title={t("updater.badgeTooltip", { version: availableUpdate.version })}
               tabIndex={-1}
             >
               <Download className="h-4 w-4" />
-              <span className="bg-amber-500 animate-pulse absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ring-2 ring-background" />
+              <span className="ring-background absolute top-0.5 right-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500 ring-2" />
             </button>
           )}
 

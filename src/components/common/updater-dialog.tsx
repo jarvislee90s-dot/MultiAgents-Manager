@@ -53,13 +53,13 @@ function NotesImage({ src, alt }: { src?: string; alt?: string }) {
 /** release note 的 Markdown 元素样式（无 typography 插件，显式覆盖） */
 const markdownComponents = {
   h1: (p: React.ComponentProps<"h1">) => (
-    <h1 {...p} className="mb-1.5 mt-3 text-sm font-semibold first:mt-0" />
+    <h1 {...p} className="mt-3 mb-1.5 text-sm font-semibold first:mt-0" />
   ),
   h2: (p: React.ComponentProps<"h2">) => (
-    <h2 {...p} className="mb-1.5 mt-3 text-sm font-semibold first:mt-0" />
+    <h2 {...p} className="mt-3 mb-1.5 text-sm font-semibold first:mt-0" />
   ),
   h3: (p: React.ComponentProps<"h3">) => (
-    <h3 {...p} className="mb-1 mt-2 text-[13px] font-semibold first:mt-0" />
+    <h3 {...p} className="mt-2 mb-1 text-[13px] font-semibold first:mt-0" />
   ),
   p: (p: React.ComponentProps<"p">) => <p {...p} className="my-1.5 leading-relaxed" />,
   ul: (p: React.ComponentProps<"ul">) => <ul {...p} className="my-1.5 list-disc pl-5" />,
@@ -72,10 +72,7 @@ const markdownComponents = {
     <blockquote {...p} className="text-muted-foreground my-1.5 border-l-2 pl-3" />
   ),
   code: (p: React.ComponentProps<"code">) => (
-    <code
-      {...p}
-      className="bg-accent rounded border px-1 font-mono text-[11px] break-all"
-    />
+    <code {...p} className="bg-accent rounded border px-1 font-mono text-[11px] break-all" />
   ),
   hr: () => <hr className="my-2.5" />,
   table: (p: React.ComponentProps<"table">) => (
@@ -84,12 +81,8 @@ const markdownComponents = {
   th: (p: React.ComponentProps<"th">) => (
     <th {...p} className="bg-accent border px-1.5 py-1 text-left" />
   ),
-  td: (p: React.ComponentProps<"td">) => (
-    <td {...p} className="border px-1.5 py-1 align-top" />
-  ),
-  img: ({ src, alt }: { src?: string; alt?: string }) => (
-    <NotesImage src={src} alt={alt} />
-  ),
+  td: (p: React.ComponentProps<"td">) => <td {...p} className="border px-1.5 py-1 align-top" />,
+  img: ({ src, alt }: { src?: string; alt?: string }) => <NotesImage src={src} alt={alt} />,
 };
 
 export function UpdaterDialog({ manualCheck = false }: UpdaterDialogProps) {
@@ -218,8 +211,7 @@ export function UpdaterDialog({ manualCheck = false }: UpdaterDialogProps) {
                   <p>
                     {t("updater.versionAvailable", {
                       version: update?.version,
-                      currentVersion:
-                        result?.status === "available" ? result.currentVersion : "",
+                      currentVersion: result?.status === "available" ? result.currentVersion : "",
                     })}
                     {update?.publishedAt && (
                       <span className="text-muted-foreground">
@@ -230,7 +222,7 @@ export function UpdaterDialog({ manualCheck = false }: UpdaterDialogProps) {
                   </p>
                   <button
                     onClick={handleOpenGithub}
-                    className="text-muted-foreground underline underline-offset-2 transition-colors hover:text-foreground"
+                    className="text-muted-foreground hover:text-foreground underline underline-offset-2 transition-colors"
                   >
                     {t("updater.viewOnGithub")}
                   </button>

@@ -67,9 +67,7 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
     try {
       // Windows：装完插件直接退出进程；macOS：装完 Rust 侧重启——
       // 正常路径上这里不会等到 resolve，失败路径带错误返回由弹窗 toast（评审 I2）
-      return await downloadAndInstall(result.update.latestJsonUrl, (progress) =>
-        set({ progress }),
-      );
+      return await downloadAndInstall(result.update.latestJsonUrl, (progress) => set({ progress }));
     } finally {
       set({ downloading: false });
     }
@@ -103,7 +101,5 @@ export const useUpdaterStore = create<UpdaterStore>((set, get) => ({
 
 /** 派生选择器：当前可用更新（无 / 检查失败 / 已是最新 → null；徽标与弹窗共用） */
 export function useAvailableUpdate(): UpdateInfo | null {
-  return useUpdaterStore((s) =>
-    s.result?.status === "available" ? s.result.update : null,
-  );
+  return useUpdaterStore((s) => (s.result?.status === "available" ? s.result.update : null));
 }

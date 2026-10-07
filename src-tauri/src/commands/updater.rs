@@ -145,8 +145,7 @@ pub async fn check_for_github_update(app: tauri::AppHandle) -> CheckUpdateStatus
             message: "未找到带升级资产的 release".into(),
         };
     };
-    let latest_version =
-        parse_tag_version(&latest.tag_name).expect("pick 已过滤无法解析的 tag");
+    let latest_version = parse_tag_version(&latest.tag_name).expect("pick 已过滤无法解析的 tag");
     if latest_version <= current {
         return CheckUpdateStatus::UpToDate {
             current_version: current.to_string(),
@@ -205,7 +204,9 @@ pub async fn install_github_update(
     // 插件仅在 release 构建注册（lib.rs）；debug 构建下 updater_builder 会因
     // state 未托管而 panic，先降级提示（评审 I3：运行时 env 门已随 lib.rs 移除）
     if cfg!(debug_assertions) {
-        return Err("此构建未启用应用内升级（仅 release 构建支持），请到 GitHub release 页下载".into());
+        return Err(
+            "此构建未启用应用内升级（仅 release 构建支持），请到 GitHub release 页下载".into(),
+        );
     }
     validate_latest_json_url(&latest_json_url)?;
     let url: tauri::Url = latest_json_url
@@ -376,8 +377,10 @@ mod tests {
         assert_eq!(up_to_date["latestVersion"], "0.5.0-beta.1");
         assert!(up_to_date.get("latest_version").is_none());
 
-        let error =
-            serde_json::to_value(CheckUpdateStatus::Error { message: "boom".into() }).unwrap();
+        let error = serde_json::to_value(CheckUpdateStatus::Error {
+            message: "boom".into(),
+        })
+        .unwrap();
         assert_eq!(error["status"], "error");
         assert_eq!(error["message"], "boom");
     }
@@ -390,20 +393,32 @@ mod tests {
             release("v0.4.1", false, true),
             release("v0.5.0-beta.2", true, true),
         ];
-        assert_eq!(pick_latest_updatable(&list).unwrap().tag_name, "v0.5.0-beta.2");
+        assert_eq!(
+            pick_latest_updatable(&list).unwrap().tag_name,
+            "v0.5.0-beta.2"
+        );
     }
 
     #[test]
     fn prerelease_beats_older_stable() {
         // 用户裁决：单通道，prerelease 也是合法升级目标
-        let list = vec![release("v0.4.1", false, true), release("v0.5.0-beta.1", true, true)];
-        assert_eq!(pick_latest_updatable(&list).unwrap().tag_name, "v0.5.0-beta.1");
+        let list = vec![
+            release("v0.4.1", false, true),
+            release("v0.5.0-beta.1", true, true),
+        ];
+        assert_eq!(
+            pick_latest_updatable(&list).unwrap().tag_name,
+            "v0.5.0-beta.1"
+        );
     }
 
     #[test]
     fn stable_beats_same_minor_prerelease() {
         // semver 规则：0.5.0 > 0.5.0-beta.1
-        let list = vec![release("v0.5.0-beta.1", true, true), release("v0.5.0", false, true)];
+        let list = vec![
+            release("v0.5.0-beta.1", true, true),
+            release("v0.5.0", false, true),
+        ];
         assert_eq!(pick_latest_updatable(&list).unwrap().tag_name, "v0.5.0");
     }
 
@@ -426,10 +441,8 @@ mod tests {
 
     #[test]
     fn cleans_only_updater_dirs_matching_app_prefix() {
-        let base = std::env::temp_dir().join(format!(
-            "mam-updater-cleanup-test-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("mam-updater-cleanup-test-{}", std::process::id()));
         std::fs::create_dir_all(base.join("MyApp-1.2.3-updater-abc")).unwrap();
         std::fs::create_dir_all(base.join("MyApp-1.2.3-updater-xyz")).unwrap();
         std::fs::create_dir_all(base.join("OtherApp-9.9.9-updater-abc")).unwrap();
