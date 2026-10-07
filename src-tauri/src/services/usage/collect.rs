@@ -1824,6 +1824,25 @@ mod tests {
     /// **整行 `//`**（判据面剥掉，**不进面**）、新增用例在 BEGIN..END 排除区内；
     /// 前端（`UsageDistributionCard.tsx` / `i18n` / 测试）根本不在面内。
     /// 面**没有新增文件**、排除区标记未动、其余 23 个文件逐字未改。
+    ///
+    /// **第 14 轮同步（2026-10-07 dsh 改「按事件发生时间」入账）**：6917/149472 → **7234/156289**
+    /// （**+317 行 / +6817 字符**）。变化**只来自两个文件的生产半边** —— 无新增文件、
+    /// 排除区标记未动、其余 22 个文件逐字未改：
+    ///   * `collectors/dsh.rs`：**+309 行 / +6627 字符** —— 逐事件归属这条链的全部生产代码：
+    ///     新增 `EventUsage` / `usage_events_of` / `EventTailPlan` / `event_watermark_of` /
+    ///     `event_tail_plan` / `EventHourAgg` / `PendingBackfill` / `backfill_buckets` /
+    ///     `emit_backfill`；`LogDigest` 多两个字段（`text_len` / `usage_events`）并在
+    ///     `LogDigest::of` 里填上；A 段改写（**不再**写四桶与请求数，改为把差额 `D` 挂账）；
+    ///     B 段新增逐事件归属块与 `D − E` 对账（补录目标按**已记录水位 R** 算）；日志侧游标由
+    ///     「`byte_offset` 一律 0」改为**两维真实水位**（解压正文字节 + 已消费事件条数），
+    ///     并加「老游标（`byte_offset`/`ordinal` 一律 0 且没有 R）不得当成有效水位」这道闸；
+    ///   * `semantics.rs`：**+8 行 / +190 字符** —— `CacheSemantics` 新增 `Backfill` 变体
+    ///     （补录来源标记）+ `as_db`/`from_db` 各多一个分支 + `is_backfill()`，`normalize`
+    ///     多一条「拒绝把来源标记当语义用」的显式分支。
+    ///
+    /// 两处增量都是**可计代码行**：判据面剥掉整行 `//` 注释（**含 `///` 文档注释**），
+    /// 本轮新写的数百行文档注释因此**不进面**。`collect.rs` 生产半边**零改动** ——
+    /// 日聚合由 `ledger::daily_rows_of` 从明细行折叠，落库路径不需要跟着改。
     #[test]
     fn scan_face_size_is_pinned() {
         let (mut lines, mut chars) = (0usize, 0usize);
@@ -1834,7 +1853,7 @@ mod tests {
         }
         assert_eq!(
             (lines, chars),
-            (6917, 149472),
+            (7234, 156289),
             "判据面尺寸变了（实测 {lines} 行 / {chars} 字符）：本用例是**声明 = 实际**的钉子——\
              先弄清面为什么变（新增文件？改了排除区标记？动了生产代码？），再同步本常量、\
              `no_source_timezone_is_fed_into_any_key_function` 的锁注释、`KNOWN-PLAN-DEFECTS.md` \

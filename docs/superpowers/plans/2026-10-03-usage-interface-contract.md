@@ -263,6 +263,34 @@ UsageCollectResult {
 
 **为什么明细表按小时桶存**：【近 5 小时】这一档要求小时粒度，按日存**产不出**小时桶。故明细唯一键为 `hourKey = YYYY-MM-DDTHH`（本地时区整点），另存派生列 `dayKey` 供日聚合与保留期清理使用。日桶由 `hourKey` 前缀聚合得到，不重复落一份。
 
+> **2026-10-07 接口变更申报（dsh 时间归属改造；用户已拍板的口径，见 `docs/superpowers/plans/2026-10-07-dsh-time-attribution-fix-brief.md`）**：
+> 三处**存储口径**变更，均不改表结构、不改命令面、不改前端值对象形状：
+>
+> 1. **dsh 的四桶改为按「事件发生时间」入账**（原：按采集时刻）。归属键仍走 `hour_key_of_host`
+>    （宿主本地），命令面/字段一字未改；变的是同一笔 token 落在哪个 `hourKey` 上——
+>    短窗口（近 5 小时 / 今天）因此从「采集时刻的平移值」变成事件真值。
+> 2. **`cacheSemantics` 取值集合新增 `backfill`**（列不变、仍是 TEXT；Rust 侧
+>    `CacheSemantics::Backfill`，`from_db` 认它，`normalize()` 对它返回 `None`——它是**来源标记**
+>    而不是缓存语义）。语义：「这一段量不是实测到的，而是日志已被清理、只能从投影缓存累计差额
+>    补录的部分」，**只进全天账**。
+> 3. **补录行的 `hourKey` 用「日键」**（`YYYY-MM-DD`，10 字符）**而不是小时键**：这是
+>    「只进全天账、不进任何短窗口」的落地机制，不是笔误。它与小时键不冲突（`usage_detail`
+>    主键含 `hourKey`，两者是不同的行），且小时档取数（`query.rs::load_rows_for_keys`）
+>    在区间过滤之后还有一道**精确成员**判定 `keys.contains(&hour_key)` ⇒ 10 字符的日键
+>    **永远不在**任何小时窗口的键集合里；日档由 `ledger::daily_rows_of` 从明细行折叠 ⇒
+>    **必然**收下这笔（「日档与小时档不得分叉」由此自动成立）。日档窗口（`近 7 天`/`近 30 天`
+>    /`自定义`）按 `day_key` 取数，照常包含它。
+>
+> **另见（2026-10-07 事故）**：本机 dsh 的历史行是**重建**出来的（dev 热重载用半成品采集器跑了
+> 真实采集；处置见用户 18:38 裁决）——事故、根因、回退点路径、重建后验收与**已知差异**
+> （counter 类事实仍按 `last_event_ms` 单点归桶、补录真机零实例、界面未表达 `backfill`）
+> 全部落成入库文档：`docs/release-notes/2026-10-07-dsh-ledger-rebuild-incident.md`。
+>
+> **配套不变量**（都有锁）：`hour_row_*` / `backfill_rows_are_day_only_and_never_land_in_an_hour_window`
+> （用真实 `resolve_range` 的键集合断言）、`hour_rows_plus_backfill_equal_the_projection_cache_delta`
+> （总量护栏）、`log_leading_the_projection_cache_is_never_counted_twice`（日志领先缓存一轮时
+> 不得重复入账）。**历史数据不回填**：改造只对生效之后的采集生效。
+
 **供应商三态列名映射**：同一概念有三个命名族——值对象字段 `UsageRow.sourceKind`（出参）/ 存储列 `provider_kind`（明细表与日聚合表）/ Rust 枚举 `SourceKind`。实现时按此映射，不得各自另起一名（否则 UI 三态标记会全退化 `unknown`）。
 
 **项目键规则**（说明书 §5.1 四条规则 + D21）：`projectKey = projectName.toLowerCase()`，其中 `projectName` **复用既有 `monitor/project.rs:10 project_name_from_path`**（basename，**不做** realpath / 大小写规范化 / trim / 软链解析）；`projectLabel = projectName` 原文；`realpath` **只留档**（会话维度列 `project_realpath`），**不进展示与分组键**；**禁止**用日志目录名反推、**禁止**用 `project_id` 反解；**一个会话文件可对应多个 projectKey**（记录级 cwd 归属）。
