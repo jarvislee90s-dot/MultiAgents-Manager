@@ -1958,49 +1958,160 @@ mod tests {
         );
     }
 
+    /// **合规红线自查清单**（凭据类 + 偏好类旗标前缀）：登录发起**一个都不许带**。
+    /// 两个测试共用同一份清单——常量内容白名单（`login_attempt_args_are_a_closed_whitelist`）
+    /// 与**实际 argv** 行为断言（`login_attempt_command_carries_only_the_whitelist_argv`）
+    /// 各查一遍，避免两处清单漂移。
+    const LOGIN_FORBIDDEN_FLAGS: &[&str] = &[
+        "--auth-key",
+        "--client-secret",
+        "--id-token",
+        "--shields-up",
+        "--advertise-routes",
+        "--advertise-exit-node",
+        "--accept-routes",
+        "--exit-node",
+        "--hostname",
+        "--login-server",
+        "--operator",
+        "--reset",
+    ];
+
+    /// **一切"往命令里加参数"的调用形态**（方法态 + 关联函数态）——形态针靠它把
+    /// "argv 只能从白名单来"从偏好变成可执行约束。
+    ///
+    /// 为什么逐个列全、而不是只写旧针的 `.arg(`：Windows `CommandExt` 的 `.raw_arg(` 与
+    /// `Command::args(&mut cmd, …)` 这类**关联函数形态**都不含子串 `.arg(`，旧针漏掉它们
+    /// （2026-10-08 收口轮实测：在调用点补 `.args(&["--auth-key", …])` 旧针**不红**）。
+    const ARGV_ADDING_PATTERNS: &[&str] = &[
+        ".arg(",
+        ".args(",
+        ".arg_os(",
+        ".args_os(",
+        ".raw_arg(",
+        "::arg(",
+        "::args(",
+        "::arg_os(",
+        "::args_os(",
+        "::raw_arg(",
+    ];
+
     /// **I2（2026-10-08 架构评审）：argv 是封闭白名单**——红线是「**不带任何凭据参数、
     /// 不碰偏好**」，而旧形态针只禁等待类调用、**没锁参数**（往 `login` 后面加
     /// `--auth-key` / `--shields-up=false` 不会变红）。本测试把白名单本身断言到底：
+    /// - **被测对象是 `login_argv()`**（生产实际取参的那个纯函数），不是常量本身——
+    ///   `assert_eq!(login_argv(), LOGIN_ARGS)` 把两者钉成同一个，改任何一边都红；
     /// - 除 `login` 外只允许 `--timeout <有界秒数>`（默认 0s = 一直等，正是 I1 要修的）；
     /// - 任何凭据 / 偏好旗标（`--auth-key` / `--shields-up` / `--advertise-*` / …）出现即红。
     ///
-    /// 变异：往 LOGIN_ARGS 里加任何一个参数 → 必红。
+    /// 变异：往 LOGIN_ARGS（或 `login_argv()`）里加任何一个参数 → 必红。
     #[test]
     fn login_attempt_args_are_a_closed_whitelist() {
+        let argv = login_argv();
         assert_eq!(
-            LOGIN_ARGS.len(),
-            3,
-            "argv 只允许 `login --timeout <n>s` 三条：{LOGIN_ARGS:?}"
+            argv, LOGIN_ARGS,
+            "`login_argv()` 必须是白名单常量本身（argv 的唯一出处，两边不许分叉）"
         );
-        assert_eq!(LOGIN_ARGS[0], "login", "只允许 login 子命令（up 语义不同）");
-        assert_eq!(LOGIN_ARGS[1], "--timeout", "第二条只允许有界等待参数");
+        assert_eq!(
+            argv.len(),
+            3,
+            "argv 只允许 `login --timeout <n>s` 三条：{argv:?}"
+        );
+        assert_eq!(argv[0], "login", "只允许 login 子命令（up 语义不同）");
+        assert_eq!(argv[1], "--timeout", "第二条只允许有界等待参数");
         // 有界：0s = 「blocks forever」（1.102.4 `login --help` 原文）⇒ 必须是有限秒数
-        let secs: u64 = LOGIN_ARGS[2]
+        let secs: u64 = argv[2]
             .strip_suffix('s')
             .and_then(|n| n.parse().ok())
-            .unwrap_or_else(|| panic!("--timeout 必须是有界秒数（如 15s）: {LOGIN_ARGS:?}"));
+            .unwrap_or_else(|| panic!("--timeout 必须是有界秒数（如 15s）: {argv:?}"));
         assert!(
             (1..=60).contains(&secs),
             "等待上限必须小而有界（1..=60 秒），实际 {secs}s"
         );
         // 红线自查（与上面的长度断言同源，但把「不许带什么」写成可读的清单）
-        for forbidden in [
-            "--auth-key",
-            "--client-secret",
-            "--id-token",
-            "--shields-up",
-            "--advertise-routes",
-            "--advertise-exit-node",
-            "--accept-routes",
-            "--exit-node",
-            "--hostname",
-            "--login-server",
-            "--operator",
-            "--reset",
-        ] {
+        for &forbidden in LOGIN_FORBIDDEN_FLAGS {
             assert!(
-                !LOGIN_ARGS.iter().any(|a| a.starts_with(forbidden)),
+                !argv.iter().any(|a| a.starts_with(forbidden)),
                 "登录发起**不得**带 {forbidden}（合规红线：不带任何凭据参数、不碰偏好）"
+            );
+        }
+    }
+
+    /// **argv 的行为断言（2026-10-08 收口轮补强）**：直读生产**真正会 spawn 的那个
+    /// `Command` 对象**的 `get_args()`——不是扫源码字符串。
+    ///
+    /// 起因（旧针被实测证伪）：旧形态针只断言 `body.contains(".args(LOGIN_ARGS)")` 且
+    /// `!body.contains(".arg(")`，于是**在调用点再补一行 `.args(&["--auth-key", …])`
+    /// 两个断言都不会红**（`.args(` 不含子串 `.arg(`；白名单测试只管常量本身、不管调用点）。
+    /// 实测：加完变异后 `login_attempt_spawns_detached_and_never_waits` +
+    /// `login_attempt_args_are_a_closed_whitelist` **双双通过**（4 passed / 0 failed）。
+    ///
+    /// 本测试查三层：① `login_argv()` == 白名单常量；② `login_command()` 造出的命令其
+    /// **实际 argv 逐条等于**白名单（长度 + 顺序 + 内容，多一条即红）；③ 红线自查落在
+    /// **实际 argv** 上（任何凭据/偏好旗标前缀出现即红）——"注释里说安全"变成"argv 被断言"。
+    /// 变异：在 `login_command` 的 `.args(login_argv())` 之后再补
+    /// `.args(&["--auth-key", "x"])` → ②③ 必红（实测报错见提交说明）。
+    #[test]
+    fn login_attempt_command_carries_only_the_whitelist_argv() {
+        assert_eq!(
+            login_argv(),
+            LOGIN_ARGS,
+            "argv 的唯一出处必须是白名单常量本身"
+        );
+        let bin = std::path::Path::new("tailscale"); // 只是占位路径：本测试不 spawn
+        let cmd = login_command(bin);
+        assert_eq!(
+            cmd.get_program(),
+            bin.as_os_str(),
+            "程序名必须是被注入的 CLI 路径（不许换成别的可执行）"
+        );
+        let got: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let want: Vec<String> = LOGIN_ARGS.iter().map(|a| (*a).to_string()).collect();
+        assert_eq!(
+            got, want,
+            "生产命令的**实际 argv** 必须逐条等于白名单（长度/顺序/内容）——多一条即触红线"
+        );
+        for &forbidden in LOGIN_FORBIDDEN_FLAGS {
+            assert!(
+                !got.iter().any(|a| a.starts_with(forbidden)),
+                "生产命令的**实际 argv** 里出现了 {forbidden}\
+                 （合规红线：不带任何凭据参数、不碰偏好）: {got:?}"
+            );
+        }
+    }
+
+    /// **argv 只有一个出处**（形态针，与上面的行为断言配对）：唯一拼装点 `login_command`
+    /// 体内 argv 调用**恰好一处**，且必须是 `.args(login_argv())`——加第二处（哪怕加空数组）
+    /// 即红；`.raw_arg(` 之类的关联/扩展形态也一并禁掉。
+    /// 变异：在 `login_command` 里再加一行 `.args(...)` → 必红。
+    #[test]
+    fn login_command_assembles_argv_only_from_the_whitelist_source() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/remote/tailscale/wizard.rs"
+        ))
+        .expect("读 wizard.rs");
+        let start = src
+            .find("fn login_command(")
+            .expect("argv 的唯一拼装点必须存在（spawn_login_attempt 调它）");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("函数体结束");
+        let body = &body[..end];
+        assert!(
+            body.contains(".args(login_argv())"),
+            "唯一拼装点必须从 `login_argv()`（白名单纯函数）**整条**取参: {body}"
+        );
+        for &pat in ARGV_ADDING_PATTERNS {
+            // 只允许 `.args(login_argv())` 那一处；其余形态一次都不许出现
+            let expected = usize::from(pat == ".args(");
+            assert_eq!(
+                body.matches(pat).count(),
+                expected,
+                "拼装点里 `{pat}` 的出现次数不对（只允许 `.args(login_argv())` 这一处）——\
+                 多一处就可能就地拼参数（合规红线）: {body}"
             );
         }
     }
@@ -2013,10 +2124,22 @@ mod tests {
     ///
     /// **I2 追加（2026-10-08 架构评审）：形态针必须连 argv 一起锁。** 旧针只禁等待类调用，
     /// 往登录命令后面加 `--auth-key` / `--shields-up=false` **不会变红**——而这条命令的合规
-    /// 红线恰恰是「不带任何凭据参数、不碰偏好」。故本针追加两条：argv 整条来自
-    /// [`LOGIN_ARGS`] 白名单常量（其内容由 `login_attempt_args_are_a_closed_whitelist` 锁死），
-    /// 且**不许就地**逐个 `.arg(...)` 拼参数（参数只能从那一个白名单出处来）。
-    /// 变异：把 `cmd.args(LOGIN_ARGS)` 改回 `.arg("login").arg("--auth-key")...` → 必红。
+    /// 红线恰恰是「不带任何凭据参数、不碰偏好」。
+    ///
+    /// **2026-10-08 收口轮补强（旧针再次被实测证伪）**：旧针的 argv 判据是
+    /// `body.contains(".args(LOGIN_ARGS)")` 且 `!body.contains(".arg(")`——**在调用点再补一行
+    /// `.args(&["--auth-key", "x"])` 两个断言都不会红**（`.args(` 不含子串 `.arg(`；白名单
+    /// 测试只管常量本身、不管调用点）。实测：加完变异后本测试 + 白名单测试 **4 passed**。
+    /// 现在改成"调用点不许自己拼 argv"：
+    /// - spawn 点必须**逐字**调用唯一拼装点 `login_command(&bin)`（签名/实参一变即不匹配）；
+    /// - 本函数体内**不得出现任何 argv 拼装形态**（[`ARGV_ADDING_PATTERNS`]：`.arg(` /
+    ///   `.args(` / `.args_os(` / `.raw_arg(` 及关联函数形态）——旧判据 `.arg(` 是其中之一，
+    ///   **没有削弱**；
+    /// - argv 的**内容**由行为断言 `login_attempt_command_carries_only_the_whitelist_argv`
+    ///   直读真实 `Command::get_args()` 锁死（不再依赖源码扫描）。
+    ///
+    /// 变异：在 `spawn_login_attempt` 里加 `.args(&["--auth-key", "x"])` → 必红（实测报错见
+    /// 提交说明）；把 `login_command(&bin)` 换成任何别的东西 → 必红。
     #[test]
     fn login_attempt_spawns_detached_and_never_waits() {
         let src = std::fs::read_to_string(concat!(
@@ -2058,22 +2181,30 @@ mod tests {
             body.contains("login_child_slot_is_empty()"),
             "必须有单飞门（同一时刻至多一个 `tailscale login`）: {body}"
         );
-        // I2：argv 必须整条来自白名单常量，且不许就地拼参数
+        // I2（2026-10-08 收口轮补强）：argv 一律经**唯一拼装点** `login_command`。
+        // 调用逐字锁死——多传/少传实参、换成别的构造都会让这一行不匹配。
         assert!(
-            body.contains(".args(LOGIN_ARGS)"),
-            "登录 argv 必须整条来自白名单常量 LOGIN_ARGS（合规红线：不带凭据参数、不碰偏好）: {body}"
+            body.contains("login_command(&bin)"),
+            "spawn 点必须逐字调用 `login_command(&bin)`（argv 的唯一拼装点，\
+             内容由 login_attempt_command_carries_only_the_whitelist_argv 断言）: {body}"
         );
-        assert!(
-            !body.contains(".arg("),
-            "不许逐个 `.arg(...)` 就地拼参数——argv 只能从 LOGIN_ARGS 这一个出处来\n\
-             （旧针只禁等待类调用 ⇒ 加 `--auth-key` 不会变红，这条就是补上的那一半）: {body}"
-        );
+        // 本函数体内**不得出现任何 argv 拼装**：旧判据 `.arg(` 只是其中一种形态，
+        // 这里把方法态与关联函数态一并禁掉——`.args(&["--auth-key", …])` 这类追加在旧针下
+        // 不红，正是本轮补上的缺口（实测见本测试文档）。
+        for &pat in ARGV_ADDING_PATTERNS {
+            assert!(
+                !body.contains(pat),
+                "spawn 点**不得**就地拼 argv（出现 {pat}）——argv 只能经 `login_command` / \
+                 `login_argv` 从白名单来（合规红线：不带任何凭据参数、不碰偏好）: {body}"
+            );
+        }
         // 命令必须是 login（不是 up）：up 与 login 是两条不同的上游命令（up 是"连上网络
         // 并按需登录"，login 是"发起一次交互式登录"），本步语义只要后者 —— 事实版理由见
         // LOGIN_ARGS 与 spawn_login_attempt 的注释
         assert!(
-            LOGIN_ARGS.contains(&"login"),
-            "必须调 `tailscale login`（只发起交互式登录、让尾网生成授权链接）: {LOGIN_ARGS:?}"
+            login_argv().contains(&"login"),
+            "必须调 `tailscale login`（只发起交互式登录、让尾网生成授权链接）: {:?}",
+            login_argv()
         );
     }
 

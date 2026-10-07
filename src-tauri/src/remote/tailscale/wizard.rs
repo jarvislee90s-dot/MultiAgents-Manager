@@ -578,6 +578,21 @@ pub(super) const LOGIN_TIMEOUT_ARG: &str = "15s";
 ///   别照抄旧结论。
 pub(super) const LOGIN_ARGS: &[&str] = &["login", "--timeout", LOGIN_TIMEOUT_ARG];
 
+/// **登录 argv 的唯一出处（纯函数，可断言；2026-10-08 收口轮补强）**：返回 [`LOGIN_ARGS`] 本身。
+///
+/// 为什么要有这一层：旧的合规红线守卫是**扫字符串**（`body.contains(".args(LOGIN_ARGS)")`
+/// 且 `!body.contains(".arg(")`），而**在调用点再补一行 `.args(&["--auth-key", …])` 两个断言
+/// 都不会红**——`.args(` 不含子串 `.arg(`，白名单测试又只管常量本身、不管调用点。MAM 绝不持
+/// 凭据是**合规红线**，不能靠一条可绕过的扫描守着。现在 argv 的拼装被收进唯一一处
+/// （[`login_command`]），并由**行为断言**直接读真实 `Command` 的 `get_args()`
+/// （`login_attempt_command_carries_only_the_whitelist_argv`）——任何就地追加的参数都必红。
+///
+/// 恒等断言 `login_argv() == LOGIN_ARGS` 把"生产实际用的那条 argv"与"被内容白名单锁死的
+/// 常量"钉在一起（`login_attempt_args_are_a_closed_whitelist`）：改任何一边都红。
+pub(super) fn login_argv() -> &'static [&'static str] {
+    LOGIN_ARGS
+}
+
 /// 轮询收尾时对等待者的处置（I1）。
 ///
 /// **决策从哪来（2026-10-08 收口轮如实更正）**：生产里**只有「窗尽且没拿到链接」那 1 条**
@@ -683,6 +698,28 @@ pub(super) fn finish_login_attempt(decision: LoginCleanup) {
     }
 }
 
+/// **登录命令的唯一拼装点**（纯构造：不 spawn、不等待、不碰管道；2026-10-08 收口轮补强）。
+///
+/// 抽出来的理由是**让红线可断言**：测试拿到的是生产**真正会 spawn 的那个 `Command` 对象**
+/// （`Command::get_args()` 直读），于是"在调用点再拼一个参数"（例如
+/// `.args(&["--auth-key", "x"])`）**必红**——不再依赖扫源码字符串。
+///
+/// 生产调用点 [`spawn_login_attempt`] 体内**不得出现任何 argv 拼装**（形态针
+/// `login_attempt_spawns_detached_and_never_waits` 连 `.arg(` / `.args(` / `.args_os(` /
+/// `.raw_arg(` 及其关联函数形态一起禁），argv 只能经本函数来。
+pub(super) fn login_command(bin: &std::path::Path) -> std::process::Command {
+    use std::process::Stdio;
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(login_argv()) // 唯一 argv 出处（I2 白名单）
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // 与 run_cli 同一条 macOS 适配（GUI standalone build 才认这条 CLI 入口）
+    #[cfg(target_os = "macos")]
+    cmd.env("TAILSCALE_BE_CLI", "1");
+    cmd
+}
+
 /// 生产发起入口：**后台**起一次 `tailscale login`（只让尾网生成授权链接，不带任何旗标）。
 ///
 /// **为什么是 `login` 而不是 `up`，以及为什么"安全"来自零旗标**：事实版理由与上游原文见
@@ -696,27 +733,20 @@ pub(super) fn finish_login_attempt(decision: LoginCleanup) {
 /// （[`adopt_login_child`]），窗尽/应用退出由 [`finish_login_attempt`] /
 /// [`cancel_login_attempt`] 收（旧实现的收尸线程既杀不掉子进程，又每次泄漏一个阻塞线程）。
 /// 形态针见 `login_attempt_spawns_detached_and_never_waits`（出现任何等待/收取输出的调用
-/// 即红，argv 不许就地拼）。
+/// 即红，argv 不许就地拼）；argv 本身的行为由 [`login_command`] 一处拼装、由其行为测试锁死。
 ///
 /// **单飞（I1）**：槽里还有活着的等待者就**不再起第二个**——用户连点两次不该派生两个进程
 /// （第二个也没有额外信息：链接由 tailscaled 持有，轮询照旧能取到）。
 ///
 /// **不代登录**：argv 里没有任何凭据参数、不读任何凭据、不解析登录结果——只让尾网生成链接。
 pub(super) fn spawn_login_attempt() -> Result<(), String> {
-    use std::process::Stdio;
     reap_login_attempt(); // 先收掉已经自然退出的（单飞判据只看活着的）
     if !login_child_slot_is_empty() {
         return Ok(()); // 单飞：已有等待者在跑，不再派生第二个
     }
     let bin = find_cli().ok_or_else(|| "未检测到 Tailscale（尚未安装）".to_string())?;
-    let mut cmd = std::process::Command::new(bin);
-    cmd.args(LOGIN_ARGS) // 唯一 argv 出处（I2 白名单）
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // 与 run_cli 同一条 macOS 适配（GUI standalone build 才认这条 CLI 入口）
-    #[cfg(target_os = "macos")]
-    cmd.env("TAILSCALE_BE_CLI", "1");
+    // 命令与 argv 一律由 login_command 一处拼装（本函数体内不得出现 argv 拼装，形态针锁死）
+    let mut cmd = login_command(&bin);
     let child = cmd
         .spawn()
         .map_err(|e| format!("启动 `tailscale login` 失败: {e}"))?;
