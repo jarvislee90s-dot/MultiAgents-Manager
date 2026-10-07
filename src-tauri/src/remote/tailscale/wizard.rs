@@ -34,50 +34,98 @@ pub(super) fn current_platform() -> Platform {
     }
 }
 
-/// **Windows 探测的实测覆盖起点**（I-3：验证位不得大于证据）。2026-10-07 的真机探测
-/// 环境 = **Windows 11 家庭版 / Tailscale 1.102.4（MSI 安装）**，按
-/// `docs/superpowers/plans/2026-10-06-windows-tailscale-probe-prompt.md` 执行，**从第 6 步
-/// `shields_up` 开始**（安装与登录此前已完成）——故**在此之前**的步骤（detect / download /
-/// install(UAC) / login）**流程没有被端到端跑过**，只有字段形态被顺带核对过。
+/// **Windows 探测的实测覆盖起点**（I-3：验证位不得大于证据）。
 ///
-/// 旧实现是一个**整行**布尔 `WINDOWS_VERIFIED = true`，UI 效果是整条「Windows 步骤尚未
-/// 实机校验」提示随位撤下 ⇒ **验证位大于证据**（用户会以为整条 Windows 流程都验过了；
-/// 代码自己的 A1 测试也只把「零点击」限定在 shields_up/funnel/verify/autostart 四步）。
-/// 现改为「实测覆盖从哪一步起 + 没跑过的步骤逐条点名」，两处都随步骤表派生，
-/// 文案收窄成精确范围（i18n `tsWizard.windowsUnverified`）。
-const WINDOWS_VERIFIED_FROM: &str = "shields_up";
+/// - **2026-10-07 第一次探测（历史）**：环境 = Windows 11 家庭版 / Tailscale 1.102.4
+///   （MSI 安装）。当时照一份**一次性探测任务书**执行（该任务书已在探测完成后删除，
+///   不在库内——2026-10-08 架构评审指出本注释还在引用它，故此处不再给失效路径），
+///   **从第 6 步 `shields_up` 开始**（安装与登录此前已完成）——故当时的起点是
+///   `shields_up`，之前的 detect / download / install(UAC) / login 四步**流程没被端到端
+///   跑过**，只有字段形态被顺带核对过。
+/// - **2026-10-07 用户实机确认（本轮依据，起点据此前移到第一步）**：用户在本机 Windows 上
+///   **卸载 Tailscale 后从零走完 MAM 向导全程**（下载 → 安装 UAC → 登录 → 关 shields-up →
+///   开通 Funnel → 可达性校验），**全程正常**，故上述四步的**流程**这一次是真的被端到端
+///   跑过了。用户原话：「走的是 MAM 向导」「反正我感觉是足以指导没做过的用户一步一步点
+///   下去了」。⇒ 起点前移到步骤表第一步（`detect`）：起点之前没有任何步骤 ⇒ 未验清单为
+///   空 ⇒ `windowsVerified = true`，前端那条「Windows 只实测了后半段」的黄标随之撤下。
+///   ⚠️ 这是一条**有据**的改动（用户亲口确认 + 实机走完），不是为了让提示消失而翻的位；
+///   后人若要把起点再往前挪（或又发现某步没实测），**必须同样在提交里写明依据**。
+///
+/// **机制保留（不许因为"现在全绿了"就删）**：旧实现是一个**整行**布尔
+/// `WINDOWS_VERIFIED = true`，UI 效果是整条提示随位撤下 ⇒ **验证位大于证据**。现结构是
+/// 「实测覆盖从哪一步起（本常量）+ 没跑过的步骤逐条点名（[`unverified_before`] 派生）+
+/// 前端弱提示（i18n `tsWizard.windowsUnverified`）」——本轮只改**事实**（起点前移），
+/// **机制一字不动**：将来若又出现未实测的段落（新增步骤 / 新平台形态），把起点挪回那一步，
+/// 清单与两个位自动跟着变（`windows_verification_list_is_derived_from_coverage_start` 锁）。
+pub(super) const WINDOWS_VERIFIED_FROM: &str = "detect";
 
 /// 没被端到端实机跑过的步骤 id（**按步骤表顺序派生**——表变了清单跟着变；非 Windows 恒空）。
 /// 判据 = 步骤表里排在「实测覆盖起点」之前的那些步骤，单点常量，不另立会漂移的第二张清单。
-pub(super) fn windows_unverified_steps(p: Platform) -> Vec<&'static str> {
+///
+/// **起点参数化**（[`unverified_before`]）：生产的起点是 [`WINDOWS_VERIFIED_FROM`]，
+/// 而把起点当参数传是**为了让「机制仍在」可断言**——本轮的改动是**事实**（Windows 全流程
+/// 已被实机跑过）而不是**机制**：起点后移时清单/两个位必须照旧跟着变（测试
+/// `windows_verification_list_is_derived_from_coverage_start` 锁这条），将来若又出现
+/// 未实测的段落，把起点挪回那一步即可。
+fn unverified_before(start: &str, p: Platform) -> Vec<&'static str> {
     if p != Platform::Windows {
         return Vec::new();
     }
     wizard_steps(p)
         .into_iter()
         .map(|s| s.id)
-        .take_while(|id| *id != WINDOWS_VERIFIED_FROM)
+        .take_while(|id| *id != start)
         .collect()
 }
 
-/// Windows 验证位载荷（纯函数、平台注入——测试可直接对 Windows 行断言）：
-/// - `windowsVerified` = **整条** Windows 流程是否都实测过（1–5 步也跑过才允许 true）；
-/// - `windowsVerifiedFrom` = 实测覆盖从哪一步起（非 Windows 平台 null）；
-/// - `windowsUnverifiedSteps` = 没被端到端实机跑过的步骤（前端据此点名，不写死清单文案）。
-///
-/// **谁在没有实机证据的情况下把 `windowsVerified` 弄成 true，测试必红**
-/// （`wizard_status_payload_aligns_steps_with_states`）——真把 1–5 步跑过了才允许改。
-pub(super) fn windows_verification_for(p: Platform) -> serde_json::Value {
-    let unverified = windows_unverified_steps(p);
+/// 生产口径：起点 = [`WINDOWS_VERIFIED_FROM`]
+pub(super) fn windows_unverified_steps(p: Platform) -> Vec<&'static str> {
+    unverified_before(WINDOWS_VERIFIED_FROM, p)
+}
+
+/// Windows 验证位载荷装配（纯函数：起点 + 未验清单 + 平台 → JSON）。三个字段**同源派生**，
+/// 位由清单算出（`windowsVerified = unverified.is_empty()`）——所以「起点一挪，清单与两个位
+/// 一起变」，不存在两处漂移。
+fn verification_payload(
+    start: &str,
+    unverified: Vec<&'static str>,
+    p: Platform,
+) -> serde_json::Value {
     serde_json::json!({
         "windowsVerified": unverified.is_empty(),
         "windowsVerifiedFrom": if p == Platform::Windows {
-            serde_json::json!(WINDOWS_VERIFIED_FROM)
+            serde_json::json!(start)
         } else {
             serde_json::Value::Null
         },
         "windowsUnverifiedSteps": unverified,
     })
+}
+
+/// 生产口径：起点 = [`WINDOWS_VERIFIED_FROM`]（清单走具名的生产入口
+/// [`windows_unverified_steps`]，保证生产与测试断言的是同一条派生）。
+///
+/// 载荷字段含义（纯函数、平台注入——测试可直接对 Windows 行断言）：
+/// - `windowsVerified` = **整条** Windows 流程是否都实测过（起点必须是第一步才允许 true）；
+/// - `windowsVerifiedFrom` = 实测覆盖从哪一步起（非 Windows 平台 null）；
+/// - `windowsUnverifiedSteps` = 没被端到端实机跑过的步骤（前端据此点名，不写死清单文案）。
+///
+/// **谁在没有实机证据的情况下把 `windowsVerified` 弄成 true，测试必红**
+/// （`wizard_status_payload_aligns_steps_with_states` +
+/// `windows_verification_list_is_derived_from_coverage_start`）——真把整条流程跑过了才允许改。
+pub(super) fn windows_verification_for(p: Platform) -> serde_json::Value {
+    verification_payload(WINDOWS_VERIFIED_FROM, windows_unverified_steps(p), p)
+}
+
+/// 起点参数化版（[`unverified_before`] 的同一条理由：让「起点一挪清单就变」可断言）。
+///
+/// **`#[cfg(test)]` 是刻意的**：生产路径**只有** [`WINDOWS_VERIFIED_FROM`] 一个起点
+/// （[`windows_verification_for`]），不存在"运行时换起点"这种可能——本函数是**测试缝**，
+/// 用来证明派生机制仍然活着（变异：把 `unverified_before` 改成恒空表 / 把
+/// `windowsVerified` 硬编码 true → `windows_verification_list_is_derived_from_coverage_start` 必红）。
+#[cfg(test)]
+pub(super) fn windows_verification_for_from(start: &str, p: Platform) -> serde_json::Value {
+    verification_payload(start, unverified_before(start, p), p)
 }
 
 /// **写路径（动作）实机验证位**（B-M5，与 [`windows_verification_for`] 同纪律：**不得把
@@ -118,7 +166,8 @@ pub(super) struct WizardStep {
 }
 
 /// macOS 九步（**已实测**）/ Windows 八步（**2026-10-07 实机校验回填**，见
-/// [`WINDOWS_VERIFIED`]；字段核对表 7/7 与 macOS 一致）。
+/// [`WINDOWS_VERIFIED_FROM`]——起点已于同日由用户实机走完 MAM 向导全程后前移到第一步，
+/// 即 Windows 整条流程已实测；字段核对表 7/7 与 macOS 一致）。
 ///
 /// **人工步分「必需 / 可选」两类**（A1，2026-10-07 Windows 实测）：
 /// - 必需 = 物理上必须由人做（安装授权框、macOS 系统扩展、浏览器登录）；
@@ -625,8 +674,10 @@ pub(super) fn probe_steps_from(port: u16, installed: bool, r: &CliReadings) -> V
 /// states = probe_steps_from 现算；authUrl = 待登录授权链接（login 步「去登录」按钮数据源，
 /// MAM 不代登录）；running/boardUrl = Task 5 通道快照（向导头部展示用）。
 /// **I-3**：Windows 验证位三项同源派生（[`windows_verification_for`]）——`windowsVerified`
-/// 表示**整条**流程都实测过（当前 false），`windowsVerifiedFrom`/`windowsUnverifiedSteps`
-/// 把「验到哪一步为止」说清，前端弱提示据此收窄到精确范围。
+/// 表示**整条**流程都实测过（2026-10-07 用户实机走完 MAM 向导全程后**当前为 true**，依据见
+/// [`WINDOWS_VERIFIED_FROM`]），`windowsVerifiedFrom`/`windowsUnverifiedSteps`
+/// 把「验到哪一步为止」说清，前端弱提示据此收窄到精确范围（清单为空时该提示不渲染，
+/// 但**提示与派生机制保留**——将来又有未实测段落时把起点挪回去即可）。
 pub(crate) fn wizard_status(port: u16) -> serde_json::Value {
     wizard_status_with(port, find_cli().is_some())
 }

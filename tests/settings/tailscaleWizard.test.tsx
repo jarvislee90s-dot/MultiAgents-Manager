@@ -81,6 +81,15 @@ const macProbe = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+// **M7（2026-10-08 架构评审）**：Windows 载荷工厂——生产**恒**给 Windows 下发实测覆盖起点
+// （Rust `WINDOWS_VERIFIED_FROM` = "detect"，见 `windows_verification_for`），而夹具此前
+// 传 `windowsVerifiedFrom: null`（那是**非 Windows** 的形态）⇒ 等于用一个生产不会出现的
+// 载荷在做断言（"提示撤下"的结论虽不变，但夹具与生产脱钩，后人照抄就会把契约带偏）。
+// 本工厂把 Windows 的默认形态钉成生产形态；要测"起点后移"的机制形态，显式覆盖该字段
+// （见 I-3 组那条 windowsVerifiedFrom: "shields_up"）。
+const windowsProbe = (over: Record<string, unknown> = {}) =>
+  macProbe({ platform: "windows", windowsVerifiedFrom: "detect", ...over });
+
 const stepRow = (id: string) =>
   document.querySelector(`[data-step="${id}"]`) as HTMLElement;
 
@@ -130,10 +139,8 @@ describe("TailscaleWizard 步骤渲染与三态（§C2）", () => {
   it("Windows 安装行常驻「查找位置」弱提示 + 动作文案点明路径可自选", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "remote_ts_probe")
-        return macProbe({
-          platform: "windows",
+        return windowsProbe({
           windowsVerified: true,
-          windowsVerifiedFrom: null,
           windowsUnverifiedSteps: [],
           steps: [
             step("detect"),
@@ -239,15 +246,18 @@ describe("TailscaleWizard 步骤渲染与三态（§C2）", () => {
 });
 
 describe("TailscaleWizard Windows 验证位按覆盖面表述（I-3：验证位不得大于证据）", () => {
-  // 2026-10-07 真机探测**从第 6 步（shields_up）开始**（安装与登录此前已完成）⇒
-  // detect / download / install(UAC) / login 四步的**流程**没被端到端跑过。
+  // **机制守卫**（②，2026-10-07）：Windows 整条流程已被用户实机走完，故**生产载荷**是
+  // `windowsVerified=true ∧ 清单为空`（见下面「整条流程都验过 → 提示撤下」那条 + Rust
+  // `windows_verification_list_is_derived_from_coverage_start`）。本组喂的是**清单非空**
+  // 的载荷——锁的是「起点一旦后移（将来又出现未实测段落），提示必须照实回来、并按后端
+  // 下发的清单点名那几步」这条防线，**不是**当前 Windows 的形态。
   // 旧实现用一个整行布尔把整条提示撤下，等于宣称整条 Windows 流程都验过了。
-  it("platform=windows：弱提示照实上墙，并点名列尚未端到端跑过的四步", async () => {
+  it("platform=windows：清单非空时弱提示照实上墙，并点名列尚未端到端跑过的四步", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "remote_ts_probe")
-        return macProbe({
-          platform: "windows",
+        return windowsProbe({
           windowsVerified: false,
+          // 起点后移的**机制形态**（不是当前生产形态）：清单随起点派生，提示照实回来
           windowsVerifiedFrom: "shields_up",
           windowsUnverifiedSteps: ["detect", "download", "install", "login"],
         });
@@ -260,9 +270,30 @@ describe("TailscaleWizard Windows 验证位按覆盖面表述（I-3：验证位�
     expect(hint.textContent).toContain("Detect Tailscale");
     expect(hint.textContent).toContain("Install Tailscale");
     expect(hint.textContent).toContain("Sign in to Tailscale");
+    // **M1（2026-10-08 架构评审）**：文案必须**从起点派生**——起点名（本夹具 = shields_up）
+    // 随载荷 windowsVerifiedFrom 下发并进文案；旧文案写死"只实测了后半段"，起点一挪就是
+    // 假陈述。变异：把插值删掉 / 退回硬编码叙事 → 本条必红。
+    expect(hint.textContent).toContain("Disable incoming-connection blocking");
+    expect(hint.textContent).not.toMatch(/second half|后半段/i);
     // 未被点名的步骤（已实测的后半段）不得出现在"未跑过"清单里
     expect(hint.textContent).not.toContain("Enable Funnel (fixed URL)");
     expect(hint.textContent).not.toContain("Board reachability check");
+  });
+
+  // **M1（2026-10-08 架构评审）**：弱提示文案必须**从起点派生**（`{{from}}` 插值），不许再
+  // 写死"只实测了后半段"——那个叙事只在起点恰好是后半段开头时成立，起点一挪即假陈述。
+  it("M1：Windows 弱提示含起点插值，且两 locale 都不再写死「后半段」叙事", () => {
+    const root = process.cwd();
+    const zh = JSON.parse(readFileSync(path.join(root, "src/i18n/locales/zh.json"), "utf8"));
+    const en = JSON.parse(readFileSync(path.join(root, "src/i18n/locales/en.json"), "utf8"));
+    for (const [name, loc] of [
+      ["zh", zh],
+      ["en", en],
+    ] as const) {
+      const hintText = loc.settings.remote.tsWizard.windowsUnverified as string;
+      expect(hintText, `${name} 必须含起点插值 {{from}}`).toContain("{{from}}");
+      expect(hintText, `${name} 不得写死「后半段」叙事`).not.toMatch(/后半段|second half/i);
+    }
   });
 
   it("macOS（本机平台）不显示 Windows 弱提示", async () => {
@@ -272,14 +303,14 @@ describe("TailscaleWizard Windows 验证位按覆盖面表述（I-3：验证位�
   });
 
   it("Windows 整条流程都验过（windowsVerified=true ∧ 未验清单为空）→ 提示撤下", async () => {
+    // **M7 夹具自检**：Windows 载荷**与生产同形**（生产恒下发起点 "detect"，见 Rust
+    // `windows_verification_for` / `windows_verification_list_is_derived_from_coverage_start`）。
+    // 夹具工厂一旦漂移回 `null`（那是**非 Windows** 的形态），本条即红——"拿生产不会出现的
+    // 载荷做断言"这类失真，从注释挪进了可执行断言。
+    expect(windowsProbe().windowsVerifiedFrom).toBe("detect");
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "remote_ts_probe")
-        return macProbe({
-          platform: "windows",
-          windowsVerified: true,
-          windowsVerifiedFrom: null,
-          windowsUnverifiedSteps: [],
-        });
+        return windowsProbe({ windowsVerified: true, windowsUnverifiedSteps: [] });
       return null;
     });
     render(<TailscaleWizard />);
@@ -372,12 +403,7 @@ describe("TailscaleWizard 写路径未实测弱提示（B2：不得把未验证�
   it("Windows 整条流程都验过（windowsVerified=true）→ 不再显示「Windows 未校验」旧提示", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "remote_ts_probe")
-        return macProbe({
-          platform: "windows",
-          windowsVerified: true,
-          windowsVerifiedFrom: null,
-          windowsUnverifiedSteps: [],
-        });
+        return windowsProbe({ windowsVerified: true, windowsUnverifiedSteps: [] });
       return null;
     });
     render(<TailscaleWizard />);

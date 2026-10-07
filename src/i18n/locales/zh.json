@@ -305,7 +305,7 @@
       "tsRecoveringHint": "Tailscale 后端正在重连（开机后通常 1–2 分钟）——配置与地址都不会变，无需任何操作。",
       "tsWizard": {
         "title": "Tailscale 固定网址配置向导",
-        "windowsUnverified": "⚠ Windows 只实测了后半段：{{steps}} 尚未端到端实机跑过（按官方文档预填，实际形态可能不同）；其余步骤已实机校验。",
+        "windowsUnverified": "⚠ Windows 实测覆盖从「{{from}}」起：{{steps}} 尚未端到端实机跑过（按官方文档预填，实际形态可能不同）；起点及其后的步骤已实机校验。",
         "statePending": "待做",
         "stateActive": "进行中…",
         "stateDone": "已完成",

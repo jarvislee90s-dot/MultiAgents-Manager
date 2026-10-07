@@ -1569,23 +1569,26 @@ mod tests {
             "other"
         };
         assert_eq!(p["platform"], expected_platform);
-        // I-3：Windows 验证位**按覆盖面如实拆细**（不得让验证位大于证据）——
-        // 本次真机探测从第 6 步（shields_up）开始，故 1–5 步的流程没被端到端跑过：
-        // platform 级载荷必须与纯函数同源（不写死、不两处漂移）
+        // I-3 → ②（2026-10-07 用户实机确认）：Windows 验证位仍**按覆盖面如实派生**，
+        // 但覆盖面已经**从第一步起**了——用户在本机 Windows 上卸载 Tailscale 后**从零
+        // 走完 MAM 向导全程**（下载 → 安装 UAC → 登录 → 关 shields-up → 开通 Funnel →
+        // 可达性校验），全程正常，故 detect/download/install/login 四步的**流程**已被
+        // 端到端实机跑过（此前记录的 shields_up 起点是更早一次、从第 6 步起的探测）。
+        // 验证位仍然由清单派生（不是硬编码 true）——机制与派生关系见下方
+        // `windows_verification_list_is_derived_from_coverage_start`。
         let win = windows_verification_for(Platform::Windows);
         assert_eq!(
-            win["windowsVerified"], false,
-            "整条 Windows 流程没验过（detect/download/install/login 四步没端到端跑过）\
-             ——旧实现用整行布尔把提示整条撤下，是验证位大于证据: {win}"
+            win["windowsVerified"], true,
+            "用户 2026-10-07 实机走完 MAM 向导全程 ⇒ 整条 Windows 流程已实测: {win}"
         );
         assert_eq!(
-            win["windowsVerifiedFrom"], "shields_up",
-            "实测覆盖从第 6 步起（2026-10-07 真机探测起点）: {win}"
+            win["windowsVerifiedFrom"], "detect",
+            "实测覆盖起点 = 步骤表第一步（清单因此为空）: {win}"
         );
         assert_eq!(
             win["windowsUnverifiedSteps"],
-            serde_json::json!(["detect", "download", "install", "login"]),
-            "没被端到端实机跑过的四步必须点名（按步骤表顺序派生，表变了跟着变）: {win}"
+            serde_json::json!([]),
+            "已无未实测步骤（清单随起点派生，表变了跟着变）: {win}"
         );
         // 本机平台（测试机上 = mac）：无 Windows 行 → 不声称任何 Windows 覆盖
         let here = windows_verification_for(current_platform());
@@ -1638,6 +1641,50 @@ mod tests {
             );
         }
         teardown_globals();
+    }
+
+    /// **② 诚实标注的机制仍在，且三位都由「实测覆盖起点」派生**（2026-10-07 用户实机
+    /// 确认后：起点前移到第一步 ⇒ 清单为空 ⇒ `windowsVerified = true`，黄标随之撤下）。
+    ///
+    /// 为什么要有这条：本轮改的是**事实**（Windows 全流程已被实机跑过），不是**机制**
+    /// ——`8e10e12` 那批「诚实标注」的资产（起点常量 + 派生清单 + 两个位 + 前端弱提示）
+    /// 必须留着，将来若又出现未实测的段落（新步骤 / 新平台形态），把起点挪回那一步即可
+    /// （清单与两个位自动跟着变）。本测试用**起点参数化**证明机制活着：
+    /// 变异：① 把 `windows_unverified_steps` 改成恒返回空表（删掉派生）→ 下方
+    /// `from("shields_up", …)` 的清单断言必红；② 把 `windowsVerified` 改成硬编码 true
+    /// → 同一条断言必红（清单非空却声称整条验过）；③ 把 `WINDOWS_VERIFIED_FROM` 改成
+    /// 非第一步而仍声称整条流程已验 → 最后一条断言必红。
+    #[test]
+    fn windows_verification_list_is_derived_from_coverage_start() {
+        // 起点一旦后移，那四步自动回到未验清单——正是 8e10e12 建立的机制
+        let past = windows_verification_for_from("shields_up", Platform::Windows);
+        assert_eq!(
+            past["windowsUnverifiedSteps"],
+            serde_json::json!(["detect", "download", "install", "login"]),
+            "起点后移 ⇒ 起点之前的步骤自动点名（机制必须仍然生效）: {past}"
+        );
+        assert_eq!(
+            past["windowsVerified"], false,
+            "清单非空 ⇒ 整条流程不算验过（位由清单派生，不得硬编码 true）: {past}"
+        );
+        // 生产起点 = 步骤表第一步 ⇒ 起点之前没有任何步骤 ⇒ 清单为空 ⇒ 位为 true
+        assert_eq!(
+            WINDOWS_VERIFIED_FROM,
+            wizard_steps(Platform::Windows)
+                .first()
+                .expect("Windows 步骤表非空")
+                .id,
+            "「整条 Windows 流程已实测」的充要条件 = 覆盖起点就是步骤表第一步"
+        );
+        assert_eq!(
+            windows_unverified_steps(Platform::Windows),
+            Vec::<&str>::new(),
+            "本次生产口径：无未实测步骤"
+        );
+        // 非 Windows 平台：清单恒空、起点恒 null（不得张冠李戴）
+        let other = windows_verification_for_from("shields_up", Platform::Other);
+        assert_eq!(other["windowsUnverifiedSteps"], serde_json::json!([]));
+        assert!(other["windowsVerifiedFrom"].is_null(), "{other}");
     }
 
     /// **M4（2026-10-07 评审 Minor）恢复窗口内的卡点必须是琥珀档（amber）**：

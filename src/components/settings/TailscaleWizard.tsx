@@ -6,8 +6,10 @@
 // 自动含自愈）；头部看板地址只在 reach=Verified 时显示（未验证不得当可用地址展示）；
 // 动作失败（Err reject）落到对应步骤行的可见错误行——**不弹全局 toast、也不静默**。
 // Windows 行如实标注「尚未实机校验」弱提示（数据源 windowsVerified）——不把未验证的
-// 流程伪装成已验证。数据源 = remote_ts_probe / remote_ts_run_step（形状契约见
-// Rust 端 tailscale::wizard_status / run_step 注释）。
+// 流程伪装成已验证。**当前 Windows 已实测整条流程**（2026-10-07 用户实机走完 MAM 向导
+// 全程），故该提示在生产载荷下不渲染；机制保留（后端 `windowsUnverifiedSteps` 非空时
+// 自动回来并点名），见下方渲染块注释。数据源 = remote_ts_probe / remote_ts_run_step
+//（形状契约见 Rust 端 tailscale::wizard_status / run_step 注释）。
 // 导出组件：TailscaleWizard（步骤列表本体，RemoteSection 的 tailscale 卡详情区
 // 直接挂载——Task 9 卡片重排时已收敛，旧的独立入口行已撤）。tsWizard.* 两级键的
 // 字面量必须只出现在本文件：RemoteSection 的 i18n 守卫测试按字面量扫描单层键，
@@ -37,6 +39,12 @@ const STEP_KEY: Record<string, string> = {
   verify: "settings.remote.tsWizard.step_verify",
   autostart: "settings.remote.tsWizard.step_autostart",
 };
+
+// 步骤 id → 本 locale 的步骤名（未知 id 原样回显）。**放模块级、t 由调用方传入**：
+// I-3 弱提示的起点名与未验清单走同一条映射（M1：文案从起点派生的前提），而定义点不在
+// 组件体内那几处改动的上下文里——两处消费各自成 hunk，改一处不会牵动另一处。
+const stepLabel = (t: ReturnType<typeof useAppTranslation>["t"], id: string) =>
+  STEP_KEY[id] ? t(STEP_KEY[id]) : id;
 
 // 可自动触发的步（id 与 Rust wizard_steps 一致）。login 不在列：MAM 不代登录，
 // 动作是「去登录」链接；detect/sys_ext 是只读探针；verify 走下方专属「重试」按钮
@@ -115,19 +123,29 @@ export function TailscaleWizard() {
           {t("settings.remote.tsWizard.refresh")}
         </Button>
       </div>
-      {/* Windows 行弱提示（I-3：验证位不得大于证据）：2026-10-07 真机探测**从第 6 步
-          （shields_up）开始**——detect/download/install(UAC)/login 四步的**流程**没被
-          端到端跑过，故提示**不得整行撤下**，而要收窄成精确范围并**点名**那几步
-          （清单来自后端 windowsUnverifiedSteps，随步骤表派生，不写死文案）。 */}
+      {/* Windows 行弱提示（I-3：验证位不得大于证据）——**机制保留，当前不渲染**：
+          2026-10-07 用户在本机 Windows 上卸载 Tailscale 后**从零走完 MAM 向导全程**
+          （下载 → 安装 UAC → 登录 → 关 shields-up → 开通 Funnel → 可达性校验，全程正常），
+          故后端把「实测覆盖起点」前移到第一步（`wizard.rs::WINDOWS_VERIFIED_FROM`）⇒
+          未验清单为空 ⇒ `windowsVerified=true` ⇒ 本行不渲染（用户实测看到的黄标就此撤下）。
+          **为什么保留这一块**：它承载的是「验证位不得大于证据」这条机制的 UI 侧——将来若
+          又出现未实测的段落（新增步骤 / 新平台形态），后端把起点挪回那一步，清单非空，
+          本行自动回来并按 `windowsUnverifiedSteps` **点名**那几步（清单随步骤表派生，
+          文案不写死）。详见 `tests/settings/tailscaleWizard.test.tsx` 的 I-3 组：
+          该组喂的是「清单非空」载荷，锁的正是这条机制。
+          **M1（2026-10-08 架构评审）：文案也从起点派生**——旧文案写死"只实测了**后半段**"
+          （当时的起点正是 `shields_up`），一旦起点挪到别处那句话就成了**假陈述**。现在
+          起点名（`windowsVerifiedFrom` → 本 locale 的步骤名）也随载荷下发、进 i18n 插值；
+          字段缺失（形态不符，生产对 Windows 恒下发）时显示 `—`——**可见的**降级，
+          好过一句读起来像事实的假话。 */}
       {probe?.platform === "windows" && !probe.windowsVerified && (
         <p
           data-testid="ts-windows-unverified"
           className="mt-1 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs text-amber-600 dark:bg-amber-500/10 dark:text-amber-400"
         >
           {t("settings.remote.tsWizard.windowsUnverified", {
-            steps: (probe.windowsUnverifiedSteps ?? [])
-              .map((id) => (STEP_KEY[id] ? t(STEP_KEY[id]) : id))
-              .join(" → "),
+            from: probe.windowsVerifiedFrom ? stepLabel(t, probe.windowsVerifiedFrom) : "—",
+            steps: (probe.windowsUnverifiedSteps ?? []).map((id) => stepLabel(t, id)).join(" → "),
           })}
         </p>
       )}
