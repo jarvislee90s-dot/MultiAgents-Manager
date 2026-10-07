@@ -14,6 +14,7 @@
 // 两级键由本文件承担（本目录 tailscaleWizard.test.tsx 以两级感知扫描把关双语言键齐备）。
 import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { SETTINGS_NOTE, SETTINGS_REMOTE_BADGE } from "@/components/settings/typography";
 import { useAppTranslation } from "@/hooks/use-app-translation";
 import { cn } from "@/lib/utils";
 import {
@@ -46,10 +47,16 @@ const RUNNABLE = new Set(["download", "install", "shields_up", "funnel"]);
 // 「恢复中」「发布中」）**带 badge**，与状态五同形（`b-amber` = 正在进行、无需操作的
 // 中间态，既不是故障 rose 也不是完成 green）；实现侧此前是纯文本 `<p>`，线稿与实现
 // 各说各话。本组件内联同形徽标（**不 import RemoteSection 的 Badge**：RemoteSection
-// 已 import 本组件，反向 import 会成环；样式与那份 amber 档逐字一致）。
+// 已 import 本组件，反向 import 会成环；字号走 `SETTINGS_REMOTE_BADGE` 这一份线稿档，
+// 与那份 amber 档逐字一致）。
 function AmberBadge({ children }: { children: React.ReactNode }) {
   return (
-    <span className="inline-flex flex-none items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-[10.5px] text-amber-600 dark:text-amber-400">
+    <span
+      className={cn(
+        "inline-flex flex-none items-center rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-600 dark:text-amber-400",
+        SETTINGS_REMOTE_BADGE
+      )}
+    >
       {children}
     </span>
   );
@@ -232,7 +239,7 @@ export function TailscaleWizard() {
                   <span className={cn("text-[13px]", done && "text-muted-foreground")}>
                     {STEP_KEY[step.id] ? t(STEP_KEY[step.id]) : step.id}
                   </span>
-                  <span className="text-muted-foreground text-[10.5px]">
+                  <span className={SETTINGS_NOTE}>
                     {done
                       ? t("settings.remote.tsWizard.stateDone")
                       : busy

@@ -9,7 +9,11 @@
 // 排版层级统一走 components/settings/typography.ts 单一出处（2026-10-07 用户裁决 C1）：
 // 卡标题取 SETTINGS_CARD_TITLE、副标题取 SETTINGS_SUBTITLE，不再内联字号字重；本文件
 // 另被登记为小字号豁免面（密集数据网格），豁免理由见 typography.ts。
-import { SETTINGS_CARD_TITLE, SETTINGS_SUBTITLE } from "@/components/settings/typography";
+import {
+  SETTINGS_CARD_TITLE,
+  SETTINGS_REMOTE_BADGE,
+  SETTINGS_SUBTITLE,
+} from "@/components/settings/typography";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
 import { Button } from "@/components/ui/button";
@@ -115,7 +119,7 @@ function Badge({
   return (
     <span
       className={cn(
-        "inline-flex flex-none items-center rounded-full px-2 py-0.5 text-[10.5px]",
+        `inline-flex flex-none items-center rounded-full px-2 py-0.5 ${SETTINGS_REMOTE_BADGE}`,
         tones[tone]
       )}
     >
