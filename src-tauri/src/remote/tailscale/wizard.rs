@@ -50,6 +50,9 @@ pub(super) fn current_platform() -> Platform {
 ///   空 ⇒ `windowsVerified = true`，前端那条「Windows 只实测了后半段」的黄标随之撤下。
 ///   ⚠️ 这是一条**有据**的改动（用户亲口确认 + 实机走完），不是为了让提示消失而翻的位；
 ///   后人若要把起点再往前挪（或又发现某步没实测），**必须同样在提交里写明依据**。
+///   **证据记录**：`docs/release-notes/windows-wizard-acceptance-2026-10-07.md`——如实标注为
+///   **当事人陈述（不是机器可复核的产物）**，并登记了未覆盖/待真机复核的面（`tailscale login`
+///   主动取链接、`--timeout 15s`、kill 等待者对 `AuthURL` 的影响）。引用本起点前先读那份记录。
 ///
 /// **机制保留（不许因为"现在全绿了"就删）**：旧实现是一个**整行**布尔
 /// `WINDOWS_VERIFIED = true`，UI 效果是整条提示随位撤下 ⇒ **验证位大于证据**。现结构是
