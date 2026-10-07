@@ -675,3 +675,29 @@ to go back` → `enter select · esc back`），而锚是写死单句 → 菜单
     同类断链排查结论：kimi Cancel 拒绝与 codex Advance 门拒均为「未实测不出手」
     正确口径（GET 不渲染对应按钮，不会撞）；无其他漏网。旧裁决变更 4 处测试
     显式申报（门同面性测试转正、计数位锁、保存即停锁、端点零投递锁）。
+
+13. **确认卡摘要权威源切换 + 单选落点校验（2026-10-07）**：
+    ① 单选数字选中后 TUI 自动推进但落点不定（可能跳过已答题）——kimi select 键序
+    后追加落点校验循环（3s 有界轮询：Review=合法终点；`? ` 题干对位≠预期题 → `←`
+    逐格拉回 ≤8 格，逐拍日志同 freeText 格式），n 题选完必落 n+1；
+    ② kimi_review_summary `→` 行 `t[1..]` UTF-8 切片 panic（→ 为 3 字节字符，切在
+    字节中间必崩）改 strip_prefix；panic hook 内 take_hook 递归 panic 一并修
+    （默认 hook 先取保存）；
+    ③ **确认卡摘要权威源=终端 Review 页屏读**：kimi_review_summary 重写为折行归并
+    状态机（区间锚定 Review→Ready + `Q `开题 / `→ `答案 / 无前缀行按状态归并折行）；
+    渲染切换「summary 命中即唯一显示」（消除单选显示成多选/双份记录叠加），未命中
+    回落本地缓存兜底；
+    ④ **刷新摘要丢失修**：主 GET effect 的快照应用是 2026-10-03 旧内联逻辑——review
+    分支只切确认卡不落 summary（后端 GET 已解析回传 `{"review":true,"summary":[4对]}`，
+    日志实证，前端没收货）→ 刷新后四题全显「未作答」。归一到 applyScreenSync
+    （Review 摘要落位 confirmSummary；旧内联独有的编辑态复位、单选选中态回填一并
+    收编——题屏分支行为不变）。
+    实机验收：答完停 Review → 刷新 → 确认卡逐题摘要与终端 Review 页一致；题目页
+    刷新对位当前题 + 勾选/自由作答回填照旧。
+    追记（同日二轮）：⑤ **单选可读性门**——归一后 kimi 单选页 heading-only 快照
+    （checked 恒空：选中项高亮是属性层读不到）会触发「屏上无选中 → 清本地选中」，
+    读不到≠没有 → mqSelected 清除仅在 checked 数组非空时生效（claude/opencode
+    恒带逐行真值，行为不变）；⑥ 测试收口：db45945 回归锁（refresh 后 summary
+    落位）+ 可读性门回归锁两条新增（TDD RED→GREEN 双向验证）+ 4 条 freeText
+    overwrite 批次过期用例修正（04d3c87 首发 overwrite:true / f097a29+0da61f5
+    单选保存自动推进——全部测试过期、零产品 bug），QuestionCard 套件 42/42 绿。

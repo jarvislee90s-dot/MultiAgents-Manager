@@ -559,17 +559,9 @@ pub fn locate_kimi_other_digit(lines: &[String]) -> Option<String> {
     None
 }
 
-/// kimi Other **编辑行残留长度**（覆盖写入的删除量判据，2026-10-06）：
-/// 编辑态行形 `→ [4] Other: <残留>`（K7 定案：重进带旧文本）→ Some(残留字符数)；
-/// 鲜态 `→ [4] Other:`（冒号后空白）→ Some(0)；编辑行不在场 → None（调用方如实中止）。
-///
-/// 「恰为 Other 行」判据与 [`locate_kimi_other_digit`] 同源（方括号行形 + other 开头），
-/// 取**最后一个** Other 行（Review 页 Other 是答案回显、编辑页才是输入行——两页不同时
-/// 在场，倒序取是纵深防御）。
-/// 单选页**当前高亮行的编号**（2026-10-07：单选高亮 `→` 前缀字符层可读——
-/// 多选页高亮属性层不可见，本判据只对单选生效）。无 `→` 编号行 → None。
-/// 有界轮询（2026-10-07 简化收敛）：每拍 settle → read → 谓词判定，命中即停。
-/// 窗尽返回最后一拍（None = 途中读不到屏）。生产步长 = [`FreeTextTerminal::settle`]。
+/// **kimi 通用有界轮询**（2026-10-07 简化收敛）：每拍 settle → read → 谓词判定，
+/// 命中即停。窗尽返回最后一拍（None = 途中读不到屏）。生产步长 =
+/// [`FreeTextTerminal::settle`]。
 fn poll_beats<Rd, T>(
     read: &mut Rd,
     terminal: &mut T,
@@ -598,9 +590,42 @@ where
     Rd: FnMut() -> Option<Vec<String>>,
     T: FreeTextTerminal,
 {
-    poll_beats(read, terminal, rounds, kimi_editor_mode).is_some()
+    let out = poll_beats(read, terminal, rounds, |l| {
+        let hit = kimi_editor_mode(l);
+        if hit {
+            // 逐拍取证（12:46 实录：6s 窗内每拍误判编辑态在场——命中行内容
+            // 落日志即可定案是哪一行在污染判定）
+            // 取证增强（15:17 定案用）：命中行的**屏内行号**（倒序 1=屏底）+
+            // **屏幕最后 3 行**原文——区分「footer 真在场」（行号靠下+末行即
+            // footer）与「历史残留/读取滞后」（行号靠上+末行已是 toggle footer）
+            let total = l.len();
+            match l
+                .iter()
+                .enumerate()
+                .rfind(|(_, x)| x.to_lowercase().contains("type answer"))
+            {
+                Some((row, src)) => {
+                    let tail: Vec<&str> = l.iter().rev().take(3).map(|x| x.trim()).collect();
+                    log::info!(
+                        "kimi 编辑态命中：行 {row}/{}（屏底倒数 {}）| {src:?} | 末3行={tail:?}",
+                        total,
+                        total - row
+                    );
+                }
+                None => log::info!(
+                    "kimi 编辑态判定：命中但全屏未见 type answer 行（异常形态）"
+                ),
+            }
+        }
+        hit
+    })
+    .is_some();
+    log::info!("kimi 编辑态等待窗尽：editor_still={out}");
+    out
 }
 
+/// kimi 单选页**当前高亮行的编号**（2026-10-07：单选高亮 `→` 前缀字符层可读——
+/// 多选页高亮属性层不可见，本判据只对单选生效）。无 `→` 编号行 → None。
 pub fn locate_kimi_highlight_digit(lines: &[String]) -> Option<String> {
     let arrow = char::from_u32(0x2192).unwrap();
     lines
@@ -611,6 +636,62 @@ pub fn locate_kimi_highlight_digit(lines: &[String]) -> Option<String> {
         .map(|(digit, _)| digit)
 }
 
+/// kimi 题屏 `? ` 题干行 → 载荷题序（**sheet 落点对位的单一判据**，01:48 定案：
+/// `? ` 行给的是 question 文本，对位基准必须是 question 而非 header——拿 header
+/// 比对永不相等）。归一（剥空白）后与载荷 question 全集比对，**唯一命中**才给
+/// 题序；题干行缺席/空串/多义命中 → None（不猜纪律）。freeText 单选保存循环
+/// （本文件）与 select 落点校验（remote::api）共用同一口径。
+pub(crate) fn kimi_sheet_question_idx(
+    lines: &[String],
+    payload_questions: &[String],
+) -> Option<usize> {
+    let norm = |x: &str| x.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let hn = lines
+        .iter()
+        .find_map(|l| l.trim().strip_prefix("? ").map(norm))?;
+    if hn.is_empty() {
+        return None;
+    }
+    let hits: Vec<usize> = payload_questions
+        .iter()
+        .enumerate()
+        .filter(|(_, q)| {
+            let qn = norm(q);
+            qn.len() >= 4 && (qn == hn || qn.contains(&hn) || hn.contains(&qn))
+        })
+        .map(|(i, _)| i)
+        .collect();
+    (hits.len() == 1).then_some(hits[0])
+}
+
+/// kimi 已选勾选字形三候选（账本吸收文案漂移的同一口径）：`[?]`=探测批 K（2.x）、
+/// `[✓]`=戊探B（2.0.2 空格/回车切勾实录）、`[√]`=2.1.1 用户实机（2026-10-06 截图）。
+const KIMI_CHECKED_GLYPHS: &[&str] = &["[?]", "[✓]", "[√]"];
+/// kimi 方框字形全集（未选 + 三版本已选）——方框 Other 行扫描的标记集。
+const KIMI_BOX_GLYPHS: &[&str] = &["[ ]", "[?]", "[✓]", "[√]"];
+
+/// 倒序找**方框 Other 行**（形态②共用扫描核）→ `(该行小写全文, 方框标记后内容
+/// （小写、去首空白）)`。倒序取**最后一个**（两页不同时在场，倒序是纵深防御）。
+/// 返回行小写全文是为勾选判定保持**整行扫描**口径（与抽取前逐字等价）。
+fn kimi_boxed_other_row(lines: &[String]) -> Option<(String, String)> {
+    lines.iter().rev().find_map(|l| {
+        let lower = l.to_lowercase();
+        let rest = KIMI_BOX_GLYPHS.iter().find_map(|m| {
+            lower
+                .find(m)
+                .and_then(|i| l.get(i + m.len()..).map(|r| r.trim().to_lowercase()))
+        })?;
+        rest.starts_with(KIMI_OTHER_ROW_LABEL).then_some((lower, rest))
+    })
+}
+
+/// kimi Other **编辑行残留长度**（覆盖写入的删除量判据，2026-10-06）：
+/// 编辑态行形 `→ [4] Other: <残留>`（K7 定案：重进带旧文本）→ Some(残留字符数)；
+/// 鲜态 `→ [4] Other:`（冒号后空白）→ Some(0)；编辑行不在场 → None（调用方如实中止）。
+///
+/// 「恰为 Other 行」判据与 [`locate_kimi_other_digit`] 同源（方括号行形 + other 开头），
+/// 取**最后一个** Other 行（Review 页 Other 是答案回显、编辑页才是输入行——两页不同时
+/// 在场，倒序取是纵深防御）。
 pub fn locate_kimi_other_residue_len(lines: &[String]) -> Option<usize> {
     // 形态①：编号编辑行 `→ [4] Other: <残留>`（单选/单题）
     if let Some(n) = lines
@@ -628,51 +709,38 @@ pub fn locate_kimi_other_residue_len(lines: &[String]) -> Option<usize> {
     }
     // 形态②：多选无编号编辑行 `[ ] Other: <残留>` / `[√] Other: <残留>`（2026-10-06
     // 姊妹断链修复：只认编号形态导致多选覆盖写入误报「读不到编辑行」）
-    const BOXED: &[&str] = &["[ ]", "[?]", "[✓]", "[√]"];
-    for l in lines.iter().rev() {
-        let lower = l.to_lowercase();
-        if let Some(rest) = BOXED.iter().find_map(|m| {
-            lower.find(m).and_then(|i| l.get(i + m.len()..).map(|r| r.trim().to_lowercase()))
-        }) {
-            if rest.starts_with(KIMI_OTHER_ROW_LABEL) {
-                return Some(
-                    rest.split_once(':')
-                        .map(|(_, v)| v.trim().chars().count())
-                        .unwrap_or(0),
-                );
-            }
-        }
-    }
-    None
+    kimi_boxed_other_row(lines).map(|(_, rest)| {
+        rest.split_once(':')
+            .map(|(_, v)| v.trim().chars().count())
+            .unwrap_or(0)
+    })
 }
 
 /// kimi **编辑态**判据（footer 锚 `type answer ↵ save …`，K2 定案词形；倒序 6 行
 /// 内找——footer 恒在屏底）：true = Other 编辑器开着（此时任何数字/回车都是文字
 /// 或状态污染——「等」是唯一正确动作）。
 pub fn kimi_editor_mode(lines: &[String]) -> bool {
-    lines
+    // **取最靠下（屏底方向）的 footer 行判状态**（2026-10-07 12:46 取证定稿）：
+    // 两种 footer 都以 `esc cancel` 结尾（编辑态 `type answer ↵ save … esc
+    // cancel` / 选项页 `… ↵ toggle ←/→/tab switch esc cancel`）——从屏底往上找
+    // 第一条含 `esc cancel` 的行即当前 footer；残留的历史 footer 行必在其上方，
+    // 不会被误读（12:46 实录：缓冲区下方 10 行空白 + 残留 type answer 行致
+    // any() 判定恒为编辑态）。
+    let footer = lines
         .iter()
-        .rev()
-        .take(14)
-        .any(|l| l.to_lowercase().contains("type answer"))
+        .rfind(|l| l.to_lowercase().contains("esc cancel"))
+        .map(|l| l.to_lowercase());
+    match footer {
+        Some(f) => f.contains("type answer"),
+        None => false, // footer 不在场（读取不完整/非问答页）→ 不判编辑态
+    }
 }
 
 /// kimi Other 行**勾选态**（补勾补丁的判据，2026-10-06）：Some(已勾?) = 行在场；
-/// None = 行不在场。字形三候选与快照同源。
+/// None = 行不在场。字形三候选与快照同源（[`KIMI_CHECKED_GLYPHS`]）。
 pub fn locate_kimi_other_checked(lines: &[String]) -> Option<bool> {
-    const CHECKED: &[&str] = &["[?]", "[✓]", "[√]"];
-    const BOXED: &[&str] = &["[ ]", "[?]", "[✓]", "[√]"];
-    for l in lines.iter().rev() {
-        let lower = l.to_lowercase();
-        if let Some(rest) = BOXED.iter().find_map(|m| {
-            lower.find(m).and_then(|i| l.get(i + m.len()..).map(|r| r.trim().to_lowercase()))
-        }) {
-            if rest.starts_with(KIMI_OTHER_ROW_LABEL) {
-                return Some(CHECKED.iter().any(|m| lower.contains(m)));
-            }
-        }
-    }
-    None
+    kimi_boxed_other_row(lines)
+        .map(|(lower, _)| KIMI_CHECKED_GLYPHS.iter().any(|m| lower.contains(m)))
 }
 
 /// kimi 终态在场（提交完成判据）
@@ -1020,9 +1088,9 @@ where
                 .send("enter")
                 .map_err(|e| StageAbort::delivery(format!("清空回车投递失败（{e}）")))?;
             sent_keys.push("enter".to_string());
-            let rounds = crate::inject::timing::poll_rounds(
-                crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
-            );
+            // 退出编辑态窗 6s（11:55 实录：空编辑态自行退出可超 3s——窗短误报）
+            // 清空退出观察上限 2s（2026-10-07 用户裁决：终端 1~2s 内已正常，超时不等）
+            let rounds = crate::inject::timing::poll_rounds(2_000);
             // 退出判定 = 「编辑态消失」；仍编辑 → 补回车 + ↑（回车退编辑态、
             // ↑ 移出 Other 行——之后数字选项不会敲进文字行）
             let exited = !wait_editor_mode(&mut read, terminal, rounds.max(1) as usize);
@@ -1040,13 +1108,18 @@ where
                 !wait_editor_mode(&mut read, terminal, rounds.max(1) as usize)
             };
             if !exited {
-                return Err(StageAbort::screen(
-                    "清空后编辑器未退出（回车+↑ 均未离开编辑态）——请到终端按 esc 退出后再操作选项",
-                ));
+                // **编辑态未退出不再报异常**（2026-10-07 用户裁决）：清空语义 =
+                // 文字已清且核验过（上方已过）——编辑器随后自行退出/由后续操作
+                // 带离，不影响清空结果。照常成功返回，仅日志留痕。
+                log::info!(
+                    "kimi-freeText 键序列(清空完成·编辑态未即时退出)={sent_keys:?}"
+                );
             }
+            log::info!("kimi-freeText 键序列(清空完成)={sent_keys:?}");
             return Ok(FreeTextOutcome {
                 sent_keys,
                 receipt_seen: Some(true),
+                advanced: false,
                 review_reached: false,
                 screen_text: None,
                 screen_checked: None,
@@ -1101,7 +1174,6 @@ where
         let rounds = crate::inject::timing::poll_rounds(
             crate::inject::timing::QUESTION_STAGE_POLL_TOTAL_MS,
         );
-        let norm = |x: &str| x.chars().filter(|c| !c.is_whitespace()).collect::<String>();
         if multi_select {
             // ===== 多选：留原页 + 勾选确认 =====
             let mut ent = 0u32;
@@ -1114,7 +1186,16 @@ where
                     ))
                 })?;
                 if kimi_editor_mode(&lines) {
-                    continue; // 编辑态未退出 → 纯等待（enter 已发，绝不补键）
+                    // **编辑态（含误入）→ 保存收尾**（2026-10-07 11:48 实录）：补勾
+                    // enter 若在 TUI 已勾并退出后落下，会**重新打开编辑器**（空编辑
+                    // 行）——此时再发一次 enter 保存收尾退出，不留编辑态给后续操作
+                    log::info!("kimi-freeText 多选：检测到编辑态 → enter 保存收尾");
+                    terminal
+                        .send("enter")
+                        .map_err(|e| StageAbort::delivery(format!("编辑态保存收尾投递失败（{e}）")))?;
+                    sent_keys.push("enter".to_string());
+                    terminal.settle();
+                    continue;
                 }
                 let checked = locate_kimi_other_checked(&lines);
                 match checked {
@@ -1124,6 +1205,7 @@ where
                         return Ok(FreeTextOutcome {
                             sent_keys,
                             receipt_seen: Some(true),
+                            advanced: false,
                             review_reached: kimi_review_present(&lines),
                             screen_text: None,
                             screen_checked: None,
@@ -1143,6 +1225,8 @@ where
                                 ))?;
                             sent_keys.push("enter".to_string());
                             unchecked_streak = 0;
+                            // **补 enter 后加长等待**（勾选渲染 + 退出编辑，300ms）
+                            std::thread::sleep(std::time::Duration::from_millis(300));
                         }
                         // 不足 2 拍 → 纯等待（防渲染延迟误判双切）
                     }
@@ -1152,6 +1236,7 @@ where
                         return Ok(FreeTextOutcome {
                             sent_keys,
                             receipt_seen: Some(true),
+                            advanced: false,
                             review_reached: kimi_review_present(&lines),
                             screen_text: None,
                             screen_checked: None,
@@ -1174,35 +1259,19 @@ where
                 ))
             })?;
             let review_here = kimi_review_present(&lines);
-            let heading_now = lines
-                .iter()
-                .find(|l| l.trim_start().starts_with("? "))
-                .map(|l| norm(&l.trim()[2..]));
-            let cur_idx = heading_now.as_ref().and_then(|hn| {
-                if hn.is_empty() {
-                    return None;
-                }
-                let hits: Vec<usize> = payload_questions
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, q)| {
-                        let qn = norm(q);
-                        qn.len() >= 4 && (qn == *hn || qn.contains(hn) || hn.contains(&qn))
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
-                (hits.len() == 1).then_some(hits[0])
-            });
+            let cur_idx = kimi_sheet_question_idx(&lines, &payload_questions);
             let cur_eff = cur_idx.unwrap_or(payload_questions.len());
             let exp_eff = expected_idx.unwrap_or(payload_questions.len());
-            // 达成：落点 == 预期题（正常推进 / 导航归位）
+            // 达成：落点 == 预期题（正常推进 / 导航归位）。advanced=true——单选
+            // 保存后 TUI 自动推进，前端据此同步 mqIndex
             if cur_eff == exp_eff {
                 log::info!("kimi-freeText 键序列(达成·预期题 Some({exp_eff}))={sent_keys:?}");
                 return Ok(FreeTextOutcome {
                     sent_keys,
                     receipt_seen: Some(true),
                     review_reached: review_here,
-                    screen_text: None,
+                    advanced: true,
+                    screen_text: Some(text.to_string()),
                     screen_checked: None,
                 });
             }
@@ -1252,6 +1321,7 @@ where
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
+        advanced: false,
         review_reached: false,
         screen_text: None,
         screen_checked: None,
@@ -1367,6 +1437,7 @@ where
         Ok(FreeTextOutcome {
             sent_keys,
             receipt_seen,
+            advanced: false,
             review_reached: false,
             screen_text: None,
             screen_checked: None,
@@ -1377,6 +1448,7 @@ where
         Ok(FreeTextOutcome {
             sent_keys,
             receipt_seen: None,
+            advanced: false,
             review_reached: false,
             screen_text: None,
             screen_checked: None,
@@ -1933,6 +2005,7 @@ where
                 return Ok(FreeTextOutcome {
                     sent_keys: sent,
                     receipt_seen,
+                    advanced: false,
                     review_reached: false,
                     screen_text: if text.is_empty() { None } else { Some(text.to_string()) },
                     screen_checked: None,
@@ -2011,6 +2084,7 @@ where
                 return Ok(FreeTextOutcome {
                     sent_keys: sent,
                     receipt_seen,
+                    advanced: false,
                     review_reached: false,
                     screen_text: if text.is_empty() { None } else { Some(text.to_string()) },
                     screen_checked: None,
@@ -2046,6 +2120,7 @@ where
                 return Ok(FreeTextOutcome {
                     sent_keys: sent,
                     receipt_seen,
+                    advanced: false,
                     review_reached: false,
                     screen_text: if text.is_empty() { None } else { Some(text.to_string()) },
                     screen_checked: None,
@@ -2433,6 +2508,7 @@ where
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
+        advanced: false,
         review_reached: false,
         screen_text,
         screen_checked,
@@ -3890,6 +3966,9 @@ where
 pub struct FreeTextOutcome {
     /// 保存后 TUI 已直达 Review/Submit 汇总屏（末题/全部已答自动汇总）
     pub review_reached: bool,
+    /// **TUI 已自动推进下一题**（单选保存后自动推进形态，2026-10-07）——前端据此
+    /// 同步 mqIndex+1（多选留原页 = false，切题交还用户）
+    pub advanced: bool,
     /// 实际发出的键（含定位数字与末尾回车；文本以占位符形式出现——不落正文）
     pub sent_keys: Vec<String>,
     /// 是否屏读到终态回执行（`None` = 读不到屏，无法核验）
@@ -4088,6 +4167,7 @@ where
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen,
+        advanced: false,
         review_reached: false,
         screen_text: None,
         screen_checked: None,
@@ -4288,6 +4368,7 @@ where
         return Ok(FreeTextOutcome {
             sent_keys,
             receipt_seen: None,
+            advanced: false,
             review_reached: false,
             screen_text: None,
             screen_checked: None,
@@ -4363,6 +4444,7 @@ where
     Ok(FreeTextOutcome {
         sent_keys,
         receipt_seen: None,
+        advanced: false,
         review_reached: false,
         screen_text,
         screen_checked,

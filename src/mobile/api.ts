@@ -833,6 +833,8 @@ export interface QuestionInfoView {
    *  非题屏（前端维持本地状态）。 */
   screen?: {
     review?: boolean;
+    /** Review 页逐题摘要（2026-10-07 确认卡权威源切换：Q/→ 行解析，以终端为准） */
+    summary?: { q: string; a: string }[];
     heading?: string;
     checked?: (boolean | null)[];
     freeText?: string | null;

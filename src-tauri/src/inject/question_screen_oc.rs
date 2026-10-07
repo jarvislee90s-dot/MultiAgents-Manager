@@ -173,6 +173,74 @@ pub fn opencode_question_screen_snapshot(lines: &[String]) -> Option<QuestionScr
 ///
 /// 无 checkbox 行 → None（非 kimi 多选页：单选页/会话正文）。误报面 = GET
 /// pending 门 + 前端 heading 对位双重兜底（同单选分支）。
+/// kimi **Review 汇总页逐题摘要**（2026-10-07 新增，确认卡权威源切换）：
+/// 形态（2.1.1 活体截图）：
+///
+/// ```text
+/// Review your answer before submit
+///  Q  <题干>
+///  →  <答案>            （答案折行归并待实测样本）
+///  Ready to submit your answers?
+///  → [1] Submit
+///    [2] Cancel
+/// ```
+///
+/// 解析规则：`Q ` 前缀行开新题，其后第一个 `→ ` 行（非 `→ [N]` 确认区）为该题
+/// 答案；`Ready to submit` 后的 Submit/Cancel 区不计入。未答题答案为空串。
+/// 返回 (题干, 答案) 有序对；无 Q 行 → None（非 Review 页/解析不出）。
+const REVIEW_ARROW: char = '→';
+
+pub fn kimi_review_summary(lines: &[String]) -> Option<Vec<(String, String)>> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut in_review = false;
+    for raw in lines {
+        let t = raw.trim();
+        if !in_review {
+            if t.starts_with("Review your answer before submit") {
+                in_review = true;
+            }
+            continue;
+        }
+        if t.starts_with("Ready to submit") {
+            break; // Submit/Cancel 区及其后不计入
+        }
+        if t.is_empty() {
+            continue;
+        }
+        if let Some(q) = t.strip_prefix("Q ") {
+            pairs.push((q.trim().to_string(), String::new()));
+            continue;
+        }
+        // → 答案行（非 → [N] 确认区）：首行或折行追加
+        if let Some(ans) = t.strip_prefix(REVIEW_ARROW).map(str::trim) {
+            if ans.starts_with('[') {
+                continue; // [1] Submit / [2] Cancel 确认区
+            }
+            if let Some(last) = pairs.last_mut() {
+                if last.1.is_empty() {
+                    last.1 = ans.to_string();
+                } else {
+                    last.1.push(' ');
+                    last.1.push_str(ans);
+                }
+            }
+            continue;
+        }
+        // 折行归并（2026-10-07 17:03 实录形态）：无前缀非空行 = 上一项折行
+        // ——Q 行后 → 题干折行（Q3「（单/选）」）；→ 行后 → 答案折行
+        if let Some(last) = pairs.last_mut() {
+            if last.1.is_empty() {
+                last.0.push(' ');
+                last.0.push_str(t);
+            } else {
+                last.1.push(' ');
+                last.1.push_str(t);
+            }
+        }
+    }
+    (!pairs.is_empty()).then_some(pairs)
+}
+
 pub fn kimi_question_screen_snapshot(lines: &[String]) -> Option<QuestionScreenSnapshot> {
     // kimi 不在 OwnAnswerDialect（own answer 编排未接入）——标记直接内联。
     // **已选字形多候选**（账本吸收文案漂移的同一口径）：`[?]`=探测批 K（2.x），

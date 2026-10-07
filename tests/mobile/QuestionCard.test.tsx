@@ -854,13 +854,16 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     });
     fireEvent.click(screen.getByTestId("question-multi-freetext-send"));
     await flushAsync();
-    // 发送带 questionIndex=0；不置终态（还要提交勾选）
+    // 发送带 questionIndex=0；不置终态（还要提交勾选）。04d3c87（2026-10-06
+    // kimi 实机定案）：输入格有内容 → 即时覆盖写入语义（不等屏读回执）——
+    // 首发也带 overwrite:true
     const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
     expect(bodies[0]).toEqual({
       sessionId: "sess-single-mft",
       action: "freeText",
       text: "内联文字",
       questionIndex: 0,
+      overwrite: true,
     });
     expect(screen.queryByTestId("question-sent")).toBeNull();
     // 提交勾选钮仍可用（主路径不受影响）
@@ -896,11 +899,13 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     expect(screen.getByTestId("question-confirm-answers")).toBeTruthy();
     expect(screen.getByTestId("question-confirm-answer-1").textContent).toContain("自定义补充");
     const bodies = answerCalls().map((c) => JSON.parse(String((c[1] as RequestInit).body)));
+    // 04d3c87：输入非空即覆盖写入语义 → freeText 首发也带 overwrite:true
     expect(bodies[bodies.length - 2]).toEqual({
       sessionId: "sess-e4-mft",
       action: "freeText",
       text: "自定义补充",
       questionIndex: 1,
+      overwrite: true,
     });
   });
 
@@ -997,7 +1002,7 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     ).toBe(true);
   });
 
-  it("多题流**单选**子题自由作答（2026-10-03）：输入框渲染，发送后不置终态", async () => {
+  it("多题流**单选**子题自由作答（2026-10-03）：输入框渲染，保存后单选自动推进（f097a29/0da61f5 回归锁）", async () => {
     installFetch();
     const info = twoQuestionInteractive();
     // 第 1 题改成单选（多题流的单选子题——终端屏同样有 Type something 行）
@@ -1014,9 +1019,19 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     });
     fireEvent.click(screen.getByTestId("question-multi-freetext-send"));
     await flushAsync();
-    // 屏读真值回显；不置终态（还能继续切题/提交）
-    expect(screen.getByTestId("question-multi-freetext").textContent).toContain("已写入：单选作答");
+    // f097a29（2026-10-06 用户需求：单选打字保存与数字 select 统一）+ 0da61f5
+    // （回执 text/advanced 完整字段）：单选保存 = 选即提交，终端已推进 → 卡面同步
+    // 推进到第 2 题。「已写入」记录在第 1 题名下（输入区随卡切走，不再原地显示
+    // ——旧断言「已写入：单选作答」即此过期）；不置终态（还能继续作答/提交）
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
     expect(screen.queryByTestId("question-sent")).toBeNull();
+    // 已写入答案在确认卡清单核验（mqFreeText[0] 已落位）：答完第 2 题（单选数字
+    // 即答 → 自动进确认卡）→ 第 1 题显示自由作答文本、第 2 题显示选中项
+    routes.answer = { status: "key_sent" };
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-confirm-answer-0").textContent).toContain("单选作答");
+    expect(screen.getByTestId("question-confirm-answer-1").textContent).toContain("b1");
   });
 
   it("清空按钮（2026-10-03）：已写入态在场（含只读态），点击发空文本+overwrite，成功后回「发送」初态", async () => {
@@ -1098,6 +1113,62 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     render(<QuestionCard session={{ id: "sess-screen-review" }} />);
     await screen.findByTestId("question-card");
     expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
+  });
+
+  it("GET 快照 review+summary 形态（db45945 回归锁）：刷新后确认卡摘要落位", async () => {
+    installFetch();
+    const info = twoQuestionInteractive();
+    // 终端已停在 Review 页，后端屏读解析出逐题摘要（Q/→ 行）——MAM 刷新/重开页面
+    // 后 GET 载荷即此形态。db45945 之前：主 GET effect 的旧内联 review 分支只切
+    // 确认卡、不落 confirmSummary → 确认卡所有题全显「（未作答）」（后端已回传
+    // summary 前端没收货）；归一到 applyScreenSync 后 summary 落位、确认卡唯一
+    // 显示终端 Review 页真值（不再叠加本地勾选/选中记忆）
+    info.screen = {
+      review: true,
+      summary: [
+        { q: "First?", a: "选项a1" },
+        { q: "Second?", a: "（未作答）" },
+      ],
+    };
+    routes.question = info;
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-screen-summary" }} />);
+    // 无任何交互：挂载 GET 即进确认卡
+    expect(await screen.findByTestId("question-confirm-hint")).toBeTruthy();
+    // 核心断言：summary 答案落位（修复前的刷新路径不落 summary，这里会显示
+    // 「（未作答）」）
+    expect(screen.getByTestId("question-confirm-answer-0").textContent).toContain("选项a1");
+    // 终端没答的题如实显示 summary 给的「（未作答）」
+    expect(screen.getByTestId("question-confirm-answer-1").textContent).toContain("（未作答）");
+    // 确认卡脚注在场（以终端 Review 页为准）
+    expect(screen.getByText("以终端 Review 页为准")).toBeTruthy();
+  });
+
+  it("可读性门（2026-10-07）：kimi 单选页 heading-only 快照（checked 空）不清本地选中记忆", async () => {
+    installFetch();
+    // 第一拍：claude 形态快照——单选页 checked 恒带逐行真值（如 [null, null] 起步），
+    // 行尾 ✓ 经 checked 通道回写 mqSelected（2026-10-06 活体定案的渲染源）
+    const claudeForm = twoQuestionInteractive();
+    claudeForm.screen = { heading: "First?", checked: [true, null] };
+    routes.question = claudeForm;
+    routes.answer = { status: "key_sent" };
+    const view = render(<QuestionCard session={{ id: "sess-readability-gate" }} />);
+    await screen.findByTestId("question-multi-current");
+    // mqSelected 已落：第 1 题选项 0 选中（单选选中态出口 = data-checked，见
+    // QuestionCard.tsx selectedHere → activeHere 分支）
+    expect(screen.getByTestId("question-multi-option-0").getAttribute("data-checked")).toBe("true");
+    // 第二拍：状态跃迁（无 status → busy）触发 GET effect 自身重拉（纪元未变，
+    // 不涉 interactionEpoch 防回跳），快照换成 kimi 形态——单选页选中项无字符
+    // 标记（高亮是属性层读不到），快照 heading-only、checked 恒空数组
+    const kimiForm = twoQuestionInteractive();
+    kimiForm.screen = { heading: "First?", checked: [] };
+    routes.question = kimiForm;
+    view.rerender(<QuestionCard session={{ id: "sess-readability-gate", status: "busy" }} />);
+    await flushAsync();
+    // 空 checked 数组 = 「读不到」≠「没有」→ 可读性门保留本地选中记忆。
+    // 无门时（旧逻辑）：checked.length=0 照走清除分支删 mqSelected → 此处变
+    // undefined（null），选中标记消失——读不到就清是过度纠偏
+    expect(screen.getByTestId("question-multi-option-0").getAttribute("data-checked")).toBe("true");
   });
 
   it("advance 回执屏读快照（2026-10-03）：新题的勾选/自由作答以快照为准", async () => {
@@ -1184,6 +1255,15 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     info.multiFreeText = true;
     info.freeTextOverwrite = false;
     routes.question = info;
+    render(<QuestionCard session={{ id: "sess-ovw-gate" }} />);
+    await screen.findByTestId("question-card");
+    // 先答第 1 题（单选数字即答）点到第 2 题再作答：f097a29 起单选保存后卡面
+    // 自动推进，而门控分支渲染在「已写入的那道题」的输入区——多选保存不推进，
+    // 卡停在原地才断言得到（旧用例在第 1 题发送后被推进带走，门控文案随卡消失）
+    routes.answer = { status: "key_sent" };
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
     // 回执带屏读真值 text → 前端记 mqFreeText（「已写入」态，触发按钮门）
     routes.answer = {
       status: "key_sent",
@@ -1192,8 +1272,6 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
       text: "先发一次",
       checked: true,
     };
-    render(<QuestionCard session={{ id: "sess-ovw-gate" }} />);
-    await screen.findByTestId("question-card");
     fireEvent.change(screen.getByTestId("question-multi-freetext-input"), {
       target: { value: "先发一次" },
     });

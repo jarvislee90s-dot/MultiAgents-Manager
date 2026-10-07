@@ -4081,6 +4081,31 @@ pub async fn session_question(
                         // `tab switch`）——快照同步勾选态与 Other 残留（2026-10-05
                         // 屏读标准补齐批 4）；单选页形态未取证 → 解析 None 保守降级
                         if tool2 == "kimi" {
+                            // **Review/Submit 汇总页优先判定**（2026-10-07 用户实录：
+                            // 全部答完 TUI 停在 Review 页——无 `? ` 题干行/勾选框，
+                            // 快照解析退化 → 前端刷新永远回第 1 题）。命中回
+                            // `{"review": true}`（与 opencode Confirm 页同形态，
+                            // 前端已消费该字段切确认卡）
+                            if crate::inject::question::kimi_review_present(&lines) {
+                                // **逐题摘要**（2026-10-07 确认卡权威源切换）：
+                                // Q/→ 行解析，摘要以终端 Review 页为准
+                                let summary = crate::inject::question_screen_oc::
+                                    kimi_review_summary(&lines);
+                                log::info!(
+                                    "[question-screen] GET pid={pid} rows={} → kimi Review 页（{} 题）",
+                                    lines.len(),
+                                    summary.as_ref().map(|v| v.len()).unwrap_or(0)
+                                );
+                                let summary_json: Vec<serde_json::Value> = summary
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|(q, a)| serde_json::json!({ "q": q, "a": a }))
+                                    .collect();
+                                return Some(serde_json::json!({
+                                    "review": true,
+                                    "summary": summary_json,
+                                }));
+                            }
                             return crate::inject::question_screen_oc::kimi_question_screen_snapshot(
                                 &lines,
                             )
@@ -4452,7 +4477,7 @@ pub async fn session_question_answer(
                 }
             })?,
         };
-        Ok((session, seq, q, tool_id, multi_question, pages, payload_questions, expected_idx))
+        Ok((session, seq, q, tool_id, multi_question, pages, payload_questions, expected_idx, q_idx))
     })
     .await
     {
@@ -4465,7 +4490,7 @@ pub async fn session_question_answer(
             );
         }
     };
-    let (session, sequence, q_for_plan, q_tool, multi_flow, pages, payload_questions, expected_idx) =
+    let (session, sequence, q_for_plan, q_tool, multi_flow, pages, payload_questions, expected_idx, q_idx) =
         match lookup {
         Ok(v) => v,
         Err(code) => {
@@ -4511,9 +4536,12 @@ pub async fn session_question_answer(
     // 传给分派器（run_toggle_stages 第 1 段与屏面题干比对，不一致=已手动切题→中止）
     let expected_question = q_for_plan.question.clone();
     let payload_questions_for_dispatch = payload_questions.clone();
+    let q_idx_for_dispatch = q_idx;
     let expected_idx_for_dispatch = expected_idx;
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 同款）：忙 → None 哨兵
     // 让位，不投递亦不落审计（无投递发生，approve/retract/jump 忙让位同口径）
+    // 闭包外回执 JSON 也要用（StageDone 的 text 字段）——闭包 move 前克隆一份
+    let free_text_for_json = free_text.clone();
     let attempt = tokio::task::spawn_blocking(move || {
         let _guard = crate::inject::queue::try_acquire_inflight(&answer_sid)?;
         Some(dispatch_question_action(
@@ -4528,6 +4556,7 @@ pub async fn session_question_answer(
             &expected_question,
             expected_idx_for_dispatch,
             payload_questions_for_dispatch,
+            q_idx_for_dispatch,
         ))
     })
     .await;
@@ -4582,6 +4611,8 @@ pub async fn session_question_answer(
         QuestionDispatch::StageDone {
             stage,
             receipt_seen,
+            review_reached,
+            advanced,
         } => {
             // 阶段机走完整条闭环：status 仍是 key_sent（旧前端语义不变），但带上
             // done/stage/verified——`verified` 的三态见端点文档（**不谎报完成**）
@@ -4607,6 +4638,9 @@ pub async fn session_question_answer(
                     "done": true,
                     "stage": stage,
                     "verified": receipt_seen,
+                    "review": review_reached,
+                    "advanced": advanced,
+                    "text": free_text_for_json.as_deref(),
                 }),
             )
         }
@@ -4643,6 +4677,8 @@ pub async fn session_question_answer(
                     "checked": checked,
                     "verified": verified,
                     "screen": screen_json,
+                    // Review 落点判定（末次切勾直达 Review 时前端切确认卡）
+                    "review": screen.as_ref().map(|snap| snap.heading.is_empty() && snap.checked.is_empty()).unwrap_or(false),
                 }),
             )
         }
@@ -4719,12 +4755,20 @@ pub async fn session_question_answer(
                 "ok",
             );
             let screen_json = screen.as_ref().map(snapshot_to_json);
+            // **Review 落点判定**（2026-10-07 13:22 缺口补齐）：单选选中后 TUI 自动
+            // 推进，末题/全部已答时直达 Review——回执带 review 供前端切确认卡
+            let review = screen
+                .as_ref()
+                .map(|snap| snap.heading.is_empty() && snap.checked.is_empty())
+                .unwrap_or(false);
             json_no_store(
                 StatusCode::OK,
                 serde_json::json!({
                     "status": "key_sent",
+                    "done": true,
                     "stage": "select",
                     "screen": screen_json,
+                    "review": review,
                 }),
             )
         }
@@ -4977,6 +5021,10 @@ enum QuestionDispatch {
     StageDone {
         stage: &'static str,
         receipt_seen: Option<bool>,
+        /// 保存后已直达 Review/Submit 汇总屏（末题/全部已答自动汇总）
+        review_reached: bool,
+        /// TUI 已自动推进下一题（kimi 单选 Other 保存后自动推进形态）
+        advanced: bool,
     },
     /// **claude 多选切勾闭环**的结论（2026-09-24）：`checked` = 屏读核验到的目标行
     /// 新勾选态（`None` = 键已发出但读不到屏无法核验——不谎报也不误报失败）；
@@ -5230,6 +5278,49 @@ fn question_terminal<'a>(
     }
 }
 
+/// free-text 阶段机臂共用的**终端缝**构造（与 [`question_terminal`] 同一模式，
+/// 多一个文本通道）：发键/发文本成功后固定 `SUBMIT_DELAY_MS` 等重绘；**文本走
+/// 字符通道**（`locate_and_inject_spec`——用户文本绝不进键通道，也不带 `[mobile]`
+/// 签名：签名是「一条新消息」的语义，作答文本不是消息；文本归一已在 handler
+/// 做过，这里原样投递）。
+#[allow(clippy::type_complexity)] // 四泛型是 FreeTextClosures 的固有形态
+fn free_text_terminal<'a>(
+    read: impl FnMut() -> Option<Vec<String>> + 'a,
+    injector: &'a dyn crate::inject::engine::Injector,
+    pid: u32,
+    spec: &'a crate::inject::families::FamilySpec,
+) -> crate::inject::question::FreeTextClosures<
+    impl FnMut() -> Option<Vec<String>> + 'a,
+    impl FnMut(&str) -> Result<(), String> + 'a,
+    impl FnMut(&str) -> Result<(), String> + 'a,
+    impl FnMut() + 'a,
+> {
+    crate::inject::question::FreeTextClosures {
+        read,
+        send: move |key: &str| {
+            let r = injector.locate_and_send_key_spec(pid, key, spec);
+            if r.is_ok() {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ));
+            }
+            r
+        },
+        send_text: move |t: &str| {
+            injector.locate_and_inject_spec(pid, t, spec)?;
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ));
+            Ok(())
+        },
+        settle: || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ))
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // 阶段机臂的缝参数（评审前已 9 个；multi_flow 为本批新增的有语义参数）
 fn dispatch_question_action(
     st: &Arc<RemoteState>,
@@ -5243,6 +5334,7 @@ fn dispatch_question_action(
     expected_question: &str,
     expected_idx: Option<usize>,
     payload_questions: Vec<String>,
+    q_idx: usize,
 ) -> QuestionDispatch {
     match plan {
         StagePlan::ClaudeSelect { index } => {
@@ -5692,6 +5784,59 @@ fn dispatch_question_action(
                     }
                 }
             }
+            // **kimi 单选 select 落点校验 + 回拉**（2026-10-07 用户定案）：单选数字
+            // = 选中 + 自动推进，TUI 可能**跳过已答题**——落点不定（下一题/更后/
+            // Review）。校验落点 == 预期（q_idx+1）；不符 → ← 逐格拉回（有界）；
+            // Review 在场（全答完）= 合法终点。多选留原页不适用本段。
+            if tool == "kimi" && payload_questions.len() > 1 && expected_idx.is_some() {
+                let probe = question_probe(st, tool, pid);
+                let mut navs = 0u32;
+                let rounds = crate::inject::timing::poll_rounds(
+                    crate::inject::timing::QUESTION_STAGE_POLL_TOTAL_MS,
+                );
+                for round in 0..rounds.max(1) {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    let lines = match probe("select-landing") {
+                        Some(l) => l,
+                        None => break,
+                    };
+                    if crate::inject::question::kimi_review_present(&lines) {
+                        log::info!("kimi 单选落点：全答完直达 Review → 合法终点");
+                        break;
+                    }
+                    let cur_idx = crate::inject::question::kimi_sheet_question_idx(
+                        &lines,
+                        &payload_questions,
+                    );
+                    match cur_idx {
+                        Some(i) if i == q_idx + 1 => {
+                            log::info!(
+                                "kimi 单选落点：第 {round} 拍落在预期题 {} ✓",
+                                q_idx + 1
+                            );
+                            break;
+                        }
+                        _ => {
+                            if navs < 8 {
+                                navs += 1;
+                                log::info!(
+                                    "kimi 单选落点第 {round} 拍：cur={cur_idx:?} exp={} → ← 拉回",
+                                    q_idx + 1
+                                );
+                                if let Err(e) =
+                                    injector.locate_and_send_key_spec(pid, "left", spec)
+                                {
+                                    return QuestionDispatch::Failed(e);
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
             QuestionDispatch::KeySent { stage: None }
         }
         StagePlan::Submit { max_down_steps } => {
@@ -5710,6 +5855,8 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_RECEIPT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 // **中止分类**（复评 F6-2）：屏读形态不符 → Aborted（带段名）；
                 // 投递失败 → Failed（**不带** aborted——语义等同批次丙的投递失败，
@@ -5865,31 +6012,7 @@ fn dispatch_question_action(
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                // 文本走字符通道（同单题自由作答的安全面：用户文本绝不进键通道）
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_multi_select_free_text_stages(
                 text,
                 *overwrite,
@@ -5932,33 +6055,7 @@ fn dispatch_question_action(
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                // **文本走字符通道**（`locate_and_inject_spec`）——裁3 的安全面：
-                // 用户文本绝不进键通道。注意本调用**不带** `[mobile]` 签名（签名是
-                // 「一条新消息」的语义，作答文本不是消息；归一已在 handler 做过）。
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_free_text_stages(
                 text,
                 || poll_question_stage(|| probe("free-row"), QUESTION_STAGE_POLL_TOTAL_MS),
@@ -5969,6 +6066,8 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_FREE_TEXT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -6069,6 +6168,8 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_RECEIPT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -6087,35 +6188,7 @@ fn dispatch_question_action(
                 text.chars().count()
             );
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                // 文本走字符通道（同 claude 自由作答：用户文本绝不进键通道、不带签名）
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
-            log::info!(
-                "kimi-freeText 路径标记：overwrite={overwrite} multi_question={multi_question} text_len={}",
-                text.chars().count()
-            );
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_kimi_free_text_stages(
                 text,
                 *overwrite,
@@ -6132,6 +6205,8 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_FREE_TEXT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: o.review_reached,
+                    advanced: o.advanced,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -6142,30 +6217,7 @@ fn dispatch_question_action(
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_codex_notes_stages(
                 text,
                 *overwrite,
@@ -6177,6 +6229,8 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_FREE_TEXT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -6187,30 +6241,7 @@ fn dispatch_question_action(
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_opencode_own_answer_stages(
                 text,
                 *overwrite,
@@ -6263,6 +6294,8 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_RECEIPT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 Err(e) => dispatch_abort(e),
             }
