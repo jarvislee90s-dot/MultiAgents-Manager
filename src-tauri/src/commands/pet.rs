@@ -99,7 +99,8 @@ fn schedule_show_fallback(app: &AppHandle) {
     });
 }
 
-/// 创建桌宠窗口（隐藏态；前端加载后按 localStorage 决定显隐，避免启动闪现）。
+/// 创建桌宠窗口（**可见态**——2026-10-07 实证：隐藏态建出来的窗口页面不会执行，见 `build_pet_window`
+/// 里 `.visible(true)` 的长注释；前端加载后仍按 localStorage 决定最终显隐，关掉宠物的人会被收回去）。
 /// 带落地校验与重试：已存在且真实落地则直接复用；幽灵或创建失败则销毁重建
 pub fn create_pet_window(app: &AppHandle) -> Result<(), String> {
     let _guard = PET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -166,7 +167,23 @@ fn build_pet_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
-        .visible(false)
+        // **可见态建窗**（2026-10-07 实证修复，原为 `.visible(false)`）：
+        //
+        // 原设计是「隐藏建窗 → 前端按 localStorage 决定显隐」，动机是「避免启动闪现」。
+        // 但实测（本机日志，同一晚连续 4 次启动，每次都是同一形状）：隐藏态建出来的宠物窗口
+        // **页面根本不会执行** —— 建窗成功、`is_visible=false`，此后**一次 `set_pet_visible`
+        // 都没有**（那是页面唯一会发出的调用）；而 MAM 其余窗口都是**可见态**建窗，页面全都正常。
+        // 更关键：**事后 `show()` 也救不回来** —— E2 的启动兜底 `show()` 确实执行了
+        // （日志有「建窗 5000ms 后仍隐藏 → 启动兜底 show()」），页面依旧没跑。
+        // ⇒ 页面必须在**建窗那一刻**就允许加载；隐藏建成之后没有第二次机会。
+        // 旁证：URL 本身没问题（dev server 对 `/index.html`、`/index.html%23/pet`、`/usage`
+        // 一律 200，SPA 回退），故不是路由或地址的问题。
+        //
+        // **为什么不再担心「启动闪现」**：宠物窗口是 `transparent(true)` 且这一刻**还没有任何
+        // 内容**（React 未挂载）⇒ 一个空的全透明窗口**视觉上就是「什么都没有」**，用户看不到它。
+        // 用户在设置里关掉了宠物时，页面挂载后第一件事就是 `set_pet_visible(false)` 把它收回去
+        // （`pet.tsx` 的 effect），故关掉的用户也不会长期留一个空窗。
+        .visible(true)
         .inner_size(PET_W, PET_H)
         .position(x, y)
         .build()
