@@ -43,6 +43,18 @@ struct MobileAssets;
 /// 简报原稿的 `serve_asset("index.html")` 会 404，故 /m 与各处回落统一伺服 mobile.html
 const MOBILE_ENTRY: &str = "mobile.html";
 
+/// §C3 可达性探针的 **MAM 特征头**（B-I6）：看板入口响应写入，tailscale 探针读取。
+/// 为什么需要它：探针原口径「拿到任意 HTTP 响应即算通」挡不住 TUN / 透明重定向式 MITM
+/// ——用户把自签 CA 装进系统信任库后 TLS 仍"成功"，拦截页被读成「已验证」（§C3 残余风险）。
+/// 写入点唯一（本文件的 `entry_response`），读取点唯一（`tailscale::probe_http`），
+/// 值与本常量同处定义，改一处必然牵动另一处（`board_entry_carries_reach_marker_for_tailscale_probe`
+/// 在服务侧锁死其在场）。
+/// **诚实边界**：这不是鉴权也不是密码学证明——知道特征值的 MITM 仍可伪造；它的定位是
+/// 「廉价判据」：把「任意响应」收紧为「带 MAM 特征」，挡掉最常见的透明错误页
+pub(crate) const MAM_REACH_HEADER: &str = "x-mam-reach";
+/// 特征头的值（版本化 token：语义变更时同步改，两侧由编译期常量约束）
+pub(crate) const MAM_REACH_VALUE: &str = "board-1";
+
 /// 入口 HTML 响应（/m 精确命中与 /m/* 未命中回落共用）。
 /// 抽成非 async 纯函数的原因：若 serve_asset 未命中分支直接 `mobile_index().await`，
 /// 会构成相互递归的 async fn（编译不过；且 dist-mobile 未构建时无限循环）。
@@ -50,7 +62,15 @@ const MOBILE_ENTRY: &str = "mobile.html";
 fn entry_response() -> Response {
     match MobileAssets::get(MOBILE_ENTRY) {
         Some(f) => (
-            [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            [
+                (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
+                // §C3（B-I6）：MAM 特征头——tailscale 可达性探针据此判定「是 MAM 答的」。
+                // 只在**真的伺服了看板入口**时写：产物缺失（404 分支）不带特征
+                (
+                    axum::http::HeaderName::from_static(MAM_REACH_HEADER),
+                    MAM_REACH_VALUE,
+                ),
+            ],
             f.data,
         )
             .into_response(),
@@ -230,8 +250,9 @@ impl<S> Drop for CleanupStream<S> {
     }
 }
 
-/// via 判定域名源接缝类型（clippy type_complexity 收敛别名）
-pub type ViaHostsSource = dyn Fn() -> Option<(Vec<String>, Vec<String>)> + Send + Sync;
+/// via 判定域名源接缝类型（clippy type_complexity 收敛别名）：三路 = (quick, named,
+/// tailscale)（§C1 追加第三路）
+pub type ViaHostsSource = dyn Fn() -> Option<(Vec<String>, Vec<String>, Vec<String>)> + Send + Sync;
 
 /// A1 写入确认探针缝类型（M9R Task 5，clippy type_complexity 收敛别名，对齐
 /// [`ViaHostsSource`] 先例）：参数 = (tool, session_id, stamp)。
@@ -318,22 +339,27 @@ pub struct RemoteState {
     pub max_devices_source: Box<dyn Fn() -> usize + Send + Sync>,
     /// per-IP 限速状态机（M5 A3）：POST /pair/pin 锁内查改；内存态重启即清
     pub pin_limiter: std::sync::Mutex<crate::remote::pin::PinRateLimiter>,
+    /// 全局限速桶（§G5）：只拦"多来源一起爆破"，阈值远宽于分来源桶——
+    /// 单个捣乱者填不满它，因此伤不到别人。
+    /// **该断言依赖滑动窗口记账**（评审 A-I1 修复）：计数 = 最近一个锁定窗口内的失败数，
+    /// 窗口外的旧记录在判断前丢弃；单调累计的旧实现下单个来源约 100 分钟即可填满阈值，
+    /// 那时"填不满"为假，"伤不到别人"随之不成立。改动本桶前先读 `pin::FAILURE_WINDOW_MS`
+    pub global_pin_limiter: std::sync::Mutex<crate::remote::pin::PinRateLimiter>,
     /// PIN 源注入缝（M5 A3）：生产 = pin::get_pin（全局 KV）；测试注入固定值（零 DB）
     pub pin_source: Box<dyn Fn() -> Option<String> + Send + Sync>,
     /// 时钟注入缝（M5 A3）：生产 = chrono 毫秒；测试注入可推进原子量——限速锁定
     /// 到期测试用它推进时间（与 pairing 时代 state_with_clock 同目的，零 sleep）
     pub now_source: Box<dyn Fn() -> i64 + Send + Sync>,
-    /// 隧道域名并集注入缝（M5 A3，gate 回环豁免消费）：生产 = 从 tunnel::snapshot()
-    /// 抽当前隧道地址的域名部分（A5 双通道聚合时改聚合实现，签名不变）；测试注入固定域名。
-    /// **None = 隧道快照错误终态（fail-closed 哨兵，评审 Important 1）**：豁免的 Host 条件
-    /// 依赖域名名单，快照错误时无从判定 Host 是否隧道域名——gate 收到 None 必须**完全
-    /// 跳过本机豁免**（回环 + 任意 Host 都不免费），而非把 None 当空名单（那是 fail-open：
-    /// Host 条件恒满足 → 回环流量全豁免）
-    pub tunnel_hosts_source: Box<dyn Fn() -> Option<Vec<String>> + Send + Sync>,
     /// via 分通道域名注入缝（M5 A3，/pair/pin 配对时刻消费）：生产 = snapshot 按
-    /// mode 分拣 quick/named 域名；测试注入固定域名。与 tunnel_hosts_source 同源分形——
-    /// gate 豁免只要"是否隧道域名"并集，via 需要通道区分
+    /// mode 分拣 quick/named/tailscale 域名；测试注入固定域名。**纯展示**（via 为
+    /// 装饰标注，零豁免后不再参与任何安全判定，2026-10-06 §G2）——**限速不得消费本缝**
+    /// （那是下面 rate_bucket_channels_source 的职责，评审 A-I2）
     pub via_hosts_source: Box<ViaHostsSource>,
+    /// **限速专用**的信任通道声明源（§G5；评审 A-I2）：每次请求现算「通道 → 已登记
+    /// 域名 + 权威来源头」声明表；`gate::rate_bucket_key` 只信表里声明的通道，未声明的
+    /// （如 tailscale Funnel）与一切不可证来源一律回落全局桶。空表 = 零信任（fail-closed）。
+    /// **与 via_hosts_source 分离**：限速的信任边界不得寄生于展示字段
+    pub rate_bucket_channels_source: Box<crate::remote::gate::RateBucketChannelsSource>,
     /// 注入器缝（M7 Task 5 方案 A 提前缝合）：生产 = RealInjector（macOS 三通道执行层；
     /// Windows 占位，Task 15 补真实现）；测试可替换 FakeInjector。
     /// 消费方：inject::queue::flush_one（flush 投递）+ session-send 直发（Task 6 已接线：
@@ -394,6 +420,11 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // /ui-config（2026-10-05 UI 改版）：远程端外观配置下发（settings KV 只读缝；
         // PIN 门禁内层 gate 结构性覆盖——新端点不需要各自鉴权代码）
         .route("/ui-config", get(api::ui_config))
+        // /channel（§C5，Task 10）：通道能力**装饰**端点（走哪条通道/带宽受限 +
+        // 实测速率）。读 Host 推断、可被伪造、允许不准、**永不得进安全判定**
+        // （不变量 §G1 推论③，见 api::channel_info 注释）；gate 由本子路由的
+        // 内层 layer 结构性覆盖
+        .route("/channel", get(api::channel_info))
         // /events（M3 Task 6）：SSE 长连接，gate 由本子路由的 layer 结构性覆盖
         // （与其余端点同一内层 gate，不需要额外 middleware）
         .route("/events", get(api::events))
@@ -515,7 +546,9 @@ pub async fn serve(bind: &str, port: u16, state: Arc<RemoteState>) -> Result<(),
     // in-flight 守卫（同会话并发双投防护）
     crate::inject::queue::spawn_flush_loop(state.clone());
     // M5 A3：来源 IP 记录——into_make_service_with_connect_info 注入 ConnectInfo
-    // extension（pair_pin 的限速键/指纹与 gate 本机豁免判定依赖；oneshot 测试在请求侧自补）
+    // extension。**消费方只有 pair_pin**（限速分桶键 + 落库来源），且**不参与放行判定**
+    // （不变量 G1：来源地址/请求头/进程归属不得影响鉴权；原 gate 本机豁免已整块删除，
+    // gate 不再消费它）。oneshot 测试在请求侧自补同一 extension。
     axum::serve(
         listener,
         router_with_static(state).into_make_service_with_connect_info::<std::net::SocketAddr>(),
@@ -576,13 +609,15 @@ mod tests {
             // M4 T0a（brief 指定）：本任务新增字段，测试用空注册表即可
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
-            // M5 A3 新字段：限速器全新；PIN 恒 "1234"；时钟真实毫秒；无隧道域名
-            // （豁免面关闭——既有"无 cookie → 403"断言不受本机豁免影响：空 Host fail closed）
+            // M5 A3 新字段：限速器全新；PIN 恒 "1234"；时钟真实毫秒；无展示通道域名、
+            // 无限速信任声明（声明表为空 ⇒ 一切回环来源回落全局桶）
+            // ——零豁免后 gate 只看设备凭据，既有"无 cookie → 403"断言不受 Host 影响
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         })
     }
@@ -594,8 +629,8 @@ mod tests {
     #[tokio::test]
     async fn gate_403_matrix_and_pin_pair_flow() {
         let app = crate::remote::server::router(test_state());
-        // 1) 无 cookie 访问 sessions → 403（请求无 Host 头——空 Host fail closed，
-        //    不会误入本机豁免；测试环境也不注入 ConnectInfo，按非本地处理）
+        // 1) 无 cookie 访问 sessions → 403（请求无 Host 头：Host 早已不参与放行——
+        //    零豁免后无论 Host 是什么、来源是不是回环都 403，不变量 G1）
         let r = app
             .clone()
             .oneshot(
@@ -1024,6 +1059,22 @@ mod tests {
             .expect("头值非可见 ASCII")
     }
 
+    /// §C3（B-I6）**变异锚点**：看板入口响应必须带 MAM 特征头——tailscale 可达性探针
+    /// 据此把「拿到任意 HTTP 响应即算通」收紧为「MAM 自己的服务答的」，挡掉 TUN / 透明
+    /// 重定向式 MITM 返回的拦截页（自签 CA 在系统信任库时 TLS 仍"成功"）。
+    /// 删掉 entry_response 的特征头 → 本测试必红（生产里探针会把一切都判成 Failed）。
+    #[tokio::test]
+    async fn board_entry_carries_reach_marker_for_tailscale_probe() {
+        let app = router_with_static(test_state());
+        let r = app.oneshot(req("GET", "/m", None, None)).await.unwrap();
+        assert_eq!(r.status(), 200, "前置：入口 HTML 可伺服");
+        assert_eq!(
+            header(&r, MAM_REACH_HEADER),
+            MAM_REACH_VALUE,
+            "MAM 特征头是 §C3 探针判据的唯一数据源，不得缺失"
+        );
+    }
+
     /// 静态伺服全矩阵（含安全不变量回归）：入口 / manifest / 真实产物 MIME /
     /// SPA 回落 / 非 /m 前缀 404 / 未知 API 路径仍 403 / 尾斜杠变体
     #[tokio::test]
@@ -1191,10 +1242,11 @@ mod tests {
             max_devices_source: Box::new(|| 3),
             // M5 A3 新字段：同 test_state 口径（限速器全新 / PIN "1234" / 真实时钟 / 无隧道域名）
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
@@ -1578,10 +1630,11 @@ mod tests {
             max_devices_source: Box::new(|| 3),
             // M5 A3 新字段：同 test_state 口径（限速器全新 / PIN "1234" / 真实时钟 / 无隧道域名）
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         let app = router(state.clone());
@@ -1710,10 +1763,11 @@ mod tests {
             max_devices_source: Box::new(|| 3),
             // M5 A3 新字段：同 test_state 口径（限速器全新 / PIN "1234" / 真实时钟 / 无隧道域名）
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         let app = router(state.clone());
@@ -1900,10 +1954,11 @@ mod tests {
             max_devices_source: Box::new(|| 3),
             // M5 A3 新字段：同 test_state 口径（限速器全新 / PIN "1234" / 真实时钟 / 无隧道域名）
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         let app = router(state.clone());
@@ -2174,10 +2229,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             // 探针 + 注入 tmpdir home（零接触真实主目录）
             home_source: Box::new(move || {
                 h.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2275,25 +2331,47 @@ mod tests {
             .to_string()
     }
 
-    // ==== M5 A3：/pair/pin 端点 + gate 本机豁免（回环 + 本地 Host 双条件）====
-    // 安全是本任务的存在意义：穿透测试锁定「隧道流量无法借回环穿透」。
+    // ==== M5 A3：/pair/pin 端点（密码制配对）+ 零豁免矩阵 ====
+    // 安全是本任务的存在意义：穿透测试锁定「回环/隧道流量都借不到放行豁免」——
+    // 2026-10-06 起鉴权只有一条规则（有效设备凭据），见 gate 模块头。
 
-    /// A3 专用 state：PIN 源 / 设备上限 / 隧道域名 / 可推进时钟全注入（零 DB 零真实隧道）。
+    /// A3 专用 state：PIN 源 / 设备上限 / via 域名（tunnel_error=true → None 哨兵）/
+    /// **限速声明表**（与生产同构：只声明 quick/named 两路 CF 通道）/ 可推进时钟全注入
+    /// （零 DB 零真实隧道）。ts_hosts = tailscale 机器域名名单（§C1，**纯装饰 via 用**；
+    /// **不进限速声明表**——Funnel 无 Cloudflare 边缘，同名头可伪造，见
+    /// `gate::cloudflare_rate_channels`）。
     /// 返回时钟句柄供限速到期测试推进（state_with_clock 同目的，零 sleep）
     fn a3_state(
         pin: Option<&str>,
         max_devices: usize,
         quick_hosts: &[&str],
         named_hosts: &[&str],
+        ts_hosts: &[&str],
         tunnel_error: bool,
     ) -> (Arc<RemoteState>, Arc<std::sync::atomic::AtomicI64>) {
         let t = Arc::new(std::sync::atomic::AtomicI64::new(1_000_000));
         let now = t.clone();
         let quick: Vec<String> = quick_hosts.iter().map(|s| s.to_string()).collect();
         let named: Vec<String> = named_hosts.iter().map(|s| s.to_string()).collect();
-        let q_tunnel = quick.clone();
-        let n_tunnel = named.clone();
+        let ts: Vec<String> = ts_hosts.iter().map(|s| s.to_string()).collect();
         let pin_owned: Option<String> = pin.map(|s| s.to_string());
+        // 限速声明源（§G5 / 评审 A-I2）：与生产**同构**——只声明 Cloudflare 两路
+        // （权威头由 gate::cloudflare_rate_channels 钉死）；ts 名单刻意不进表，
+        // 这样"未声明通道 → 全局桶"在端点级也可断言。tunnel_error ⇒ 零声明（fail-closed）。
+        // 顺序在 via_source 之前：后者 move 掉 quick/named，本闭包先克隆一份
+        let rate_channels: Box<crate::remote::gate::RateBucketChannelsSource> = if tunnel_error {
+            Box::new(Vec::new)
+        } else {
+            let (q, n) = (quick.clone(), named.clone());
+            Box::new(move || crate::remote::gate::cloudflare_rate_channels(q.clone(), n.clone()))
+        };
+        // via 域名源：tunnel_error=true 模拟快照错误终态 → None 哨兵（原 gate 豁免
+        // 判定随 2026-10-06 §G2 退役，None 哨兵仅供 via 保守回落 lan）
+        let via_source: Box<ViaHostsSource> = if tunnel_error {
+            Box::new(|| None)
+        } else {
+            Box::new(move || Some((quick.clone(), named.clone(), ts.clone())))
+        };
         (
             Arc::new(RemoteState {
                 ui_config_source: Box::new(|| None),
@@ -2328,15 +2406,13 @@ mod tests {
                 sse_registry: Arc::new(SseRegistry::default()),
                 max_devices_source: Box::new(move || max_devices),
                 pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+                global_pin_limiter: std::sync::Mutex::new(
+                    crate::remote::pin::PinRateLimiter::global(),
+                ),
                 pin_source: Box::new(move || pin_owned.clone()),
                 now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
-                tunnel_hosts_source: Box::new(move || {
-                    if tunnel_error {
-                        return None; // 评审 Important 1：错误态哨兵——gate 必须跳过豁免
-                    }
-                    Some(q_tunnel.iter().chain(n_tunnel.iter()).cloned().collect())
-                }),
-                via_hosts_source: Box::new(move || Some((quick.clone(), named.clone()))),
+                via_hosts_source: via_source,
+                rate_bucket_channels_source: rate_channels,
                 home_source: Box::new(|| None),
             }),
             t,
@@ -2397,21 +2473,54 @@ mod tests {
         )
     }
 
-    /// 穿透矩阵（安全关键，变异自证：去掉 is_local_access 的 Host 条件——只查回环——
-    /// 断言 1 必红：127.0.0.1 + 隧道 Host 的公网隧道流量会被免密放进看板）：
-    /// 1. 127.0.0.1 + Host=隧道域名（模拟 cloudflared 本机回环转发公网流量）+ 无 cookie → 403；
-    /// 2. 回环（127.0.0.1 / ::1）+ 本地 Host → 免密直达 /sessions 200；
-    /// 3. 非回环 + 本地 Host + 无 cookie → 403（豁免只信来源回环）；
-    /// 4. 回环 + 缺 Host 头 → 403（空 Host fail closed）。
+    /// 带自定义来源头的 POST /pair/pin（§G5 分桶测试用）
+    fn pin_post_with(
+        addr: &str,
+        host: Option<&str>,
+        extra: Option<(&str, &str)>,
+        body: &str,
+    ) -> axum::http::Request<Body> {
+        let mut b = http_req(
+            "POST",
+            "/m/api/v1/pair/pin",
+            addr,
+            host,
+            None,
+            None,
+            Some(body),
+        );
+        if let Some((k, v)) = extra {
+            b.headers_mut().insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        b
+    }
+
+    /// 零豁免矩阵（安全关键，本 Task 的变异锚点）：
+    /// **回环来源 + 任意 Host + 无 cookie → 一律 403。**
+    /// 变异自证：谁把「回环 + Host 不在隧道名单 → 免密」加回来，本测试必红。
+    /// 覆盖：本地形态 Host / 隧道域名 Host / 伪造回环 Host / 空 Host / 用户自有域名 Host。
     #[tokio::test]
-    async fn gate_local_exempt_requires_loopback_and_local_host() {
-        let (state, _t) = a3_state(Some("1234"), 3, &["mam-test.trycloudflare.com"], &[], false);
+    async fn gate_never_exempts_loopback_regardless_of_host() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            false,
+        );
         let app = router(state);
 
-        // 1) 穿透：回环 + 隧道 Host → 403 不得免密（带端口的 Host 形态归一后同样拦下）
         for host in [
-            "mam-test.trycloudflare.com",
-            "mam-test.trycloudflare.com:443",
+            Some("localhost:9420"),             // 本地形态
+            Some("127.0.0.1:9420"),             // 伪造回环形态（历史漏洞入口）
+            Some("mam-test.trycloudflare.com"), // 隧道域名
+            Some("mam.example.com"),            // 用户自有域名（直连反代形态）
+            Some("evil.example.com"),           // 完全外部域名
+            None,                               // 空 Host
         ] {
             let r = app
                 .clone()
@@ -2419,7 +2528,7 @@ mod tests {
                     "GET",
                     "/m/api/v1/sessions",
                     "127.0.0.1:40000",
-                    Some(host),
+                    host,
                     None,
                     None,
                     None,
@@ -2429,134 +2538,399 @@ mod tests {
             assert_eq!(
                 r.status(),
                 403,
-                "隧道域名 Host 的回环流量不得免密（穿透防线）：{host}"
+                "回环来源 + Host={host:?} + 无凭据必须 403（不变量 G1：请求头不得影响放行）"
             );
         }
+    }
 
-        // 2) 本机免密：回环 + 本地 Host → 直达看板 200（数据来自注入源 totalCount=7）
-        for addr in ["127.0.0.1:40001", "[::1]:40002"] {
+    /// 配对入口仍是唯一例外：`/pair/pin` 无凭据可达（否则无法换取凭据）。
+    /// 与上一条配对使用，锁死「放行名单只有一个」这个边界。
+    #[tokio::test]
+    async fn gate_still_allows_pair_pin_only() {
+        let (state, _t) = a3_state(Some("1234"), 3, &[], &[], &[], false);
+        let app = router(state);
+
+        // /pair/pin 无凭据可达（PIN 即凭据）——非 403 即可（本测试只断言不被门禁拦）
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "127.0.0.1:40100",
+                Some("localhost:9420"),
+                None,
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_ne!(r.status(), 403, "/pair/pin 是换凭据入口，不得被门禁拦");
+
+        // 其余端点无凭据一律 403
+        let r = app
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/host",
+                "127.0.0.1:40101",
+                Some("localhost:9420"),
+                None,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "非配对端点无凭据必须 403");
+    }
+
+    /// 【2026-10-06 spike 探针 → 修复后的回归锚点】直连域名 + **同机反向代理**场景。
+    ///
+    /// 直连域名模式的接线是「MAM 绑端口供用户反向代理」（一期 spec §P7）。当用户的反代
+    /// （nginx / Caddy）与 MAM **同机**运行时，它是从**回环**把公网流量转发进来的，
+    /// 而 `Host` 是用户自有域名——该域名**不在** quick/named 隧道名单里。
+    /// 豁免判据第 ③ 步是**黑名单**（"不在名单"即算本地），于是这批公网流量会被
+    /// **误判为本机**而免密放行。
+    ///
+    /// 本测试断言**修复后的正确行为**：回环来源 + 自有域名 Host + 无 cookie → 403。
+    /// 修复前本测试为**红**（实测见 2026-10-06 spike 报告）。
+    #[tokio::test]
+    async fn gate_local_exempt_must_not_cover_same_host_reverse_proxy() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            false,
+        );
+        let app = router(state);
+
+        // 三种用户域名形态：裸域名 / 带端口 / 与 tunnel.rs 夹具同形态的真实命名隧道域名
+        // 先收齐全部状态再断言——失败时一次拿到三种形态的完整事实（而非首个 panic 即止）
+        let mut observed: Vec<(&str, u16)> = Vec::new();
+        for host in [
+            "mam.example.com",
+            "mam.example.com:443",
+            "mam-win.bondtoolbox.asia",
+        ] {
             let r = app
                 .clone()
                 .oneshot(http_req(
                     "GET",
                     "/m/api/v1/sessions",
-                    addr,
-                    Some("localhost:9420"),
+                    "127.0.0.1:41000",
+                    Some(host),
                     None,
                     None,
                     None,
                 ))
                 .await
                 .unwrap();
-            assert_eq!(r.status(), 200, "{addr} 本机免密应直达看板");
-            assert!(body_string(r).await.contains("\"totalCount\":7"));
+            observed.push((host, r.status().as_u16()));
         }
-
-        // 3) 非回环 + 本地 Host → 403
-        let r = app
-            .clone()
-            .oneshot(http_req(
-                "GET",
-                "/m/api/v1/sessions",
-                "10.0.0.5:40003",
-                Some("localhost:9420"),
-                None,
-                None,
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 403, "非回环来源不得借本地 Host 免密");
-
-        // 4) 回环 + 缺 Host 头 → 403（fail closed）
-        let r = app
-            .oneshot(http_req(
-                "GET",
-                "/m/api/v1/sessions",
-                "127.0.0.1:40004",
-                None,
-                None,
-                None,
-                None,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(r.status(), 403, "缺 Host 头必须按非本地处理（fail closed）");
+        assert!(
+            observed.iter().all(|(_, s)| *s == 403),
+            "同机反代（回环 + 自有域名 Host）不得免密，实测状态：{observed:?}"
+        );
     }
 
-    /// 快照错误态 fail-closed（评审 Important 1）：隧道快照处于错误终态时，豁免依赖的
-    /// 域名名单无从判定——gate 收到 None 哨兵必须**完全跳过本机豁免**：
-    /// 回环 + 本地 Host（正常态本应免密 200）→ 仍要求 cookie（403）；
-    /// 有效 cookie 的请求不受影响（fail-closed 只收紧豁免路径，不断 cookie 路径）。
-    /// 变异锚点：若把 None 当空名单处理（fail-open），断言 1 必红
+    /// 快照不可信 → via 保守回落 lan（2026-10-06 §G2 重写：原「快照错误关豁免」
+    /// 随豁免判定一并退役——其「无 cookie → 403」面由
+    /// `gate_never_exempts_loopback_regardless_of_host` 锁定，「有效 cookie → 200」
+    /// 由配对/会话各流测试覆盖）。名单哨兵 None 时配对照常成功（配对只认 PIN），
+    /// 但 via 不得借用不可信名单打通道标签——即使 Host 是标准 quick 域名也标 lan
+    /// （2026-09-18 实测误标根因的守护锚点）。
+    /// 变异锚点：把 None 当空名单（fail-open 标注）或映射回本机 → 本测试必红
     #[tokio::test]
-    async fn gate_local_exempt_disabled_when_tunnel_snapshot_degraded() {
-        let (state, _t) = a3_state(Some("1234"), 3, &["mam-test.trycloudflare.com"], &[], true);
-        // 预置有效设备（cookie 路径的对照组；last_seen 取当前时刻——滑动 TTL 窗口内）
-        let now = chrono::Utc::now().timestamp_millis();
-        state.store.with(|c| {
-            crate::remote::pairing::persist_device(
-                c,
-                &crate::remote::pairing::NewDevice {
-                    id: "degraded".into(),
-                    name: String::new(),
-                    ua: "ua-degraded".into(),
-                    origin_ip: "ip-degraded".into(),
-                    via: String::new(),
-                    paired_at: now,
-                },
-            )
-            .unwrap();
-        });
-        let app = router(state);
+    async fn pair_via_falls_back_to_lan_when_tunnel_snapshot_degraded() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            true,
+        );
+        let app = router(state.clone());
 
-        // 1) 回环 + 本地 Host + 无 cookie → 403（豁免被快照错误完全关闭）
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "203.0.113.7:52000",
+                Some("mam-test.trycloudflare.com"),
+                Some("ua-degraded"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "快照错误不阻断配对（配对只认 PIN）");
+        let id = cookie_device_id(&r);
+        let via: String = state.store.with(|c| {
+            c.query_row("SELECT via FROM remote_devices WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        });
+        assert_eq!(
+            via, "lan",
+            "名单不可信（None 哨兵）→ via 保守标 lan，绝不判隧道通道/本机"
+        );
+    }
+
+    /// §C5 /channel 装饰端点（Task 10）：受门禁保护 + via 按 Host 推断 + limited
+    /// 与实测速率如实下发。装饰纪律（不变量 §G1 推论③）锁面：本端点**只读不改**、
+    /// 不触碰限速器/设备表——变异锚点是「有人拿 via 进安全判定」，本测试以
+    /// 「配对流不受 /channel 调用影响」作行为侧守护（安全判定唯一依据仍是 cookie）。
+    #[tokio::test]
+    async fn channel_endpoint_gated_and_reports_via_limited_and_measured_rates() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &["mam.example.com"],
+            &["jarvismac-mini.example-tailnet.ts.net"],
+            false,
+        );
+        let app = router(state.clone());
+
+        // ① 无 cookie → 403（/channel 在 nest 内受 gate 结构性覆盖，与其他端点同款；
+        //    装饰端点也不裸奔）
         let r = app
             .clone()
             .oneshot(http_req(
                 "GET",
-                "/m/api/v1/sessions",
-                "127.0.0.1:41000",
-                Some("localhost:9420"),
+                "/m/api/v1/channel",
+                "203.0.113.7:54000",
+                Some("mam-test.trycloudflare.com"),
                 None,
                 None,
                 None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403, "装饰端点同样受门禁保护（无凭据 403）");
+
+        // ② 配对拿有效 cookie（经 quick 域名）
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "203.0.113.7:54001",
+                Some("mam-test.trycloudflare.com"),
+                Some("ua-channel"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let cookie = format!("mam_device={}", cookie_device_id(&r));
+
+        // ③ Host=quick 域名 → via=quick + limited=true + 实测速率原样下发
+        let r = app
+            .clone()
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/channel",
+                "203.0.113.7:54002",
+                Some("mam-test.trycloudflare.com"),
+                None,
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers()
+                .get("cache-control")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-store"),
+            "通道可达性会变化，必须 no-store"
+        );
+        let body = body_string(r).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["via"], "quick", "Host==quick 域名 → via=quick");
+        assert_eq!(v["limited"], true, "隧道通道 → limited=true");
+        assert_eq!(
+            v["est_mbps_down"], 1.8,
+            "下行实测速率照抄（客户端实收口径，勿改服务端发出量口径）"
+        );
+        assert_eq!(v["est_mbps_up"], 0.8, "上行实测速率照抄（服务端实收口径）");
+
+        // ④ Host=局域网地址 → via=lan + limited=false
+        let r = app
+            .clone()
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/channel",
+                "192.168.1.9:54003",
+                Some("192.168.1.9:9420"),
+                None,
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["via"], "lan", "非隧道 Host → via=lan");
+        assert_eq!(v["limited"], false, "局域网直连不受限");
+
+        // ⑤ Host=tailscale 机器域名 → via=tailscale（§C1 四值分类在装饰端点同款生效）
+        let r = app
+            .clone()
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/channel",
+                "203.0.113.8:54004",
+                Some("jarvismac-mini.example-tailnet.ts.net"),
+                None,
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["via"], "tailscale", "机器域名命中 → via=tailscale");
+        assert_eq!(v["limited"], true);
+    }
+
+    /// §C5 /channel：名单哨兵 None（快照错误态）→ via 保守回落 lan（与 /pair/pin
+    /// 同款口径，见 pair_via_falls_back_to_lan_when_tunnel_snapshot_degraded）——
+    /// 即使 Host 是标准 quick 域名也不得借不可信名单打隧道标签
+    #[tokio::test]
+    async fn channel_via_falls_back_to_lan_when_tunnel_snapshot_degraded() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            true, // tunnel_error → via_hosts_source 恒 None
+        );
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "203.0.113.7:54005",
+                Some("mam-test.trycloudflare.com"),
+                Some("ua-channel-degraded"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let cookie = format!("mam_device={}", cookie_device_id(&r));
+        let r = app
+            .oneshot(http_req(
+                "GET",
+                "/m/api/v1/channel",
+                "203.0.113.7:54006",
+                Some("mam-test.trycloudflare.com"),
+                None,
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["via"], "lan",
+            "名单不可信（None 哨兵）→ via 保守标 lan，不借不可信名单打隧道标签"
+        );
+        assert_eq!(v["limited"], false);
+    }
+
+    /// §C1 接线：Host 命中 tailscale 机器域名 → via=tailscale（Task 5 给 classify_via
+    /// 加的第四分支——漏接时 Tailscale 通道的设备在花名册上会被误标 lan 且无来源徽标）。
+    /// 配套断言（§G5 纪律）：伪造 CF-Connecting-IP 在 Tailscale Host 上**不得**被采信
+    /// （Funnel 没有 Cloudflare 边缘替我们拒伪造头）——tailscale 不在限速声明表里，
+    /// "未声明 ⇒ 不开桶"的行为断言见 `pair_pin_undeclared_channel_never_opens_a_bucket`；
+    /// 本测试锁**落库来源**：真实对端地址，既不是伪造头也不是内部哨兵（评审 A-M3）
+    #[tokio::test]
+    async fn pair_via_tailscale_host_is_labeled_tailscale_and_cf_header_not_trusted() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &[],
+            &[],
+            &["jarvismac-mini.example-tailnet.ts.net"],
+            false,
+        );
+        let app = router(state.clone());
+
+        // via 装饰标注：机器域名 → tailscale
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "203.0.113.9:53000",
+                Some("jarvismac-mini.example-tailnet.ts.net"),
+                Some("ua-ts"),
+                r#"{"pin":"1234"}"#,
             ))
             .await
             .unwrap();
         assert_eq!(
             r.status(),
-            403,
-            "快照错误 ∧ 回环 → 不豁免（fail-closed，不得当空名单 fail-open）"
+            200,
+            "PIN 正确必须 200（via 是纯装饰，不影响配对）"
+        );
+        let id = cookie_device_id(&r);
+        let via: String = state.store.with(|c| {
+            c.query_row("SELECT via FROM remote_devices WHERE id = ?1", [&id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        });
+        assert_eq!(
+            via, "tailscale",
+            "Host==机器域名 → via=tailscale（不得误标 lan）"
         );
 
-        // 2) 同请求带有效 cookie → 200（fail-closed 只影响豁免，不影响 cookie 认证路径）
+        // 落库来源（§G5 + 评审 A-M3）：同 Host + 回环来源 + 伪造 CF-Connecting-IP →
+        // 伪造头**不得**被采信（tailscale 无 CF 边缘背书，不在声明表里）。旧断言曾读
+        // `origin_ip == GLOBAL_BUCKET`——那是把内部哨兵当来源落库的 bug（含 NUL、
+        // 且不是来源地址）；正确行为 = 回落**真实 TCP 对端** 127.0.0.1
         let r = app
-            .oneshot(http_req(
-                "GET",
-                "/m/api/v1/sessions",
-                "127.0.0.1:41000",
-                Some("localhost:9420"),
-                None,
-                Some("mam_device=degraded"),
-                None,
+            .oneshot(pin_post_with(
+                "127.0.0.1:53001",
+                Some("jarvismac-mini.example-tailnet.ts.net"),
+                Some(("cf-connecting-ip", "9.9.9.9")),
+                r#"{"pin":"1234"}"#,
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 200, "有效 cookie 在快照错误态照常过闸");
+        assert_eq!(r.status(), 200);
+        let origin_ip: String = state.store.with(|c| {
+            c.query_row(
+                "SELECT origin_ip FROM remote_devices WHERE id = ?1",
+                [cookie_device_id(&r)],
+                |r| r.get(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            origin_ip, "127.0.0.1",
+            "伪造的 CF 头不得成为落库来源——回落到真实 TCP 对端"
+        );
+        assert_ne!(
+            origin_ip,
+            crate::remote::pin::GLOBAL_BUCKET,
+            "内部哨兵（含 NUL）不得外泄进 remote_devices.origin_ip（评审 A-M3）"
+        );
+        assert!(!origin_ip.contains('\u{0}'), "数据列绝不含 NUL");
     }
 
     /// 配对流（矩阵 4）：PIN 对 → 200 + Set-Cookie（携带 upsert 返回 id）+ 落行；
-    /// via 按 Host 四分支（quick 域名 → quick / 本地 Host 非回环 → lan / named 域名 →
-    /// named / 回环+本地 → local）；两台不同 UA/IP 设备 → 各自一行；同 UA+IP 重绑 →
-    /// 同行 id（cookie 刷新）——A1 upsert 语义在新端点上存活
+    /// via 按 Host 三分支装饰标注（quick 域名 → quick / named 域名 → named / 其余 →
+    /// lan，**不再有 local 分支**——本机不是通道，2026-10-06 零豁免）；两台不同
+    /// UA/IP 设备 → 各自一行；同 UA+IP 重绑 → 同行 id（cookie 刷新）——A1 upsert
+    /// 语义在新端点上存活
     #[tokio::test]
-    async fn pin_pair_flow_via_four_branches_two_devices_and_rejoin() {
+    async fn pin_pair_flow_via_three_branches_two_devices_and_rejoin() {
         let (state, _t) = a3_state(
             Some("1234"),
             10,
             &["mam-test.trycloudflare.com"],
             &["mam.example.com"],
+            &[],
             false,
         );
         let app = router_with_static(state.clone());
@@ -2660,7 +3034,8 @@ mod tests {
         });
         assert_eq!(via_c, "named", "Host==named 域名（带端口归一）→ via=named");
 
-        // 设备 D：本机回环 + 本地 Host → via=local
+        // 设备 D：本机回环 + 本地 Host → via=lan（2026-10-06 零豁免：本机不是通道，
+        // 服务端不再产生 local 标注）
         let r = app
             .clone()
             .oneshot(pin_post(
@@ -2681,7 +3056,10 @@ mod tests {
             )
             .unwrap()
         });
-        assert_eq!(via_d, "local", "回环 + 非隧道 Host → via=local");
+        assert_eq!(
+            via_d, "lan",
+            "回环 + 非隧道 Host → via=lan（不再有 local 分支）"
+        );
 
         // 四台设备 = 四行（UA/IP 互异，指纹各不同）
         let rows: i64 = state.store.with(|c| {
@@ -2718,7 +3096,7 @@ mod tests {
     /// （now_source 注入缝）→ 正确 PIN 配对成功
     #[tokio::test]
     async fn pin_rate_limit_locks_after_five_failures_then_expires() {
-        let (state, t) = a3_state(Some("1234"), 3, &[], &[], false);
+        let (state, t) = a3_state(Some("1234"), 3, &[], &[], &[], false);
         let app = router(state.clone());
         for want in [4, 3, 2, 1] {
             let r = app
@@ -2797,12 +3175,355 @@ mod tests {
         assert_eq!(n, 1, "成功配对应落一行设备记录");
     }
 
+    /// §G5 端点级验收 1：回环 + 隧道域名 + 权威头存在 → 按权威头分桶，
+    /// 不同 CF-Connecting-IP 互不影响（捣乱者只填自己的桶）。
+    #[tokio::test]
+    async fn pair_pin_buckets_by_cf_connecting_ip_when_tunneled() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            false,
+        );
+        let app = router(state);
+
+        // 捣乱者（1.2.3.4）连错 5 次
+        for _ in 0..5 {
+            let r = app
+                .clone()
+                .oneshot(pin_post_with(
+                    "127.0.0.1:40200",
+                    Some("mam-test.trycloudflare.com"),
+                    Some(("cf-connecting-ip", "1.2.3.4")),
+                    r#"{"pin":"0000"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_ne!(r.status(), 200, "错误 PIN 不得成功");
+        }
+        // 捣乱者被锁
+        let r = app
+            .clone()
+            .oneshot(pin_post_with(
+                "127.0.0.1:40201",
+                Some("mam-test.trycloudflare.com"),
+                Some(("cf-connecting-ip", "1.2.3.4")),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 429, "捣乱者自己的桶应已锁");
+        // **本人不受影响**：换一个来源（5.6.7.8）用正确 PIN 仍可配对
+        let r = app
+            .oneshot(pin_post_with(
+                "127.0.0.1:40202",
+                Some("mam-test.trycloudflare.com"),
+                Some(("cf-connecting-ip", "5.6.7.8")),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "他人的桶不得影响本人（§G5 核心断言）");
+    }
+
+    /// §G5 端点级验收 2：回环 + **非隧道 Host**（直连反代形态）→ 回落全局桶，
+    /// 即不同 CF-Connecting-IP 也共用一个桶（fail-closed 的有意选择）。
+    #[tokio::test]
+    async fn pair_pin_falls_back_to_global_bucket_for_non_tunnel_host() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            false,
+        );
+        let app = router(state);
+
+        for _ in 0..5 {
+            let _ = app
+                .clone()
+                .oneshot(pin_post_with(
+                    "127.0.0.1:40300",
+                    Some("mam.example.com"),
+                    Some(("cf-connecting-ip", "1.2.3.4")),
+                    r#"{"pin":"0000"}"#,
+                ))
+                .await
+                .unwrap();
+        }
+        // 换个来源、正确 PIN——仍被锁（因为落的是同一个全局桶）
+        let r = app
+            .oneshot(pin_post_with(
+                "127.0.0.1:40301",
+                Some("mam.example.com"),
+                Some(("cf-connecting-ip", "5.6.7.8")),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 429, "非隧道 Host 回落全局桶（fail-closed）");
+    }
+
+    /// 评审 A-M4：把**全局桶**直接预置为 Locked，断言「隧道 Host + 权威头」（其分桶键
+    /// 是 1.2.3.4，即**另一个分来源桶**）的请求也 429——这才真正隔离出全局桶。
+    /// 原用例（上一条）全部请求来自 127.0.0.1，"按回环对端分桶"的实现同样会 429，
+    /// 抓不住"回落成了按回环对端分桶"。
+    #[tokio::test]
+    async fn pair_pin_global_bucket_blocks_clean_source_buckets_too() {
+        let (state, t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            false,
+        );
+        let app = router(state.clone());
+        let now = t.load(std::sync::atomic::Ordering::SeqCst);
+        // 预置全局桶：恰满阈值即锁（走 state 的注入时钟，零 sleep）
+        {
+            let mut g = state.global_pin_limiter.lock().unwrap();
+            for _ in 0..crate::remote::pin::GLOBAL_MAX_FAILURES {
+                g.record_failure(crate::remote::pin::GLOBAL_BUCKET, now);
+            }
+        }
+        // 隔离性前置：该 CF 来源自己的桶**没锁**——429 不可能是分来源桶给的
+        assert_eq!(
+            state.pin_limiter.lock().unwrap().check("1.2.3.4", now),
+            crate::remote::pin::RateDecision::Allowed,
+            "前置：1.2.3.4 的分来源桶干净"
+        );
+        let r = app
+            .clone()
+            .oneshot(pin_post_with(
+                "127.0.0.1:40400",
+                Some("mam-test.trycloudflare.com"),
+                Some(("cf-connecting-ip", "1.2.3.4")),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            429,
+            "全局桶锁定 → 已声明通道 + 干净来源桶 + 正确 PIN 也拒（429 只能来自全局桶）"
+        );
+        let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["retryAfter"], 600, "全局桶锁定期 = LOCK_MS（600 秒）");
+        // 局域网来源（自己那一路桶，且是"合法新设备配对"的恢复路径）同样被挡——
+        // 这正是评审 A-I1 要消除的伤害面
+        let r = app
+            .oneshot(pin_post(
+                "192.168.1.50:40401",
+                Some("192.168.1.9:9420"),
+                Some("ua-lan"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            429,
+            "全局闸锁定时所有人（含局域网合法新设备）都被挡"
+        );
+    }
+
+    /// 评审 A-I2 端点级：**未声明的通道**（tailscale Funnel）上伪造权威头不得开桶——
+    /// 5 次失败只记进全局桶（阈值 50，远未触顶）；随后在**已声明**通道（quick）上用
+    /// 同一个伪造头值 9.9.9.9 正确 PIN → 200。变异锚点：把 tailscale 并进声明表，
+    /// 那 5 次失败就会锁掉 9.9.9.9 这个桶 → 末断言红（旧实现靠 api.rs 的特例注释排除
+    /// ts，现在由"未声明 ⇒ 回落全局桶"结构性承担）。
+    #[tokio::test]
+    async fn pair_pin_undeclared_channel_never_opens_a_bucket() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            3,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &["jarvismac-mini.example-tailnet.ts.net"],
+            false,
+        );
+        let app = router(state);
+        for _ in 0..5 {
+            let r = app
+                .clone()
+                .oneshot(pin_post_with(
+                    "127.0.0.1:40500",
+                    Some("jarvismac-mini.example-tailnet.ts.net"),
+                    Some(("cf-connecting-ip", "9.9.9.9")),
+                    r#"{"pin":"0000"}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 401, "未声明通道上的失败照常 401（记进全局桶）");
+        }
+        let r = app
+            .oneshot(pin_post_with(
+                "127.0.0.1:40501",
+                Some("mam-test.trycloudflare.com"),
+                Some(("cf-connecting-ip", "9.9.9.9")),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            r.status(),
+            200,
+            "未声明通道不得为伪造头值开桶（否则 9.9.9.9 桶已被上面 5 次锁掉 → 这里必 429）"
+        );
+    }
+
+    /// 评审 A-M3 端点级：落库来源（origin_ip）与限速分桶键**分离**——origin_ip 恒为
+    /// 真实来源：① 可证隧道流量 → 权威头值（§G5 要求来源记录能区分公网来源）；
+    /// ② 不可证（此处：回环 + 非隧道 Host）→ 真实 TCP 对端 127.0.0.1，**绝不是内部哨兵**
+    /// （GLOBAL_BUCKET 含 NUL）。变异锚点：把分桶键当 origin_ip 传回
+    /// （persist_and_cookie(&key)）→ ② 档必红。
+    #[tokio::test]
+    async fn pair_pin_records_real_origin_not_the_rate_key_sentinel() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            10,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            false,
+        );
+        let app = router(state.clone());
+        let read_origin = |id: &str| -> String {
+            state.store.with(|c| {
+                c.query_row(
+                    "SELECT origin_ip FROM remote_devices WHERE id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+            })
+        };
+        // ② 不可证：回环 + 非隧道 Host（直连域名 + 同机反代形态）→ 真实对端地址
+        let r = app
+            .clone()
+            .oneshot(pin_post(
+                "127.0.0.1:40700",
+                Some("mam.example.com"),
+                Some("ua-unprovable"),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let origin = read_origin(&cookie_device_id(&r));
+        assert_eq!(
+            origin, "127.0.0.1",
+            "不可证来源 → 真实 TCP 对端（不是哨兵、不是伪造头）"
+        );
+        assert_ne!(
+            origin,
+            crate::remote::pin::GLOBAL_BUCKET,
+            "内部哨兵不得落进 remote_devices.origin_ip"
+        );
+        assert!(!origin.contains('\u{0}'), "数据列绝不含 NUL");
+        // ① 可证：回环 + 已声明通道 + 权威头 → 权威头值（来源记录区分度，§G5）
+        let r = app
+            .oneshot(pin_post_with(
+                "127.0.0.1:40701",
+                Some("mam-test.trycloudflare.com"),
+                Some(("cf-connecting-ip", "198.51.100.44")),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            read_origin(&cookie_device_id(&r)),
+            "198.51.100.44",
+            "可证公网来源落库（花名册/审计来源可用）"
+        );
+    }
+
+    /// 评审 B 追加项**变异锚点**（端点级）：设备指纹用**归一化来源**（原始 TCP 对端
+    /// `addr.ip()`），展示列 `origin_ip` 仍存真实公网出口 IP（§G5 保留）。同一浏览器
+    /// （同 UA + 同 TCP 对端）换网络重配（不同 CF-Connecting-IP）必须**覆盖原行、不新增**
+    /// ——否则一部手机在家 WiFi/蜂窝/换地方各建一行，默认上限 3 直接占满，之后连笔记本
+    /// 都配不上（正是本功能的目标场景：户外连接）。
+    /// 变异自证：`persist_and_cookie` 的指纹输入换回 display_origin（传 origin）→
+    /// 设备数变 2、id 不等，本测试必红。
+    #[tokio::test]
+    async fn pair_pin_fingerprint_uses_peer_so_re_network_reuses_the_row() {
+        let (state, _t) = a3_state(
+            Some("1234"),
+            10,
+            &["mam-test.trycloudflare.com"],
+            &[],
+            &[],
+            false,
+        );
+        let app = router(state.clone());
+        let count = || -> i64 {
+            state.store.with(|c| {
+                c.query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+                    .unwrap()
+            })
+        };
+        // 第一次：家 WiFi 出口 → CF 边缘 → 本机（TCP 对端恒 127.0.0.1）
+        let r = app
+            .clone()
+            .oneshot(pin_post_with(
+                "127.0.0.1:40710",
+                Some("mam-test.trycloudflare.com"),
+                Some(("cf-connecting-ip", "198.51.100.44")),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let id1 = cookie_device_id(&r);
+        assert_eq!(count(), 1);
+        // 第二次：同一浏览器换到蜂窝（出口 IP 变了，TCP 对端与 UA 未变）
+        let r = app
+            .clone()
+            .oneshot(pin_post_with(
+                "127.0.0.1:40711",
+                Some("mam-test.trycloudflare.com"),
+                Some(("cf-connecting-ip", "203.0.113.7")),
+                r#"{"pin":"1234"}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let id2 = cookie_device_id(&r);
+        assert_eq!(
+            id1, id2,
+            "换网络重配必须命中同一行（指纹输入 = 原始 TCP 对端，不是出口 IP）"
+        );
+        assert_eq!(
+            count(),
+            1,
+            "换网络重配不得新增设备行（名额不被一部手机占满）"
+        );
+        let origin: String = state.store.with(|c| {
+            c.query_row(
+                "SELECT origin_ip FROM remote_devices WHERE id = ?1",
+                [&id1],
+                |r| r.get(0),
+            )
+            .unwrap()
+        });
+        assert_eq!(
+            origin, "203.0.113.7",
+            "展示列仍更新为最新真实公网来源（§G5 要求保留）"
+        );
+    }
+
     /// 上限门（矩阵 6）：满员（max=1，已配一台）→ 第二台 PIN 对也拒——沿用既有直通
     /// 上限语义（403 + {"error":"cap_full"}）；门在 PIN 正确**之后**判定（先验 PIN 再谈
     /// 名额）；腾位后同 PIN 可配
     #[tokio::test]
     async fn pin_pair_rejected_when_device_cap_full() {
-        let (state, _t) = a3_state(Some("1234"), 1, &[], &[], false);
+        let (state, _t) = a3_state(Some("1234"), 1, &[], &[], &[], false);
         let app = router(state.clone());
         // 第一台占满名额
         let r = app
@@ -2894,10 +3615,13 @@ mod tests {
                     sse_registry: Arc::new(SseRegistry::default()),
                     max_devices_source: Box::new(|| 3),
                     pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+                    global_pin_limiter: std::sync::Mutex::new(
+                        crate::remote::pin::PinRateLimiter::global(),
+                    ),
                     pin_source: Box::new(move || slot.lock().unwrap().clone()),
                     now_source: Box::new(move || now.load(std::sync::atomic::Ordering::SeqCst)),
-                    tunnel_hosts_source: Box::new(|| Some(Vec::new())),
                     via_hosts_source: Box::new(|| None),
+                    rate_bucket_channels_source: Box::new(Vec::new),
                     home_source: Box::new(|| None),
                 }),
                 t,
@@ -2939,7 +3663,7 @@ mod tests {
     /// 多余段同样 403（名单精确相等，不是 /pair 前缀）
     #[tokio::test]
     async fn legacy_pair_endpoints_are_closed() {
-        let (state, _t) = a3_state(Some("1234"), 3, &[], &[], false);
+        let (state, _t) = a3_state(Some("1234"), 3, &[], &[], &[], false);
         let app = router(state);
         for (uri, body) in [
             ("/m/api/v1/pair", r#"{"pin":"1234"}"#),
@@ -3215,10 +3939,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         })
     }
@@ -3433,10 +4158,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         })
     }
@@ -5304,10 +6030,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         })
     }
@@ -6332,10 +7059,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         persist_named_device(&state, "mm", "测试设备");
@@ -9009,10 +9737,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         })
     }
@@ -10020,10 +10749,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         })
     }
@@ -10294,10 +11024,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         persist_named_device(&state2, "mm", "测试设备");
@@ -10550,10 +11281,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         (state, sid_out)
@@ -10597,10 +11329,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         (state, sid_out)
@@ -10674,10 +11407,11 @@ mod tests {
             sse_registry: Arc::new(SseRegistry::default()),
             max_devices_source: Box::new(|| 3),
             pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
             pin_source: Box::new(|| Some("1234".to_string())),
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-            tunnel_hosts_source: Box::new(|| Some(Vec::new())),
             via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
         });
         (state, sid_out)
