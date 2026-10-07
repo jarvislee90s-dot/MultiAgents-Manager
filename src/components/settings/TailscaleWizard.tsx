@@ -41,8 +41,8 @@ const STEP_KEY: Record<string, string> = {
 };
 
 // 步骤 id → 本 locale 的步骤名（未知 id 原样回显）。**放模块级、t 由调用方传入**：
-// I-3 弱提示的起点名与未验清单走同一条映射（M1：文案从起点派生的前提），而定义点不在
-// 组件体内那几处改动的上下文里——两处消费各自成 hunk，改一处不会牵动另一处。
+// 步骤行标题、I-3 弱提示的起点名、未验清单三处走**同一条映射**（M1：文案从起点派生的
+// 前提）——三处各写一遍就是三份会漂移的副本。
 const stepLabel = (t: ReturnType<typeof useAppTranslation>["t"], id: string) =>
   STEP_KEY[id] ? t(STEP_KEY[id]) : id;
 
@@ -156,7 +156,10 @@ export function TailscaleWizard() {
   // "没有链接"——那是权威读数，不许拿旧回执硬撑）。旧实现在探测报空时仍回落到回执，
   // 与"探测是权威源"的注释自相矛盾。
   const receiptLive = authUrl !== null && receiptGen === probeGen;
-  const loginLink = (probe?.authUrl ? probe.authUrl : null) ?? (receiptLive ? authUrl : null);
+  // 探测（权威源）给的链接：**空串按"没有链接"处理**（后端用空串表示暂无链接，
+  // 不是"有链接"）——只有它为空串时，才轮到上面的回执顶上。
+  const probedLink = probe?.authUrl ? probe.authUrl : null;
+  const loginLink = probedLink ?? (receiptLive ? authUrl : null);
 
   // ⑤ 登录窗口的**自动复评**（用户实测：登录步曾无可点之物，见下方渲染块注释）。
   // 用户路径是「点链接 → 浏览器抢走焦点 → 在浏览器完成登录 → 切回 MAM」——窗口重新拿到
@@ -296,6 +299,8 @@ export function TailscaleWizard() {
           const done = st?.done ?? false;
           const busy = busyStep === step.id;
           const blocked = st?.blockedReason ?? null;
+          // ④ 长阻塞步的「在走动」文案键（非长阻塞步 ⇒ undefined ⇒ 不挂指示器）
+          const progressKey = LONG_STEP_HINT[step.id];
           // **I3（2026-10-08 架构评审）：动作文案必须指向行内真实存在的按钮。**
           // 后端下发的 `actLogin` 是"点击「去登录」…"，而「去登录」按钮**只在 loginLink
           // 非空时渲染**（见下方 login 块）——无链接时行内只有「获取登录链接」(+兜底提示)，
@@ -324,7 +329,7 @@ export function TailscaleWizard() {
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className={cn("text-[13px]", done && "text-muted-foreground")}>
-                    {STEP_KEY[step.id] ? t(STEP_KEY[step.id]) : step.id}
+                    {stepLabel(t, step.id)}
                   </span>
                   <span className={SETTINGS_NOTE}>
                     {done
@@ -403,18 +408,18 @@ export function TailscaleWizard() {
                     循环** ⇒ 下载阻塞期间本行照常渲染、`animate-spin` 照常转。
                     role=progressbar 且**不带 aria-valuenow** = 标准的「不确定进度」语义
                     （有值就是假百分比的前身）；文案也如实说"总量未知，故不给百分比"。 */}
-                {busy && LONG_STEP_HINT[step.id] && (
+                {busy && progressKey && (
                   <p
                     data-testid="ts-step-progress"
                     role="progressbar"
-                    aria-label={t(LONG_STEP_HINT[step.id])}
+                    aria-label={t(progressKey)}
                     className="text-muted-foreground mt-1 flex items-center gap-1.5 text-[11px]"
                   >
                     <span
                       aria-hidden="true"
                       className="inline-block h-3 w-3 flex-none animate-spin rounded-full border-2 border-blue-500 border-t-transparent"
                     />
-                    {t(LONG_STEP_HINT[step.id])}
+                    {t(progressKey)}
                   </p>
                 )}
                 {/* 需要人的步骤：动作文案突出显示（后端 humanActionKey 下发，前端只翻译）。
