@@ -281,38 +281,33 @@ pub(super) fn image_path_value(
 ///   原样保留，不报错、不落空——这点很重要：fail-closed 的失败方式是"路径不存在"，不是
 ///   "路径被吞成空串"）；
 /// - **没有配对的第二个 `%`**（如 `C:\50%\x.exe`）或**空名 `%%`**：原样保留，一个字符都不吞；
-/// - 无 `%`：恒等（零分配的短路在 [`image_path_value`] 的类型门上）。
+/// - 无 `%`：恒等（逐字复制，不做任何变量查找）。
 ///
 /// 与 [`image_path_value`] 同一条 cfg 门（只服务 Windows 的第二来源与测试：非 Windows 的
 /// 生产构建里它若留着就是死代码）。
 #[cfg(any(windows, test))]
 fn expand_env_refs(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     let mut out = String::with_capacity(raw.len());
-    let bytes = raw.as_bytes();
-    let mut idx = 0usize;
-    while idx < bytes.len() {
-        if bytes[idx] == b'%' {
-            if let Some(rel) = raw[idx + 1..].find('%') {
-                let end = idx + 1 + rel; // 配对 `%` 的下标
-                let name = &raw[idx + 1..end];
-                if !name.is_empty() {
-                    if let Some(val) = lookup(name) {
-                        out.push_str(&val);
-                        idx = end + 1;
-                        continue;
-                    }
-                }
-                // 未知变量 / 空名：整段原样保留（不吞字符、不报错）
-                out.push_str(&raw[idx..=end]);
-                idx = end + 1;
-                continue;
-            }
+    let mut rest = raw; // 还没扫描的剩余片段
+    while let Some(open) = rest.find('%') {
+        // `%` 之前的普通片段原样带过
+        out.push_str(&rest[..open]);
+        // 落单的 `%`（后面再没有配对的）：整段原样保留到串尾
+        let Some(close) = rest[open + 1..].find('%') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let name = &rest[open + 1..open + 1 + close];
+        // 空名 `%%` 不得去查变量（`%NAME%` 才是一次引用）
+        let value = if name.is_empty() { None } else { lookup(name) };
+        match value {
+            Some(val) => out.push_str(&val),
+            // 未知变量 / 空名：整段原样保留（不吞字符、不报错）
+            None => out.push_str(&rest[open..=open + 1 + close]),
         }
-        // 普通字符，或落单的 `%` ⇒ 原样推入一个字符（按 UTF-8 边界推进）
-        let ch = raw[idx..].chars().next().unwrap_or('\u{fffd}');
-        out.push(ch);
-        idx += ch.len_utf8();
+        rest = &rest[open + 2 + close..]; // 配对 `%` 之后
     }
+    out.push_str(rest);
     out
 }
 
@@ -352,14 +347,13 @@ pub(super) fn parse_service_image_path_with(
         return (!inner.is_empty()).then(|| inner.to_string());
     }
     // ③ 不带引号：由长到短取「存在」的候选前缀（空白即参数边界）
-    let mut end = s.len();
+    let mut cand = s; // s 已 trim ⇒ 首轮候选 = 整串，且此后每轮都非空、无尾随空白
     loop {
-        let cand = s[..end].trim_end();
-        if !cand.is_empty() && exists(cand) {
+        if exists(cand) {
             return Some(cand.to_string());
         }
         // 没有更短的空白边界了 ⇒ 候选已试尽，如实 None（不猜）
-        end = cand.rfind(char::is_whitespace)?;
+        cand = cand[..cand.rfind(char::is_whitespace)?].trim_end();
     }
 }
 
@@ -381,7 +375,7 @@ pub(super) fn parse_service_image_path_with(
 pub(super) fn cli_beside_service_exe(service_exe: &str) -> Option<String> {
     let s = service_exe.trim();
     let cut = s.rfind(['\\', '/'])?;
-    let (dir, _file) = s.split_at(cut + 1); // dir 含结尾分隔符
+    let dir = &s[..=cut]; // 含结尾分隔符
     Some(format!("{dir}tailscale.exe"))
 }
 
