@@ -93,19 +93,23 @@ const markdownComponents = {
 };
 
 export function UpdaterDialog({ manualCheck = false }: UpdaterDialogProps) {
-  const result = useUpdaterStore((s) => s.result);
-  const checking = useUpdaterStore((s) => s.checking);
-  const downloading = useUpdaterStore((s) => s.downloading);
-  const progress = useUpdaterStore((s) => s.progress);
-  const dialogOpen = useUpdaterStore((s) => s.dialogOpen);
-  const skippedVersion = useUpdaterStore((s) => s.skippedVersion);
-  const skippedLoaded = useUpdaterStore((s) => s.skippedLoaded);
-  const checkUpdate = useUpdaterStore((s) => s.checkUpdate);
-  const installUpdate = useUpdaterStore((s) => s.installUpdate);
-  const openDialog = useUpdaterStore((s) => s.openDialog);
-  const closeDialog = useUpdaterStore((s) => s.closeDialog);
-  const skipVersion = useUpdaterStore((s) => s.skipVersion);
-  const loadSkippedVersion = useUpdaterStore((s) => s.loadSkippedVersion);
+  // 该组件消费 store 全部状态字段（弹窗判定/下载进度/忽略版本），整库订阅最直白；
+  // 动作引用恒定，不会带来多余渲染
+  const {
+    result,
+    checking,
+    downloading,
+    progress,
+    dialogOpen,
+    skippedVersion,
+    skippedLoaded,
+    checkUpdate,
+    installUpdate,
+    openDialog,
+    closeDialog,
+    skipVersion,
+    loadSkippedVersion,
+  } = useUpdaterStore();
   const { t } = useTranslation();
 
   const update = result?.status === "available" ? result.update : null;
@@ -269,7 +273,6 @@ export function UpdaterDialog({ manualCheck = false }: UpdaterDialogProps) {
 export function useManualUpdateCheck() {
   const checkUpdate = useUpdaterStore((s) => s.checkUpdate);
   const checking = useUpdaterStore((s) => s.checking);
-  const result = useUpdaterStore((s) => s.result);
   const [showNoUpdate, setShowNoUpdate] = useState(false);
   const { t } = useTranslation();
 
@@ -287,11 +290,5 @@ export function useManualUpdateCheck() {
     // available → UpdaterDialog（manualCheck 模式）自动弹窗
   };
 
-  return {
-    checkUpdate: handleCheckUpdate,
-    checking,
-    hasUpdate: result?.status === "available",
-    showNoUpdate,
-    dismissNoUpdate: () => setShowNoUpdate(false),
-  };
+  return { checkUpdate: handleCheckUpdate, checking, showNoUpdate };
 }
