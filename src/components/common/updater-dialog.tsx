@@ -191,7 +191,11 @@ export function UpdaterDialog({ manualCheck = false }: UpdaterDialogProps) {
   };
 
   return (
-    <Dialog open={dialogOpen} onOpenChange={(open) => !open && closeDialog()}>
+    <Dialog
+      open={dialogOpen}
+      // 下载中禁关：无取消下载手段，ESC/遮罩误关只会留下进度黑洞（评审 Minor）
+      onOpenChange={(open) => !open && !downloading && closeDialog()}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">

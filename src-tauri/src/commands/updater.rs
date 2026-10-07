@@ -75,6 +75,8 @@ pub fn pick_latest_updatable(releases: &[GithubRelease]) -> Option<&GithubReleas
 }
 
 // —— IPC 返回类型（与前端 lib/updater.ts 的 UpdateCheckResult 对齐，camelCase）——
+// 注意：internally-tagged enum 的 container 属性只作用于 variant 名；variant
+// 字段名要 camelCase 必须用 rename_all_fields（默认蛇形，前端读不到）
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -92,7 +94,7 @@ pub struct UpdateAvailable {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "status")]
+#[serde(tag = "status", rename_all_fields = "camelCase")]
 pub enum CheckUpdateStatus {
     #[serde(rename = "available")]
     Available {
@@ -336,6 +338,48 @@ mod tests {
         assert_eq!(parse_tag_version("v0.5.0-beta.1").unwrap(), expected);
         assert!(parse_tag_version("0.4.1").is_some());
         assert!(parse_tag_version("not-a-version").is_none());
+    }
+
+    #[test]
+    fn ipc_shape_serializes_variant_fields_camel_case() {
+        // IPC 契约形状锁（2026-10-08 评审 Important）：internally-tagged enum 的
+        // container 属性只作用于 variant 名，variant 字段默认蛇形输出——前端
+        // lib/updater.ts 读 currentVersion，回退蛇形即运行时恒 undefined
+        let available = serde_json::to_value(CheckUpdateStatus::Available {
+            current_version: "0.4.1".into(),
+            update: UpdateAvailable {
+                version: "0.5.0-beta.1".into(),
+                prerelease: true,
+                notes: "notes".into(),
+                html_url: "https://github.com/r/releases/tag/v0.5.0-beta.1".into(),
+                published_at: None,
+                tag: "v0.5.0-beta.1".into(),
+                latest_json_url: "https://github.com/r/dl/v0.5.0-beta.1/latest.json".into(),
+            },
+        })
+        .unwrap();
+        assert_eq!(available["status"], "available");
+        assert_eq!(available["currentVersion"], "0.4.1");
+        assert!(available.get("current_version").is_none());
+        assert_eq!(
+            available["update"]["htmlUrl"],
+            "https://github.com/r/releases/tag/v0.5.0-beta.1"
+        );
+
+        let up_to_date = serde_json::to_value(CheckUpdateStatus::UpToDate {
+            current_version: "0.5.0-beta.1".into(),
+            latest_version: "0.5.0-beta.1".into(),
+        })
+        .unwrap();
+        assert_eq!(up_to_date["status"], "up-to-date");
+        assert_eq!(up_to_date["currentVersion"], "0.5.0-beta.1");
+        assert_eq!(up_to_date["latestVersion"], "0.5.0-beta.1");
+        assert!(up_to_date.get("latest_version").is_none());
+
+        let error =
+            serde_json::to_value(CheckUpdateStatus::Error { message: "boom".into() }).unwrap();
+        assert_eq!(error["status"], "error");
+        assert_eq!(error["message"], "boom");
     }
 
     #[test]

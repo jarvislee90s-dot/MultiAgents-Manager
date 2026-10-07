@@ -7,6 +7,7 @@
 // T4 稍后：仅关弹窗，不写 KV（下次启动再弹）
 // T5 立即升级：以检查结果的 latestJsonUrl 调 install_github_update
 // T5b 立即升级失败：downloading 复位 + 弹窗保留（评审 I2 回归锁）
+// T8 下载中禁关：ESC 不关弹窗（无取消下载手段，误关只留进度黑洞；评审 Minor 回归锁）
 // T7 手动二次检查（About 场景）：首查 up-to-date 不弹，再查 available 重开弹窗（评审 I5 回归锁）
 // T6 徽标：无更新不渲染；有更新渲染（含被忽略版本）且点击置 dialogOpen
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -44,11 +45,12 @@ const AVAILABLE: Extract<UpdateCheckResult, { status: "available" }> = {
   },
 };
 
-/** 每用例的 mock 形态：检查结果 + 已忽略版本（含 install 是否失败） */
+/** 每用例的 mock 形态：检查结果 + 已忽略版本（含 install 失败/挂起） */
 const mode = {
   upToDate: false,
   skipped: null as string | null,
   installReject: null as string | null,
+  installHang: false,
 };
 
 beforeAll(async () => {
@@ -60,6 +62,7 @@ beforeEach(() => {
   mode.upToDate = false;
   mode.skipped = null;
   mode.installReject = null;
+  mode.installHang = false;
   useUpdaterStore.setState({
     result: null,
     checking: false,
@@ -85,6 +88,7 @@ beforeEach(() => {
       case "set_setting":
         return Promise.resolve(undefined);
       case "install_github_update":
+        if (mode.installHang) return new Promise(() => {});
         return mode.installReject
           ? Promise.reject(mode.installReject)
           : Promise.resolve(undefined);
@@ -195,6 +199,22 @@ describe("UpdaterDialog 自动模式（home 挂载）", () => {
     // 弹窗保留：标题与按钮仍在，用户可重试或改去 GitHub
     expect(await screen.findByText("发现新版本")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "立即升级" })).toBeInTheDocument();
+  });
+
+  it("T8 下载中 ESC 不关弹窗：进度界面保持可见（评审 Minor 回归锁）", async () => {
+    mode.installHang = true;
+    render(<UpdaterDialog />);
+    fireEvent.click(await screen.findByRole("button", { name: "立即升级" }));
+
+    // 下载挂起中：标题切到下载态，弹窗必须开着
+    expect(await screen.findByText("正在下载更新")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(useUpdaterStore.getState().downloading).toBe(true);
+    });
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(useUpdaterStore.getState().dialogOpen).toBe(true);
+    expect(screen.getByText("正在下载更新")).toBeInTheDocument();
   });
 
   it("T7 手动模式二次检查：首查 up-to-date 不弹，再查 available 重开（I5 回归锁）", async () => {
