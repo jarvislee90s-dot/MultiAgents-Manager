@@ -904,6 +904,8 @@ export type QuestionAnswerResult =
        *  下一题请求但已在 Review 确认屏、零按键（已在终点）——前端**不**推进。
        *  缺省（opencode 等旧路径）视为已前移（既有行为不变） */
       advanced?: boolean;
+  /** 保存后 TUI 直达 Review/Submit 汇总屏（末题/全部已答自动汇总）——前端据此切确认卡 */
+  review?: boolean;
       /** claude 切题（2026-10-02）：方向 echo（prev/next）——前端移动 mqIndex 需
        *  确认 echo 与请求 direction 一致（opencode 旧回执无此字段 → 维持回绕行为） */
       direction?: string;

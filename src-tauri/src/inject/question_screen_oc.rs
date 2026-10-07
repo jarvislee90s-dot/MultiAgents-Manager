@@ -225,7 +225,45 @@ pub fn kimi_question_screen_snapshot(lines: &[String]) -> Option<QuestionScreenS
         checked.push(Some(is_selected));
     }
     if checked.is_empty() {
-        return None; // 无选项行 = 非 kimi 多选题页（无 Other 行亦出快照，仅无文字通道）
+        // **单选页兜底**（2026-10-06 刷新对位修复）：无勾选框行可能是**单选题页**
+        // （选项 = `[N] label` 编号行形，无勾选框）——此前返回 None → GET 无快照 →
+        // 刷新永远回第 1 题。单选页出 heading-only 快照（checked 空 = 前端 heading
+        // 对位后不写勾选态）+ Other 行文本（单选 Other 有编号，free_text 同面）。
+        let arrow = char::from_u32(0x2192).unwrap();
+        let chevron = char::from_u32(0x276F).unwrap();
+        let has_bracket_row = lines.iter().any(|l| {
+            let t = l.trim().trim_start_matches([arrow, chevron]).trim_start();
+            t.starts_with('[')
+                && t.find(']').is_some_and(|c| {
+                    let n = &t[1..c];
+                    n.len() == 1 && n.chars().next().is_some_and(|d| d.is_ascii_digit())
+                })
+        });
+        if !has_bracket_row {
+            return None;
+        }
+        let free_text = lines
+            .iter()
+            .rev()
+            .filter_map(|l| {
+                let t = l.trim().trim_start_matches([arrow, chevron]).trim_start();
+                if !t.starts_with('[') {
+                    return None;
+                }
+                let close = t.find(']')?;
+                let after = t[close + 1..].trim();
+                after.to_lowercase().starts_with("other")
+                    .then(|| after.split_once(':').map(|(_, v)| v.trim().to_string()))
+                    .flatten()
+                    .filter(|v| !v.is_empty())
+            })
+            .next();
+        return Some(QuestionScreenSnapshot {
+            checked: Vec::new(),
+            free_text: free_text.clone(),
+            free_text_present: free_text.is_some(),
+            heading,
+        });
     }
     Some(QuestionScreenSnapshot {
         checked,

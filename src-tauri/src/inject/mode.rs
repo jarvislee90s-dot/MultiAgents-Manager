@@ -6117,6 +6117,28 @@ mod tests {
             }
             None => eprintln!("==== kimi 权限菜单定位器：未命中（标题/footer 锚或行形不匹配）===="),
         }
+        // **属性层（粗体探测）**：视口各行属性压缩行程——高亮行（❯/▶ 前缀）与
+        // 普通行的属性差 = 粗体/加亮是否属性级可读的判据
+        match crate::inject::windows_console::read_screen_window_attrs(pid) {
+            Ok(rows) => {
+                eprintln!("==== 属性层 {} 行（行程压缩：起点x-长度:0x掩码）====", rows.len());
+                for (i, row) in rows.iter().enumerate() {
+                    let mut runs: Vec<String> = Vec::new();
+                    let mut cur = row.first().copied().unwrap_or(0);
+                    let mut start = 0usize;
+                    for (x, a) in row.iter().enumerate() {
+                        if *a != cur {
+                            runs.push(format!("x{start}-{}:0x{cur:04X}", x - start));
+                            cur = *a;
+                            start = x;
+                        }
+                    }
+                    runs.push(format!("x{start}-{}:0x{cur:04X}", row.len() - start));
+                    eprintln!("ATTR {i:02} | {}", runs.join(" "));
+                }
+            }
+            Err(e) => eprintln!("属性层读取失败：{e}"),
+        }
     }
 
     /// **数字直达的输入行残留现场（真机夹具）**：用户走查截图里堆积的

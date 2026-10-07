@@ -165,6 +165,8 @@ function writeSnapshotState(
     ) => void;
     setMqFreeText: (updater: (prev: Record<number, string>) => Record<number, string>) => void;
     setMqSelected: (updater: (prev: Record<number, number>) => Record<number, number>) => void;
+    /** 输入格直接同步（2026-10-07 用户指令：刷新后输入格=终端真值，不留本地残留） */
+    setFreeText?: (v: string) => void;
   },
   multiSelect = true
 ): Set<number> {
@@ -200,6 +202,9 @@ function writeSnapshotState(
         return n;
       });
     }
+    // **输入格直接同步**（2026-10-07 用户指令）：刷新后输入格 = 终端真值
+    //（有文字 → 填入；占位 → 清空），不留上一题/上一轮的本地残留
+    setters.setFreeText?.(screen.freeText ?? "");
   }
   return set;
 }
@@ -312,7 +317,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         v.screen,
         qi,
         v.questions.length === 1,
-        { setChecked, setMqChecked, setMqFreeText, setMqSelected },
+        { setChecked, setMqChecked, setMqFreeText, setMqSelected, setFreeText },
         v.questions[qi]?.multiSelect ?? true
       );
     },
@@ -380,6 +385,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 setMqChecked,
                 setMqFreeText,
                 setMqSelected,
+                setFreeText,
               });
               // 已打字（屏上文本）→ 只读呈现「已写入 + 编辑」（屏读为准）
               if (v.screen.freeText !== null && v.screen.freeText !== undefined) {
@@ -506,12 +512,30 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               setMqIndex(dest);
               // 评审 I2：快照**归属校验**——heading 必须唯一对位到 dest，且勾选数
               // 与载荷选项数一致；校验不过 → 跳过应用（本地状态不被部分/异屏读损坏）
+              // **输入格快照驱动**（2026-10-07）：快照归属命中（含单选页 heading-only
+              // 形态）→ free_text 覆盖输入格；缺失 → 清空（不沿用上一题的本地残留）
+              setFreeText(res.screen?.freeText ?? "");
+              setMqFreeText((prev) => {
+                const n = { ...prev };
+                if (res.screen?.freeText) {
+                  n[dest] = res.screen.freeText;
+                } else {
+                  delete n[dest];
+                }
+                return n;
+              });
+              const snapCheckedLen = (res.screen?.checked ?? []).length;
+              const headingOnly =
+                res.screen?.heading != null && snapCheckedLen === 0;
               if (
                 res.screen &&
                 res.screen.heading &&
                 info !== null &&
                 findQuestionByHeading(info.questions, res.screen.heading) === dest &&
-                (res.screen.checked ?? []).length === info.questions[dest]?.options.length
+                (snapCheckedLen === info.questions[dest]?.options.length ||
+                  // 单选页快照：无勾选框 → checked 空——heading 唯一命中即对位
+                  // （勾选态不写，如实），页面位置同步不再被 checked 长度卡死
+                  (headingOnly && findQuestionByHeading(info.questions, res.screen.heading) !== null))
               ) {
                 writeSnapshotState(
                   res.screen,
@@ -572,7 +596,20 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             // 屏读为准：回执带回该行屏上文本（可能带此前终端侧的残留），以它为准
             // 屏读为准（评审 I1）：回执 text = 该行屏上文本；null = 收尾读屏失败
             //（未核验——不把本地发送文本虚报成已写入，保持可编辑可重试）
-            if (overwrite && (text ?? "") === "") {
+            if (res.review === true) {
+              // **保存后 TUI 直达 Review**（末题/全部已答自动汇总，2026-10-07）——
+              // 直接切确认卡，同步终端真实位置
+              setMqFreeText((prev) => {
+                const n = { ...prev };
+                delete n[questionIndex];
+                return n;
+              });
+              setFreeText("");
+              setEditingFreeText(false);
+              setFtUnverified(false);
+              setInProgress(null);
+              setMqIndex(info?.questions.length ?? questionIndex + 1);
+            } else if (overwrite && (text ?? "") === "") {
               // **清空请求**：成功 = 终端 TS 行恢复占位 → 删卡面记录回「发送」初态
               setMqFreeText((prev) => {
                 const n = { ...prev };
@@ -753,16 +790,18 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 freeText,
                 qi,
                 undefined,
-                mqFreeText[qi] !== undefined ? true : undefined
+                freeText.trim() !== "" || mqFreeText[qi] !== undefined ? true : undefined
               )
             }
             className="rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
           >
-            {mqFreeText[qi] !== undefined ? "覆盖写入" : "发送"}
+            {freeText.trim() !== "" || mqFreeText[qi] !== undefined ? "覆盖写入" : "发送"}
           </button>
         )}
-        {/* 清空（独立动作，不依赖编辑解锁）：已写入态与编辑态都在场；按能力位门控 */}
-        {mqFreeText[qi] !== undefined && info.freeTextOverwrite === true && (
+        {/* 清空（独立动作，不依赖编辑解锁）：**输入格有内容即在场**（2026-10-06 用户
+            指令：不等屏读回执——输入了就该能清）+ 已写入态；按能力位门控 */}
+        {info.freeTextOverwrite === true &&
+          (mqFreeText[qi] !== undefined || freeText.trim() !== "") && (
           <button
             type="button"
             data-testid="question-multi-freetext-clear"

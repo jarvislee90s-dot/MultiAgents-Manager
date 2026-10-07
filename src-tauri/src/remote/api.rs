@@ -4359,6 +4359,22 @@ pub async fn session_question_answer(
         if q_idx >= hit.questions.len() {
             return Err("bad_index");
         }
+        // **保存后预期落点**（载荷 question 全集 + 预期题序）——单选保存后 sheet
+        // 落点校验/导航的基准（01:48 header≠question 判据错位修复）。
+        // **按题形态分流**（2026-10-07 03:03 事故修复）：多选 Other 保存后**留在
+        // 原题**（切题靠手动），预期 = 原页自身；单选保存后自动推进，预期 = 下一题
+        let is_multi_select_q = hit.questions[q_idx].multi_select;
+        let expected_idx = if is_multi_select_q {
+            Some(q_idx)
+        } else {
+            Some(q_idx + 1).filter(|i| *i < hit.questions.len())
+        };
+        // 载荷 question 全集（保存后 sheet 落点校验的基准）
+        let payload_questions: Vec<String> = hit
+            .questions
+            .iter()
+            .map(|q| q.question.clone())
+            .collect();
         let pages = hit.questions.len() + 1; // 题目数 + Submit 页（opencode prev 用）
         let q = hit.questions.into_iter().nth(q_idx).unwrap_or_else(|| {
             // unreachable（上面已判界内），防御性占位——序列构造会因选项越界拒绝
@@ -4436,7 +4452,7 @@ pub async fn session_question_answer(
                 }
             })?,
         };
-        Ok((session, seq, q, tool_id, multi_question, pages))
+        Ok((session, seq, q, tool_id, multi_question, pages, payload_questions, expected_idx))
     })
     .await
     {
@@ -4449,7 +4465,8 @@ pub async fn session_question_answer(
             );
         }
     };
-    let (session, sequence, q_for_plan, q_tool, multi_flow, pages) = match lookup {
+    let (session, sequence, q_for_plan, q_tool, multi_flow, pages, payload_questions, expected_idx) =
+        match lookup {
         Ok(v) => v,
         Err(code) => {
             // 校验失败零注入零审计（approve guards 同口径）：
@@ -4493,6 +4510,8 @@ pub async fn session_question_answer(
     // 切勾目标身份核验的题干（评审 I1）：多题卡当前题的 question 文本，随计划
     // 传给分派器（run_toggle_stages 第 1 段与屏面题干比对，不一致=已手动切题→中止）
     let expected_question = q_for_plan.question.clone();
+    let payload_questions_for_dispatch = payload_questions.clone();
+    let expected_idx_for_dispatch = expected_idx;
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 同款）：忙 → None 哨兵
     // 让位，不投递亦不落审计（无投递发生，approve/retract/jump 忙让位同口径）
     let attempt = tokio::task::spawn_blocking(move || {
@@ -4507,6 +4526,8 @@ pub async fn session_question_answer(
             free_text.as_deref(),
             &stage_plan,
             &expected_question,
+            expected_idx_for_dispatch,
+            payload_questions_for_dispatch,
         ))
     })
     .await;
@@ -4815,6 +4836,8 @@ enum StagePlan {
         overwrite: bool,
         /// 多题流：保存后**不代发确认键**（单题 E-B8 语义在多题流会把未答题一并提交）
         multi_question: bool,
+        /// 题形态：补发回车只对多选生效（单选推进漂移，停用——用户裁决）
+        multi_select: bool,
     },
     /// **codex Tab 备注阶段机**（批次戊 E5）：弹窗 footer 锚判读 → Tab → 打字 →
     /// Enter 提交（当前高亮项+备注）→ 终态。`overwrite` = 已在备注态时**再按
@@ -4884,6 +4907,7 @@ impl StagePlan {
             (A::FreeText, "kimi") => Self::KimiFreeText {
                 overwrite,
                 multi_question: multi_flow,
+                multi_select: q.multi_select,
             },
             (A::FreeText, "codex") => Self::CodexNotes { overwrite },
             (A::FreeText, "opencode") => Self::OpencodeOwnAnswer { overwrite },
@@ -5217,6 +5241,8 @@ fn dispatch_question_action(
     free_text: Option<&str>,
     plan: &StagePlan,
     expected_question: &str,
+    expected_idx: Option<usize>,
+    payload_questions: Vec<String>,
 ) -> QuestionDispatch {
     match plan {
         StagePlan::ClaudeSelect { index } => {
@@ -5644,6 +5670,9 @@ fn dispatch_question_action(
                     return QuestionDispatch::Failed(e);
                 }
             }
+            if tool == "kimi" {
+                log::info!("kimi-SingleKey 路径标记：sequence={sequence:?}");
+            }
             if (tool == "kimi" || tool == "codex") && !sequence.is_empty() {
                 if let Some(pre) = &pre_select {
                     let probe = question_probe(st, tool, pid);
@@ -5952,7 +5981,27 @@ fn dispatch_question_action(
             // 生效必带来页切换/高亮移动 → 屏面变化；首题 `←` TUI 不动 → 窗尽
             // Unchanged → 如实 Failed 可重试）；到达后快照随回执回传（卡面
             // heading/checked 对位，快照解析不出 = None 如实）。
+            // **前置：编辑态检查**（2026-10-07 用户指令，通用逻辑）：光标停在
+            // Other 编辑行时 ←/→ 被编辑器吞掉（切题无效）→ 先发 ↑ 离开编辑行
+            // （回到选项区）→ 屏读确认非编辑态 → 才发切题键。
             let probe = question_probe(st, tool, pid);
+            if let Some(pre) = probe("adv-pre-edit") {
+                if crate::inject::question::kimi_editor_mode(&pre) {
+                    if let Err(e) = injector.locate_and_send_key_spec(pid, "up", spec) {
+                        return QuestionDispatch::Failed(e);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    if let Some(post) = probe("adv-post-edit") {
+                        if crate::inject::question::kimi_editor_mode(&post) {
+                            return QuestionDispatch::Failed(
+                                "当前在文字编辑行且 ↑ 未退出编辑态——切题无效，请人工核对终端".to_string(),
+                            );
+                        }
+                    }
+                }
+            }
             let key = match direction {
                 crate::inject::question::NavDirection::Next => "right",
                 crate::inject::question::NavDirection::Prev => "left",
@@ -6011,6 +6060,11 @@ fn dispatch_question_action(
                 || poll_receipt_stage(|| probe("kimi-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
             );
+            log::info!(
+                "kimi-freeText 键序列={:?} receipt_seen={:?}",
+                out.as_ref().ok().map(|o| o.sent_keys.clone()),
+                out.as_ref().ok().map(|o| o.receipt_seen)
+            );
             match out {
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_RECEIPT,
@@ -6023,10 +6077,15 @@ fn dispatch_question_action(
         StagePlan::KimiFreeText {
             overwrite,
             multi_question,
+            multi_select,
         } => {
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
+            log::info!(
+                "kimi-freeText 路径标记：overwrite={overwrite} multi_question={multi_question} multi_select={multi_select} text_len={}",
+                text.chars().count()
+            );
             let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::question::FreeTextClosures {
                 read: || probe("read"),
@@ -6053,10 +6112,17 @@ fn dispatch_question_action(
                     ))
                 },
             };
+            log::info!(
+                "kimi-freeText 路径标记：overwrite={overwrite} multi_question={multi_question} text_len={}",
+                text.chars().count()
+            );
             let out = crate::inject::question::run_kimi_free_text_stages(
                 text,
                 *overwrite,
                 *multi_question,
+                payload_questions,
+                expected_idx,
+                *multi_select,
                 || probe("kimi-other"),
                 || poll_question_stage(|| probe("kimi-review"), QUESTION_STAGE_POLL_TOTAL_MS),
                 || poll_receipt_stage(|| probe("kimi-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
@@ -6187,6 +6253,11 @@ fn dispatch_question_action(
                 || poll_question_stage(|| probe("oc-confirm"), QUESTION_STAGE_POLL_TOTAL_MS),
                 || poll_receipt_stage(|| probe("oc-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
+            );
+            log::info!(
+                "kimi-freeText 键序列={:?} receipt_seen={:?}",
+                out.as_ref().ok().map(|o| o.sent_keys.clone()),
+                out.as_ref().ok().map(|o| o.receipt_seen)
             );
             match out {
                 Ok(o) => QuestionDispatch::StageDone {
