@@ -10971,10 +10971,16 @@ mod tests {
 
     /// POST：**显式 group 路由**（丁T4 新增字段）——codex 权限组「完全信任」→ 走
     /// `/permissions` 两段式的**第一段**（文本 + 回车；第二段无真屏读 → 中止并如实回执）
+    /// 平台门控（2026-10-07 存量债清理）：本测断言的是「两段式的**第一段照常投递**」，
+    /// 而第一段之后的菜单定位/导航**必须屏读**，屏读是 **Windows 能力**——
+    /// `remote/api.rs::menu_stages` 在 `not(windows)` 下按设计恒回
+    /// Err「本平台无屏读，权限菜单无法定位」（如实回执，不盲发）。故该行为在非 Windows
+    /// 上**不可能发生**，属平台不适用而非行为回归；门控取严 = 原注入平台门
+    /// （inject/routing.rs：仅 Windows/macOS 可注入）∩ 屏读能力（仅 Windows）。
     #[tokio::test]
     #[cfg_attr(
-        not(any(windows, target_os = "macos")),
-        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+        not(windows),
+        ignore = "屏读是 Windows 能力：非 Windows 下 menu_stages 恒回 Err「本平台无屏读，权限菜单无法定位」，第一段投递不可发生（平台不适用）"
     )]
     async fn session_mode_switch_routes_explicit_permission_group() {
         let fake = FakeInjector::ok();
@@ -11184,10 +11190,14 @@ mod tests {
 
     /// codex 运行中门**只管 Plan 档**：同一 Processing 会话切权限组 → 照常出手
     /// （权限菜单的可用性与回合状态无关；未实测有同类限制 → 不扩张）。
+    /// 平台门控（2026-10-07 存量债清理）：本测断言「运行中门只拦 Plan 档 → 权限组
+    /// 照常出手」，而权限组出手 = 走两段式的第一段，第二段的菜单定位**必须屏读**
+    /// （Windows 能力）——非 Windows 下 `menu_stages` 恒回 Err「本平台无屏读」，
+    /// 记录里不会有 `/permissions`。属平台不适用而非行为回归。
     #[tokio::test]
     #[cfg_attr(
-        not(any(windows, target_os = "macos")),
-        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+        not(windows),
+        ignore = "屏读是 Windows 能力：非 Windows 下 menu_stages 恒回 Err「本平台无屏读，权限菜单无法定位」，权限组出手不可发生（平台不适用）"
     )]
     async fn session_mode_switch_codex_busy_only_blocks_plan() {
         let fake = FakeInjector::ok();
@@ -11226,10 +11236,14 @@ mod tests {
     ///
     /// **本用例能证明什么**：探针只在**第一段之前**被调用一次（守卫位）→ 断「调用
     /// 次数恰好 1」+「第一段照常投递」。若有人在第二段前再插一次探针，计数变 2 → 先红。
+    /// 平台门控（2026-10-07 存量债清理）：本测断言「第一段照常投递 + 守卫恰好调用一次」，
+    /// 而投递第一段的**前提**是菜单路径可行——菜单定位/导航必须屏读（Windows 能力），
+    /// 非 Windows 下 `menu_stages` 恒回 Err「本平台无屏读，权限菜单无法定位」，
+    /// 记录为空 ⇒ 断言不可满足。属平台不适用而非行为回归。
     #[tokio::test]
     #[cfg_attr(
-        not(any(windows, target_os = "macos")),
-        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+        not(windows),
+        ignore = "屏读是 Windows 能力：非 Windows 下 menu_stages 恒回 Err「本平台无屏读，权限菜单无法定位」，第一段投递不可发生（平台不适用）"
     )]
     async fn session_mode_switch_menu_guard_runs_once_before_first_stage() {
         let fake = FakeInjector::ok();
