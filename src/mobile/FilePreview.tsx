@@ -9,7 +9,7 @@
 // - 越界 / 超限 / 不存在对外一律 403（后端探测面最小化）→「无法预览该文件」错误态；
 // - 手机现实（Task 8 裁决）：split = 上对话下文件（纵向分屏，由 SessionDetail 排版），
 //   fullscreen = 全屏浮层；默认 fullscreen，切换控件在 SessionDetail（mode 是受控 prop）。
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import hljs from "highlight.js/lib/common";
@@ -17,6 +17,7 @@ import { ArrowLeft, X } from "lucide-react";
 import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
 import { fileKindOf } from "./FilePanel";
 import { ApiError, fetchFile, type FilePayload } from "./api";
+import { etaRemainingText, formatBytes, transferRateBps, type TransferSample } from "./board-logic";
 import type { Session } from "@/types/session";
 
 interface FilePreviewProps {
@@ -105,6 +106,15 @@ export default function FilePreview({
 }: FilePreviewProps) {
   const [state, setState] = useState<LoadState>({ phase: "loading" }); // 手动重试信号（403 时文件可能已被 agent 补写回限内 / 网络恢复后再试）
   const [retryTick, setRetryTick] = useState(0);
+  // 下行进度（Task 10 §C5）：最新一次进度回调的快照（null = 尚无进度事件——
+  // 文本分支 / 流式读不可用时保持旧「加载中…」文案，不显示假数字）
+  const [progress, setProgress] = useState<{
+    loaded: number;
+    total: number | null;
+    rateBps: number | null;
+  } | null>(null);
+  // 速率估算的首个样本（进度回调里取样，渲染期不碰时钟——purity 纪律）
+  const firstSampleRef = useRef<TransferSample | null>(null);
 
   // 源码/渲染双态（M5 B4，线稿 .pv-head seg）：仅 .md 与 .html 出现切换器。
   // 默认口径 = 各自现状延续：.md 默认渲染（现有 markdown 排版显式化）、
@@ -150,7 +160,15 @@ export default function FilePreview({
     let alive = true;
     let objectUrl: string | null = null;
     setState({ phase: "loading" });
-    fetchFile(session.id, filePath)
+    setProgress(null); // 换文件/重试先清上一份进度（UI 不得串场）
+    firstSampleRef.current = null;
+    fetchFile(session.id, filePath, (loaded, total) => {
+      if (!alive) return;
+      const atMs = Date.now(); // 事件回调里取样（非渲染期），供剩余时间估算
+      const first = firstSampleRef.current ?? { loaded, atMs };
+      firstSampleRef.current = first;
+      setProgress({ loaded, total, rateBps: transferRateBps(first, { loaded, atMs }) });
+    })
       .then((p) => {
         if (!alive) {
           if (p.kind === "image") URL.revokeObjectURL(p.url); // 迟到的图片响应直接释放
@@ -219,6 +237,18 @@ export default function FilePreview({
     if (showMarkdown) return null;
     return highlightText(state.payload.content, filePath);
   }, [state, filePath, showMarkdown]);
+
+  // 加载态派生量（渲染期纯计算，不碰时钟；各只算一次——百分比与剩余时间文案
+  // 在文本行与进度条两处共用）。total 未知（隧道不透传 content-length）→
+  // 百分比为 null，渲染侧据此不显示百分比与进度条（不编假数字，§C5 硬要求）
+  const progressTotal = progress?.total ?? null;
+  const progressPercent =
+    progress && progressTotal !== null
+      ? Math.min(100, Math.floor((progress.loaded / progressTotal) * 100))
+      : null;
+  const progressEta = progress
+    ? etaRemainingText(progress.loaded, progressTotal, progress.rateBps)
+    : null;
 
   return (
     <section
@@ -347,7 +377,35 @@ export default function FilePreview({
         data-font-scale={fontScale}
         className="min-h-0 flex-1 overflow-auto p-3"
       >
-        {state.phase === "loading" && <p className="text-sm text-[var(--mut)]">加载中…</p>}
+        {/* 加载态（Task 10 §C5）：有进度事件 → 已传字节 + 百分比（有 total 才显示，
+            隧道不透传 content-length 时 total=null——只显示已传字节，不编假百分比）
+            + 预估剩余（速率可估才显示）+ 细进度条（同条件）。纯文件加载进度条，
+            与线稿 .upl/.pbar 同布局 */}
+        {state.phase === "loading" && (
+          <div data-testid="preview-progress">
+            <div className="flex items-center justify-between gap-2 text-sm text-[var(--mut)]">
+              <span>加载中…</span>
+              {progress && (
+                <span data-testid="preview-progress-text" className="text-xs tabular-nums">
+                  {`已传 ${formatBytes(progress.loaded)}`}
+                  {progressTotal !== null &&
+                    progressPercent !== null &&
+                    ` / ${formatBytes(progressTotal)} · ${progressPercent}%`}
+                  {progressEta !== null && ` · ${progressEta}`}
+                </span>
+              )}
+            </div>
+            {progressPercent !== null && (
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-[var(--cb)]">
+                <div
+                  data-testid="preview-progress-bar"
+                  className="h-full rounded-full bg-[var(--btnp)]"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+            )}
+          </div>
+        )}
         {state.phase === "error" && (
           <p data-testid="preview-error" className="text-sm text-rose-600 dark:text-rose-400">
             {/* M5 P2-a：403 带后端结构化原因码，按原因分診排障文案（已过闸设备可见） */}

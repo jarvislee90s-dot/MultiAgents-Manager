@@ -8,7 +8,49 @@ import { useEffect, useMemo, useState } from "react";
 import { FileText, Image as ImageIcon, X } from "lucide-react";
 import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
 import { formatRelativeTime } from "./board-logic";
-import type { SessionFileEntry } from "./api";
+import { fetchChannel, type ChannelInfo, type SessionFileEntry } from "./api";
+
+/** 带宽耗时预估的参考附件大小（§C5，MB）：面板只知路径不知大小，按线稿口径用
+ *  20 MB 参考量给出「量级感受」（20MB×8bit / 1.8Mbps ≈ 1.5 分钟 / ÷0.8 ≈ 3.3 分钟） */
+const BW_REFERENCE_MB = 20;
+
+/** 带宽受限横幅（§C5：如实告知 + 满速升级指引）。**文件面板与附件区共用同一份
+ *  判据与文案**（评审 I-2 后半：附件区也要出横幅——只上传、不浏览文件的用户
+ *  不然永远看不到「这是通道限制，不是故障」；抽成一个组件而不是各写一份，是为了
+ *  杜绝两处文案漂移，改口径只改这里）。
+ *  - 判据：仅受限通道（隧道）就地出现；局域网直连与拉取失败都不渲染；
+ *  - 耗时式 = 20MB×8 / 实测速率 / 60（分钟，一位小数）；
+ *  - **有限正数守卫**（评审 M-3 / I-2）：畸形载荷（limited=true 但 est=0/NaN/
+ *    Infinity）时耗时式会得「Infinity 分钟」这类假数字——速率非有限正数一律
+ *    不渲染（无数据不如不提示）；
+ *  - testId 由调用方给（panel-bw-note / composer-bw-note），className 供落点间距。 */
+export function ChannelBwNote({
+  channel,
+  testId,
+  className = "",
+}: {
+  channel: ChannelInfo | null;
+  testId: string;
+  className?: string;
+}) {
+  if (!channel?.limited) return null;
+  // 速率要能算出有意义的耗时：非有限正数（0 / NaN / Infinity）一律不渲染横幅
+  const isUsableRate = (mbps: number) => Number.isFinite(mbps) && mbps > 0;
+  if (!isUsableRate(channel.estMbpsDown) || !isUsableRate(channel.estMbpsUp)) return null;
+  // 参考量按实测速率折算的耗时（分钟，一位小数）
+  const minutesFor = (mbps: number) => ((BW_REFERENCE_MB * 8) / mbps / 60).toFixed(1);
+  return (
+    <div
+      data-testid={testId}
+      className={`rounded-lg bg-[var(--cbg)] px-2 py-1.5 text-[11px] leading-4 text-[var(--mut)] ${className}`}
+    >
+      当前通道带宽受限（实测下行 ~{channel.estMbpsDown} Mbps / 上行 ~{channel.estMbpsUp}{" "}
+      Mbps——这是通道限制，不是故障）：{BW_REFERENCE_MB} MB 附件下载约需{" "}
+      {minutesFor(channel.estMbpsDown)} 分钟、上传约需 {minutesFor(channel.estMbpsUp)} 分钟。
+      手机装上 Tailscale 并加入尾网后可直连本机，带宽可提升 1–2 个数量级（满速）。
+    </div>
+  );
+}
 
 /** 追溯档位（用户裁决 3）：顶档 = SessionDetail.MAX_LIMIT（1000 到顶） */
 export const FILE_SCOPES = [200, 500, 1000] as const;
@@ -91,6 +133,19 @@ export default function FilePanel({
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(id);
+  }, []);
+
+  // 通道能力（Task 10 §C5，装饰）：挂载拉一次，任何失败静默 → 无提示不阻塞面板。
+  // **纯装饰**——读 Host 推断、可被伪造、允许不准、不进任何安全判定（G1 推论③）
+  const [channel, setChannel] = useState<ChannelInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void fetchChannel().then((c) => {
+      if (alive) setChannel(c);
+    });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   /** 执行搜索：草稿 trim 后生效（空串 = 清除搜索） */
@@ -354,6 +409,11 @@ export default function FilePanel({
           可预览：文本 / 代码 ≤500KB（md/html 支持渲染切换），图片 ≤5MB
           （png/jpg/jpeg/gif/webp/svg/bmp）；敏感目录不可预览，其余原因见报错提示。
         </p>
+        {/* 带宽受限提示 + 满速升级指引（Task 10 §C5）：仅受限通道（隧道）就地出现，
+            局域网直连与拉取失败都不渲染——升级指引不占通道卡片位（§C4 4 卡不变），
+            只在用户真会遇到大文件传输时就地告知。判据/文案/有限正数守卫见
+            ChannelBwNote（附件区复用同一份，评审 I-2） */}
+        <ChannelBwNote channel={channel} testId="panel-bw-note" className="mt-3" />
       </div>
     </section>
   );
