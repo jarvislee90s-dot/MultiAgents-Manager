@@ -3073,7 +3073,7 @@ mod tests {
         }
     }
 
-    /// Task 6 专用 state：夹具与 [`inject_state_with_probe`] 同一套，确认缝缺省
+    /// Task 6 专用 state：夹具与 `inject_state_with_probe`（Windows-only）同一套，确认缝缺省
     /// 恒命中（首轮即中，零延迟零等待）+ 指定注入器
     fn inject_state(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
@@ -3108,6 +3108,15 @@ mod tests {
     /// 测试与 approve_state 的 approve_sends_key 双方使用，实测 2/30 假红；本夹具侧
     /// 已改名 sess_i 让 sess_h 归 approve 族独占；sess_t3 同规——T3 端点测试 ~5s
     /// 轮询窗内守卫全程占用，撞 id 会把对方挤成 queued 假红）
+    ///
+    /// **平台门控（2026-10-07 存量债清理）**：本夹具的**唯一**消费方是
+    /// `#[cfg(windows)]` 的 `send_reports_submitted_when_stamp_missed_no_stuck_draft`
+    /// ——它依赖 Windows 屏读（假 pid 无滞留草稿 → submitted 中性回执）这条
+    /// 非 Windows 平台不存在的能力。非 Windows 上没有消费方 ⇒ 会被
+    /// `cargo clippy --all-targets -- -D warnings` 判 dead_code（实测 macOS 红 1 条）。
+    /// 因此把门控**加在夹具本身**（而不是无理由 `#[allow(dead_code)]`）：
+    /// 与消费方同 cfg，Windows 上门控开启、夹具照旧被使用，其余平台则不编译。
+    #[cfg(windows)]
     fn inject_state_with_probe(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         confirm_probe: std::sync::Arc<crate::remote::server::ConfirmProbeFn>,
