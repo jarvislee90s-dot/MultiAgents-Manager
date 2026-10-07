@@ -80,7 +80,9 @@ trash = "5"
 semver = "1"
 # system-proxy：reqwest 的**默认特性**，被 default-features=false 一并关掉——M4 T1d
 # 下载器不读 Windows/macOS 系统代理、直连 github.com 失败的根因，必须显式加回
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy"] }
+# blocking：§C3（Task 7）可达性校验用——tailscale.rs 的钉 IP 探测与 DoH 取数都是
+# 同步上下文（专职 std::thread / spawn_blocking），async client 反而要 runtime 缝合
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "system-proxy", "blocking"] }
 # M4 T1d：cloudflared 下载完整性校验（固定版本 + release 页 SHA256 表比对；
 # 0.10 本就存在于依赖树，升直依不新增传递项）
 sha2 = "0.11"
