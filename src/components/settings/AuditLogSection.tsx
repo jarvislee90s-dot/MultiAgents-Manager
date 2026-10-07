@@ -2,6 +2,7 @@
 // 数据源 = inject_list_audit（最近 100 条，AuditRow serde camelCase；行内无 device_id，
 // 设备标识不外泄）；动作词表 send|queue|flush|jump|retract|approve|reject|fail|key 由后端
 // 约束，前端原样小写展示（不翻译不改写）。样式对齐 RemoteSection：分区标题 + 边框卡片。
+import { SETTINGS_CARD_TITLE } from "@/components/settings/typography";
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
@@ -63,7 +64,7 @@ export function AuditLogSection() {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold">{t("settings.audit.title")}</h2>
+        <h2 className={SETTINGS_CARD_TITLE}>{t("settings.audit.title")}</h2>
         <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
           {t("settings.audit.refresh")}
         </Button>
@@ -90,7 +91,11 @@ export function AuditLogSection() {
             <span>{t("settings.audit.action")}</span>
             <span>{t("settings.audit.summary")}</span>
           </div>
-          <ul>
+          {/* `max-h` + 内滚只加在**行列表**上，表头留在滚动区外 ⇒ 滚到底也看得见列名
+              （2026-10-07 用户裁决：「注入审计的窗口有点过长了，限定一个高度，在里面做滚轮」）。
+              `60vh` 的取法：设置窗口 880×640 ⇒ 约 384px 高，一屏能看到表头 + 6~7 行；
+              再高就会把同块内的「远程服务 / 信号健康度」两张卡整个顶出视野。 */}
+          <ul className="max-h-[60vh] overflow-y-auto">
             {items.map((r, i) => (
               <li
                 // AuditRow 无唯一 id（ts 理论可撞），拼 index 兜底键稳定

@@ -37,6 +37,15 @@ fn window_alive(_w: &tauri::WebviewWindow) -> bool {
     true
 }
 
+/// 诊断取值：窗口自报的可见性文本（`is_visible` 失败时返回 err 文本）。
+/// 纯观测——任何失败都不参与建窗/显隐结果，只为回答「窗口自己说它可见吗」
+fn visible_text(w: &tauri::WebviewWindow) -> String {
+    match w.is_visible() {
+        Ok(v) => v.to_string(),
+        Err(e) => format!("err: {}", e),
+    }
+}
+
 /// 清除可能存在的幽灵/旧窗口（幂等）：destroy 后注册表条目经事件循环异步清除，
 /// 轮询等待消失（最多 300ms），避免同标签重建冲突
 fn clear_pet_window(app: &AppHandle) {
@@ -51,12 +60,60 @@ fn clear_pet_window(app: &AppHandle) {
     }
 }
 
-/// 创建桌宠窗口（隐藏态；前端加载后按 localStorage 决定显隐，避免启动闪现）。
+/// **启动兜底**（2026-10-07 用户裁决 E2）：宠物窗口是**隐藏态**建的，而把它显示出来的**唯一**
+/// 路径是宠物页面自己的 JS（`pet.tsx` 那条 `invoke("set_pet_visible", …)`）。
+///
+/// 实机证据（本机日志，同一晚三次启动）：窗口建成功且 `is_visible=false`，此后到用户手动开之前
+/// **一次 `set_pet_visible` 都没有**；而手动一开就 `false → true` 立刻成功。这指向一个死锁——
+/// **隐藏窗口的 WebView 不执行页面 ⇒ 页面没机会显示自己**。
+///
+/// 兜底策略：建窗后等 `PET_SHOW_FALLBACK_MS`，若窗口**仍**隐藏，就由 Rust 侧直接 `show()`。
+/// 窗口一旦可见，页面就会跑起来，随后它自己的 `set_pet_visible(loadVisible())` 会**权威纠正**
+/// 最终状态（关掉宠物的用户会被立刻 `hide()` 回去）。
+///
+/// **为什么不干脆「建窗即可见」**：那会让**每个**关掉宠物的用户在每次启动时都看到一闪；
+/// 本兜底只在「页面没干活」的故障路径上生效，正常路径**零行为变化**。
+///
+/// 这个 warn 日志本身就是判据：**看到它就证明页面没有自显示**（配合紧随其后的
+/// `set_pet_visible` 行，就能确认「页面在窗口可见后才真正跑起来」）。
+fn schedule_show_fallback(app: &AppHandle) {
+    /// 给页面留的时间：足够它 mount + 发 IPC（实机在秒级内），又不至于让人觉得启动卡了
+    const PET_SHOW_FALLBACK_MS: u64 = 5000;
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(PET_SHOW_FALLBACK_MS));
+        let Some(w) = handle.get_webview_window("pet") else {
+            return;
+        };
+        // 正常路径：页面已经自己显示过了（那就什么都不做）。窗口没了也别碰。
+        if !window_alive(&w) || w.is_visible().unwrap_or(false) {
+            return;
+        }
+        log::warn!(
+            "pet window 建窗 {}ms 后仍隐藏（页面未自显示）→ 启动兜底 show()",
+            PET_SHOW_FALLBACK_MS
+        );
+        if let Err(e) = w.show() {
+            log::error!("pet window 启动兜底 show() 失败：{}", e);
+        }
+    });
+}
+
+/// 创建桌宠窗口（**可见态**——2026-10-07 实证：隐藏态建出来的窗口页面不会执行，见 `build_pet_window`
+/// 里 `.visible(true)` 的长注释；前端加载后仍按 localStorage 决定最终显隐，关掉宠物的人会被收回去）。
 /// 带落地校验与重试：已存在且真实落地则直接复用；幽灵或创建失败则销毁重建
 pub fn create_pet_window(app: &AppHandle) -> Result<(), String> {
     let _guard = PET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(existing) = app.get_webview_window("pet") {
         if window_alive(&existing) {
+            // 诊断（分支留痕）：复用分支此前完全静默——回答「这次建窗是复用已有窗口还是新建」
+            // 与「复用那一刻窗口自报的可见性」（is_visible=false ⇒ 建窗成功但从未 show，与 H2 互通）
+            log::info!(
+                "pet window 复用已落地窗口（branch=reused existing, attempt=0, is_visible={}）",
+                visible_text(&existing)
+            );
+            // 复用分支同样要挂兜底：窗口活着但隐藏 + 页面没跑 = 同一个死锁
+            schedule_show_fallback(app);
             return Ok(());
         }
         log::warn!("pet window 未落地（启动竞态幽灵），销毁重建");
@@ -67,9 +124,19 @@ pub fn create_pet_window(app: &AppHandle) -> Result<(), String> {
         match build_pet_window(app) {
             Ok(w) => {
                 if window_alive(&w) {
+                    // 诊断（分支留痕）：成功路径在 `attempt == 1` 时**完全静默** ⇒ 日志里
+                    // 「建窗成功」与「压根没走到这一步」无法区分。本次事故正是这样：4 小时 15 分
+                    // 的日志里宠物行数为 0，既不能排除建窗失败、也不能确认建窗成功。
+                    // 记 `is_visible` 一并回答「建窗那一刻窗口自报可见吗」。
+                    log::info!(
+                        "pet window 新建成功（branch=built new, attempt={}, is_visible={}）",
+                        attempt,
+                        visible_text(&w)
+                    );
                     if attempt > 1 {
                         log::info!("pet window 第 {} 次尝试创建成功", attempt);
                     }
+                    schedule_show_fallback(app);
                     return Ok(());
                 }
                 last_err = "窗口未落地（幽灵）".to_string();
@@ -100,9 +167,55 @@ fn build_pet_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
         .always_on_top(true)
         .skip_taskbar(true)
         .resizable(false)
-        .visible(false)
+        // **可见态建窗**（2026-10-07 实证修复，原为 `.visible(false)`）：
+        //
+        // 原设计是「隐藏建窗 → 前端按 localStorage 决定显隐」，动机是「避免启动闪现」。
+        // 但实测（本机日志，同一晚连续 4 次启动，每次都是同一形状）：隐藏态建出来的宠物窗口
+        // **页面根本不会执行** —— 建窗成功、`is_visible=false`，此后**一次 `set_pet_visible`
+        // 都没有**（那是页面唯一会发出的调用）；而 MAM 其余窗口都是**可见态**建窗，页面全都正常。
+        // 更关键：**事后 `show()` 也救不回来** —— E2 的启动兜底 `show()` 确实执行了
+        // （日志有「建窗 5000ms 后仍隐藏 → 启动兜底 show()」），页面依旧没跑。
+        // ⇒ 页面必须在**建窗那一刻**就允许加载；隐藏建成之后没有第二次机会。
+        // 旁证：URL 本身没问题（dev server 对 `/index.html`、`/index.html%23/pet`、`/usage`
+        // 一律 200，SPA 回退），故不是路由或地址的问题。
+        //
+        // **为什么不再担心「启动闪现」**：宠物窗口是 `transparent(true)` 且这一刻**还没有任何
+        // 内容**（React 未挂载）⇒ 一个空的全透明窗口**视觉上就是「什么都没有」**，用户看不到它。
+        // 用户在设置里关掉了宠物时，页面挂载后第一件事就是 `set_pet_visible(false)` 把它收回去
+        // （`pet.tsx` 的 effect），故关掉的用户也不会长期留一个空窗。
+        .visible(true)
         .inner_size(PET_W, PET_H)
         .position(x, y)
+        // **页面加载判据（2026-10-07）**：宠物窗口的问题一路查到「页面从不执行」，而「没加载」与
+        // 「加载了但 JS 死了」在 Rust 侧长得一模一样（都只表现为「没有 `set_pet_visible`」）。
+        // 这两步把它们分开：
+        //   * 出现 `pet page load: …` ⇒ 文档**确实加载了** ⇒ 问题在页面 JS（看后面的错误探针）；
+        //   * 从不出现 ⇒ 文档压根没加载 ⇒ 问题在窗口 / URL / WebView 层。
+        // 顺带装个**错误探针**：把第一个未捕获错误写进 `document.title`，3 秒后由 Rust 读回来
+        // —— 标题是 Rust 唯一能直接读到的页面状态，这样不必为探针新增 IPC 命令。
+        .on_page_load(|w, payload| {
+            log::info!(
+                "pet page load: event={:?} url={}",
+                payload.event(),
+                payload.url()
+            );
+            if let Err(e) = w.eval(
+                "window.addEventListener('error', function (e) { \
+                   document.title = 'PETERR:' + (e.message || 'unknown'); \
+                 });",
+            ) {
+                log::warn!("pet 错误探针注入失败：{}", e);
+            }
+            let w2 = w.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(3000));
+                match w2.title() {
+                    // 标题没被改写 ⇒ 页面没抛未捕获错误（`PETERR:` 前缀才是异常）
+                    Ok(t) => log::info!("pet title after 3s = {t}"),
+                    Err(e) => log::warn!("pet 读标题失败：{}", e),
+                }
+            });
+        })
         .build()
         .map_err(|e| format!("创建桌宠窗口失败: {}", e))?;
     // dev 模式下 WebView2 可能给 webview 自动附加 DevTools 独立窗口，显式关闭
@@ -125,11 +238,29 @@ pub async fn set_pet_visible(app: AppHandle, visible: bool) -> Result<(), String
         }
     }
     if let Some(w) = app.get_webview_window("pet") {
-        if visible {
-            w.show().map_err(|e| e.to_string())?;
-        } else {
-            w.hide().map_err(|e| e.to_string())?;
+        // 诊断（显隐前后各一行）：`is_visible` 的**前后对账**是区分本次事故三种假设的关键——
+        // 若 after = true 而用户看不见 ⇒ 窗口在、页面没画出来（H1：渲染/量测自激）；若日志里
+        // 压根没有这一对 ⇒ 前端那条**唯一**的显示路径没走到（H2：`pet.tsx` 的 `.catch` 吞了失败）。
+        let before = visible_text(&w);
+        let r = if visible { w.show() } else { w.hide() };
+        if let Err(e) = r {
+            log::warn!(
+                "set_pet_visible({}) 失败：{}（is_visible before={}）",
+                visible,
+                e,
+                before
+            );
+            return Err(e.to_string());
         }
+        log::info!(
+            "set_pet_visible({})：is_visible {} → {}",
+            visible,
+            before,
+            visible_text(&w)
+        );
+    } else {
+        // 窗口不在注册表里也要留痕：否则「调用发生了但没有窗口」与「调用压根没发生」无法区分
+        log::warn!("set_pet_visible({}) 但 pet 窗口不在注册表里", visible);
     }
     Ok(())
 }

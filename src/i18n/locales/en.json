@@ -69,6 +69,20 @@
     "title": "Settings",
     "button": "Settings",
     "close": "Close",
+    "nav": {
+      "appearance": "Appearance & skin",
+      "appearanceDesc": "Local theme and language, plus fonts, skins, corners and accent for the remote board / web",
+      "desktop": "Desktop & alerts",
+      "desktopDesc": "Global shortcut, desktop notifications and sounds, and the Foxbell pet itself",
+      "tools": "Tools & health",
+      "toolsDesc": "Enable or disable each CLI tool, and run the skill / link health check",
+      "usage": "Usage",
+      "usageDesc": "Collection and mini-bar settings, plus collection status, today's numbers and export",
+      "remote": "Remote access",
+      "remoteDesc": "Remote service and channels, access and security, paired devices, signal health and injection audit",
+      "data": "Data",
+      "dataDesc": "Mobile attachment footprint and cleanup"
+    },
     "appearance": {
       "title": "Appearance",
       "description": "Customize the appearance and language of the app",
@@ -130,15 +144,7 @@
       "allow": "Allow",
       "deny": "Deny"
     },
-    "shortcut": {
-      "title": "Shortcuts",
-      "description": "Configure global shortcuts",
-      "placeholder": "Press key combination",
-      "showMain": "Show Main Window",
-      "showMainDesc": "Use shortcut to quickly show the main window",
-      "setSuccess": "Shortcut set to {{shortcut}}!",
-      "cleared": "Shortcut cleared!"
-    },
+
     "notifications": {
       "title": "Notifications",
       "heading": "Notification Settings",
@@ -319,6 +325,65 @@
       "overThreshold": "Large usage, consider cleaning",
       "hint": "Attachments = images/docs uploaded from mobile messages, stored in each project's .mam-attachments/<session>/ (locally git-excluded)",
       "loadError": "Failed to load data management list, please refresh"
+    },
+    "usageStatus": {
+      "title": "Usage collection status",
+      "description": "Minimal visible acceptance surface for plan ①: trigger a collection and check per-source results plus today's totals (kept as a debug entry after ② ships, or removed).",
+      "collect": "Collect now",
+      "collecting": "Collecting…",
+      "collectFailed": "Collection failed",
+      "collectedAt": "Data as of",
+      "duration": "Duration",
+      "newRecords": "New records",
+      "neverCollected": "Not collected in this run (click Collect now)",
+      "sourceOk": "OK",
+      "sourceFailed": "Failed",
+      "parsedFiles": "files",
+      "newRecordsShort": "new",
+      "noSources": "No source was collected this round (nothing is scanned while the usage switch is off; CSV export is not gated by that switch)",
+      "todayTitle": "Today",
+      "bucketInputFresh": "Fresh input",
+      "bucketCacheRead": "Cache read",
+      "bucketCacheWrite": "Cache write",
+      "bucketOutput": "Output",
+      "hitRate": "Hit rate",
+      "requests": "Requests",
+      "userEst": "User input (est.)",
+      "notAvailable": "—",
+      "empty": "No usage data for today (nothing collected yet, or no tool ran)",
+      "loadError": "Failed to load usage data",
+      "retry": "Retry",
+      "exportAndReveal": "Export today's CSV and open its folder",
+      "exporting": "Exporting…",
+      "exportFailed": "Export failed",
+      "exportHint": "Exports today's totals as CSV into your Downloads folder and reveals it in your system file manager (CSV export is not gated by the usage switch)",
+      "exportHintDisabled": "It exports the already-collected historical ledger (nothing new is collected while the switch is off); the export button stays available — no need to re-enable the switch to back up or export your history",
+      "disabledNotice": "The usage statistics switch is off: nothing is collected or stored, so today's totals below are necessarily empty (CSV export is not gated by that switch)",
+      "emptyDisabled": "Today's totals are empty — the usage statistics switch is off (see the notice above)",
+      "revealFailed": "Exported to {{path}}, but could not open its folder automatically (open it manually in your system file manager)"
+    },
+    "usage": {
+      "title": "Usage statistics",
+      "desc": "Eight settings for usage collection, the pet mini bar and the share image.",
+      "enabled": "Enable usage statistics",
+      "enabledHint": "When off, no session file is scanned; the dashboard and mini bar keep showing the already-collected ledger.",
+      "miniBarRange": "Mini bar range",
+      "miniBarToolRows": "Mini bar tool rows",
+      "miniBarToolRowsHint": "How many tools the mini bar's third line lists, 1–7 (3 by default).",
+      "detailRetentionDays": "Detail retention (days)",
+      "detailRetentionHint": "Details older than {{days}} days are not kept (1–3650 days).",
+      "collectIntervalMin": "Fallback collect interval (minutes)",
+      "collectIntervalHint": "The dashboard and mini bar collect when they open; this interval only floors the background fallback ticker, 1–1440 minutes.",
+      "providerMapRules": "Provider mapping rules (JSON)",
+      "providerMapRulesPlaceholder": "{\"rules\":[{\"prefix\":\"deepseek-\",\"provider\":\"volcengine\"}]}",
+      "providerMapRulesHint": "Only the {\"rules\":[{\"prefix\":…,\"provider\":…}]} shape is accepted; an invalid value is only flagged here and the save is still sent.",
+      "providerMapRulesInvalid": "Not the {\"rules\":[{\"prefix\":…,\"provider\":…}]} shape: the backend will reject the save (warning only, submission is not blocked).",
+      "exportPose": "Share-image pose",
+      "poseResetOnSwitch": "The pose fell back to Random because the pet changed: pose keys follow the sheet's row count and may not exist on the new sheet. (now under Export settings on the board)",
+      "saveFailed": "Failed to save usage settings",
+      "rangeToday": "Today",
+      "rangeLast5h": "Last 5 hours",
+      "rangeLast7d": "Last 7 days"
     }
   },
   "home": {
@@ -562,15 +627,6 @@
     "toDisableCount": "To disable ({{n}})",
     "residentExemptCount": "Resident-exempt ({{n}})",
     "saveAsPreset": "Save as Preset"
-  },
-  "screenshot": {
-    "saved": "Screenshot saved: {{path}}",
-    "failed": "Screenshot failed: {{error}}",
-    "title": "Screenshot Tool",
-    "capturing": "Capturing...",
-    "capture": "Capture",
-    "refreshList": "Refresh list",
-    "recent": "Recent screenshots"
   },
   "manifest": {
     "installConfirm": "Confirm installation",
@@ -863,6 +919,194 @@
       "pet-name-dot-prefix": "Pet name cannot start with a dot",
       "download-url-invalid": "Invalid download URL",
       "finalize-scan-failed": "Failed to read pet info after finalize"
+    }
+  },
+  "usage": {
+    "rpc": {
+      "usage-db-failed": "Usage ledger read/write failed: {{err}}",
+      "usage-source-io": "Failed to read usage source file: {{err}}",
+      "usage-source-db-open": "Cannot open usage database read-only: {{err}}",
+      "usage-range-invalid": "Invalid time range: {{err}}",
+      "usage-groupby-invalid": "Invalid grouping dimension: the records page supports tool or project only",
+      "usage-filter-unavailable": "This filter cannot be evaluated for the current time range: {{err}}",
+      "usage-settings-invalid": "Invalid usage settings: {{err}}",
+      "usage-disabled": "Usage statistics is disabled",
+      "usage-internal": "Usage operation failed: {{err}}"
+    },
+    "label": {
+      "unknownProvider": "Unknown"
+    },
+    "title": "Usage Dashboard",
+    "menu": {
+      "dashboard": "📊 Usage Dashboard",
+      "usage": "🏷 Today's Usage"
+    },
+    "mini": {
+      "requestInput": "Request input",
+      "hitRate": "Hit rate",
+      "cacheHit": "Cache hit",
+      "output": "Output",
+      "session": "This session",
+      "noSession": "No session",
+      "untitled": "Untitled",
+      "sessionEmptyHint": "This row is empty in two cases: (1) no recently active session in the current range yet (including never collected); (2) day tiers (last 7 days / 30 days / custom) aggregate without a session id, so the row cannot be computed.",
+      "sessionHint": "“This session” = the most recently active session within the current range, not the one you have open",
+      "toolsBasis": "By tool · request input: ",
+      "detail": "Details »",
+      "loading": "Loading usage…",
+      "error": "Failed to load usage — open the dashboard via “Details »” to retry",
+      "truncated": "The float clips when space runs out — open the dashboard for the full picture"
+    },
+    "tab": {
+      "board": "Board",
+      "records": "Records"
+    },
+    "export": {
+      "copyText": "Copy text",
+      "copyImage": "Copy image",
+      "image": "Export image",
+      "csv": "Export CSV",
+      "copied": "Copied",
+      "copiedImage": "Image copied",
+      "savedTo": "Saved to {{path}}",
+      "openDir": "Open containing folder",
+      "saveFailed": "Export failed: {{error}}",
+      "exporting": "Exporting…",
+      "copyFailed": "Copy failed: {{error}}",
+      "settings": "Export settings",
+      "settingsTitle": "Export settings",
+      "settingsSaved": "Export settings saved",
+      "poseLabel": "Share-image pose (the token-usage pet)",
+      "poseHint": "The pose of the pet drawn on the share image. Same pose set as the board / desktop pet; \"random\" picks one per export.",
+      "quote": "Quote",
+      "quoteTitle": "Share-image quote",
+      "quotePlaceholder": "Leave empty to use the default pool (variables: {range} {tokens} {hitPct} {models})",
+      "quoteHint": "Printed in the share image's speech bubble and included in the text summary.",
+      "quoteSave": "Save",
+      "quoteCancel": "Cancel",
+      "quoteSaved": "Quote saved",
+      "boardOnly": "Board tab only (the text summary and share image are board-scoped)"
+    },
+    "range": {
+      "last5h": "Last 5 hours",
+      "today": "Today",
+      "last7d": "Last 7 days",
+      "last30d": "Last 30 days",
+      "custom": "Custom",
+      "from": "From",
+      "to": "To"
+    },
+    "rangeClamped": "Truncated to the most recent 31 days",
+    "empty": "No data",
+    "error": {
+      "title": "Failed to load usage data"
+    },
+    "hero": {
+      "label": "{{range}} token total",
+      "sub": "Request input + output (excludes cache writes and estimated user input)"
+    },
+    "grid": {
+      "userEst": "User input (est.) · incl. subagents",
+      "output": "Output",
+      "requestTotal": "Request input (full cumulative)",
+      "cacheRead": "Cache read",
+      "hitRate": "Cache hit rate",
+      "requests": "Requests",
+      "asOf": "Data as of"
+    },
+    "pose": {
+      "random": "Random",
+      "idle": "Idle",
+      "run-right": "Run right",
+      "run-left": "Run left",
+      "waving": "Wave",
+      "jumping": "Jump",
+      "failed": "Failed",
+      "waiting": "Wait",
+      "running": "Busy",
+      "review": "Review",
+      "look": "Look around (needs an 11-row sheet; falls back to idle on a 9-row sheet)"
+    },
+    "card": {
+      "trend": "Usage trend",
+      "distribution": "Group distribution",
+      "peak": "Peak {{v}}",
+      "compareSubject": "Range total"
+    },
+    "group": {
+      "tool": "By tool",
+      "project": "By project",
+      "provider": "By provider",
+      "model": "By provider / model"
+    },
+    "records": {
+      "cardDim": "Card grouping",
+      "dim": {
+        "tool": "By tool",
+        "project": "By project"
+      },
+      "filterTools": "Tools",
+      "subagentInclude": "Incl. subagents",
+      "subagentParentsOnly": "Parent sessions only",
+      "subagentUnavailable": "Daily aggregate rows carry no session id → switch to Today or Last 5 hours first",
+      "caliberInclude": "Tokens only · incl. subagents",
+      "caliberParentsOnly": "Tokens only · excl. subagents",
+      "cardTotal": "Total {{v}}",
+      "moreRows": "Show {{n}} more rows",
+      "collapse": "Collapse",
+      "retention": "Keeps detail for the last {{days}} days",
+      "empty": "No data"
+    },
+    "source": {
+      "measured": "Measured",
+      "inferred": "Inferred",
+      "unknown": "Unknown"
+    },
+    "moreN": "+{{n}}",
+    "exact": "Exact value {{value}}",
+    "compare": " ({{delta}})",
+    "compareHint": "vs. previous equal-length range {{prev}}",
+    "compare.new": "new",
+    "turnBasis": {
+      "claude": "Counts started turns (user rows with no toolUseResult and not meta); assistant rows are never counted (2.68x streaming duplicates)",
+      "codex": "Counts event_msg.task_started; turn_context is unusable (11 rows vs 1 task_started in a single file)",
+      "kimi": "Distinct append_loop_event turnId across all subagent dirs; usageScope=\"turn\" is per-LLM-step (9.14x inflated) and unusable",
+      "opencode": "Counts user rows (assistant rows are steps and would inflate the count); V1/V2 differ in table and column names",
+      "workbuddy": "No turn concept — no value is shown (traceId counts model requests, not turns)",
+      "zcode": "Counts turn_usage rows (authoritative); sessions without turn rows count as 0; do not merge model_usage.turn_id (over-counts)",
+      "dsh": "Reads sessionStats.turns directly; subagent sessions are layered out per D17"
+    },
+    "work": {
+      "title": "Work summary",
+      "sessions": "Sessions",
+      "sessionsHint": "Layered by subagent: parent sessions only — subagent sessions are not counted twice",
+      "turns": "Turns",
+      "turnsHint": "Split by tool; never summed across tools (per-source turn criteria are not comparable)",
+      "errors": "Errors (three layers, no total)",
+      "errorModel": "Model / transport",
+      "errorTurn": "Turn failure",
+      "errorTool": "Tool failure",
+      "interrupted": "User interrupted (not an error)",
+      "partialSources": "{{sources}} not counted in this row (sources without this field)",
+      "longest": "Longest turn",
+      "longestHint": "Includes idle time; idle is not excluded",
+      "p50": "p50",
+      "max": "Max",
+      "toolCalls": "Tool calls",
+      "toolCallsTotal": "Total calls",
+      "toolAvg": "Avg duration",
+      "topToolCount": "Top by calls",
+      "topToolMs": "Top by duration",
+      "topList": "Top tools",
+      "unavailable": "Not available",
+      "unavailableAll": "Not available in any source",
+      "subagentLayer": "Counts are layered (parent sessions only); token totals include subagents"
+    },
+    "notCollected": "Not collected yet",
+    "footer": {
+      "caliber": "Tokens only · incl. subagents · aggregated locally",
+      "baseline": "Baseline: previous equal-length range",
+      "retention": "No detail older than {{days}} days"
     }
   },
   "errors": {

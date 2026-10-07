@@ -5,6 +5,23 @@
  * the @tauri-apps/api modules throw errors because __TAURI_INTERNALS__ is undefined.
  * This mock provides safe fallbacks so the UI can render for screenshot capture.
  */
+// 用量域 case 体改用**同源夹具**（计划② Task 1）：与 tests/msw/tauriMocks.ts 共用
+// src/lib/usage/mockFixtures.ts，双端形状从源头一致（门禁 tests/usage/usageMockParity.test.ts）
+import {
+  mockUsageCollect,
+  mockUsageCsv,
+  mockUsageDashboard,
+  mockUsageMode,
+  mockUsageRecords,
+  mockUsageSettings,
+} from "@/lib/usage/mockFixtures";
+import type {
+  UsageFilters,
+  UsageGroupBy,
+  UsageRange,
+  UsageRecordsGroupBy,
+  UsageSettingsPatch,
+} from "@/types/usage";
 
 // Check if running in Tauri
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -670,7 +687,6 @@ if (!isTauri) {
       case "get_setting":
         if (args?.key === "notifications_enabled") return Promise.resolve(true);
         if (args?.key === "notification_sound") return Promise.resolve("default");
-        if (args?.key === "global_shortcut") return Promise.resolve("Cmd+Shift+M");
         if (args?.key === "ui_theme") return Promise.resolve(null);
         return Promise.resolve(null);
 
@@ -800,6 +816,58 @@ if (!isTauri) {
       // M4 T4：新增 remoteOnText 第四参——mock 无状态托盘，多余参数忽略（无返回）
       case "update_tray_menu":
         return Promise.resolve(undefined);
+
+      // —— 用量域（计划① Task 20 登记 case；② Task 1 换体）：case 行与位置不动，只换源——
+      // 夹具收口到 `src/lib/usage/mockFixtures.ts`（与 tests/msw/tauriMocks.ts **同一构造器**，
+      // 双端形状不可能漂移）。目验三态开关见 mockUsageMode：
+      // localStorage["mam-mock-usage"] = "empty" → 空态（夹具内部分叉）；"error" → 用量命令 reject。
+      case "usage_collect":
+        return mockUsageMode() === "error"
+          ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+          : Promise.resolve(
+              mockUsageCollect((args as { force?: boolean } | undefined)?.force ?? false)
+            );
+      case "usage_dashboard": {
+        const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+        const groupBy = (args as { groupBy?: UsageGroupBy } | undefined)?.groupBy ?? "tool";
+        return mockUsageMode() === "error"
+          ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+          : Promise.resolve(mockUsageDashboard(range, groupBy));
+      }
+      case "usage_records": {
+        const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+        const groupBy = (args as { groupBy?: UsageRecordsGroupBy } | undefined)?.groupBy ?? "tool";
+        const filters = (args as { filters?: UsageFilters } | undefined)?.filters ?? {};
+        return mockUsageMode() === "error"
+          ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+          : Promise.resolve(mockUsageRecords(range, groupBy, filters));
+      }
+      case "usage_export_csv": {
+        const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+        const groupBy = (args as { groupBy?: UsageGroupBy } | undefined)?.groupBy ?? "tool";
+        const filters = (args as { filters?: UsageFilters } | undefined)?.filters ?? {};
+        return mockUsageMode() === "error"
+          ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+          : Promise.resolve(mockUsageCsv(range, groupBy, filters));
+      }
+      // 导出落盘（计划① Task 21，契约 §3 新增 2 条）：真实命令返回落盘绝对路径（string）；
+      // mock 返回同形字符串，**必须带上请求的 name**（写死文件名会让文件名断言与分享图路径断言全红）
+      case "export_save_text":
+      case "export_save_bytes":
+        return Promise.resolve(
+          `/Users/jarvis/Downloads/${(args as { name?: string } | undefined)?.name ?? "mock-export.csv"}`
+        );
+      case "usage_get_settings":
+        return mockUsageMode() === "error"
+          ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+          : Promise.resolve(mockUsageSettings());
+      case "usage_set_settings": {
+        const patch = ((args as { patch?: UsageSettingsPatch } | undefined)?.patch ??
+          {}) as UsageSettingsPatch;
+        return mockUsageMode() === "error"
+          ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+          : Promise.resolve(mockUsageSettings(patch));
+      }
 
       // Default: return empty success
       default:

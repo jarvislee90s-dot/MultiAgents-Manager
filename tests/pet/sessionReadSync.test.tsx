@@ -15,14 +15,14 @@ interface Frame {
 }
 
 const { listenMock, frame } = vi.hoisted(() => ({
-  listenMock: vi.fn(),
+  // `listen` 是 async API：mock 必须**在 import 之前**就带实现。theme-provider 在**模块作用域**就
+  // `listen(...).catch(...)` 订阅主题事件（FoxbellPet 经 useTheme 把它带进本文件的模块图），而 ESM 的
+  // import 先于模块体语句执行 ⇒ 模块体的 mockImplementation 来不及生效，未实现的 `vi.fn()` 返回
+  // undefined 会在 `.catch` 处抛 `Cannot read properties of undefined`（整文件 0 test）。
+  listenMock: vi.fn(async () => () => {}),
   // 稳定容器：mock 每次返回 frame.current 引用；测试在两帧预建数据间切换
   frame: { current: null as Frame | null },
 }));
-
-listenMock.mockImplementation(async (_event: string, handler: (e: unknown) => void) => {
-  return () => {};
-});
 
 vi.mock("@tauri-apps/api/event", () => ({
   listen: listenMock,

@@ -26,6 +26,10 @@ export function PetMenu(props: {
   onClose(): void;
   onPreview(action: PetAction | null): void;
   onHide(): void;
+  /** 打开用量大看板（计划② Task 6 步骤 10）：窗口创建与主题接线在 FoxbellPet（父组件） */
+  onOpenDashboard(): void;
+  /** 手动唤回用量浮窗（计划② Task 13 步骤 5 / D12）：浮窗状态同样在 FoxbellPet（父组件） */
+  onMiniUsage(): void;
   voiceCapable: boolean;
   subtitleCapable: boolean;
 }) {
@@ -218,6 +222,31 @@ export function PetMenu(props: {
               () => saveConfig({ alwaysOnTop: !cfg.alwaysOnTop }),
               cfg.alwaysOnTop ? t("pet.menu.on") : t("pet.menu.off")
             )}
+          </div>
+          {/* 用量看板（计划② Task 6 步骤 10）：主菜单**第一个分隔线之前**；点击先关菜单再开看板 */}
+          <div
+            data-testid="pet-menu-dashboard"
+            title={t("usage.title")}
+            style={itemStyle}
+            onClick={() => {
+              props.onClose();
+              props.onOpenDashboard();
+            }}
+          >
+            {t("usage.menu.dashboard")}
+          </div>
+          {/* 浮窗手动唤回（计划② Task 13 步骤 5 / D12）：与「📊 用量看板」同在第一个分隔线**之前**。
+              菜单项自身先 onClose，回调**只置模式**——容器是同一个（hover 悬停 / manual 唤回共用）；
+              窗口高度与浮窗可见性由 FoxbellPet 的渲染守卫决定，本组件不碰 */}
+          <div
+            data-testid="pet-menu-mini-usage"
+            style={itemStyle}
+            onClick={() => {
+              props.onClose();
+              props.onMiniUsage();
+            }}
+          >
+            {t("usage.menu.usage")}
           </div>
           <div style={{ height: 1, margin: "4px 10px", background: "rgba(255,255,255,0.12)" }} />
           <div style={rowStyle} onClick={() => setPage("Size")}>

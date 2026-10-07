@@ -18,6 +18,8 @@ import { useRemoteEvents } from "@/hooks/useRemoteEvents";
 const HomePage = lazy(() => import("./pages/home"));
 const AboutPage = lazy(() => import("./pages/about"));
 const SettingsPage = lazy(() => import("./pages/settings"));
+// 用量大看板（计划② Task 6）：独立窗口 `usage-dashboard` 的页面（见 lib/usage/openWindow.ts）
+const UsageDashboardPage = lazy(() => import("./pages/usage-dashboard"));
 
 const NotificationPage = lazy(() => import("./pages/notification"));
 const PetPage = lazy(() => import("./pages/pet"));
@@ -26,6 +28,8 @@ const pageMap = {
   "/": HomePage,
   "/about": AboutPage,
   "/settings": SettingsPage,
+  // 漏注册会**静默回落首页**（有源码锁：tests/pet/usage-window.test.tsx 用例 1）
+  "/usage": UsageDashboardPage,
 };
 
 const pathname = window.location.pathname;

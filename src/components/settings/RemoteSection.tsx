@@ -4,6 +4,7 @@
 // 详情区（本机 / 局域网 / 临时隧道 / 命名隧道）③ 访问与安全（访问密码 / 重置设备 /
 // 已接入设备列表）。状态唯一数据源 = remote_status 的 channels + pin 载荷（M5 A5）；
 // 命令统一走 src/lib/api/remote.ts；Token / 本机名 / 保活写通用 set_setting。
+import { SETTINGS_CARD_TITLE, SETTINGS_SUBTITLE } from "@/components/settings/typography";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import QRCode from "qrcode";
 import { Button } from "@/components/ui/button";
@@ -440,8 +441,8 @@ export function RemoteSection() {
 
   return (
     <div>
-      <h2 className="text-lg font-semibold">{t("settings.remote.title")}</h2>
-      <p className="text-muted-foreground mb-1 text-sm">{t("settings.remote.desc")}</p>
+      <h2 className={SETTINGS_CARD_TITLE}>{t("settings.remote.title")}</h2>
+      <p className={`mb-1 ${SETTINGS_SUBTITLE}`}>{t("settings.remote.desc")}</p>
 
       {/* ① 通用 */}
       <div className="text-muted-foreground mt-4 text-[12.5px] font-semibold">

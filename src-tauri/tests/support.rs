@@ -22,3 +22,37 @@ pub fn setup() {
         std::mem::forget(temp);
     });
 }
+
+// ---- 用例私有账本库（Task 4 / GC 19：账本断言不再共用 setup() 的那一个库）----
+use rusqlite::Connection;
+use std::path::PathBuf;
+
+/// **每条集成用例独占一个账本库**：返回一个建好表的私有连接（真实 DB 文件，路径带 tag）。
+///
+/// 与 `setup()` 的分工（两者可以同时用，互不干扰）：
+/// * `setup()` 管**进程级**环境与全局 `DB`（`Once`，一个二进制只生效一次）——凡是会碰
+///   **全局设置库**（`settings::load` / `settings::save`，采集器内部都会读它）或
+///   `dirs::home_dir()` 的用例才调它；
+/// * 本函数给的是**用例私有**的库文件：不设 env、不碰全局 `DB`，因此并行安全，且
+///   `count_rows_conn` 这类绝对行数断言在这里是稳定的。
+///
+/// （为什么不用 `setup()` 重定向出独立库：`DB` 是 `Lazy<Mutex<Connection>>`，
+/// 首次取值时就把路径定死了，同一个二进制内没法"每条用例换一个库"。）
+#[allow(dead_code)]
+pub fn open_ledger_db(tag: &str) -> Connection {
+    let home = unique_home(tag);
+    let conn = Connection::open(home.join(".mam").join("mam.db")).expect("打开用例私有账本库失败");
+    // 与生产启动路径同款：schema::init 建齐（含 Task 2 追加的 4 张用量账本表）
+    multi_agents_manager_lib::database::schema::init(&conn);
+    conn
+}
+
+/// 用例私有且**泄漏保活**的数据目录（`<temp>/<tag>` 带上用例名：失败信息里能直接看出是谁）
+#[allow(dead_code)]
+fn unique_home(tag: &str) -> PathBuf {
+    let temp = tempfile::tempdir().expect("创建用例私有 tempdir 失败");
+    let home = temp.path().join(tag);
+    std::fs::create_dir_all(home.join(".mam")).expect("创建 .mam 目录失败");
+    std::mem::forget(temp); // 与 setup() 同款：用例存活期间目录不得被清理
+    home
+}

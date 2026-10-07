@@ -1,4 +1,21 @@
 import { vi } from "vitest";
+// 用量域 case 体改用**同源夹具**（计划② Task 1）：与 src/tauri-mock.ts 共用
+// src/lib/usage/mockFixtures.ts，双端形状从源头一致（门禁 tests/usage/usageMockParity.test.ts）
+import {
+  mockUsageCollect,
+  mockUsageCsv,
+  mockUsageDashboard,
+  mockUsageMode,
+  mockUsageRecords,
+  mockUsageSettings,
+} from "@/lib/usage/mockFixtures";
+import type {
+  UsageFilters,
+  UsageGroupBy,
+  UsageRange,
+  UsageRecordsGroupBy,
+  UsageSettingsPatch,
+} from "@/types/usage";
 
 export const mockSessions = {
   sessions: [
@@ -347,6 +364,58 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     // spawner 缝，无需在此模拟）
     case "session_open":
       return Promise.resolve(undefined);
+    // —— 用量域（计划① Task 20 登记 case；② Task 1 换体）：case 行与位置不动，只换源——
+    // 夹具收口到 `src/lib/usage/mockFixtures.ts`（与 src/tauri-mock.ts **同一构造器**，
+    // 双端形状不可能漂移）。目验三态开关见 mockUsageMode：
+    // localStorage["mam-mock-usage"] = "empty" → 空态（夹具内部分叉）；"error" → 用量命令 reject。
+    case "usage_collect":
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(
+            mockUsageCollect((args as { force?: boolean } | undefined)?.force ?? false)
+          );
+    case "usage_dashboard": {
+      const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+      const groupBy = (args as { groupBy?: UsageGroupBy } | undefined)?.groupBy ?? "tool";
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageDashboard(range, groupBy));
+    }
+    case "usage_records": {
+      const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+      const groupBy = (args as { groupBy?: UsageRecordsGroupBy } | undefined)?.groupBy ?? "tool";
+      const filters = (args as { filters?: UsageFilters } | undefined)?.filters ?? {};
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageRecords(range, groupBy, filters));
+    }
+    case "usage_export_csv": {
+      const range = (args as { range?: UsageRange } | undefined)?.range ?? { preset: "today" };
+      const groupBy = (args as { groupBy?: UsageGroupBy } | undefined)?.groupBy ?? "tool";
+      const filters = (args as { filters?: UsageFilters } | undefined)?.filters ?? {};
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageCsv(range, groupBy, filters));
+    }
+    // 导出落盘（计划① Task 21，契约 §3 新增 2 条）
+    case "export_save_text":
+    case "export_save_bytes":
+      // 真实命令返回落盘绝对路径（string）；mock 返回同形字符串，**必须带上请求的 name**
+      //（写死文件名会让文件名断言与分享图路径断言全红），前端提示语可正常渲染
+      return Promise.resolve(
+        `/Users/jarvis/Downloads/${(args as { name?: string } | undefined)?.name ?? "mock-export.csv"}`
+      );
+    case "usage_get_settings":
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageSettings());
+    case "usage_set_settings": {
+      const patch = ((args as { patch?: UsageSettingsPatch } | undefined)?.patch ??
+        {}) as UsageSettingsPatch;
+      return mockUsageMode() === "error"
+        ? Promise.reject({ code: "usage-db-failed", detail: "mam-mock-usage=error" })
+        : Promise.resolve(mockUsageSettings(patch));
+    }
     default:
       return Promise.resolve(undefined);
   }

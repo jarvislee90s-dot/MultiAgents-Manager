@@ -157,10 +157,11 @@ pub fn run() {
             // M2 远程接入：按设置恢复远程服务器（开机自启语义；内部用
             // tauri::async_runtime，无 runtime 上下文的主线程可安全调用）
             crate::remote::restore_on_launch();
+            // 用量账本：应用启动采集一次（按需路径，绝不进 3 秒轮询）
+            crate::services::usage::collect::spawn_initial_collection();
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(plugins::system_tray::init());
@@ -285,6 +286,16 @@ pub fn run() {
         remote::remote_toggle_channel,
         // M7 W5：桌面端写审计查看（最近 N 条，只读）
         inject::inject_list_audit,
+        // 用量域（计划①）：采集 / 大看板 / 记录页 / CSV / 设置读写
+        commands::usage::usage_collect,
+        commands::usage::usage_dashboard,
+        commands::usage::usage_records,
+        commands::usage::usage_export_csv,
+        commands::usage::usage_get_settings,
+        commands::usage::usage_set_settings,
+        // 导出落盘（计划①，契约 §3 新增）：文本/二进制写导出目录（2026-10-07 A2 起 = 系统下载目录）
+        commands::export::export_save_text,
+        commands::export::export_save_bytes,
     ]);
 
     #[cfg(not(debug_assertions))]

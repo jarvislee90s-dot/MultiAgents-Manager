@@ -12,8 +12,6 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useSessions } from "@/hooks/useSessions";
 import { useNotification } from "@/hooks/useNotification";
 import { useSessionStore } from "@/stores/sessionStore";
-import { registerShortcut } from "@/lib/shortcut";
-import { toggleWindow } from "@/lib/window";
 import { loadVisible, subscribeConfig } from "@/components/pet/petConfig";
 import { PetStartupGuard } from "@/components/pet/PetStartupGuard";
 import { useAppTranslation } from "@/hooks/use-app-translation";
@@ -21,8 +19,6 @@ import { Activity, AlertCircle } from "lucide-react";
 import { NotificationBell } from "@/components/notifications/NotificationBell";
 import { useLegacySkillMigration } from "@/hooks/useLegacySkillMigration";
 import { LegacySkillMigrationDialog } from "@/components/resources/LegacySkillMigrationDialog";
-
-const SHORTCUT_KEY = "global-shortcut-show-main";
 
 export default function HomePage() {
   useSessions();
@@ -59,18 +55,6 @@ export default function HomePage() {
   useEffect(() => subscribeConfig(() => setPetOn(loadVisible())), []);
 
   useEffect(() => {
-    const unlistenShortcutChanged = listen<{ shortcut: string }>(
-      "shortcut-changed",
-      async (event) => {
-        const newShortcut = event.payload.shortcut;
-        if (newShortcut) {
-          await registerShortcut(newShortcut, async () => {
-            await toggleWindow("main");
-          });
-        }
-      }
-    );
-
     const initTrayMenu = async () => {
       try {
         // Task 16 统一重建：基础项 + 预设项一次成型（原 update_tray_menu 会丢预设项）
@@ -92,18 +76,7 @@ export default function HomePage() {
     // 会丢桌宠态、重建出错误标签）；勾选态不经 setState，托盘重建即回环刷新
     const unlistenRemoteChanged = listen("remote-changed", () => void initTrayMenu());
 
-    const initShortcut = async () => {
-      const savedShortcut = localStorage.getItem(SHORTCUT_KEY);
-      if (savedShortcut) {
-        await registerShortcut(savedShortcut, async () => {
-          await toggleWindow("main");
-        });
-      }
-    };
-    initShortcut();
-
     return () => {
-      unlistenShortcutChanged.then((fn) => fn());
       unlistenRemoteChanged.then((fn) => fn());
     };
     // petOn 变化时重跑本 effect，托盘桌宠文案随开关/语言刷新

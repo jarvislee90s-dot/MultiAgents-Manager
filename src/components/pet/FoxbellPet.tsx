@@ -29,11 +29,25 @@ import {
 } from "./petStatus";
 import { MIN_SPEECH_MS, VoicePlayer, type VoiceGroup } from "./petVoices";
 import { PetMenu } from "./PetMenu";
+import { UsageMiniBar } from "./UsageMiniBar";
 import { usePetWindow } from "./usePetWindow";
+import { useTheme } from "@/components/common/theme-provider";
+import { openUsageDashboard } from "@/lib/usage/openWindow";
+import {
+  MINI_GRACE_MS,
+  MINI_HOVER_MS,
+  MINI_RESTORE_MS,
+  miniBarGap,
+  miniBarHeight,
+  windowHeightSum,
+} from "@/lib/usage/miniBar";
 import "./pet-cursor.css";
 
 export function FoxbellPet() {
   const { t } = useTranslation();
+  // 当前主题（计划② Task 6 步骤 11）：看板窗口按它建窗（`system` → undefined，跟随系统；
+  // 主题事实源是 DB settings KV，见 theme-provider 的模块级接线）
+  const { theme } = useTheme();
   const [cfg, setCfg] = useState<PetConfig>(() => loadConfig());
   const cfgRef = useRef(cfg);
   // 渲染期禁止写 ref（react-hooks/refs）：改在 effect 中同步，供 Task 9 交互读取最新配置
@@ -430,6 +444,11 @@ export function FoxbellPet() {
       stopLook();
       invalidateLookChain();
       stopPreview(); // 预览循环 interval 卸载清理（Fix 1 评审随附：previewLoopRef 泄漏）
+      // 浮窗三个在途定时器一并收口（修复轮 1 评审 Minor）：卸载时最多残留 0.5s 的定时器，
+      // 虽不会重复悬停泄漏，但按本文件「定时器在卸载清理里收口」的约定补齐
+      clearMiniHover();
+      clearMiniGrace();
+      clearMiniRestore();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -440,7 +459,14 @@ export function FoxbellPet() {
   const [dragging, setDragging] = useState(false);
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0) return; // 右键留给菜单（spec A6）
+    // 浮窗与指针的交汇（D13）：任何按下都先停掉在途的悬停 / 宽限 / 恢复定时器，避免层叠竞态
+    clearMiniHover();
+    clearMiniGrace();
+    clearMiniRestore();
+    if (e.button !== 0) return; // 右键留给菜单（spec A6）：浮窗由菜单守卫压住，模式不动
+    // 左键按下 = 拖拽起点（或单击）：记下模式并隐藏浮窗，松手 MINI_RESTORE_MS 后再恢复
+    miniBeforeDragRef.current = miniMode;
+    setMiniMode(null);
     stopLook();
     if (!unlockedRef.current) {
       unlockedRef.current = true;
@@ -490,6 +516,55 @@ export function FoxbellPet() {
       },
     });
     lastDeltaRef.current = { dx: 0, dy: 0 };
+    // 松手 MINI_RESTORE_MS 后恢复浮窗（D13）：恢复的是**拖拽前那个模式**（hover 悬停 / manual 唤回）；
+    // 拖拽前没有浮窗（null）则什么都不做。到点前先与指针对账：指针已不在精灵/浮窗上 ⇒ **丢弃这次恢复**
+    // （否则 hover 层会挂出一个没有关闭通道的常驻浮窗，见 `pointerOnPetRef` 的注释）
+    const prevMode = miniBeforeDragRef.current;
+    miniBeforeDragRef.current = null;
+    if (prevMode !== null) {
+      clearMiniRestore();
+      miniRestoreTimerRef.current = later(() => {
+        miniRestoreTimerRef.current = null;
+        if (!pointerOnPetRef.current) return; // 对账不过 ⇒ 不恢复
+        setMiniMode(prevMode);
+      }, MINI_RESTORE_MS);
+    }
+  };
+
+  /** 精灵悬停：MINI_HOVER_MS 后出浮窗（manual 模式不重设定时器）；回到精灵即取消宽限 */
+  const onSpritePointerEnter = () => {
+    pointerOnPetRef.current = true; // 指针回到宠物身上（悬停层揭幕的对账依据）
+    clearMiniGrace();
+    if (miniMode === "manual") return;
+    clearMiniHover();
+    miniHoverTimerRef.current = later(() => {
+      miniHoverTimerRef.current = null;
+      setMiniMode("hover");
+    }, MINI_HOVER_MS);
+  };
+
+  /**
+   * 精灵移开：停掉未到点的悬停定时器，**并取消在途的「松手恢复」**（修复轮 1 评审 Important）：
+   * 单击/拖拽松手后排的那次恢复，若指针随后离开精灵，到点就会把浮窗挂出来——而 hover 层没有任何
+   * 关闭通道。离开即作废，恢复必须重新由悬停挣来（真拖拽时指针一直压在精灵上，不受影响）。
+   */
+  const onSpritePointerLeave = () => {
+    pointerOnPetRef.current = false;
+    clearMiniHover();
+    clearMiniRestore();
+    startMiniGrace();
+  };
+
+  /** 指针进入浮窗（或其内的「详情 »」）：算「在宠物身上」，并取消 200ms 宽限 */
+  const onMiniWrapPointerEnter = () => {
+    pointerOnPetRef.current = true;
+    clearMiniGrace();
+  };
+
+  /** 指针离开浮窗：算「离开宠物」——回到精灵会由精灵的 enter 重新置位；hover 层重新起宽限 */
+  const onMiniWrapPointerLeave = () => {
+    pointerOnPetRef.current = false;
+    startMiniGrace();
   };
 
   const onDoubleClick = (e: React.MouseEvent) => {
@@ -502,14 +577,129 @@ export function FoxbellPet() {
   const menuWrapRef = useRef<HTMLDivElement | null>(null);
   // 右键菜单位置（spec A6）：x=夹紧后的光标横坐标；lift=光标高于精灵底边的距离（菜单向上展开的锚距）
   const [menu, setMenu] = useState<{ x: number; lift: number } | null>(null);
+
+  // ---- 浮窗迷你条（计划② Task 13；spec D12/D13/D20）----
+  // 两个触发方式（精灵悬停 / 右键菜单「🏷 今日用量」）**共用同一个容器**。渲染守卫 `menu === null`
+  // 保证菜单打开时浮窗不渲染（层序：菜单在上；syncSize 那一支因此传 miniH = 0）。
+  const [miniMode, setMiniMode] = useState<"hover" | "manual" | null>(null);
+  // 浮窗定位基准：卡片区**实测**高度（jsdom 恒 0）。浮窗贴在卡片上方 ⇒ 卡片增减后必须重算 bottom。
+  const [cardsHeight, setCardsHeight] = useState(0);
+  /**
+   * 诊断（H1 的判据 + 行为中性守卫）：上一次**真正写进** `cardsHeight` 的量测值，以及亚像素
+   * 抖动计数。布局 effect 里的 `setCardsHeight(cardsH)` 用的是 `getBoundingClientRect().height`
+   * 的**浮点**值，而 `cardsHeight` **不在那个 effect 的依赖数组里** ⇒ 抖动一次就 setState 一次、
+   * 进而再量测一次（「宠物不显示」事故的嫌疑假设 H1）。React 对**相同值**本来就 bail out
+   * ⇒ 「值没变就不 set」不改变任何行为，只是把「其实什么都没发生」这句话落实，并把抖动留成证据。
+   */
+  const cardsHeightRef = useRef<number | null>(null);
+  const cardsJitterRef = useRef<{ count: number; since: number }>({ count: 0, since: 0 });
+  const miniWrapRef = useRef<HTMLDivElement | null>(null);
+  const miniHoverTimerRef = useRef<(() => void) | null>(null); // 悬停 MINI_HOVER_MS 出浮窗
+  const miniGraceTimerRef = useRef<(() => void) | null>(null); // 移开 MINI_GRACE_MS 宽限后消失
+  const miniRestoreTimerRef = useRef<(() => void) | null>(null); // 松手 MINI_RESTORE_MS 后恢复
+  const miniBeforeDragRef = useRef<"hover" | "manual" | null>(null); // 拖拽前的模式（松手后恢复它）
+  // 「指针此刻在不在宠物身上」（精灵或浮窗，含其中的「详情 »」）：由 enter/leave 维护。
+  // 悬停层的**每一次揭幕都要过这一关**（恢复定时器到点、菜单关闭守卫解除）——否则会出现
+  // 「浮窗在指针早已移开时冒出来，而 hover 层没有任何关闭通道（ESC/点外只注册于 manual）」
+  // 的常驻浮窗（修复轮 1 评审 Important）。
+  const pointerOnPetRef = useRef(false);
+
+  /** 三个浮窗定时器的取消口（幂等：空位 no-op）。`later` 返回的就是取消函数本身 */
+  const clearMiniHover = () => {
+    const cancel = miniHoverTimerRef.current;
+    miniHoverTimerRef.current = null;
+    cancel?.();
+  };
+  const clearMiniGrace = () => {
+    const cancel = miniGraceTimerRef.current;
+    miniGraceTimerRef.current = null;
+    cancel?.();
+  };
+  const clearMiniRestore = () => {
+    const cancel = miniRestoreTimerRef.current;
+    miniRestoreTimerRef.current = null;
+    cancel?.();
+  };
+
+  /**
+   * hover 模式起一次宽限卸载（D13）：精灵移开、指针从浮窗移开都走这里；
+   * 指针回到精灵**或**进入浮窗都会取消它（宽限的全部意义就是够鼠标移到「详情 »」上）。
+   * manual 模式不受影响：它由菜单唤回，只能被 ESC / 点外部 / 拖拽收掉。
+   */
+  const startMiniGrace = () => {
+    if (miniMode !== "hover") return;
+    clearMiniGrace();
+    miniGraceTimerRef.current = later(() => {
+      miniGraceTimerRef.current = null;
+      setMiniMode(null);
+    }, MINI_GRACE_MS);
+  };
+
+  /**
+   * 菜单是 hover 层的「遮罩」：菜单一关（`menu → null`）就与指针对一次账（修复轮 1 评审）。
+   * 右键唤菜单时 hover 模式**不动**（指针若仍在精灵上，菜单关掉后浮窗回来是对的）；但指针若早已
+   * 离开，hover 浮窗不得随守卫解除而「立刻冒出来」——悬停层的出现必须真的由悬停挣来。
+   * 只在 `miniMode`/`menu` 变化时跑：正常悬停路径不受影响（那时指针必在宠物身上）。
+   */
+  useEffect(() => {
+    if (menu !== null || miniMode !== "hover") return;
+    if (!pointerOnPetRef.current) setMiniMode(null);
+  }, [menu, miniMode]);
+
+  // 手动模式（D12）：点浮窗外部 / ESC 关闭。**ESC 逐层**（D13）：菜单开着时本监听**根本不注册**
+  // ——那一次 ESC 只会落到菜单自己那只监听上，一次只关一层（关键坑第 4 条）。
+  // 与候选浮层同款用 layout effect：提交阶段同步注册，浮窗 DOM 可被观察到之前监听必然已在位。
   useLayoutEffect(() => {
-    const baseH = px(50 + FRAME_H + 10);
+    if (miniMode !== "manual" || menu !== null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMiniMode(null);
+    };
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      // 浮窗内（「详情 »」）与宠物本体上的按下都不算「点外部」：后者是拖拽 / 右键唤菜单的起点
+      if (miniWrapRef.current?.contains(target)) return;
+      if (spriteRef.current?.contains(target)) return;
+      setMiniMode(null);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("pointerdown", onDown, true);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("pointerdown", onDown, true);
+    };
+  }, [miniMode, menu]);
+
+  useLayoutEffect(() => {
     const menuH = menuWrapRef.current?.getBoundingClientRect().height ?? 0;
     const cardsH = cardsWrapRef.current?.getBoundingClientRect().height ?? 0;
     const candidatesH = jumpCandidatesRef.current?.getBoundingClientRect().height ?? 0;
-    void pet.syncSize(px(340), Math.ceil(baseH + Math.max(cardsH, menuH, candidatesH)));
+    // 浮窗定位基准（jsdom 恒 0）+ 诊断：只有**真的变了**才 setState（React 对相同值本就 bail out，
+    // 故这不是行为变更），并把亚像素抖动记下来 —— 抖动即自激的燃料（见 `cardsHeightRef` 的注释）。
+    const prevCardsH = cardsHeightRef.current;
+    if (prevCardsH === null || cardsH !== prevCardsH) {
+      const delta = prevCardsH === null ? 0 : cardsH - prevCardsH;
+      if (prevCardsH !== null && delta > 0 && delta < 0.5) {
+        const j = cardsJitterRef.current;
+        const now = performance.now();
+        if (now - j.since > 2000) cardsJitterRef.current = { count: 1, since: now };
+        else j.count += 1;
+        console.debug("[pet] cardsHeight 亚像素抖动", { from: prevCardsH, to: cardsH, delta });
+        if (cardsJitterRef.current.count === 9) {
+          console.warn("[pet] cardsHeight 在 2s 内抖动 9 次 —— 迷你条布局 effect 可能自激（H1）");
+        }
+      }
+      cardsHeightRef.current = cardsH;
+      setCardsHeight(cardsH);
+    }
+    // 浮窗高度：菜单打开时浮窗被渲染守卫隐藏 ⇒ miniH = 0（否则菜单与浮窗的高度会被一起算进去）
+    const miniH = miniMode !== null && menu === null ? miniBarHeight(cfg.scale) : 0;
+    // 高度 = base + (浮窗显示 ? 卡片 + 浮窗 : max(卡片, 菜单, 候选)) —— D20 核心修订：**求和**
+    void pet.syncSize(
+      px(340),
+      windowHeightSum({ scale: cfg.scale, cardsH, menuH, candidatesH, miniH })
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cfg.scale, menu, cards, moreCount, candidates, pet.syncSize]);
+  }, [cfg.scale, menu, cards, moreCount, candidates, miniMode, pet.syncSize]);
 
   const px = (v: number) => Math.round(v * cfg.scale);
   const style = frameStyle(anim, frame, lookFrame, cfg.scale, active.rows);
@@ -520,7 +710,10 @@ export function FoxbellPet() {
     setMenu(null);
     setMenuOpen(false);
     stopPreview();
-  }, [setMenuOpen, stopPreview]);
+    // `setMenu` 进依赖数组：Task 13 引入浮窗后 React Compiler 的依赖推断把这条 setter 也算作
+    // 本回调的依赖（`pnpm lint` 的 preserve-manual-memoization 报错逐字点名它）。setter 身份恒稳定，
+    // 写进数组**不改变**回调的重建时机（行为与原先完全一致），只是让编译器对得上账。
+  }, [setMenu, setMenuOpen, stopPreview]);
 
   /** 动作子页预览循环（spec B4）：进入子页立即播一次，~1700ms 循环；返回主菜单（null）即停 */
   const handleMenuPreview = useCallback(
@@ -539,15 +732,44 @@ export function FoxbellPet() {
     [playTransient, stopPreview]
   );
 
+  /** 打开用量大看板（计划② Task 6 步骤 11）：菜单项自身先 onClose，这里只管建窗/聚焦；
+   *  父窗传 `"main"`——宠物窗口可能隐藏，定位会回落到屏幕居中（见 lib/usage/openWindow.ts） */
+  const handleOpenDashboard = useCallback(() => {
+    void openUsageDashboard({
+      title: t("usage.title"),
+      theme: theme === "system" ? undefined : theme,
+    });
+  }, [t, theme]);
+
+  /** 右键菜单「🏷 今日用量」：手动唤回浮窗（D12）。菜单项自身已先 onClose，这里**只置模式** */
+  const handleMiniUsage = useCallback(() => {
+    setMiniMode("manual");
+  }, []);
+
+  /** 「详情 »」钻取（spec P2 第 5 条 / D12）：直达大看板**并关闭浮窗**——复用菜单入口的同一个开窗函数 */
+  const handleMiniDetail = useCallback(() => {
+    setMiniMode(null);
+    handleOpenDashboard();
+  }, [handleOpenDashboard]);
+
   /** 隐藏桌宠（spec §10/§10.2）：关菜单 + 本地持久化 + invoke + 广播 */
   const handleMenuHide = useCallback(() => {
     setMenu(null);
     setMenuOpen(false);
     stopPreview();
+    // 隐藏即收掉浮窗（修复轮 1 评审）：三个在途定时器停掉 + 模式归零，否则「隐藏 → 再显示」
+    // 浮窗还挂着（显示路径不会重置它）。直接操作 ref（不调上面的 helper）：那些函数每次渲染新建，
+    // 进了依赖数组会打断 Fix 3 的稳定身份。
+    for (const ref of [miniHoverTimerRef, miniGraceTimerRef, miniRestoreTimerRef]) {
+      ref.current?.();
+      ref.current = null;
+    }
+    setMiniMode(null);
     saveVisible(false); // 本地状态 + 订阅同步（spec §10）
     invoke("set_pet_visible", { visible: false }).catch(() => {});
     emitPetVisibility(false); // 广播给主窗口/托盘同步（spec §10.2）
-  }, [emitPetVisibility, setMenuOpen, stopPreview]);
+    // 同 `handleMenuClose`：`setMenu` 是编译器点名的依赖（setter 稳定 ⇒ 行为不变）
+  }, [emitPetVisibility, setMenu, setMenuOpen, stopPreview]);
 
   return (
     <div ref={contentRef} style={{ position: "fixed", inset: 0, overflow: "visible" }}>
@@ -575,6 +797,9 @@ export function FoxbellPet() {
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
         onDoubleClick={onDoubleClick}
+        // 浮窗悬停时序（D13）：进入即（重）起 500ms 悬停定时器 + 取消宽限；移开则停悬停、起 200ms 宽限
+        onPointerEnter={onSpritePointerEnter}
+        onPointerLeave={onSpritePointerLeave}
         onContextMenu={(e) => {
           e.preventDefault(); // 屏蔽系统菜单（spec A6）
           // Fix 1（向上展开 + A6 夹紧）：记录光标相对精灵底边的高度 lift——精灵 bottom 锚定，
@@ -587,6 +812,33 @@ export function FoxbellPet() {
           setMenuOpen(true); // 菜单打开期间关闭穿透
         }}
       />
+      {/* 浮窗迷你条（计划② Task 13；spec D12/D13/D20）：两个触发方式**共用这一个挂载点**。
+          渲染守卫 `menu === null`：菜单打开时浮窗隐藏（层序：菜单在上 ⇒ syncSize 那一支传 miniH = 0）；
+          拖拽期间由 onPointerDown 直接置 null（松手 MINI_RESTORE_MS 后恢复原模式）。
+          ⚠️ **吃点击面积如实记录**：宠物窗口**整窗常驻交互**（`setIgnoring(true)` 全仓零调用点、
+          `ignoringRef` 恒 false，`registerInteractive` / `hitTest` 是活代码），且 CSS
+          `pointer-events: none` **无法**穿透到别的 OS 窗口 ⇒ 挂上浮窗会让吃点击面积增加约
+          `340 × Δh`（逻辑 px × scale，Δh = 浮窗高度）。这是本方案**接受**的代价：容器只是不抢
+          宠物窗口**内部**的指针事件，透明像素与浮窗区域照样吃 OS 点击，不假装可穿透。 */}
+      {miniMode !== null && menu === null && (
+        <div
+          ref={miniWrapRef}
+          data-testid="pet-mini-wrap"
+          // 指针进/出浮窗都维护「在不在宠物身上」的对账位（悬停层揭幕要用），并处理 200ms 宽限
+          onPointerEnter={onMiniWrapPointerEnter}
+          onPointerLeave={onMiniWrapPointerLeave}
+          style={{
+            position: "absolute",
+            bottom: px(50 + FRAME_H + 10) + cardsHeight + miniBarGap(cfg.scale), // 卡片区之上 6px（同 scale）
+            left: "50%",
+            transform: "translateX(-50%)",
+            width: px(320), // 与状态卡片同宽；窗口宽度 px(340) 不动（spec P2「不加宽窗口」）
+            zIndex: 4,
+          }}
+        >
+          <UsageMiniBar scale={cfg.scale} mode={miniMode} onDetail={handleMiniDetail} t={t} />
+        </div>
+      )}
       {subtitle && (
         <div
           data-testid="pet-bubble"
@@ -807,6 +1059,8 @@ export function FoxbellPet() {
             onClose={handleMenuClose}
             onPreview={handleMenuPreview}
             onHide={handleMenuHide}
+            onOpenDashboard={handleOpenDashboard}
+            onMiniUsage={handleMiniUsage}
             voiceCapable={active.hasVoice}
             subtitleCapable={active.hasSubtitle}
           />

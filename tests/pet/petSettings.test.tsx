@@ -56,7 +56,8 @@ describe("settings 桌宠分区", () => {
 
   it("切到桌宠分区：三个控件齐备（开启/置顶/大小）", () => {
     renderPage();
-    fireEvent.click(screen.getByText("Pet")); // i18n 默认 en
+    // 2026-10-06 两级导航：桌宠卡现在挂在「桌面与提醒」块内 ⇒ 先点块（testid），桌宠三控件随块渲染
+    fireEvent.click(screen.getByTestId("settings-nav-desktop"));
     expect(screen.getByText("Enable pet")).toBeTruthy();
     expect(screen.getByText("Always on top")).toBeTruthy();
     expect(screen.getByText("Size")).toBeTruthy();
@@ -64,7 +65,7 @@ describe("settings 桌宠分区", () => {
 
   it("开启开关：写 localStorage 并调用 set_pet_visible", async () => {
     renderPage();
-    fireEvent.click(screen.getByText("Pet"));
+    fireEvent.click(screen.getByTestId("settings-nav-desktop"));
     const toggles = screen.getAllByRole("switch");
     fireEvent.click(toggles[0]); // 分区内第一个 Switch = 开启桌宠
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("set_pet_visible", { visible: true }));
@@ -73,7 +74,7 @@ describe("settings 桌宠分区", () => {
 
   it("大小三档：点 Large 写 scale=1.25", async () => {
     renderPage();
-    fireEvent.click(screen.getByText("Pet"));
+    fireEvent.click(screen.getByTestId("settings-nav-desktop"));
     fireEvent.click(screen.getByText("Large"));
     await waitFor(() => expect(loadConfig().scale).toBe(1.25));
   });
@@ -87,7 +88,7 @@ describe("外部宠物三入口（spec §11）", () => {
 
   it("渲染当前宠物行与切换按钮", async () => {
     renderPage(); // 合并 main 后设置页接 react-query（W5 工具管理），须包 QueryClientProvider
-    fireEvent.click(screen.getByText("Pet")); // i18n 固定 en：英文分支断言
+    fireEvent.click(screen.getByTestId("settings-nav-desktop")); // i18n 固定 en：英文分支断言
     expect(await screen.findByText(/当前宠物|Current pet/)).toBeInTheDocument();
     const switchBtn = await screen.findByRole("button", { name: /切换宠物|Switch pet/ });
     fireEvent.click(switchBtn);

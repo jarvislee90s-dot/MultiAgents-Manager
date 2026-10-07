@@ -1,6 +1,7 @@
 // 数据管理分区（2026-09-20 用户要求）：桌面端 MAM 存储数据的统一管理入口。
 // 首版只管移动端附件（各项目 .mam-attachments/<会话>/）：列出占用 + 按项目清理；
 // 审计/HANDOFF 等其余数据进治理台账（spec 附录），实现逐期跟进。
+import { SETTINGS_CARD_TITLE } from "@/components/settings/typography";
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useAppTranslation } from "@/hooks/use-app-translation";
@@ -61,7 +62,7 @@ export function DataManagementSection() {
   return (
     <div>
       <div className="flex items-center justify-between gap-2">
-        <h2 className="text-lg font-semibold">{t("settings.dataManagement.title")}</h2>
+        <h2 className={SETTINGS_CARD_TITLE}>{t("settings.dataManagement.title")}</h2>
         <Button variant="outline" size="sm" onClick={() => void refresh()} disabled={loading}>
           {t("settings.dataManagement.refresh")}
         </Button>

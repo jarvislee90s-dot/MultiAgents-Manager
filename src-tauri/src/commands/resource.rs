@@ -956,13 +956,32 @@ pub async fn open_tool_resource(tool_id: String, kind: String) -> Result<String,
     Ok(path.to_string_lossy().to_string())
 }
 
+/// reveal_dir 白名单**根**的唯一出处（2026-10-07 A2 抽出）：`~/.mam`、`~/.agents`，
+/// 以及**导出目录**（A2 之后 = 系统下载目录，见 `commands/export.rs::exports_dir()`）。
+///
+/// 抽成独立函数是为了让「白名单根包含导出目录」这条不变量**可被零 IO 地测到** ——
+/// 导出目录搬家时最容易漏的就是这里：落盘成功、提示「已保存」，用户点「打开所在目录」却被拒。
+/// 用例见 `export.rs::reveal_whitelist_contains_exports_dir`。
+///
+/// ⚠️ 导出目录这一项**刻意是 `exports_dir()` 本身**（同一个函数），不是硬编码的 `~/Downloads`：
+/// debug 构建下 `MAM_HOME` 会把导出目录重定向到 `$MAM_HOME/Downloads`，硬编码会让测试环境里
+/// 「白名单放行的目录」与「实际落盘的目录」错开（正是本函数要防的那类缺陷）。
+pub(crate) fn reveal_allowed_roots() -> Vec<std::path::PathBuf> {
+    let home = dirs::home_dir().unwrap_or_default();
+    vec![
+        home.join(".mam"),
+        home.join(".agents"),
+        crate::commands::export::exports_dir(),
+    ]
+}
+
 /// reveal_dir 白名单校验核（wave33 Item 4，可测）：canonicalize 后必须以
-/// ~/.mam 或 ~/.agents 为前缀（安全白名单——前端快捷跳转只允许 MAM 管辖目录）。
+/// ~/.mam、~/.agents 或导出目录（A2 后 = 系统下载目录）为前缀
+/// （安全白名单——前端快捷跳转只允许 MAM 管辖目录与**用户自己的导出落点**）。
 /// 词法预检 + canonicalize 复核双道（对不存在的路径 canonicalize 失败 → 报
 /// 不存在；越界路径无论存在与否一律拒绝）
 pub fn ensure_reveal_allowed(path: &str) -> Result<std::path::PathBuf, String> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let raw_roots = [home.join(".mam"), home.join(".agents")];
+    let raw_roots = reveal_allowed_roots();
     let p = std::path::Path::new(path);
     let lexically_allowed = raw_roots.iter().any(|r| p.starts_with(r));
     // canonicalize 对不存在路径失败 → 明确报不存在（而非静默放行/误报越界）
@@ -973,14 +992,14 @@ pub fn ensure_reveal_allowed(path: &str) -> Result<std::path::PathBuf, String> {
         .collect();
     if !lexically_allowed && !root_canons.iter().any(|r| canonical.starts_with(r)) {
         return Err(format!(
-            "路径不在允许打开的范围（~/.mam 或 ~/.agents）: {}",
+            "路径不在允许打开的范围（~/.mam、~/.agents 或导出目录）: {}",
             path
         ));
     }
     // symlink 穿透复核：词法命中但 canonicalize 落到白名单外 → 拒绝
     if !root_canons.iter().any(|r| canonical.starts_with(r)) {
         return Err(format!(
-            "路径不在允许打开的范围（~/.mam 或 ~/.agents）: {}",
+            "路径不在允许打开的范围（~/.mam、~/.agents 或导出目录）: {}",
             path
         ));
     }

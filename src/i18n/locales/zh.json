@@ -69,6 +69,20 @@
     "title": "设置",
     "button": "设置",
     "close": "关闭",
+    "nav": {
+      "appearance": "外观与皮肤",
+      "appearanceDesc": "本机主题与语言，以及远程端（手机看板 / 网页）的字体、皮肤、圆角与品牌色",
+      "desktop": "桌面与提醒",
+      "desktopDesc": "全局快捷键、桌面通知与音效，以及 Foxbell 桌宠本体",
+      "tools": "工具与体检",
+      "toolsDesc": "各 CLI 工具的启停，以及技能 / 链接一致性体检",
+      "usage": "用量统计",
+      "usageDesc": "采集口径与浮窗设置，以及采集状态、今日口径与导出",
+      "remote": "远程接入",
+      "remoteDesc": "远程服务与通道、访问与安全、已接入设备，以及信号健康度与注入审计",
+      "data": "数据管理",
+      "dataDesc": "移动端附件占用与清理"
+    },
     "appearance": {
       "title": "外观",
       "description": "自定义应用的外观和语言",
@@ -130,15 +144,7 @@
       "allow": "允许",
       "deny": "拒绝"
     },
-    "shortcut": {
-      "title": "快捷键",
-      "description": "设置全局快捷键",
-      "placeholder": "按下组合键设置",
-      "showMain": "显示主窗口",
-      "showMainDesc": "使用快捷键快速显示主窗口",
-      "setSuccess": "已将快捷键设为 {{shortcut}}！",
-      "cleared": "已取消快捷键！"
-    },
+
     "notifications": {
       "title": "通知",
       "heading": "通知设置",
@@ -319,6 +325,65 @@
       "overThreshold": "占用较大，建议清理",
       "hint": "附件 = 移动端发消息时上传的图片/文档，存于各项目目录 .mam-attachments/<会话>/（已本地 git 排除）",
       "loadError": "数据管理列表加载失败，请刷新重试"
+    },
+    "usageStatus": {
+      "title": "用量采集状态",
+      "description": "计划① 的最小可见验收面：手动触发一次采集，核对各源结果与今日口径（② 的看板上线后本分区可保留为调试入口，也可删除）。",
+      "collect": "立即采集",
+      "collecting": "采集中…",
+      "collectFailed": "采集失败",
+      "collectedAt": "数据截止",
+      "duration": "耗时",
+      "newRecords": "新增记录",
+      "neverCollected": "本次运行尚未采集（点「立即采集」）",
+      "sourceOk": "成功",
+      "sourceFailed": "失败",
+      "parsedFiles": "文件",
+      "newRecordsShort": "新增",
+      "noSources": "本轮未采集任何源（用量总开关关闭时不扫描任何源；CSV 导出不受该开关门控）",
+      "todayTitle": "今日口径",
+      "bucketInputFresh": "未缓存输入",
+      "bucketCacheRead": "缓存读",
+      "bucketCacheWrite": "缓存写",
+      "bucketOutput": "产出",
+      "hitRate": "命中率",
+      "requests": "请求次数",
+      "userEst": "用户输入(估)",
+      "notAvailable": "—",
+      "empty": "今日暂无用量数据（可能还没采集，或各工具今天都没跑）",
+      "loadError": "用量数据加载失败",
+      "retry": "重试",
+      "exportAndReveal": "导出今日 CSV 并打开所在目录",
+      "exporting": "导出中…",
+      "exportFailed": "导出失败",
+      "exportHint": "导出今日口径 CSV 到系统「下载」文件夹并在系统文件管理器中定位（CSV 导出不受用量总开关门控）",
+      "exportHintDisabled": "导出的是「已采集的历史账本」（关闭期间不再采集新数据）；导出按钮保留不变——无需打开总开关即可备份/导出自己的历史账本",
+      "disabledNotice": "用量统计总开关已关闭：不采集、不落库，下面的「今日口径」必然是空态（CSV 导出不受该开关门控）",
+      "emptyDisabled": "今日口径为空——用量统计总开关已关闭（见上方提示）",
+      "revealFailed": "已导出到 {{path}}，但未能自动打开所在目录（可在系统文件管理器中手动打开）"
+    },
+    "usage": {
+      "title": "用量统计",
+      "desc": "用量采集、宠物浮窗与分享图姿态的 8 项设置。",
+      "enabled": "启用用量统计",
+      "enabledHint": "关闭后不再扫描任何会话文件；看板与浮窗继续显示已采集的历史账本。",
+      "miniBarRange": "浮窗用量口径",
+      "miniBarToolRows": "浮窗工具条数",
+      "miniBarToolRowsHint": "浮窗第 3 行最多列几个工具，1–7（默认 3）。",
+      "detailRetentionDays": "明细保留期（天）",
+      "detailRetentionHint": "{{days}} 天前的明细不再保留（1–3650 天）。",
+      "collectIntervalMin": "兜底采集间隔（分钟）",
+      "collectIntervalHint": "看板与浮窗打开时按需采集；此间隔只作后台兜底 ticker 的下限，1–1440 分钟。",
+      "providerMapRules": "供应商映射规则（JSON）",
+      "providerMapRulesPlaceholder": "{\"rules\":[{\"prefix\":\"deepseek-\",\"provider\":\"volcengine\"}]}",
+      "providerMapRulesHint": "只认 {\"rules\":[{\"prefix\":…,\"provider\":…}]} 形态；非法只在此提示，保存照发。",
+      "providerMapRulesInvalid": "不是 {\"rules\":[{\"prefix\":…,\"provider\":…}]} 形态：保存会被后端拒绝（本条只提示，不阻断提交）。",
+      "exportPose": "分享图姿态",
+      "poseResetOnSwitch": "换宠物后姿态已回退为「随机」：姿态键按图集行数给出，新图集未必有该行。（该设置现在在看板的「导出设置」里）",
+      "saveFailed": "用量设置保存失败",
+      "rangeToday": "当日",
+      "rangeLast5h": "近 5 小时",
+      "rangeLast7d": "近 7 天"
     }
   },
   "home": {
@@ -562,15 +627,6 @@
     "toDisableCount": "将停用 ({{n}})",
     "residentExemptCount": "常驻豁免 ({{n}})",
     "saveAsPreset": "存为预设"
-  },
-  "screenshot": {
-    "saved": "截图已保存: {{path}}",
-    "failed": "截图失败: {{error}}",
-    "title": "截图工具",
-    "capturing": "截图中...",
-    "capture": "截图",
-    "refreshList": "刷新列表",
-    "recent": "最近截图"
   },
   "manifest": {
     "installConfirm": "安装确认",
@@ -863,6 +919,194 @@
       "pet-name-dot-prefix": "宠物名不能以点开头",
       "download-url-invalid": "下载地址非法",
       "finalize-scan-failed": "导入落地后读取宠物信息失败"
+    }
+  },
+  "usage": {
+    "rpc": {
+      "usage-db-failed": "用量账本读写失败：{{err}}",
+      "usage-source-io": "读取用量源文件失败：{{err}}",
+      "usage-source-db-open": "无法只读打开用量数据库：{{err}}",
+      "usage-range-invalid": "时间范围非法：{{err}}",
+      "usage-groupby-invalid": "分组维度非法：记录页只支持按工具或按项目分组",
+      "usage-filter-unavailable": "该筛选在当前时间档位算不出：{{err}}",
+      "usage-settings-invalid": "用量设置非法：{{err}}",
+      "usage-disabled": "用量统计已关闭",
+      "usage-internal": "用量操作失败：{{err}}"
+    },
+    "label": {
+      "unknownProvider": "未知"
+    },
+    "title": "用量看板",
+    "menu": {
+      "dashboard": "📊 用量看板",
+      "usage": "🏷 今日用量"
+    },
+    "mini": {
+      "requestInput": "请求输入",
+      "hitRate": "命中率",
+      "cacheHit": "缓存命中",
+      "output": "产出",
+      "session": "本会话",
+      "noSession": "暂无会话",
+      "untitled": "无标题",
+      "sessionEmptyHint": "本行有两种空态：① 当前时间范围内没有最近会话（含尚未采集）；② 日档（近 7 天 / 近 30 天 / 自定义）的聚合行不带会话标识，本行算不出。",
+      "sessionHint": "「本会话」= 当前时间范围内最近有活动的会话，不是当前打开的那个",
+      "toolsBasis": "按工具 请求输入：",
+      "detail": "详情 »",
+      "loading": "用量加载中…",
+      "error": "用量加载失败，点『详情 »』进看板重试",
+      "truncated": "浮窗放不下时会截断，点这里看完整数据"
+    },
+    "tab": {
+      "board": "看板",
+      "records": "记录"
+    },
+    "export": {
+      "copyText": "复制文本",
+      "copyImage": "复制图片",
+      "image": "导出图片",
+      "csv": "导出 CSV",
+      "copied": "已复制",
+      "copiedImage": "图片已复制",
+      "savedTo": "已保存：{{path}}",
+      "openDir": "打开所在目录",
+      "saveFailed": "导出失败：{{error}}",
+      "exporting": "导出中…",
+      "copyFailed": "复制失败：{{error}}",
+      "settings": "导出设置",
+      "settingsTitle": "导出设置",
+      "settingsSaved": "导出设置已保存",
+      "poseLabel": "分享图姿态（token 用量里的宠物）",
+      "poseHint": "分享图上那只宠物的姿势。它和看板/桌宠用的是同一套姿态；留「随机」则每次导出随机挑一个。",
+      "quote": "评语",
+      "quoteTitle": "分享图评语",
+      "quotePlaceholder": "留空则用默认评语池（可用变量 {range} {tokens} {hitPct} {models}）",
+      "quoteHint": "这段话印在分享图的气泡里，也进文本摘要。留空即用默认评语池。",
+      "quoteSave": "保存",
+      "quoteCancel": "取消",
+      "quoteSaved": "评语已保存",
+      "boardOnly": "仅「看板」页签可用（文本摘要与分享图都是看板口径）"
+    },
+    "range": {
+      "last5h": "近 5 小时",
+      "today": "当日",
+      "last7d": "近 7 天",
+      "last30d": "近 30 天",
+      "custom": "自定义",
+      "from": "起始日期",
+      "to": "结束日期"
+    },
+    "rangeClamped": "已截断为最近 31 天",
+    "empty": "暂无数据",
+    "error": {
+      "title": "用量数据加载失败"
+    },
+    "hero": {
+      "label": "{{range}} Token 合计",
+      "sub": "请求输入 + 产出（不含缓存写入与用户输入估算）"
+    },
+    "grid": {
+      "userEst": "用户输入(估) · 含子代理",
+      "output": "产出",
+      "requestTotal": "请求输入(全文累计)",
+      "cacheRead": "缓存命中",
+      "hitRate": "命中率",
+      "requests": "请求次数",
+      "asOf": "数据截止时间"
+    },
+    "pose": {
+      "random": "随机",
+      "idle": "待机",
+      "run-right": "向右跑",
+      "run-left": "向左跑",
+      "waving": "挥手",
+      "jumping": "跳跃",
+      "failed": "沮丧",
+      "waiting": "等候",
+      "running": "忙碌",
+      "review": "复核",
+      "look": "环顾（需 11 行动作图集；9 行图集回落待机）"
+    },
+    "card": {
+      "trend": "用量趋势",
+      "distribution": "分组分布",
+      "peak": "峰值 {{v}}",
+      "compareSubject": "区间合计"
+    },
+    "group": {
+      "tool": "按工具",
+      "project": "按项目",
+      "provider": "按供应商",
+      "model": "按供应商/模型"
+    },
+    "records": {
+      "cardDim": "卡片分组",
+      "dim": {
+        "tool": "按工具",
+        "project": "按项目"
+      },
+      "filterTools": "工具",
+      "subagentInclude": "含子代理",
+      "subagentParentsOnly": "仅父会话",
+      "subagentUnavailable": "日聚合行不带会话标识 → 切到当日或近 5 小时再用",
+      "caliberInclude": "纯 token · 含子代理",
+      "caliberParentsOnly": "纯 token · 不含子代理",
+      "cardTotal": "合计 {{v}}",
+      "moreRows": "展开其余 {{n}} 行",
+      "collapse": "收起",
+      "retention": "仅保留最近 {{days}} 天明细",
+      "empty": "暂无数据"
+    },
+    "source": {
+      "measured": "实测",
+      "inferred": "推断",
+      "unknown": "未知"
+    },
+    "moreN": "等 {{n}}",
+    "exact": "精确值 {{value}}",
+    "compare": "（{{delta}}）",
+    "compareHint": "环比上一等长周期 {{prev}}",
+    "compare.new": "新增",
+    "turnBasis": {
+      "claude": "按「已发起回合」计数（user 行且 toolUseResult 为空、非 meta）；绝不数 assistant 行（流式重复 2.68×）",
+      "codex": "按 event_msg.task_started 计数；turn_context 不可用（单文件实测 11 条对 1 条）",
+      "kimi": "按 append_loop_event 的 turnId 去重（含全部子代理目录）；usageScope=\"turn\" 是 per-LLM-step（虚高 9.14×），不可用",
+      "opencode": "按 user 行计数（assistant 行是 step，数它会虚高）；V1/V2 表名与列名不同",
+      "workbuddy": "无回合概念，不出值（traceId 是模型请求数，不是回合数）",
+      "zcode": "按 turn_usage 行数（权威）；无 turn 行的会话按 0 计；勿用 model_usage.turn_id 归并（会多算）",
+      "dsh": "直接取 sessionStats.turns；子代理会话已按 D17 分层剔除"
+    },
+    "work": {
+      "title": "工作小结",
+      "sessions": "会话数",
+      "sessionsHint": "已按子代理分层：只计父会话，子代理会话不重复计数",
+      "turns": "回合数",
+      "turnsHint": "只按工具分列，不跨工具合计（各源回合判据不可比）",
+      "errors": "报错（三层分列 · 不合计）",
+      "errorModel": "模型 / 传输层",
+      "errorTurn": "回合失败",
+      "errorTool": "工具失败",
+      "interrupted": "用户打断（不计入报错）",
+      "partialSources": "{{sources}} 不计入本行（无此字段的源）",
+      "longest": "最长单 turn",
+      "longestHint": "含挂机、未剔 idle",
+      "p50": "p50",
+      "max": "最长",
+      "toolCalls": "工具调用",
+      "toolCallsTotal": "调用总数",
+      "toolAvg": "平均耗时",
+      "topToolCount": "次数第一",
+      "topToolMs": "耗时第一",
+      "topList": "Top 工具",
+      "unavailable": "该指标不可得",
+      "unavailableAll": "所有来源均不可得",
+      "subagentLayer": "计数已按子代理分层（token 合计含子代理）"
+    },
+    "notCollected": "尚未采集",
+    "footer": {
+      "caliber": "纯 token · 含子代理 · 本地聚合",
+      "baseline": "环比基准：上一等长周期",
+      "retention": "{{days}} 天前无明细"
     }
   },
   "errors": {

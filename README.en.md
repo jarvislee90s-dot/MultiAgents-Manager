@@ -98,6 +98,56 @@ Since v0.3.0 the pet format is open — Foxbell is no longer the only companion:
 - **Manage panel**: import / edit description / rename / delete / one-click hot swap — no app restart needed; the active pet is auto-restored after deletion or switching
 - **Capability gating**: pets without voices gracefully degrade to animation-only (transient actions kept); voice capabilities stay in two-way sync
 
+### Token Usage Dashboard (Usage Ledger)
+
+Token usage from seven tools (Claude Code / Codex / Kimi Code / OpenCode / ZCode / WorkBuddy / dsh) is accounted
+for in one ledger: the app collects once shortly after startup, and `usage_collect` lets the frontend trigger a
+collection on demand (single-flight mutex + a default minimum interval of 10 minutes);
+**collection runs on its own on-demand path and never enters the 3-second session polling loop**. The ledger
+lives in 4 tables in `~/.mam/mam.db` (hourly detail, permanently kept daily aggregates, collection cursors,
+session dimension); detail is kept for 90 days by default (configurable), and after expiry only the daily
+aggregates remain.
+
+**Phase ① scope**: the collection & storage foundation plus 8 IPC commands — 6 usage commands (`usage_collect` /
+`usage_dashboard` / `usage_records` / `usage_export_csv` / `usage_get_settings` / `usage_set_settings`) and
+2 export-to-disk commands (`export_save_text` / `export_save_bytes`). The user-facing dashboard / mini-bar
+surfaces are not implemented yet (upcoming work), so this version ships no UI entry point.
+
+**How the numbers are defined (read this first)**
+
+- **Four buckets**: uncached input / cache read / cache write / output; **request input** and the
+  **cache hit rate** are derived from the three cache-semantics modes (exclusive / subset / total-only).
+  Sources disagree on semantics, and **records of the same tool can differ too** — Codex decides per record
+  by arithmetic on `total_tokens` (measured on this machine: 92.69% with the correct rule; treating
+  everything as "subset" yields absurd values above 100%). When in doubt we treat it as "exclusive"
+  (a wrong call shows a lower hit rate instead of silently over-counting).
+- **Sub-agents included**: token totals include sub-agent / sidechain usage; **session and turn counts are
+  layered by parent/child** (one conversation is not counted as several).
+- **The sub-agent flag is only meaningful in the hourly tier**: `isSubagent` is `true` / `false` for hourly
+  grouped rows, and is the empty state `null` in the daily tier and for record-page card rows (neither tier
+  has a session dimension, so it cannot be computed) — `null` must **not** be read as `false` ("no sub-agents").
+- **Turn counts are never summed across tools** (each source's rule is not comparable); **the longest single
+  turn is reported per tool as p50 + max**, and **it includes idle time (idle is not excluded)**.
+- **Errors are split into three layers, plus a separate "user interrupted" column** (the three layers are
+  mutually exclusive; adding them up is meaningless).
+- **Unavailable metrics show an empty state, never 0**: **user input (estimated) is only computed for
+  claude / codex / kimi — every other source shows an empty state in both the hourly and daily tiers**;
+  WorkBuddy has no turn concept, no duration field and no provider; OpenCode has no tool-level errors;
+  kimi has no user-interrupt rule; dsh errors and longest turns can only come from raw session logs
+  (only 19 of 99 sessions exist on this machine).
+- **Master switch (on by default)**: when it is off, **nothing is collected and nothing is written to the
+  ledger** (retention cleanup is skipped as well) and dashboard / record queries return the off-state early;
+  **CSV export is currently not gated by the master switch**, so existing ledger history can still be exported
+  while it is off (a registered decision pending review).
+- **"By project" follows record ownership**: one session file can span several projects (only the cwd inside a
+  given record counts as its project); project names come from the same source as the dashboard session cards
+  (`projectName`); on Windows the same directory may split into two groups because path casing differs between
+  sources; records without a cwd fall into `Unknown`.
+- **Privacy**: ledger queries and the upcoming surfaces contain only structured numbers and static text
+  (tool name, model name, project name, session title) — **no prompt text and no code content**;
+  CSV export contains only structured ledger columns, and **session titles and raw paths never enter the CSV**.
+  CSV export is UTF-8 with BOM (Excel-friendly).
+
 ### Desktop Notifications & Sound Alerts
 
 - Color-change-based notifications (red↔yellow↔green) with deduplication

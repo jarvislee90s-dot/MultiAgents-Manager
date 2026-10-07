@@ -31,6 +31,16 @@ const RECENT_LINES: usize = 500;
 /// 兜底"文件仍在写入"的时间窗（秒），与既有解析器同量级
 const FILE_RECENT_SECS: f32 = 60.0;
 
+/// 串行化 `KIMI_CODE_HOME` 环境变量切换：它是**进程级**量，并行测试线程共享，必须互斥。
+///
+/// **Task 13 起从本文件 `mod tests` 提到模块级 `pub(crate)`**：`services::usage::collectors::kimi`
+/// 的采集器用例（按任务书用 `KIMI_CODE_HOME` 指向 tempdir）与这里的解析器用例落在**同一个
+/// lib 测试二进制**里并行执行，各自持一把**私有**锁等于没锁——实测第一次跑就复现：
+/// 用例 A 的 `collect()` 读到用例 B 的 fixture（`output` 合计 30 而非 1020）。
+/// 两处共用同一把锁后，env 的「设置 → 采集 → 清理」才是确定性的。
+#[cfg(test)]
+pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Kimi Code 数据根目录：KIMI_CODE_HOME 环境变量优先，否则 ~/.kimi-code
 pub(crate) fn kimi_home() -> PathBuf {
     kimi_home_with(&dirs::home_dir().unwrap_or_default())
@@ -603,9 +613,7 @@ mod tests {
         (session_dir, work_dir.to_string())
     }
 
-    /// 串行化 KIMI_CODE_HOME 环境变量切换：进程级 env 在并行测试间共享，必须互斥
-    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// 串行化 KIMI_CODE_HOME 环境变量切换：见模块级 `HOME_LOCK`（两处共用同一把锁）
     fn run_with_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {
         let _guard = HOME_LOCK.lock().unwrap();
         std::env::set_var("KIMI_CODE_HOME", home);

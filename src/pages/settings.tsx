@@ -1,6 +1,12 @@
+import { SETTINGS_FIELD } from "@/components/settings/typography";
+import {
+  SETTINGS_BADGE,
+  SETTINGS_CARD_TITLE,
+  SETTINGS_PAGE_TITLE,
+  SETTINGS_SUBTITLE,
+} from "@/components/settings/typography";
 import { useCallback, useEffect, useRef, useState } from "react";
 import RemoteAppearanceSection from "@/components/settings/RemoteAppearanceSection";
-import { emit } from "@tauri-apps/api/event";
 import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import {
@@ -16,23 +22,23 @@ import { useTheme } from "@/components/common/theme-provider";
 import { TitleBar } from "@/components/common/title-bar";
 import { WindowFrame } from "@/components/common/window-frame";
 import { LanguageToggle } from "@/components/common/language-toggle";
-import { ShortcutInput } from "@/components/common/shortcut-input";
+// 一级导航只有 6 个块，故**只保留 6 个块图标**（Palette / Bell / Wrench / BarChart3 /
+// Smartphone / Database）+ 页内仍在用的功能图标。原先 12 个分区图标里
+// `Keyboard` / `Dog` / `HeartPulse` / `RadioTower` / `ScrollText` / `Activity` 已成未使用导入
+// （`noUnusedLocals` 会当场报错）——分区不再各自出现在侧栏，就没有「分区图标」这个概念了。
 import {
   Moon,
   Sun,
   Monitor,
   Palette,
-  Keyboard,
   Bell,
   Volume2,
   Database,
-  Dog,
   Wrench,
-  HeartPulse,
   RefreshCw,
-  RadioTower,
   Smartphone,
-  ScrollText,
+  BarChart3,
+  type LucideIcon,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -53,8 +59,6 @@ import {
   playSound,
   type SoundConfig,
 } from "@/lib/audio";
-import { registerShortcut, unregisterShortcut } from "@/lib/shortcut";
-import { toggleWindow } from "@/lib/window";
 import { PetSwitchDialog } from "@/components/pet/manage/PetSwitchDialog";
 import { PetImportDialog } from "@/components/pet/manage/PetImportDialog";
 import { PetManageDialog } from "@/components/pet/manage/PetManageDialog";
@@ -65,13 +69,13 @@ import { RemoteSection } from "@/components/settings/RemoteSection";
 import { AuditLogSection } from "@/components/settings/AuditLogSection";
 import { SignalHealthSection } from "@/components/settings/SignalHealthSection";
 import { DataManagementSection } from "@/components/settings/DataManagementSection";
+import { UsageStatusSection } from "@/components/settings/UsageStatusSection";
+import { UsageSection } from "@/components/settings/UsageSection";
 import { toast } from "sonner";
 import { formatInvokeError } from "@/lib/invokeError";
 import { ToolIcon } from "@/components/common/ToolIcon";
 import { Toaster } from "@/components/ui/sonner";
 import { useAppTranslation } from "@/hooks/use-app-translation";
-
-const SHORTCUT_KEY = "global-shortcut-show-main";
 
 // 一致性体检只读摘要（spec §13 设置页「立即体检」）：各源计数 + 前几条文本 + refetch。
 // 与资源页 HealthCheckCard 共用 ["preset-health"] query key（设置窗口独立 WebView，各自取数）
@@ -146,7 +150,10 @@ function HealthSummary() {
 
 type SettingSection =
   | "appearance"
-  | "shortcut"
+  // 2026-10-06 两级导航：远程端外观（皮肤）从 `appearance` 里拆出来独立成卡——
+  // 它本来就是一个完整的折叠配置器（字体/皮肤/圆角/品牌色 + 预览），与「本机外观（主题+语言）」
+  // 不是一件事。块 = 「外观与皮肤」，块内两张卡。
+  | "skin"
   | "notifications"
   | "pet"
   | "tools"
@@ -154,7 +161,9 @@ type SettingSection =
   | "signal"
   | "remote"
   | "audit"
-  | "data";
+  | "data"
+  | "usage"
+  | "usageStatus";
 
 // 工具管理行（后端 ToolSetting，serde camelCase）
 type ToolRow = {
@@ -165,11 +174,84 @@ type ToolRow = {
   managed: boolean;
 };
 
+/**
+ * 一级导航 = **功能大块**（2026-10-06 用户裁决「按大的功能区块做一个切换，点进大块再分小卡片」）。
+ * 每个分区（`SettingSection`）**恰好挂在一个块里**——有测试遍历它来防「重构漏挂一节 ⇒ 该分区
+ * 在界面上永远看不见」。
+ *
+ * 分块依据（修的是三条具体缺陷）：
+ *  * **同族不再被拆到两端**：`usage`（用量设置）与 `usageStatus`（采集状态/导出）原先隔了 7 项，
+ *    现在同属「用量统计」块；`remote`/`signal`/`audit` 同属「远程接入」块。
+ *  * **只读查看面与手动设置项分开**：审计/体检/信号/数据这些「平时就看一看」的面各自归到
+ *    语义相邻的块里，不再与开关项平铺混列。
+ *  * **皮肤有自己的位置**：远程端外观整节原本塞在「外观」里，现在与「本机外观」并列为两张卡。
+ */
+type SettingBlock = "appearance" | "desktop" | "tools" | "usage" | "remote" | "data";
+
+const SETTINGS_BLOCKS: {
+  id: SettingBlock;
+  labelKey: string;
+  descKey: string;
+  icon: LucideIcon;
+  sections: SettingSection[];
+}[] = [
+  {
+    id: "appearance",
+    labelKey: "settings.nav.appearance",
+    descKey: "settings.nav.appearanceDesc",
+    icon: Palette,
+    sections: ["appearance", "skin"],
+  },
+  {
+    id: "desktop",
+    labelKey: "settings.nav.desktop",
+    descKey: "settings.nav.desktopDesc",
+    icon: Bell,
+    sections: ["notifications", "pet"],
+  },
+  {
+    id: "usage",
+    labelKey: "settings.nav.usage",
+    descKey: "settings.nav.usageDesc",
+    icon: BarChart3,
+    sections: ["usage", "usageStatus"],
+  },
+  {
+    id: "remote",
+    labelKey: "settings.nav.remote",
+    descKey: "settings.nav.remoteDesc",
+    icon: Smartphone,
+    sections: ["remote", "signal", "audit"],
+  },
+  {
+    id: "tools",
+    labelKey: "settings.nav.tools",
+    descKey: "settings.nav.toolsDesc",
+    icon: Wrench,
+    sections: ["tools", "health"],
+  },
+  {
+    id: "data",
+    labelKey: "settings.nav.data",
+    descKey: "settings.nav.dataDesc",
+    icon: Database,
+    sections: ["data"],
+  },
+];
+
 export default function SettingsPage() {
-  const [shortcut, setShortcut] = useState<string>("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [soundConfig, setSoundConfig] = useState<SoundConfig>(() => getSoundConfig());
-  const [activeSection, setActiveSection] = useState<SettingSection>("appearance");
+  // 一级导航状态 = 当前**块**。块内所有卡片同时渲染（用户裁决的形态），故不再有
+  // 「当前分区」这一层状态 —— 删掉 `activeSection` 是刻意的：留着一个不参与渲染的旧状态，
+  // 会造出「工具卡已脏但守卫不触发」的空档（见 `switchBlock`）。
+  const [activeBlock, setActiveBlock] = useState<SettingBlock>("appearance");
+  /** 当前块要渲染的 12 个分区集合（JSX 里 12 处守卫都读它） */
+  /** 当前块的元数据（侧栏与块标题共用同一张表；`??` 只为类型收窄，`activeBlock` 恒在表内） */
+  const activeBlockMeta = SETTINGS_BLOCKS.find((b) => b.id === activeBlock) ?? SETTINGS_BLOCKS[0];
+  const visibleIds = new Set(
+    (SETTINGS_BLOCKS.find((b) => b.id === activeBlock) ?? SETTINGS_BLOCKS[0]).sections
+  );
   // 桌宠状态：复用 petConfig（localStorage 单后端），跨窗口改动经 subscribeConfig 回流
   const [petVisible, setPetVisible] = useState(() => loadVisible());
   const [petCfg, setPetCfg] = useState(() => loadConfig());
@@ -197,25 +279,15 @@ export default function SettingsPage() {
   const enabledToolsQuery = useEnabledToolsQuery();
   const enabledTools = enabledToolsQuery.data ?? [];
 
-  const handleShowMainWindow = useCallback(async () => {
-    await toggleWindow("main");
-  }, []);
-
-  // 更新音效配置并持久化
+  // 更新音效配置并持久化。
+  // ⚠️ 2026-10-07 D4 手术追记：本函数**被我删快捷键的那条正则误吞过**（`handleShowMainWindow`
+  // 的正则没在 `}, []);` 处收住，一路吃到下一个 `};`），靠 eslint 的两条
+  // `setSoundConfig/saveSoundConfig is never used` 才暴露；此处按 `git show HEAD:` 的原文恢复。
   const updateSound = (patch: Partial<SoundConfig>) => {
     const next = { ...soundConfig, ...patch };
     setSoundConfig(next);
     saveSoundConfig(next);
   };
-
-  useEffect(() => {
-    // Load saved shortcut
-    const savedShortcut = localStorage.getItem(SHORTCUT_KEY);
-    if (savedShortcut) {
-      setShortcut(savedShortcut);
-      registerShortcut(savedShortcut, handleShowMainWindow);
-    }
-  }, [handleShowMainWindow]);
 
   useEffect(() => {
     const loadNotificationSetting = async () => {
@@ -255,8 +327,9 @@ export default function SettingsPage() {
 
   // 进入工具分区时拉取勾选状态
   useEffect(() => {
-    if (activeSection === "tools") void loadToolSettings();
-  }, [activeSection, loadToolSettings]);
+    if (visibleIds.has("tools")) void loadToolSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeBlock, loadToolSettings]);
 
   // 脏标记时拦截窗口关闭（P2-2）：Tauri 2 onCloseRequested → preventDefault 后走既有
   // 三选弹窗（保存 / 放弃更改 / 继续编辑）。浏览器/jsdom 下 getCurrentWindow 未实现
@@ -314,17 +387,19 @@ export default function SettingsPage() {
     (r) => r.enabled !== (savedToolEnabled[r.toolId] ?? r.enabled)
   );
 
-  // 分区切换守卫：工具分区有未保存更改时先弹三选拦截
-  const switchSection = (next: SettingSection) => {
-    if (next === activeSection) return;
-    if (activeSection === "tools" && toolDirty) {
+  // 块切换守卫：工具卡有未保存更改时先弹三选拦截。
+  // `visibleIds.has("tools")` = 「当前这一块里正显示着工具卡」——块内多卡并置后这比原来的
+  // `activeSection === "tools"` 更准（工具卡可见 ⇒ 脏标记必须拦）。
+  const switchBlock = (next: SettingBlock) => {
+    if (next === activeBlock) return;
+    if (visibleIds.has("tools") && toolDirty) {
       setLeaveGuard(() => () => {
         setToolDirty(false);
-        setActiveSection(next);
+        setActiveBlock(next);
       });
       return;
     }
-    setActiveSection(next);
+    setActiveBlock(next);
   };
 
   // 批量应用变更；成功后复位草稿、失效缓存并执行缓存跳转。
@@ -378,27 +453,6 @@ export default function SettingsPage() {
     }
   };
 
-  const handleShortcutChange = async (newShortcut: string) => {
-    const oldShortcut = shortcut;
-    setShortcut(newShortcut);
-
-    if (newShortcut) {
-      localStorage.setItem(SHORTCUT_KEY, newShortcut);
-      await registerShortcut(newShortcut, handleShowMainWindow, oldShortcut);
-      // Notify main window to update shortcut
-      await emit("shortcut-changed", { shortcut: newShortcut });
-      toast.success(t("settings.shortcut.setSuccess", { shortcut: newShortcut }));
-    } else {
-      localStorage.removeItem(SHORTCUT_KEY);
-      if (oldShortcut) {
-        await unregisterShortcut(oldShortcut);
-      }
-      // Notify main window to clear shortcut
-      await emit("shortcut-changed", { shortcut: "" });
-      toast.info(t("settings.shortcut.cleared"));
-    }
-  };
-
   const toggleNotifications = async () => {
     const newValue = !notificationsEnabled;
     setNotificationsEnabled(newValue);
@@ -431,59 +485,6 @@ export default function SettingsPage() {
     }
   };
 
-  const menuItems = [
-    {
-      id: "appearance" as SettingSection,
-      label: t("settings.appearance.title"),
-      icon: Palette,
-    },
-    {
-      id: "shortcut" as SettingSection,
-      label: t("settings.shortcut.title"),
-      icon: Keyboard,
-    },
-    {
-      id: "notifications" as SettingSection,
-      label: t("settings.notifications.title"),
-      icon: Bell,
-    },
-    {
-      id: "pet" as SettingSection,
-      label: t("settings.pet.title"),
-      icon: Dog,
-    },
-    {
-      id: "tools" as SettingSection,
-      label: t("settings.tools.title"),
-      icon: Wrench,
-    },
-    {
-      id: "health" as SettingSection,
-      label: t("resources.health.title"),
-      icon: HeartPulse,
-    },
-    {
-      id: "signal" as SettingSection,
-      label: t("settings.signalHealth.title"),
-      icon: RadioTower,
-    },
-    {
-      id: "remote" as SettingSection,
-      label: t("settings.remote.title"),
-      icon: Smartphone,
-    },
-    {
-      id: "audit" as SettingSection,
-      label: t("settings.audit.title"),
-      icon: ScrollText,
-    },
-    {
-      id: "data" as SettingSection,
-      label: t("settings.dataManagement.title"),
-      icon: Database,
-    },
-  ];
-
   return (
     <WindowFrame
       titleBar={<TitleBar title={t("settings.title")} showMaximize={false} />}
@@ -492,21 +493,22 @@ export default function SettingsPage() {
       <Toaster />
       <aside className="border-border flex w-40 flex-col border-r p-4">
         <nav className="flex-1 space-y-1">
-          {menuItems.map((item) => {
-            const Icon = item.icon;
+          {SETTINGS_BLOCKS.map((block) => {
+            const Icon = block.icon;
             return (
               <button
-                key={item.id}
-                onClick={() => switchSection(item.id)}
+                key={block.id}
+                data-testid={`settings-nav-${block.id}`}
+                onClick={() => switchBlock(block.id)}
                 className={cn(
                   "flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors",
-                  activeSection === item.id
+                  activeBlock === block.id
                     ? "bg-accent text-accent-foreground font-medium"
                     : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
                 )}
               >
                 <Icon className="h-4 w-4" />
-                {item.label}
+                {t(block.labelKey)}
               </button>
             );
           })}
@@ -514,14 +516,17 @@ export default function SettingsPage() {
       </aside>
 
       <div className="flex-1 overflow-auto">
-        <div className="max-w-3xl p-4">
-          {activeSection === "appearance" && (
+        <div className="max-w-3xl space-y-4 p-4">
+          {/* 一级导航选中的那一块的标题 + 一句话说明（块内各节自带 h2，故这里是 h2 之上的块头） */}
+          <div>
+            <h2 className={`mb-1 ${SETTINGS_PAGE_TITLE}`}>{t(activeBlockMeta.labelKey)}</h2>
+            <p className={SETTINGS_SUBTITLE}>{t(activeBlockMeta.descKey)}</p>
+          </div>
+          {visibleIds.has("appearance") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("settings.appearance.title")}</h2>
-                <p className="text-muted-foreground text-sm">
-                  {t("settings.appearance.description")}
-                </p>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("settings.appearance.title")}</h2>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.appearance.description")}</p>
               </div>
 
               {/* 框一 · 桌面端外观（即点即生效，本期维持现状） */}
@@ -538,9 +543,7 @@ export default function SettingsPage() {
                 <div className="px-4 py-1">
                   <div className="space-y-0">
                     <div className="flex items-center justify-between py-2.5">
-                      <label className="text-sm font-medium">
-                        {t("settings.appearance.theme")}
-                      </label>
+                      <label className={SETTINGS_FIELD}>{t("settings.appearance.theme")}</label>
                       <div className="flex gap-2">
                         <Button
                           variant={theme === "light" ? "default" : "outline"}
@@ -575,59 +578,39 @@ export default function SettingsPage() {
                     <div className="border-t" />
 
                     <div className="flex items-center justify-between py-2.5">
-                      <label className="text-sm font-medium">
-                        {t("settings.appearance.language")}
-                      </label>
+                      <label className={SETTINGS_FIELD}>{t("settings.appearance.language")}</label>
                       <LanguageToggle />
                     </div>
                   </div>
                 </div>
               </div>
-
-              {/* 框二 · 远程端外观（保存后下发；折叠配置器，spec §5） */}
-              <RemoteAppearanceSection />
             </div>
           )}
 
-          {activeSection === "shortcut" && (
+          {/* 远程端外观（皮肤）：**独立成卡**（2026-10-06 两级导航）。原先它是「外观」框二，
+              与「本机外观（主题 + 语言）」挤在同一个分区里；它本身就是一个完整的折叠配置器
+              （字体气质 / 皮肤底色 / 卡片圆角 / 品牌色 + 双列预览），拆开才与「外观与皮肤」这个
+              块名对得上，也才让「皮肤相关」在导航里有一处可指的位置。
+              它自带卡壳与折叠头，故这里**不再套一层卡**（套了就成卡中卡）。 */}
+          {visibleIds.has("skin") && <RemoteAppearanceSection />}
+
+          {/* 快捷键分区**整节已移除**（2026-10-07 用户裁决 D4：UI 与功能一起去掉）。
+              原来这里是一个 ShortcutInput（全局快捷键，默认 Cmd+Shift+M，用于唤起主窗口）。
+              移除后：`lib/shortcut.ts`、`components/common/shortcut-input.tsx` 一并删除，
+              设置块表里也不再有 `shortcut` 这一节。 */}
+
+          {visibleIds.has("notifications") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("settings.shortcut.title")}</h2>
-                <p className="text-muted-foreground text-sm">
-                  {t("settings.shortcut.description")}
-                </p>
-              </div>
-
-              <div className="space-y-0">
-                <div className="flex items-center justify-between py-2.5">
-                  <div className="flex-1">
-                    <label className="text-sm font-medium">{t("settings.shortcut.showMain")}</label>
-                    <p className="text-muted-foreground mt-0.5 text-xs">
-                      {t("settings.shortcut.showMainDesc")}
-                    </p>
-                  </div>
-                  <ShortcutInput value={shortcut} onChange={handleShortcutChange} />
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeSection === "notifications" && (
-            <div className="space-y-4">
-              <div>
-                <h2 className="mb-1 text-lg font-semibold">
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>
                   {t("settings.notifications.heading")}
                 </h2>
-                <p className="text-muted-foreground text-sm">
-                  {t("settings.notifications.description")}
-                </p>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.notifications.description")}</p>
               </div>
               <div className="space-y-0">
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">
-                      {t("settings.notifications.desktop")}
-                    </label>
+                    <label className={SETTINGS_FIELD}>{t("settings.notifications.desktop")}</label>
                     <p className="text-muted-foreground mt-0.5 text-xs">
                       {t("settings.notifications.desktopDesc")}
                     </p>
@@ -646,7 +629,7 @@ export default function SettingsPage() {
                 <div className="space-y-3 py-2.5">
                   {/* 全局完成音：所有工具默认播放的音效 */}
                   <div className="flex items-center justify-between gap-2">
-                    <label className="text-sm font-medium">
+                    <label className={SETTINGS_FIELD}>
                       {t("settings.notifications.soundGlobalDefault")}
                     </label>
                     <div className="flex items-center gap-1.5">
@@ -675,7 +658,7 @@ export default function SettingsPage() {
                     </div>
                   </div>
                   {/* 工具专属音：覆盖全局默认，空值=跟随全局 */}
-                  <label className="text-sm font-medium">
+                  <label className={SETTINGS_FIELD}>
                     {t("settings.notifications.soundToolOverride")}
                   </label>
                   {enabledTools.map((tool) => {
@@ -728,7 +711,7 @@ export default function SettingsPage() {
                 <div className="border-t" />
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">
+                    <label className={SETTINGS_FIELD}>
                       {t("settings.notifications.floatTest")}
                     </label>
                     <p className="text-muted-foreground mt-0.5 text-xs">
@@ -766,17 +749,17 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {activeSection === "pet" && (
+          {visibleIds.has("pet") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("settings.pet.title")}</h2>
-                <p className="text-muted-foreground text-sm">{t("settings.pet.desc")}</p>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("settings.pet.title")}</h2>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.pet.desc")}</p>
               </div>
               <div className="space-y-0">
                 {/* 开启开关：显隐同步 Rust 端创建/销毁宠物窗口 */}
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">{t("settings.pet.enable")}</label>
+                    <label className={SETTINGS_FIELD}>{t("settings.pet.enable")}</label>
                   </div>
                   <Switch checked={petVisible} onCheckedChange={onPetVisibleChange} />
                 </div>
@@ -784,7 +767,7 @@ export default function SettingsPage() {
                 {/* 置顶开关：置顶时抑制主窗口浮窗通知（spec D4） */}
                 <div className="flex items-center justify-between py-2.5">
                   <div className="flex-1">
-                    <label className="text-sm font-medium">{t("settings.pet.alwaysOnTop")}</label>
+                    <label className={SETTINGS_FIELD}>{t("settings.pet.alwaysOnTop")}</label>
                   </div>
                   <Switch
                     checked={petCfg.alwaysOnTop}
@@ -794,7 +777,7 @@ export default function SettingsPage() {
                 <div className="border-t" />
                 {/* 大小三档 */}
                 <div className="flex items-center justify-between py-2.5">
-                  <label className="text-sm font-medium">{t("settings.pet.scale")}</label>
+                  <label className={SETTINGS_FIELD}>{t("settings.pet.scale")}</label>
                   <div className="flex gap-1">
                     {PET_SCALES.map((s) => (
                       <button
@@ -818,7 +801,7 @@ export default function SettingsPage() {
                 <div className="border-t" />
                 {/* 当前宠物 + 三入口（spec §11）：切换在 Task 13，导入在 Task 16，修改在 Task 17 */}
                 <div className="flex items-center justify-between gap-2 py-2.5">
-                  <label className="text-sm font-medium">{t("settings.pet.currentPet")}</label>
+                  <label className={SETTINGS_FIELD}>{t("settings.pet.currentPet")}</label>
                   <span className="text-muted-foreground mr-auto pl-2 text-sm">
                     {activePetName}
                   </span>
@@ -838,11 +821,11 @@ export default function SettingsPage() {
             </div>
           )}
 
-          {activeSection === "tools" && (
+          {visibleIds.has("tools") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("settings.tools.title")}</h2>
-                <p className="text-muted-foreground text-sm">{t("settings.tools.hint")}</p>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("settings.tools.title")}</h2>
+                <p className={SETTINGS_SUBTITLE}>{t("settings.tools.hint")}</p>
               </div>
               {/* 行式开关列表：名称 + 安装状态 badge + Switch */}
               <div className="divide-border divide-y rounded-md border">
@@ -851,10 +834,10 @@ export default function SettingsPage() {
                     <div className="flex items-center gap-2">
                       {/* issue #36-6：行首补图标（spec §6「图标 + 名称 + badge + 开关」） */}
                       <ToolIcon toolId={r.toolId} size={16} />
-                      <span className="text-sm font-medium">{r.name}</span>
+                      <span className={SETTINGS_FIELD}>{r.name}</span>
                       <span
                         className={cn(
-                          "rounded px-1.5 py-0.5 text-[10px]",
+                          `rounded px-1.5 py-0.5 ${SETTINGS_BADGE}`,
                           r.installed
                             ? "bg-emerald-500/10 text-emerald-500"
                             : "bg-muted text-muted-foreground"
@@ -876,21 +859,25 @@ export default function SettingsPage() {
           )}
 
           {/* 一致性体检（spec §13）：同 query 数据只读摘要 + 立即体检（处置入口在资源页卡片） */}
-          {activeSection === "health" && (
+          {visibleIds.has("health") && (
             <div className="space-y-4">
               <div>
-                <h2 className="mb-1 text-lg font-semibold">{t("resources.health.title")}</h2>
+                <h2 className={`mb-1 ${SETTINGS_CARD_TITLE}`}>{t("resources.health.title")}</h2>
               </div>
               <HealthSummary />
             </div>
           )}
-          {activeSection === "remote" && <RemoteSection />}
+          {visibleIds.has("remote") && <RemoteSection />}
           {/* T5：信号健康度（hook 通道自查 + codex 信任门引导，与 RemoteSection 同级独立分区） */}
-          {activeSection === "signal" && <SignalHealthSection />}
+          {visibleIds.has("signal") && <SignalHealthSection />}
           {/* M7 W5：注入审计桌面查看入口（与 RemoteSection 同级独立分区） */}
-          {activeSection === "audit" && <AuditLogSection />}
+          {visibleIds.has("audit") && <AuditLogSection />}
           {/* 2026-09-20：数据管理首版（移动端附件占用列出/清理，C5） */}
-          {activeSection === "data" && <DataManagementSection />}
+          {visibleIds.has("data") && <DataManagementSection />}
+          {/* 计划② Task 14：用量统计设置分组（8 项设置；① 的采集验收面在下面的 usageStatus 分支） */}
+          {visibleIds.has("usage") && <UsageSection />}
+          {/* 计划① Task 24：用量采集状态（最小可见验收面；② 上线后可保留为调试入口或删除） */}
+          {visibleIds.has("usageStatus") && <UsageStatusSection />}
         </div>
       </div>
       <PetSwitchDialog open={switchOpen} onOpenChange={setSwitchOpen} />
