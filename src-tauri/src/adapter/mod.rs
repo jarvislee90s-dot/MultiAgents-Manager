@@ -2292,16 +2292,31 @@ mod builtin_native_tests {
 mod skill_dir_tests {
     use super::*;
 
+    /// dsh 的 skill 目录必须挂在 **dsh 数据根**下（`skill_dir_for_tool` 注册表与
+    /// adapter 走同一路径单源）。
+    ///
+    /// **不把 `<注入 home>/.dsh/skills` 写死**（存量基线红的根因）：
+    /// `monitor::dsh::dsh_home_with` 按 M0 F14 口径**优先消费 `$DSH_HOME`**，而 DSH
+    /// harness 本体就会设该变量——写死断言会随宿主环境变红（本机实测
+    /// `$DSH_HOME=/Users/jarvis/.dsh` ⇒ 实得 `/Users/jarvis/.dsh/skills`，
+    /// 期望 `/home/test/.dsh/skills`）。
+    ///
+    /// 这里改断**单源契约**：注册表结果 == `dsh_home_with(注入 home)/skills`——
+    /// 两种宿主环境下都成立，且不比原断言弱（原断言只是「`$DSH_HOME` 缺席」这一分支
+    /// 的特例，该分支在下方显式钉住）。刻意**不改成「跳过」**：契约本身在本平台
+    /// 完全可断言，跳过会丢掉真实的回归覆盖。
     #[test]
-    fn dsh_skill_dir_under_home() {
-        let dir = skill_dir_for_tool("dsh", std::path::Path::new("/home/test"))
-            .expect("dsh 应有 skill 目录");
-        assert_eq!(
-            dir,
-            std::path::Path::new("/home/test")
-                .join(".dsh")
-                .join("skills")
-        );
+    fn dsh_skill_dir_follows_dsh_data_root() {
+        let home = std::path::Path::new("/home/test");
+        let dir = skill_dir_for_tool("dsh", home).expect("dsh 应有 skill 目录");
+        assert_eq!(dir, crate::monitor::dsh::dsh_home_with(home).join("skills"));
+        // 无环境覆盖 → 回落注入 home（显式钉住回落分支，不靠宿主环境碰运气）
+        if std::env::var("DSH_HOME")
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+        {
+            assert_eq!(dir, home.join(".dsh").join("skills"));
+        }
     }
 
     #[test]

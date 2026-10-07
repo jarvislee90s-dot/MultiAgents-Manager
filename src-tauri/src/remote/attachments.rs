@@ -251,18 +251,13 @@ pub fn clean_project_attachments(project: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{temp_dir, TestDir};
 
-    fn tempdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "mam-attach-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// 本族每个用例的临时目录：唯一性来自 `test_support`（pid + 进程内原子序号），
+    /// **不再**用 `as_nanos()`——旧写法同一微秒内撞名，并行用例互相
+    /// `remove_dir_all`（存量 flake 根因，见 `test_support` 模块文档）。
+    fn tempdir() -> TestDir {
+        temp_dir("mam-attach-test")
     }
 
     // ---- sanitize_file_name ----
@@ -316,7 +311,6 @@ mod tests {
         // 无 .git → None（不写任何排除文件——用户定案：非 git 项目跳过）
         assert_eq!(pending_git_exclude(&root, GIT_EXCLUDE_LINE), None);
         assert!(!root.join(".git").exists());
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -335,7 +329,6 @@ mod tests {
         let content2 = std::fs::read_to_string(&file).unwrap();
         assert_eq!(content.matches(".mam-attachments/").count(), 1);
         assert_eq!(content2, content);
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -355,7 +348,6 @@ mod tests {
             content.contains("node_modules\n.mam-attachments/"),
             "{content}"
         );
-        std::fs::remove_dir_all(&root).ok();
     }
 
     // ---- write_attachment ----
@@ -381,7 +373,6 @@ mod tests {
         let content =
             std::fs::read_to_string(root.join(".git").join("info").join("exclude")).unwrap();
         assert!(content.contains(".mam-attachments/"));
-        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
@@ -397,7 +388,6 @@ mod tests {
             "同名第二次落盘 = a (1).txt"
         );
         assert_eq!(std::fs::read(&p1).unwrap(), b"one");
-        std::fs::remove_dir_all(&root).ok();
     }
 
     // ---- 索引（C5 数据管理数据源）----
@@ -420,7 +410,6 @@ mod tests {
         assert_eq!(read_index(&home).len(), 2);
         prune_index_for_project(&home, "e:/proj/a"); // 大小写不敏感剔除
         assert!(read_index(&home).is_empty());
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -429,7 +418,6 @@ mod tests {
         std::fs::create_dir_all(index_path(&home).parent().unwrap()).unwrap();
         std::fs::write(index_path(&home), "not-json{{").unwrap();
         assert!(read_index(&home).is_empty(), "损坏索引防御性降级为空");
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -445,6 +433,5 @@ mod tests {
         // 无附件目录 → (0, 0)
         let (f2, b2) = project_attachment_stats(&root.join("nope"));
         assert_eq!((f2, b2), (0, 0));
-        std::fs::remove_dir_all(&root).ok();
     }
 }
