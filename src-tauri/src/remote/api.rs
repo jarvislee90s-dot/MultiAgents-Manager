@@ -1018,7 +1018,7 @@ pub async fn session_send(
     // 溯源真源在注入审计页）。经 store.with 走会话自己的库（测试内存库零污染）
     let signature_on = st
         .store
-        .with(|conn| crate::inject::normalize::message_signature_enabled_conn(conn));
+        .with(crate::inject::normalize::message_signature_enabled_conn);
     let content =
         crate::inject::normalize::compose_injection_flagged(&device_name, &req.text, signature_on);
     // D6 修改重发：queueOnly=true 只跳过 ⑥ 的直发尝试（语义见 SessionSendReq::queue_only
@@ -8778,7 +8778,7 @@ pub async fn session_create(
         .unwrap_or_else(|| CREATE_DEFAULT_FIRST_MESSAGE.to_string());
     let signature_on = st
         .store
-        .with(|conn| crate::inject::normalize::message_signature_enabled_conn(conn));
+        .with(crate::inject::normalize::message_signature_enabled_conn);
     let composed =
         crate::inject::normalize::compose_injection_flagged(&device_name, &text, signature_on);
     let run = CreateRun {
