@@ -367,8 +367,6 @@
                  不显示假百分比」同一条纪律）。实现为纯前端即可（已读码验证：
                  `remote_ts_run_step` 是 async + spawn_blocking，Rust 主线程不被占用；
                  `invoke()` 返回 Promise 不阻塞 JS 事件循环 ⇒ 动画照常跑）。 -->
-            <div class="step done">✓ 安装 Tailscale（已获管理员确认）</div>
-            
             <div class="step cur">⏳ 正在下载安装包（官方源 + sha256 校验）… <span class="side">（总量未知 ⇒ 只表示「在走动」，不给百分比；i18n `tsWizard.downloading`）</span></div>
             <div class="step done">✓ 安装 Tailscale（已获管理员确认）<span class="side">（Windows MSI 版：安装向导会让你选安装路径——动作文案点明「用默认路径最省事」；安装行常驻弱提示，说明 MAM 的两个查找位置 + 装完点「刷新状态」）</span></div>
             <!-- 2026-10-07 十一次回写（⑤ 用户实测 + 根因诊断）：原稿画的
