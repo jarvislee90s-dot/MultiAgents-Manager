@@ -189,12 +189,26 @@ export type TsServeEntry = { ours: boolean; label: string };
 export type TsStepResult = {
   ok: boolean;
   approvalUrl?: string | null;
+  /** **login 步的授权链接**（⑤，2026-10-07 用户实测）：新装机器上 `status --json` 的
+   *  `AuthURL` 是**空串**（授权链接要**发起一次交互式登录**才由尾网生成），所以登录步
+   *  不再是"等链接自己出现"——`remote_ts_run_step("login")` 会**后台发起**一次
+   *  `tailscale login`（只 spawn、不等待；argv = `login --timeout 15s`，见 Rust
+   *  `wizard::LOGIN_ARGS`）并**有界轮询**（≤9.5s）把 `AuthURL` 取回来，链接随本字段
+   *  交回前端做成按钮。**MAM 只递链接：不代登录、不持凭据。**
+   *  已登录（Running）时为空串（无需链接）；始终拿不到时也为空串——前端据空串给
+   *  「去本机客户端点 Log in / 稍候重试」的兜底文案（走静态 i18n 键，不渲染 `note`）。
+   *  **M4（2026-10-08 架构评审）：前端把本字段当"过渡回执"用**——立即上墙，但**随下一次
+   *  探测落地作废**（`TailscaleWizard` 的 `receiptGen`/`probeGen`）：权威源永远只有探测
+   *  （`TsWizardProbe.authUrl`），探测说没有链接时不许拿旧回执硬撑（链接会被 tailscaled
+   *  轮换/失效）。 */
   authUrl?: string;
+  /** 本次 login 步**是否发起过**登录尝试（true = 已让尾网去生成链接；false/缺省 =
+   *  已有链接或已登录，未发起）。幂等语义：已有链接时不发起（用户可能正拿着它在浏览器操作）。 */
+  triggered?: boolean;
   /** Tailscale 后端状态（`sys_ext` / `login` 步回读；Deferred 回执里点明「卡在哪个态」） */
   backendState?: string;
   path?: string;
   skipped?: string;
-  triggered?: boolean;
   done?: boolean;
   /** W-A：后端重连/初始化窗口内这一步**没做**（后端拒绝写入，或不判定既有配置形态）——
    *  `true` **不是失败**（回执 `ok: true`），配套 `backendState` + `note` 说明成因；

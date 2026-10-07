@@ -430,6 +430,274 @@ pub(super) fn extract_approval_url(text: &str) -> Option<String> {
         .map(|w| w.trim_end_matches(['.', ',', ')']).to_string())
 }
 
+// ============================================================
+// ⑤ 登录步（MAM 不代登录——只递链接；但**必须主动把链接取来**）
+// ============================================================
+
+/// 登录步轮询窗上限（注入 `wait` 的累计时长必须 ≤ 它——测试逐条断言，变异即红）
+pub(super) const LOGIN_LINK_POLL_WINDOW: std::time::Duration =
+    std::time::Duration::from_millis(9500);
+
+/// 轮询节奏（首次读**立即**发生，之后按本表的间隔重读）。累加 = 9500ms = 上面那个窗：
+/// `300+500+700+1000×8`——授权链接通常在 1 秒内就生成（只等尾网一次往返），
+/// 这个节奏既能让常见情形一次就拿到，又不会在异常情形下无限轮询。
+pub(super) const LOGIN_LINK_POLL_DELAYS_MS: &[u64] = &[
+    300, 500, 700, 1000, 1000, 1000, 1000, 1000, 1000, 1000, 1000,
+];
+
+/// 登录步内核（可测；注入 = 读状态 / 发起登录 / 等待）。
+///
+/// **为什么必须主动发起**（2026-10-07 用户实测诊断）：新装机器上
+/// `tailscale status --json` 是 `NeedsLogin ∧ AuthURL=""`——授权链接由尾网在
+/// **发起一次交互式登录**时才生成（`tailscale login`，与 Windows GUI 的「Log in」
+/// 按钮同义）。MAM 此前从不发起（全仓 `run_cli` 调用点无 `up`/`login`），于是
+/// `AuthURL` 永远是空串，而前端只在 `authUrl` 非空时才渲染「去登录」⇒ **登录步是死胡同**
+/// （行里写着"需要你操作：去浏览器登录"，却没有任何可点的东西）。
+///
+/// **合规红线（一字不让）**：MAM **不代登录、不持有任何用户凭据**（模块头注释即此条）。
+/// 本步只做两件事：① 让尾网**生成**一个授权链接（发起登录尝试，不带任何凭据参数）；
+/// ② 把链接**原样递出去**。登录本身始终由用户在浏览器完成。
+///
+/// **有界**：发起是后台的（`trigger` 只 spawn 不等待，见 [`spawn_login_attempt`] 的形态针），
+/// 轮询按 [`LOGIN_LINK_POLL_DELAYS_MS`] 走、窗上限 [`LOGIN_LINK_POLL_WINDOW`]；拿不到就
+/// 如实回空串 + 成因（前端给"去客户端点登录"的兜底文案），**绝不无限等**。
+///
+/// **等待者的生命周期（I1，2026-10-08 架构评审；注入口 = `cleanup`）**：子进程由
+/// [`spawn_login_attempt`] 登记进单飞槽，本函数**每次返回前**都经 `cleanup` 交代它的去向
+/// （[`finish_login_attempt`]）——窗尽且没拿到链接 ⇒ [`LoginCleanup::Kill`]（否则它会按
+/// 默认 0s 一直等，MAM 退出后成孤儿）；拿到链接 / 已登录 ⇒ [`LoginCleanup::Keep`]
+/// （**保守**：杀是否让已生成的 AuthURL 失效**待真机复核**，见 [`LoginCleanup`] 的注释）。
+/// 把收尾做成注入口（而不是在本函数里就地杀）是为了让"什么时候杀"成为**可断言的行为**
+/// 而不是一句注释：`login_step_settles_waiter_conservatively` 锁死两条路各自的决策。
+///
+/// 幂等：已 `Running` → 不发起、直接 `done`；已有链接 → 不发起、直接递出
+/// （用户可能正拿着那条链接在浏览器里操作）。
+pub(super) fn login_step_with(
+    read: impl Fn() -> Result<TsStatus, String>,
+    trigger: impl FnOnce() -> Result<(), String>,
+    wait: impl Fn(std::time::Duration),
+    cleanup: impl Fn(LoginCleanup),
+) -> Result<serde_json::Value, String> {
+    let first = read()?;
+    // ① 已登录（Running）：本步已完成，链接无意义（已登录时 AuthURL 本就是空串）
+    if first.backend_state == "Running" {
+        cleanup(LoginCleanup::Keep); // 只收尸：前一轮若有等待者，它的等待条件也已满足
+        return Ok(serde_json::json!({
+            "ok": true,
+            "done": true,
+            "backendState": first.backend_state,
+            "authUrl": "",
+        }));
+    }
+    // ② 已有链接：直接递出去（**幂等**——用户可能正拿着它那条在浏览器里操作，不得再发起）
+    if !first.auth_url.is_empty() {
+        cleanup(LoginCleanup::Keep); // 有链接 ⇒ 不杀（保守口径见 LoginCleanup）
+        return Ok(serde_json::json!({
+            "ok": true,
+            "done": false,
+            "backendState": first.backend_state,
+            "authUrl": first.auth_url,
+        }));
+    }
+    // ③ 链接还没生成（新装形态）：后台发起一次登录尝试 → 有界轮询把它取回来
+    trigger()?;
+    let mut last_state = first.backend_state;
+    for delay in LOGIN_LINK_POLL_DELAYS_MS {
+        wait(std::time::Duration::from_millis(*delay));
+        let s = read()?;
+        // 轮询期间用户在浏览器里点完了 → 直接报完成（前端随后重探也会看到 Running）
+        if s.backend_state == "Running" {
+            cleanup(LoginCleanup::Keep); // 已登录：CLI 的等待条件已满足，会自己退
+            return Ok(serde_json::json!({
+                "ok": true,
+                "done": true,
+                "backendState": s.backend_state,
+                "authUrl": "",
+                "triggered": true,
+            }));
+        }
+        if !s.auth_url.is_empty() {
+            cleanup(LoginCleanup::Keep); // **拿到链接一律不杀**（待真机复核，见 LoginCleanup）
+            return Ok(serde_json::json!({
+                "ok": true,
+                "done": false,
+                "backendState": s.backend_state,
+                "authUrl": s.auth_url,
+                "triggered": true,
+            }));
+        }
+        last_state = s.backend_state;
+    }
+    // 有界放弃：如实回空串 + 成因（**不编链接、不谎报**），并**收掉那个还在等的子进程**
+    // （I1：窗尽且没拿到链接 ⇒ 再等下去不会有链接，却会按默认 0s 一直等、MAM 退出后成孤儿）
+    cleanup(login_cleanup_decision(false, false));
+    // 前端据 authUrl 为空给出「去客户端点 Log in / 稍候重试」的兜底文案（i18n 静态键，
+    // 不渲染本 note——中文串直接上屏会绕过 i18n，消费方约定见 src/lib/api/remote.ts 的
+    // `note` 注释）。
+    Ok(serde_json::json!({
+        "ok": true,
+        "done": false,
+        "backendState": last_state,
+        "authUrl": "",
+        "triggered": true,
+        "note": format!(
+            "已发起登录，但在 {:?} 内没有拿到授权链接（后端状态 {last_state}）——可在开始菜单\
+             打开 Tailscale 客户端点「Log in」，或稍候重试；MAM 只递链接、不代登录",
+            LOGIN_LINK_POLL_WINDOW
+        ),
+    }))
+}
+
+/// 有界等待参数（I1）：`login` 的 `--timeout` **默认 0s = 一直等**（1.102.4 `login --help`
+/// 原文「default (0s) blocks forever」）——用户不登录，那个进程就一直活着。15s 的口径 =
+/// 轮询窗（[`LOGIN_LINK_POLL_WINDOW`] 9.5s）+ 一次尾网往返的余量：常见情形 1 秒内就拿到
+/// 链接，15s 是"用户在浏览器里慢慢点"与"绝不留一个永久等待者"之间的取舍。
+pub(super) const LOGIN_TIMEOUT_ARG: &str = "15s";
+
+/// **登录发起的完整 argv（唯一出处，I2）**——合规红线「**不带任何凭据参数、不碰偏好**」
+/// 靠这条白名单从注释变成可执行约束（`login_attempt_args_are_a_closed_whitelist` 断言其
+/// 内容封闭、`login_attempt_spawns_detached_and_never_waits` 断言 spawn 只从这里取参数）。
+///
+/// **为什么"零旗标"才是真正让本步安全的东西**（2026-10-08 架构评审更正：旧注释的理由与
+/// 本机 CLI 自述不符）：
+/// - 本机 1.102.4 `up --help` 原文：「**With no flags, "tailscale up" brings the network
+///   online without changing any settings.**」——不存在"`up` 会按默认值改偏好"这回事；
+///   有旗标时上游反而**拒绝**静默改设置（原文：若某个未显式给出的默认值会导致设置变化，
+///   直接返回错误，除非带 `--reset`）；
+/// - `login --help` 暴露的是**与 `up` 同一套偏好旗标**（`--shields-up` / `--advertise-*` /
+///   `--accept-*` / `--exit-node` …）**以及凭据旗标**（`--auth-key` / `--client-secret` /
+///   `--id-token`）——所以"用 login 就天然不碰偏好/凭据"是**错的**：安全来自我们
+///   **一个旗标都不带**（除有界的 `--timeout`），而不是来自子命令名。
+/// - ⚠️ **`login` 自标 alpha**（原文「This command is currently in alpha and may change in
+///   the future.」）——上游随时可能改语义/旗标集；后人动本步前**先跑 `login --help` 复核**，
+///   别照抄旧结论。
+pub(super) const LOGIN_ARGS: &[&str] = &["login", "--timeout", LOGIN_TIMEOUT_ARG];
+
+/// 轮询收尾时对等待者的处置（I1；纯函数 [`login_cleanup_decision`] 算出来）。
+///
+/// ⚠️ **待真机复核（本机无法验证 Windows 行为）**：杀掉等待者会不会让**已经生成的
+/// AuthURL** 失效？在拿到答案之前，杀法取**保守口径**——只有"轮询窗已尽**且拿不到链接**"
+/// 才杀（那种情形下没有任何链接可被影响），**拿到链接一律不杀**，交给 `--timeout 15s`
+/// 自己退（有界）。真机复核项：① `tailscale login --timeout 15s` 超时退出后，
+/// `status --json` 的 `AuthURL` 是否仍在；② kill 掉等待者后 AuthURL 是否仍在。两条任一
+/// 为"失效"⇒ 需要重新设计（例如把登录等待者交给 GUI 客户端）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LoginCleanup {
+    /// 杀 + 收尸（窗尽且没拿到链接：等下去没有意义）
+    Kill,
+    /// 只做无阻塞收尸（自然退出清槽）；**不杀**
+    Keep,
+}
+
+/// 收尾决策（纯函数、可测）：`done` = 后端已 Running；`has_link` = 本轮拿到了授权链接。
+/// 变异：把 `has_link` 也判成 `Kill`（"杀了一了百了"）→
+/// `login_cleanup_decision_is_conservative` 必红——那是**没有真机证据就改保守口径**。
+pub(super) fn login_cleanup_decision(done: bool, has_link: bool) -> LoginCleanup {
+    if done || has_link {
+        LoginCleanup::Keep
+    } else {
+        LoginCleanup::Kill
+    }
+}
+
+/// **登录等待者的单飞槽（I1）**：同一时刻至多一个 `tailscale login`。
+///
+/// 为什么是 `Mutex<Option<Child>>` 而不是"spawn 完起个收尸线程"（旧实现）：旧形态下子进程
+/// 的所有权在收尸线程手里，**外面谁也杀不掉它** ⇒ 轮询失败后没有任何清理路径，MAM 退出后
+/// 就是一个孤儿进程（评审 I1 三条中的第 3 条）。把句柄放在模块级槽里，窗尽/应用退出才
+/// 有"可杀之物"；顺带把每次点击泄漏的**一个阻塞线程**去掉（旧收尸线程）。
+///
+/// 收尸纪律：自然退出的子进程由 [`reap_login_attempt`]（`try_wait`，无阻塞）在**下一次**
+/// 发起/收尾时清出槽位——槽里至多留一个"已退出但未收尸"的句柄，**不是一个活着的进程**；
+/// 应用退出路径 [`cancel_login_attempt`] 一律 kill + wait。
+static LOGIN_CHILD: once_cell::sync::Lazy<std::sync::Mutex<Option<std::process::Child>>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
+
+/// 取槽锁（毒化容忍：本静态被**退出钩子**（[`cancel_login_attempt`]）触碰，释放路径绝不
+/// 允许因一次 panic 毒化而连环失败；槽里装的只是进程句柄，没有需要保持一致性的不变式）
+fn login_child_lock() -> std::sync::MutexGuard<'static, Option<std::process::Child>> {
+    LOGIN_CHILD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// 登记刚 spawn 的等待者（单飞槽的唯一写入口）
+fn adopt_login_child(child: std::process::Child) {
+    *login_child_lock() = Some(child);
+}
+
+/// 槽是否为空（测试断言用；不含任何进程操作）
+pub(super) fn login_child_slot_is_empty() -> bool {
+    login_child_lock().is_none()
+}
+
+/// 无阻塞收尸：已自然退出的子进程清出槽位（不阻塞、不杀）
+pub(super) fn reap_login_attempt() {
+    let mut slot = login_child_lock();
+    if let Some(child) = slot.as_mut() {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            *slot = None;
+        }
+    }
+}
+
+/// **收尾口（应用退出 / 窗尽）**：把还在等待的 `tailscale login` kill + wait，不留孤儿。
+/// 槽空 = no-op（退出钩子在"用户一次都没点过"的形态下也会调它）。
+pub(crate) fn cancel_login_attempt() {
+    let child = login_child_lock().take();
+    if let Some(mut child) = child {
+        let _ = child.kill();
+        let _ = child.wait(); // 收尸（防僵尸）；kill 之后 wait 是有界的
+    }
+}
+
+/// 轮询收尾的生产口径：`Kill` → 杀 + 收尸；`Keep` → 只收尸（自然退出的清槽）
+pub(super) fn finish_login_attempt(decision: LoginCleanup) {
+    match decision {
+        LoginCleanup::Kill => cancel_login_attempt(),
+        LoginCleanup::Keep => reap_login_attempt(),
+    }
+}
+
+/// 生产发起入口：**后台**起一次 `tailscale login`（只让尾网生成授权链接，不带任何旗标）。
+///
+/// **为什么是 `login` 而不是 `up`，以及为什么"安全"来自零旗标**：事实版理由与上游原文见
+/// [`LOGIN_ARGS`]（旧注释写"`up` 会连带按默认值改偏好"，与本机 1.102.4 的 `up --help`
+/// 自述不符，已更正；顺带标注 `login` 自标 alpha）。
+///
+/// **为什么必须后台（不能同步等）**：`tailscale login` 的 `--timeout` 默认 0s = **一直等**
+/// （实测帮助原文「default (0s) blocks forever」）——同步等它就是把向导挂死（本项目刚修过
+/// `wait_child_bounded` 那类「命令阻塞把 UI 挂死」的缺陷）。故只 `spawn`：三条标准流全给
+/// null（不占管道、不因管道写满而假死），**不另起收尸线程**——句柄登记进单飞槽
+/// （[`adopt_login_child`]），窗尽/应用退出由 [`finish_login_attempt`] /
+/// [`cancel_login_attempt`] 收（旧实现的收尸线程既杀不掉子进程，又每次泄漏一个阻塞线程）。
+/// 形态针见 `login_attempt_spawns_detached_and_never_waits`（出现任何等待/收取输出的调用
+/// 即红，argv 不许就地拼）。
+///
+/// **单飞（I1）**：槽里还有活着的等待者就**不再起第二个**——用户连点两次不该派生两个进程
+/// （第二个也没有额外信息：链接由 tailscaled 持有，轮询照旧能取到）。
+///
+/// **不代登录**：argv 里没有任何凭据参数、不读任何凭据、不解析登录结果——只让尾网生成链接。
+pub(super) fn spawn_login_attempt() -> Result<(), String> {
+    use std::process::Stdio;
+    reap_login_attempt(); // 先收掉已经自然退出的（单飞判据只看活着的）
+    if !login_child_slot_is_empty() {
+        return Ok(()); // 单飞：已有等待者在跑，不再派生第二个
+    }
+    let bin = find_cli().ok_or_else(|| "未检测到 Tailscale（尚未安装）".to_string())?;
+    let mut cmd = std::process::Command::new(bin);
+    cmd.args(LOGIN_ARGS) // 唯一 argv 出处（I2 白名单）
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // 与 run_cli 同一条 macOS 适配（GUI standalone build 才认这条 CLI 入口）
+    #[cfg(target_os = "macos")]
+    cmd.env("TAILSCALE_BE_CLI", "1");
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 `tailscale login` 失败: {e}"))?;
+    adopt_login_child(child);
+    Ok(())
+}
+
 // ------------------------------------------------------------
 // 逐步探测（remote_ts_probe 的内核）：每步都要能说出「怎么算完成」
 // ------------------------------------------------------------
@@ -901,15 +1169,34 @@ pub(crate) fn run_step(step: &str, port: u16) -> Result<serde_json::Value, Strin
             let s = run_cli(&["status", "--json"]).and_then(|j| parse_status(&j))?;
             Ok(serde_json::json!({ "ok": true, "backendState": s.backend_state }))
         }
-        // login：MAM 不代登录——只把授权链接递出去（用户在浏览器完成）
-        "login" => {
-            let s = run_cli(&["status", "--json"]).and_then(|j| parse_status(&j))?;
-            Ok(serde_json::json!({
-                "ok": true,
-                "backendState": s.backend_state,
-                "authUrl": s.auth_url,
-            }))
-        }
+        // login：MAM 不代登录——只把授权链接递出去（用户在浏览器完成）。**⑤（2026-10-07
+        // 用户实测）**：链接**不是"等它自己出现"**——新装机器上 `AuthURL` 是空串（要发起
+        // 一次交互式登录才由尾网生成），故本步**主动让尾网生成**（后台 `tailscale login`，
+        // 只 spawn 不等待）+ 有界轮询取回。长阻塞注意：本臂最长 LOGIN_LINK_POLL_WINDOW
+        //（9.5s），命令经 spawn_blocking 调（remote_ts_run_step），不占 IPC/主线程；
+        // 发起本身是后台的（[`spawn_login_attempt`]）——**绝不**同步等 tailscale login。
+        // argv 白名单（I2）：`login --timeout 15s`（零凭据旗标、零偏好旗标）；`--timeout`
+        // 把"默认 0s 一直等"变成有界（I1）。
+        //
+        // **为什么本臂不需要 W-A 初始化门（I4，2026-10-08 架构评审）**：规格的「写恰好五处
+        // + 初始化中一律 Deferred」点名的是会**改 tailscaled 配置/偏好**的四条写命令
+        //（`set --shields-up=false` / `funnel --bg` / `funnel reset` / 撤销）；`login` 是
+        // 第五个会碰 tailscaled 状态的动作（发起一次交互式登录），但它**不写任何设置**，
+        // 而且**上游 CLI 自带 Running 门**——`--timeout` 的语义就是「等待 tailscaled 进入
+        // Running 状态的最长时间」（默认 0s 一直等），即恢复窗口内这条命令只会**等**、
+        // 不会在未就绪的后端上落任何配置 ⇒ 等价于"Deferred 下沉到 CLI 自己"。
+        // 故本臂**有意不过门**（也不过 W-A 的 Deferred 回执：本步产物是一个链接，不是配置）。
+        // ⚠️ **残余与待裁决**：恢复窗口内 `probe_steps_from` 的 login 臂会呈现成"待做"
+        //（判据是 `BackendState == "Running"`），前端据此渲染「获取登录链接」按钮——对一台
+        // **其实已登录、只是后端在重连**的机器，这是一个"假待做"。危害有界（点下去只是
+        // 一次有界等待、不改配置），但要不要给 login 也补一道 W-A 门（或把该窗口内的 login
+        // 步呈现成 amber"恢复中"）属**设计裁决**，已上报控制方（本轮只登记，不擅自改语义）。
+        "login" => login_step_with(
+            || run_cli(&["status", "--json"]).and_then(|j| parse_status(&j)),
+            spawn_login_attempt,
+            std::thread::sleep,
+            finish_login_attempt,
+        ),
         // shields_up：关「阻止传入连接」（写入后回读确认，见 disable_shields_up）。
         // **W-A 同一道后端门（I2，2026-10-07 评审）**：规格要求 7 明文「初始化中一律
         // Deferred——不写 shields-up」；本步此前没过门，恢复窗口里向导显示「待做 + 执行」，

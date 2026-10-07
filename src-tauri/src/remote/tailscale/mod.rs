@@ -36,6 +36,9 @@ pub(crate) use reach::RECORD_REPUBLISH_HINT;
 #[cfg(test)]
 pub(crate) use reach::set_reachability;
 pub(crate) use status::{set_ts_snapshot, start_channel, stop_all, stop_channel, ts_snapshot};
+// I1（2026-10-08 架构评审）：应用退出钩子要能把 `tailscale login` 的等待者一起收掉
+// （kill + wait，不留孤儿进程）——`lib.rs` 的 RunEvent::Exit 是唯一的生产消费方。
+pub(crate) use wizard::cancel_login_attempt;
 pub(crate) use wizard::{run_step, wizard_status};
 
 // 测试模块需要看见三个子模块的内部件（`use super::*` 从 tests 取用）；仅测试构建存在。
@@ -104,6 +107,18 @@ mod tests {
     const STATUS_NEEDS_LOGIN: &str = r#"{
         "BackendState": "NeedsLogin",
         "AuthURL": "https://login.tailscale.com/a/abc123",
+        "Self": { "DNSName": "" },
+        "CertDomains": []
+    }"#;
+
+    /// **⑤ 新装未发起过登录的形态**（2026-10-07 诊断所得，用户实测场景）：
+    /// `NeedsLogin` **但 AuthURL 为空**——授权链接由尾网在**发起一次交互式登录**时才生成
+    /// （`tailscale login` / GUI 的「Log in」按钮），MAM 此前从不发起 ⇒ 链接永远不出现，
+    /// 而前端只在 `probe.authUrl` 非空时才渲染「去登录」，于是登录步成为**死胡同**：
+    /// 行里有"需要你操作：去浏览器登录"的文案，却没有任何可点的东西。
+    const STATUS_NEEDS_LOGIN_NO_URL: &str = r#"{
+        "BackendState": "NeedsLogin",
+        "AuthURL": "",
         "Self": { "DNSName": "" },
         "CertDomains": []
     }"#;
@@ -1685,6 +1700,417 @@ mod tests {
         let other = windows_verification_for_from("shields_up", Platform::Other);
         assert_eq!(other["windowsUnverifiedSteps"], serde_json::json!([]));
         assert!(other["windowsVerifiedFrom"].is_null(), "{other}");
+    }
+
+    // ============================================================
+    // ⑤ 登录步：MAM 不代登录，但**必须主动把链接取来**（2026-10-07 用户实测诊断）
+    // ============================================================
+    //
+    // 根因（读码 + 注入缝复现，见 STATUS_NEEDS_LOGIN_NO_URL 的注释）：新装机器上
+    // `status --json` 是 `NeedsLogin ∧ AuthURL=""`——授权链接要**发起一次交互式登录**
+    // 才由尾网生成，而全仓 `run_cli` 调用点里**从来没有 `up` / `login`**（只有
+    // status / get / funnel status / funnel --bg / set / funnel reset），MAM 从不发起
+    // ⇒ 链接永远不出现；前端又只在 `probe.authUrl` 非空时才渲染链接 ⇒ 登录步无可点之物。
+    // 修法（**不越合规红线**：只递链接、不代登录、不持凭据）：后台发起 `tailscale login`
+    //（与 GUI「Log in」按钮同义，**只让尾网生成授权链接**）+ 有界轮询 status 取 AuthURL。
+    //
+    // 注入缝 = (读状态, 发起登录, 等待)：测试零进程零睡眠，且能把「有界」断言到底。
+
+    /// 读状态序列（测试替身：按调用次数吐预置序列，越界后一直吐最后一个）
+    fn status_reader_seq(seq: Vec<&'static str>) -> impl Fn() -> Result<TsStatus, String> {
+        let idx = std::cell::Cell::new(0usize);
+        move || {
+            let i = idx.get();
+            idx.set(i + 1);
+            let raw = seq.get(i).copied().unwrap_or_else(|| *seq.last().unwrap());
+            parse_status(raw)
+        }
+    }
+
+    /// 空 URL 的待登录态（新装形态）→ 一次发起 → 轮询拿到链接：**这就是用户实测的那条路**
+    #[test]
+    fn login_step_actively_requests_link_and_returns_it() {
+        let reads = std::cell::Cell::new(0usize);
+        let seq = status_reader_seq(vec![
+            STATUS_NEEDS_LOGIN_NO_URL,
+            STATUS_NEEDS_LOGIN_NO_URL,
+            STATUS_NEEDS_LOGIN,
+        ]);
+        let triggered = std::cell::Cell::new(0usize);
+        let waited = std::cell::RefCell::new(Vec::new());
+        let r = login_step_with(
+            || {
+                reads.set(reads.get() + 1);
+                seq()
+            },
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |d| waited.borrow_mut().push(d),
+            |_| {},
+        )
+        .expect("登录步应成功返回");
+        assert_eq!(
+            triggered.get(),
+            1,
+            "AuthURL 为空时必须**发起一次**登录尝试（否则链接永远不出现）: {r}"
+        );
+        assert_eq!(
+            r["authUrl"], "https://login.tailscale.com/a/abc123",
+            "拿到链接必须原样递出（MAM 只递链接，不代登录）: {r}"
+        );
+        assert_eq!(r["done"], false, "还没登录完，不得报 done: {r}");
+        assert!(
+            reads.get() >= 3,
+            "必须轮询（第一次读到空 → 发起 → 继续读），实际读了 {} 次: {r}",
+            reads.get()
+        );
+        // 有界：注入的等待总时长不得超过轮询窗上限
+        let total: std::time::Duration = waited.borrow().iter().sum();
+        assert!(
+            total <= LOGIN_LINK_POLL_WINDOW,
+            "轮询必须有界（≤{:?}），实际累计等了 {total:?}",
+            LOGIN_LINK_POLL_WINDOW
+        );
+    }
+
+    /// 幂等：已经有链接时**不得**再发起登录尝试（用户可能正拿着那条链接在浏览器里操作）
+    #[test]
+    fn login_step_does_not_trigger_when_link_is_already_present() {
+        let triggered = std::cell::Cell::new(0usize);
+        let r = login_step_with(
+            status_reader_seq(vec![STATUS_NEEDS_LOGIN]),
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |_| {},
+            |_| {},
+        )
+        .expect("登录步应成功返回");
+        assert_eq!(triggered.get(), 0, "已有链接 → 不发起（幂等）: {r}");
+        assert_eq!(r["authUrl"], "https://login.tailscale.com/a/abc123");
+    }
+
+    /// 已登录（Running）：无需链接、不发起任何东西
+    #[test]
+    fn login_step_reports_done_without_triggering_when_already_running() {
+        let reads = std::cell::Cell::new(0usize);
+        let triggered = std::cell::Cell::new(0usize);
+        let r = login_step_with(
+            || {
+                reads.set(reads.get() + 1);
+                parse_status(STATUS_RUNNING)
+            },
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |_| {},
+            |_| {},
+        )
+        .expect("登录步应成功返回");
+        assert_eq!(r["done"], true, "Running = 已登录完成: {r}");
+        assert_eq!(r["authUrl"], "");
+        assert_eq!(reads.get(), 1, "已登录 ⇒ 读一次就够，不该轮询: {r}");
+        assert_eq!(triggered.get(), 0);
+    }
+
+    /// 链接始终不出现：**有界放弃**并如实回报（不许无限轮询、不许谎报有链接）
+    #[test]
+    fn login_step_gives_up_bounded_when_link_never_appears() {
+        let reads = std::cell::Cell::new(0usize);
+        let triggered = std::cell::Cell::new(0usize);
+        let waited = std::cell::RefCell::new(Vec::new());
+        let r = login_step_with(
+            || {
+                reads.set(reads.get() + 1);
+                parse_status(STATUS_NEEDS_LOGIN_NO_URL)
+            },
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |d| waited.borrow_mut().push(d),
+            |_| {},
+        )
+        .expect("登录步应成功返回（拿不到链接不是错误，是「还没生成」）");
+        assert_eq!(triggered.get(), 1, "仍要发起（下一次可能就拿到了）: {r}");
+        assert_eq!(r["authUrl"], "", "拿不到就如实给空串，不编链接: {r}");
+        assert_eq!(r["triggered"], true, "回执要如实说明「已发起」: {r}");
+        // 有界：读次数 = 1（首次）+ 轮询步数；等待累计 = 轮询窗
+        assert_eq!(
+            reads.get(),
+            1 + LOGIN_LINK_POLL_DELAYS_MS.len(),
+            "轮询次数必须固定（有界），实际读了 {} 次",
+            reads.get()
+        );
+        let total: std::time::Duration = waited.borrow().iter().sum();
+        assert!(
+            total <= LOGIN_LINK_POLL_WINDOW,
+            "累计等待 {total:?} 超过窗口 {:?}",
+            LOGIN_LINK_POLL_WINDOW
+        );
+        // note 如实说明成因（中文硬编码、前端不渲染——消费方约定见 src/lib/api/remote.ts）
+        assert!(
+            r["note"].as_str().unwrap_or_default().contains("没有拿到"),
+            "必须给出成因说明: {r}"
+        );
+    }
+
+    /// 读状态失败 = Err（fail-closed：绝不拿"读不到"当"已登录/已拿到链接"）
+    #[test]
+    fn login_step_fails_closed_when_status_unreadable() {
+        let triggered = std::cell::Cell::new(0usize);
+        let e = login_step_with(
+            || Err("未检测到 Tailscale（尚未安装）".to_string()),
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |_| {},
+            |_| {},
+        )
+        .expect_err("读不到状态必须 Err");
+        assert!(e.contains("尚未安装"), "{e}");
+        assert_eq!(triggered.get(), 0, "状态都读不到就不该去发起登录: {e}");
+    }
+
+    /// 发起登录失败（CLI 调不起来）= 如实 Err（不静默吞、也不谎报有链接）
+    #[test]
+    fn login_step_reports_trigger_failure() {
+        let e = login_step_with(
+            status_reader_seq(vec![STATUS_NEEDS_LOGIN_NO_URL]),
+            || Err("启动 tailscale login 失败: 权限不足".to_string()),
+            |_| {},
+            |_| {},
+        )
+        .expect_err("发起失败必须 Err");
+        assert!(e.contains("权限不足"), "{e}");
+    }
+
+    // ============================================================
+    // I1（2026-10-08 架构评审）：登录子进程的**生命周期**——有界 + 单飞 + 窗尽/退出收尸
+    // ============================================================
+    //
+    // 评审三条：① 只 spawn + 收尸线程 ⇒ 每次点击泄漏 1 进程 + 1 阻塞线程；② `login` 的
+    // `--timeout` 默认 0s = 一直等 ⇒ 用户不登录它就一直活着；③ 轮询失败后无清理 ⇒ MAM
+    // 退出后成孤儿进程（本仓纪律：不留孤儿进程）。修法 = 评审给的 a+b：`--timeout 15s`
+    // 有界 + 模块级 `Mutex<Option<Child>>` 单飞 + 窗尽/应用退出 kill + wait。
+    //
+    // **杀与 AuthURL 的关系待真机复核**（本机无法验证 Windows 行为，见 LoginCleanup 的
+    // 注释）：故杀法**保守**——只在"轮询窗已尽**且拿不到链接**"时杀，拿到链接一律不杀。
+
+    /// 窗尽收尾的决策表（纯函数）——保守口径逐格锁死
+    #[test]
+    fn login_cleanup_decision_is_conservative() {
+        assert_eq!(
+            login_cleanup_decision(true, false),
+            LoginCleanup::Keep,
+            "已登录（Running）：CLI 自己的等待条件已满足，它会自然退出——不需要我们杀"
+        );
+        assert_eq!(
+            login_cleanup_decision(false, true),
+            LoginCleanup::Keep,
+            "**拿到链接 ⇒ 绝不杀**：杀掉等待者会不会让已生成的 AuthURL 失效，本机无法验证\n\
+             Windows 行为 ⇒ 保守处理（登记为待真机复核）"
+        );
+        assert_eq!(
+            login_cleanup_decision(false, false),
+            LoginCleanup::Kill,
+            "窗尽且没拿到链接：再等下去也不会有链接（默认 0s 会一直等）⇒ 必须杀 + 收尸，\n\
+             否则 MAM 退出后就是一个孤儿进程"
+        );
+    }
+
+    /// 收尾决策**接进登录步**（不是只写在抽屉里的纯函数）：拿不到链接 → Kill；
+    /// 拿到链接 → Keep。变异：把 login_step_with 尾部的 cleanup 调用删掉/改成恒 Keep → 必红。
+    #[test]
+    fn login_step_settles_waiter_conservatively() {
+        let decisions = std::cell::RefCell::new(Vec::new());
+        // ① 轮询窗耗尽、始终没有链接 → Kill
+        login_step_with(
+            status_reader_seq(vec![STATUS_NEEDS_LOGIN_NO_URL]),
+            || Ok(()),
+            |_| {},
+            |d| decisions.borrow_mut().push(d),
+        )
+        .expect("拿不到链接不是错误");
+        assert_eq!(
+            decisions.borrow().as_slice(),
+            [LoginCleanup::Kill],
+            "窗尽且无链接必须收掉等待者（否则它按默认 0s 一直等）"
+        );
+        // ② 轮询中拿到链接 → Keep（保守：不杀）
+        decisions.borrow_mut().clear();
+        login_step_with(
+            status_reader_seq(vec![STATUS_NEEDS_LOGIN_NO_URL, STATUS_NEEDS_LOGIN]),
+            || Ok(()),
+            |_| {},
+            |d| decisions.borrow_mut().push(d),
+        )
+        .expect("拿到链接应成功返回");
+        assert_eq!(
+            decisions.borrow().as_slice(),
+            [LoginCleanup::Keep],
+            "拿到链接 ⇒ 不杀（AuthURL 是否随之失效待真机复核）"
+        );
+    }
+
+    /// **I2（2026-10-08 架构评审）：argv 是封闭白名单**——红线是「**不带任何凭据参数、
+    /// 不碰偏好**」，而旧形态针只禁等待类调用、**没锁参数**（往 `login` 后面加
+    /// `--auth-key` / `--shields-up=false` 不会变红）。本测试把白名单本身断言到底：
+    /// - 除 `login` 外只允许 `--timeout <有界秒数>`（默认 0s = 一直等，正是 I1 要修的）；
+    /// - 任何凭据 / 偏好旗标（`--auth-key` / `--shields-up` / `--advertise-*` / …）出现即红。
+    ///
+    /// 变异：往 LOGIN_ARGS 里加任何一个参数 → 必红。
+    #[test]
+    fn login_attempt_args_are_a_closed_whitelist() {
+        assert_eq!(
+            LOGIN_ARGS.len(),
+            3,
+            "argv 只允许 `login --timeout <n>s` 三条：{LOGIN_ARGS:?}"
+        );
+        assert_eq!(LOGIN_ARGS[0], "login", "只允许 login 子命令（up 语义不同）");
+        assert_eq!(LOGIN_ARGS[1], "--timeout", "第二条只允许有界等待参数");
+        // 有界：0s = 「blocks forever」（1.102.4 `login --help` 原文）⇒ 必须是有限秒数
+        let secs: u64 = LOGIN_ARGS[2]
+            .strip_suffix('s')
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("--timeout 必须是有界秒数（如 15s）: {LOGIN_ARGS:?}"));
+        assert!(
+            (1..=60).contains(&secs),
+            "等待上限必须小而有界（1..=60 秒），实际 {secs}s"
+        );
+        // 红线自查（与上面的长度断言同源，但把「不许带什么」写成可读的清单）
+        for forbidden in [
+            "--auth-key",
+            "--client-secret",
+            "--id-token",
+            "--shields-up",
+            "--advertise-routes",
+            "--advertise-exit-node",
+            "--accept-routes",
+            "--exit-node",
+            "--hostname",
+            "--login-server",
+            "--operator",
+            "--reset",
+        ] {
+            assert!(
+                !LOGIN_ARGS.iter().any(|a| a.starts_with(forbidden)),
+                "登录发起**不得**带 {forbidden}（合规红线：不带任何凭据参数、不碰偏好）"
+            );
+        }
+    }
+
+    /// **不许同步阻塞**（本项目刚修过 `wait_child_bounded` 那类「命令阻塞把 UI 挂死」）：
+    /// 生产发起入口 `spawn_login_attempt` 只能 spawn，**不得**出现任何等待/收取输出的调用。
+    /// 形态针（与既有 `run_cli(&["funnel", "reset"])` 调用形态针同一手法）：
+    /// 变异：把 `spawn_login_attempt` 里的 `spawn()` 换成 `output()` / 加 `wait()` / 改走
+    /// `run_cli`（内部会 `wait_child_bounded`）→ 本测试必红。
+    ///
+    /// **I2 追加（2026-10-08 架构评审）：形态针必须连 argv 一起锁。** 旧针只禁等待类调用，
+    /// 往登录命令后面加 `--auth-key` / `--shields-up=false` **不会变红**——而这条命令的合规
+    /// 红线恰恰是「不带任何凭据参数、不碰偏好」。故本针追加两条：argv 整条来自
+    /// [`LOGIN_ARGS`] 白名单常量（其内容由 `login_attempt_args_are_a_closed_whitelist` 锁死），
+    /// 且**不许就地**逐个 `.arg(...)` 拼参数（参数只能从那一个白名单出处来）。
+    /// 变异：把 `cmd.args(LOGIN_ARGS)` 改回 `.arg("login").arg("--auth-key")...` → 必红。
+    #[test]
+    fn login_attempt_spawns_detached_and_never_waits() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/remote/tailscale/wizard.rs"
+        ))
+        .expect("读 wizard.rs");
+        let start = src
+            .find("fn spawn_login_attempt()")
+            .expect("生产发起入口必须存在（run_step 的 login 臂传它）");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("函数体结束");
+        let body = &body[..end];
+        assert!(
+            body.contains(".spawn()"),
+            "必须用 spawn 起进程（不等待）: {body}"
+        );
+        for forbidden in [
+            ".output()",
+            ".status()",
+            "wait_child_bounded",
+            "wait_timeout",
+            "run_cli(",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "发起登录**不得**同步阻塞（出现 {forbidden}）——tailscale login 默认会一直\n\
+                 等用户在浏览器完成；同步等它=把向导挂死: {body}"
+            );
+        }
+        // I1：spawn 出来的子进程必须**登记进单飞槽**（否则窗尽/退出时无从 kill + wait，
+        // 就成了评审说的"每次点击泄漏 1 进程 + 1 阻塞线程、退出后成孤儿"）
+        assert!(
+            body.contains("adopt_login_child("),
+            "spawn 出来的 wait 者必须交给单飞槽登记（I1：窗尽/应用退出要能 kill + wait）: {body}"
+        );
+        // I1：单飞门——槽里还有活着的等待者就不再派生第二个（连点不该派生两个进程）
+        assert!(
+            body.contains("login_child_slot_is_empty()"),
+            "必须有单飞门（同一时刻至多一个 `tailscale login`）: {body}"
+        );
+        // I2：argv 必须整条来自白名单常量，且不许就地拼参数
+        assert!(
+            body.contains(".args(LOGIN_ARGS)"),
+            "登录 argv 必须整条来自白名单常量 LOGIN_ARGS（合规红线：不带凭据参数、不碰偏好）: {body}"
+        );
+        assert!(
+            !body.contains(".arg("),
+            "不许逐个 `.arg(...)` 就地拼参数——argv 只能从 LOGIN_ARGS 这一个出处来\n\
+             （旧针只禁等待类调用 ⇒ 加 `--auth-key` 不会变红，这条就是补上的那一半）: {body}"
+        );
+        // 命令必须是 login（不是 up）：up 与 login 是两条不同的上游命令（up 是"连上网络
+        // 并按需登录"，login 是"发起一次交互式登录"），本步语义只要后者 —— 事实版理由见
+        // LOGIN_ARGS 与 spawn_login_attempt 的注释
+        assert!(
+            LOGIN_ARGS.contains(&"login"),
+            "必须调 `tailscale login`（只发起交互式登录、让尾网生成授权链接）: {LOGIN_ARGS:?}"
+        );
+    }
+
+    // ============================================================
+    // I1（2026-10-08 架构评审）：退出钩子必须把登录等待者一起收
+    // ============================================================
+
+    /// **应用退出不留孤儿**：`lib.rs` 的 `RunEvent::Exit` 钩子此前只 `tunnel::stop_all` +
+    /// `tailscale::stop_all`（隧道/通道），而 `tailscale login` 的等待者**不是通道**——
+    /// 它是本模块唯一的长期子进程（`--timeout 15s` 有界，但 15 秒内 MAM 退出就是孤儿）。
+    /// 形态针：退出钩子里必须出现 `tailscale::cancel_login_attempt()`。
+    /// 变异：删掉 lib.rs 里那一行 → 必红。
+    #[test]
+    fn app_exit_hook_reaps_login_attempt() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+            .expect("读 lib.rs");
+        let start = src
+            .find("RunEvent::Exit")
+            .expect("退出钩子必须存在（M4：应用退出清理子进程）");
+        let hook = &src[start..];
+        assert!(
+            hook.contains("tailscale::cancel_login_attempt()"),
+            "退出钩子必须收掉 `tailscale login` 的等待者（kill + wait）——\n\
+             否则 MAM 退出后它就是一个孤儿进程: {hook}"
+        );
+    }
+
+    /// 槽空时收尾口必须是**无副作用的安全调用**（退出钩子会在任何状态下调用它：
+    /// 用户可能一次都没点过「获取登录链接」）。本用例不派生任何进程。
+    #[test]
+    fn cancel_login_attempt_is_safe_without_a_child() {
+        cancel_login_attempt(); // 槽空 → no-op，不得 panic
+        reap_login_attempt();
+        assert!(
+            login_child_slot_is_empty(),
+            "槽空时收尾口不得凭空变出一个子进程句柄"
+        );
     }
 
     /// **M4（2026-10-07 评审 Minor）恢复窗口内的卡点必须是琥珀档（amber）**：

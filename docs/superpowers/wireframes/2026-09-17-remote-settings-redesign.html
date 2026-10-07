@@ -370,9 +370,32 @@
             <div class="step done">✓ 安装 Tailscale（已获管理员确认）</div>
             
             <div class="step cur">⏳ 正在下载安装包（官方源 + sha256 校验）… <span class="side">（总量未知 ⇒ 只表示「在走动」，不给百分比；i18n `tsWizard.downloading`）</span></div>
-            
             <div class="step done">✓ 安装 Tailscale（已获管理员确认）<span class="side">（Windows MSI 版：安装向导会让你选安装路径——动作文案点明「用默认路径最省事」；安装行常驻弱提示，说明 MAM 的两个查找位置 + 装完点「刷新状态」）</span></div>
-            <div class="step cur">⏳ 登录 Tailscale —— <button class="btn">打开登录页</button> 等待你在浏览器完成登录…</div>
+            <!-- 2026-10-07 十一次回写（⑤ 用户实测 + 根因诊断）：原稿画的
+                 `<button class="btn">打开登录页</button>` 是**对的方向**，但实现此前只在
+                 `probe.authUrl` 非空时渲染一条**文字链接**，而新装机器上
+                 `tailscale status --json` 是 `NeedsLogin ∧ AuthURL=""`——授权链接要
+                 **发起一次交互式登录**（`tailscale login`，与 Windows GUI 的「Log in」
+                 按钮同义）才由尾网生成，而 MAM 全仓 `run_cli` 调用点**从来没有 up/login**，
+                 ⇒ 链接永远不出现 ⇒ **登录行里没有任何可点的东西**（用户实测原话：
+                 「登录代做，我没有看到有链接什么的」，只能自己去客户端手动登录）。
+                 故本行改为三件套（实现 = TailscaleWizard 的 login 行）：
+                 ① 拿到链接 → `<button>`（Button asChild 包 `<a target="_blank"
+                    rel="noreferrer noopener">`）；② 还没有链接 → 一个
+                    **「获取登录链接」按钮**（点它让 MAM 主动向后端要：后端**后台**发起
+                    `tailscale login`（只 spawn 不等待——该命令 `--timeout` 默认 0s
+                    会一直等用户在浏览器完成，同步等它=把向导挂死）+ **有界轮询**
+                    `status --json` 的 AuthURL（≤9.5s）取回）；③ 拿不到 → 一句**明确的
+                    下一步**（去本机 Tailscale 客户端点「Log in」/ 点「刷新状态」重试），
+                    而不是让用户自己去客户端里找。
+                 **合规红线不变（模块头注释写死）**：MAM **只递链接**——不代登录、
+                 不持有任何用户凭据；登录始终由用户在浏览器完成。
+                 另：登录窗口内窗口重新拿到 focus 时自动重探一次（用户切回 MAM 即见
+                 「已完成」），**不做定时轮询**（沿用「GET 时机 = 挂载/状态跃迁/动作后」）。 -->
+            <div class="step cur">⏳ 登录 Tailscale —— <button class="btn">去登录</button>
+              <button class="btn">获取登录链接</button>
+              <span class="side">（还没有链接时给「获取登录链接」+ 下一步文案；拿到后「去登录」做成按钮，新窗口打开。点「获取登录链接」在途期间同样挂不确定进度：后端最长 9.5s 取链接，i18n `tsWizard.fetchingLoginLink`）</span>
+              等待你在浏览器完成登录…</div>
             <!-- 2026-10-07 三次回写（A1 实测）：Windows 11 家庭版 / Tailscale 1.102.4 MSI
                  实测 `funnel --bg` 退出码 0、0.1 秒返回、**零批准链接、零人工点击**；而
                  macOS 实测首开确有一次批准。两平台各执一端 ⇒ 批准是**可能不出现的分支**，

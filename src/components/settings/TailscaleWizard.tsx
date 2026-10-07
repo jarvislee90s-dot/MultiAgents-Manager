@@ -51,15 +51,18 @@ const stepLabel = (t: ReturnType<typeof useAppTranslation>["t"], id: string) =>
 //（§C3，未验/失败都要能重触发校验）；autostart 是 MAM 自身行为（恒已完成）
 const RUNNABLE = new Set(["download", "install", "shields_up", "funnel"]);
 
-// ④ 「在走动」反馈的适用范围（2026-10-07 用户裁决）：只有这两步会给用户一段
+// ④ 「在走动」反馈的适用范围（2026-10-07 用户裁决）：只有这三步会给用户一段
 // **没有任何其它动静**的等待——download = 一次同步下载（Rust 侧 download_url_to 一次性
-// 取回，期间零反馈）；install = 系统授权框之后到安装器返回之间（msiexec/installer 阻塞）。
-// 其余步（shields_up / funnel）是秒级 CLI 写，不给每一步都挂噪音。
+// 取回，期间零反馈）；install = 系统授权框之后到安装器返回之间（msiexec/installer 阻塞）；
+// login = 「获取登录链接」的动作（后端后台发起 `tailscale login` + 有界轮询取链接，
+// 最长 9.5s——这一步同样只有"进行中…"可看，而它正是用户实测"没有可点之物"的那一步，
+// 更要让用户看见 MAM 确实去要了）。其余步（shields_up / funnel）是秒级 CLI 写，不给每步都挂噪音。
 // **不确定进度（indeterminate）**：总量未知 ⇒ 不给百分比（与移动端「速率未知只显示已传
 // 字节，不显示假百分比」同一条纪律），只表示「正在传输，没有卡住」。
 const LONG_STEP_HINT: Record<string, string> = {
   download: "settings.remote.tsWizard.downloading",
   install: "settings.remote.tsWizard.installing",
+  login: "settings.remote.tsWizard.fetchingLoginLink",
 };
 
 // **M3（2026-10-07 评审 Minor）**：线稿状态二的两行琥珀提示（wireframe 354-355：
@@ -89,12 +92,23 @@ export function TailscaleWizard() {
   const [busyStep, setBusyStep] = useState<string | null>(null);
   // funnel 步回执带出的批准链接（首次开通时上游要求一次浏览器批准；MAM 只递不代点）
   const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
+  // ⑤ login 步回执带出的授权链接（「获取登录链接」按钮的产物）：回执里拿到的链接**立即**
+  // 上墙，不等下一次探测——探测的 authUrl 是同一字段（后端 status --json 的 AuthURL），
+  // 两条路同源，回执只是把用户刚点出来的结果直接交回去（少一次"点了没反应"的空窗）。
+  // **M4（2026-10-08 架构评审）：回执必须有失效机制**——它只是"过渡态"，随**下一次探测
+  // 落地**作废（`receiptGen` 代数与 `probeGen` 对齐；探测是权威源，见 loginLink 的计算）。
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [receiptGen, setReceiptGen] = useState(0);
+  // 探测落地的代数（每次成功探到一轮读数 +1）：回执只对"它之后还没有新探测"的窗口有效
+  const [probeGen, setProbeGen] = useState(0);
   // 动作失败的落点（Task 6 评审移交指针）：按步骤行内展示，不再 catch 吞错零反馈
   const [stepError, setStepError] = useState<{ step: string; message: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
       setProbe(await remoteTsProbe());
+      // 探测落地 = 权威源更新一次 ⇒ 回执代数随之作废（M4）
+      setProbeGen((g) => g + 1);
       setLoadError(null);
     } catch (e) {
       setLoadError(typeof e === "string" ? e : String(e));
@@ -112,6 +126,12 @@ export function TailscaleWizard() {
     try {
       const r = await remoteTsRunStep(step);
       if (r.approvalUrl) setApprovalUrl(r.approvalUrl);
+      // ⑤ login 步回执的授权链接（后端主动取回的，MAM 只递不代登录）；M4：记下它到的
+      // **探测代数**——紧随其后的那次重探一落地，本回执即作废（探测是权威源）
+      if (r.authUrl) {
+        setAuthUrl(r.authUrl);
+        setReceiptGen(probeGen);
+      }
       await load(); // 动作回执后重探一次（GET 时机 = 挂载/动作后，不做时刻轮询）
     } catch (e) {
       // 失败不弹全局 toast 抢焦点：把错误落到对应步骤行（可见错误行），重探刷新状态
@@ -125,6 +145,35 @@ export function TailscaleWizard() {
   const stateOf = (id: string): TsStepState | undefined => probe?.states.find((s) => s.id === id);
   // §C3：头部地址门控——只有校验通过（Verified）才算可用地址；未验证/失败一律不展示
   const reachVerified = probe?.reach?.state === "verified";
+  // ⑤ 登录窗口：登录步未完成时，链接可能由两条路出现（用户点「获取登录链接」、或用户在
+  // 浏览器里点完了）——两条都在下面接住
+  const loginDone = stateOf("login")?.done ?? false;
+  // **权威源仍是探测**（与全仓「UI 以重探为权威源」一致）：探测有链接就用探测的（授权链接
+  // 会被 tailscaled 轮换/失效，回执里那条可能已经过期）。
+  // **M4（2026-10-08 架构评审）：回执有失效机制**——它只在"还没有新探测落地"的窗口里有效
+  //（`receiptGen === probeGen`，即它到的时候是第几代探测），把用户刚点出来的结果**立即**
+  // 上墙、免得出现"点了没反应"的空窗；下一次探测一落地就**一律以探测为准**（哪怕探测说
+  // "没有链接"——那是权威读数，不许拿旧回执硬撑）。旧实现在探测报空时仍回落到回执，
+  // 与"探测是权威源"的注释自相矛盾。
+  const receiptLive = authUrl !== null && receiptGen === probeGen;
+  const loginLink = (probe?.authUrl ? probe.authUrl : null) ?? (receiptLive ? authUrl : null);
+
+  // ⑤ 登录窗口的**自动复评**（用户实测：登录步曾无可点之物，见下方渲染块注释）。
+  // 用户路径是「点链接 → 浏览器抢走焦点 → 在浏览器完成登录 → 切回 MAM」——窗口重新拿到
+  // focus 时重探一次，登录步自动翻「已完成」、向导继续往下走。
+  // **为什么不做定时轮询**：本仓纪律是「GET 时机 = 挂载 / 状态跃迁 / 动作后」，且这一窗口的
+  // 真值变化**只可能由用户离开/回到本窗口引起**；拿不到链接时用户手上还有「获取登录链接」
+  // 与「刷新状态」两条明路，不需要后台偷跑 CLI（探一次要派生 3 个进程）。
+  // **M5（2026-10-08 架构评审）：作用域收窄到"链接已在屏幕上"这一窗口。** 旧判据只有
+  // `!loginDone`，于是"已装未登录"的整段时间里每次聚焦都白跑一轮探测（3 个 CLI 派生）——
+  // 用户切个窗口回来就付这个代价；而上面那条用户路径**必然先有链接**（没链接时他还在
+  // 向导里点「获取登录链接」，不存在"去浏览器登录完切回来"这一幕）。
+  useEffect(() => {
+    if (loginDone || !loginLink) return;
+    const onFocus = () => void load();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [load, loginDone, loginLink]);
 
   return (
     <div data-testid="ts-wizard">
@@ -247,7 +296,16 @@ export function TailscaleWizard() {
           const done = st?.done ?? false;
           const busy = busyStep === step.id;
           const blocked = st?.blockedReason ?? null;
-          const actionText = step.needsHuman && step.humanActionKey ? t(step.humanActionKey) : "";
+          // **I3（2026-10-08 架构评审）：动作文案必须指向行内真实存在的按钮。**
+          // 后端下发的 `actLogin` 是"点击「去登录」…"，而「去登录」按钮**只在 loginLink
+          // 非空时渲染**（见下方 login 块）——无链接时行内只有「获取登录链接」(+兜底提示)，
+          // 沿用 actLogin 就是同一行两条矛盾指令（⑤ 要消灭的"无可点之物"的降级版）。
+          // 故无链接时换 `actLoginNoLink`（两个 locale 同步新增，文案里点名的正是那个真按钮）。
+          const actionKey =
+            step.id === "login" && !loginLink
+              ? "settings.remote.tsWizard.actLoginNoLink"
+              : step.humanActionKey;
+          const actionText = step.needsHuman && actionKey ? t(actionKey) : "";
           return (
             <div
               key={step.id}
@@ -286,18 +344,42 @@ export function TailscaleWizard() {
                       {t("settings.remote.tsWizard.runStep")}
                     </Button>
                   )}
-                  {/* login：MAM 不代登录——只递授权链接（authUrl 由 probe/run_step 透出） */}
-                  {step.id === "login" && !done && probe?.authUrl && (
-                    <a
-                      data-auth
-                      data-testid="ts-auth-link"
-                      href={probe.authUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-xs text-blue-500 underline"
+                  {/* login：MAM 不代登录——只递授权链接。**⑤（2026-10-07 用户实测）**：
+                      旧实现只在 `probe.authUrl` 非空时渲染一条文字链接，而新装机器上
+                      `status --json` 是 `NeedsLogin ∧ AuthURL=""`（授权链接要**发起一次
+                      交互式登录**才由尾网生成）⇒ **登录行里没有任何可点的东西**，用户
+                      「没有看到有链接什么的」，只能自己去客户端手动登录。
+                      现在两条路都给：
+                      ① 拿到链接（回执 / 探测）→ 做成**明确的按钮**（Button asChild 包 <a>，
+                         新窗口 + noreferrer noopener）；
+                      ② 还没有链接 → 一个**「获取登录链接」按钮**（点它让 MAM 主动向后端要：
+                         后端后台发起 `tailscale login` + 有界轮询取链接，见 Rust
+                         `login_step_with`）+ 一句**明确的下一步**文案（不是让用户自己去
+                         客户端里找）。合规红线不变：**只递链接，不代登录、不持凭据**。 */}
+                  {step.id === "login" && !done && loginLink && (
+                    <Button asChild size="sm" className="h-6 px-2 text-xs">
+                      <a
+                        data-auth
+                        data-testid="ts-auth-link"
+                        href={loginLink}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                      >
+                        {t("settings.remote.tsWizard.openAuthUrl")}
+                      </a>
+                    </Button>
+                  )}
+                  {step.id === "login" && !done && (
+                    <Button
+                      variant={loginLink ? "ghost" : "outline"}
+                      size="sm"
+                      className="h-6 px-2 text-xs"
+                      data-testid="ts-login-link-btn"
+                      disabled={busyStep !== null}
+                      onClick={() => void run("login")}
                     >
-                      {t("settings.remote.tsWizard.openAuthUrl")}
-                    </a>
+                      {t("settings.remote.tsWizard.getLoginLink")}
+                    </Button>
                   )}
                   {/* verify：§C3 专属重试钮（未验/失败都可重触发校验；后端含自愈） */}
                   {step.id === "verify" && !done && (
@@ -359,6 +441,19 @@ export function TailscaleWizard() {
                     className="text-muted-foreground mt-0.5 text-[11px]"
                   >
                     {t("settings.remote.tsWizard.installPathHint")}
+                  </p>
+                )}
+                {/* ⑤ 拿不到链接时的**明确下一步**（用户实测的正是这一段：行里只有动作文案、
+                    没有任何可点的东西，用户只能自己去客户端里手动登录）。文案说清三件事：
+                    点上面的按钮让 MAM 去要链接 / MAM 不代登录不碰账号 / 兜底可到本机
+                    Tailscale 客户端点「Log in」，或点右上「刷新状态」重试。
+                    busy 期间不挂（正在要链接，别同时喊两边）。 */}
+                {step.id === "login" && !done && !loginLink && !busy && (
+                  <p
+                    data-testid="ts-login-hint"
+                    className="text-muted-foreground mt-0.5 text-[11px] leading-snug"
+                  >
+                    {t("settings.remote.tsWizard.loginLinkHint")}
                   </p>
                 )}
                 {step.needsHuman && step.humanOptional && (

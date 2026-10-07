@@ -328,6 +328,10 @@ pub fn run() {
             // §C1 修复轮 1 Finding 2②：Funnel 无子进程可 kill_on_drop（守护 =
             // 轮询线程 + tailscaled 常驻配置），进程退出必须显式撤 + 收 DESIRED
             crate::remote::tailscale::stop_all();
+            // I1（2026-10-08 架构评审）：`tailscale login` 的等待者**不是通道**，
+            // stop_all 收不到它——它是本模块唯一长期存在的子进程（`--timeout 15s` 有界，
+            // 但 15 秒内 MAM 退出就是一个孤儿进程）。kill + wait 收掉。
+            crate::remote::tailscale::cancel_login_attempt();
             crate::remote::power::release();
         }
     });

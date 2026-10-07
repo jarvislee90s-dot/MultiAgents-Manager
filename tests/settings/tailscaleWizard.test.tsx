@@ -7,7 +7,7 @@
 // 向导挂进 RemoteSection 的 tailscale 卡详情区，独立入口行已撤）/ i18n zh-en
 // tsWizard 两级键齐备且两 locale 键集相等。
 // mock 模式沿用 tests/settings/remoteSection.test.tsx（vi.hoisted + vi.mock）。
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -441,6 +441,236 @@ describe("TailscaleWizard ④下载步「在走动」反馈（不确定进度，
     expect(within(stepRow("shields_up")).queryByTestId("ts-step-progress")).toBeNull();
   });
 });
+
+// ⑤ 登录步必须**可点**（2026-10-07 用户实测：登录那一步没有可点的东西，只能自己去客户端
+// 手动登录）。诊断（读码 + 注入缝复现）：新装机器上 `status --json` 是
+// `NeedsLogin ∧ AuthURL=""`——授权链接由尾网在**发起一次交互式登录**时才生成（tailscale
+// login / GUI 的「Log in」按钮），而 MAM 此前从不发起（全仓 run_cli 调用点无 up/login）；
+// 前端又只在 `probe.authUrl` 非空时才渲染链接 ⇒ 登录行里有"需要你操作：去浏览器登录"的
+// 文案，却没有任何可点的东西。修法：MAM **主动取链接**（后端后台发起 + 有界轮询，见 Rust
+// `login_step_with`），前端把链接做成按钮、拿不到时给明确的下一步。
+// 合规红线不变：MAM **只递链接，不代登录、不持凭据**（登录始终在浏览器由用户完成）。
+describe("TailscaleWizard ⑤登录步可点（新装 AuthURL 为空不再是死胡同）", () => {
+  const noLinkProbe = () => macProbe({ authUrl: "" });
+
+  it("authUrl 为空：登录行给出明确的「Get login link」按钮 + 下一步文案（旧实现此处空无一物）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_ts_probe") return noLinkProbe();
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    const btn = within(stepRow("login")).getByTestId("ts-login-link-btn");
+    expect(btn.tagName).toBe("BUTTON");
+    expect(btn.textContent).toMatch(/get login link/i);
+    // 拿不到链接时给**明确的下一步**（不是让用户自己去客户端里找）
+    expect(within(stepRow("login")).getByTestId("ts-login-hint").textContent).toMatch(
+      /tailscale app/i
+    );
+    // 未点击前不发任何 run_step（不偷跑登录尝试）
+    expect(invokeMock.mock.calls.filter((c) => c[0] === "remote_ts_run_step").length).toBe(0);
+  });
+
+  it("点按钮 → remote_ts_run_step(login)（MAM 只递链接不代登录）；回执链接在探测落地前立即上墙", async () => {
+    // **M4（2026-10-08 架构评审）**：回执是**过渡态**（"点了立刻上墙"），权威源仍是探测。
+    // 本用例把动作后的那次重探**挂住**，模拟"探测在途"的真实窗口 ⇒ 回执的链接必须先上墙
+    // （否则用户点了没反应）；随后释放探测，断言上墙的换成**探测那条**（回执让位）。
+    let releaseProbe: (v: unknown) => void = () => {};
+    let probes = 0;
+    invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
+      if (cmd === "remote_ts_probe") {
+        probes += 1;
+        if (probes === 1) return noLinkProbe(); // 挂载：无链接
+        return await new Promise((r) => {
+          releaseProbe = r; // 动作后的重探：挂住（在途）
+        });
+      }
+      if (cmd === "remote_ts_run_step" && args?.step === "login")
+        return { ok: true, authUrl: "https://login.tailscale.com/a/fetched", triggered: true };
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    fireEvent.click(within(stepRow("login")).getByTestId("ts-login-link-btn"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_ts_run_step", { step: "login" })
+    );
+    const link = await within(stepRow("login")).findByTestId("ts-auth-link");
+    expect(link.getAttribute("href")).toBe("https://login.tailscale.com/a/fetched");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(link.getAttribute("rel")).toContain("noreferrer");
+    // 有链接就有明路：兜底文案收起
+    expect(within(stepRow("login")).queryByTestId("ts-login-hint")).toBeNull();
+    // 探测落地（权威源给的是另一条）⇒ 上墙的必须是探测那条，回执作废
+    releaseProbe(macProbe({ authUrl: "https://login.tailscale.com/a/from-probe" }));
+    await waitFor(() =>
+      expect(within(stepRow("login")).getByTestId("ts-auth-link").getAttribute("href")).toBe(
+        "https://login.tailscale.com/a/from-probe"
+      )
+    );
+  });
+
+  // **M4（2026-10-08 架构评审）**：旧实现的回执链接**没有失效机制**——`probe.authUrl`
+  // 为空（后端已不再持有那条链接：轮换/失效/尾网重来）时仍拿旧回执硬撑上墙，与"探测是
+  // 权威源"的注释矛盾。修法：回执只在**它之后还没有新探测落地**的窗口里有效；下一次探测
+  // 一落地就以探测为准（哪怕是"没有链接"）。
+  it("M4：探测（权威源）落地说没有链接 ⇒ 回执链接作废，不再硬撑", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
+      if (cmd === "remote_ts_probe") return noLinkProbe(); // 权威源**始终**没有链接
+      if (cmd === "remote_ts_run_step" && args?.step === "login")
+        return { ok: true, authUrl: "https://login.tailscale.com/a/stale", triggered: true };
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    fireEvent.click(within(stepRow("login")).getByTestId("ts-login-link-btn"));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("remote_ts_run_step", { step: "login" })
+    );
+    // 动作后的重探已落地（权威源：无链接）⇒ 那条回执不许继续当链接挂着
+    await waitFor(() => expect(within(stepRow("login")).queryByTestId("ts-auth-link")).toBeNull());
+    // 回到"拿不到链接"的如实呈现：明路仍是「获取登录链接」+ 兜底文案（不是无可点之物）
+    expect(within(stepRow("login")).getByTestId("ts-login-link-btn")).toBeTruthy();
+    expect(within(stepRow("login")).getByTestId("ts-login-hint")).toBeTruthy();
+  });
+
+  // **I3（2026-10-08 架构评审）**：登录行的琥珀动作文案必须**指向真实存在的按钮**。
+  // 旧形态两种（无链接 / 有链接）共用 `actLogin` =「点击「去登录」」，而「去登录」按钮
+  // **只在 loginLink 非空时渲染** ⇒ 无链接时行内只有「获取登录链接」，同一行两条矛盾指令
+  // （正是 ⑤ 要消灭的"无可点之物"的降级版）。修法：无链接时换一个键，且文案里点名的就是
+  // 行内那个真按钮。
+  it("I3：无链接时动作文案指向「Get login link」（行内真实存在的按钮），不指向渲染不出来的「Sign in」", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_ts_probe") return noLinkProbe();
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    const row = stepRow("login");
+    const action = within(row).getByText(/your action/i);
+    // 行内没有「Sign in」按钮（无链接 ⇒ 不渲染），文案不得让用户去点它
+    expect(within(row).queryByTestId("ts-auth-link")).toBeNull();
+    expect(action.textContent).not.toMatch(/click\s+“?sign in/i);
+    // 文案必须点名行内**真的存在**的那个按钮（比对按钮自身的文案，不写死测试侧字面量）
+    const realButton = within(row).getByTestId("ts-login-link-btn");
+    expect(realButton.textContent).toBeTruthy();
+    expect(action.textContent).toContain(realButton.textContent!);
+  });
+
+  it("I3：有链接时动作文案仍指向「Sign in」，且那个按钮确实在行内", async () => {
+    render(<TailscaleWizard />); // 默认 macProbe 带 authUrl
+    await screen.findByText("Detect Tailscale");
+    const row = stepRow("login");
+    const action = within(row).getByText(/your action/i);
+    const signIn = within(row).getByTestId("ts-auth-link");
+    expect(signIn.textContent).toBeTruthy();
+    expect(action.textContent).toContain(signIn.textContent!);
+  });
+
+  it("点按钮在途期间也给走动反馈（后端最长 9.5s 取链接，同样要看得见 MAM 去要了）", async () => {
+    let release: (v: unknown) => void = () => {};
+    invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
+      if (cmd === "remote_ts_probe") return noLinkProbe();
+      if (cmd === "remote_ts_run_step" && args?.step === "login")
+        return await new Promise((r) => {
+          release = r;
+        });
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    fireEvent.click(within(stepRow("login")).getByTestId("ts-login-link-btn"));
+    const bar = await within(stepRow("login")).findByTestId("ts-step-progress");
+    expect(bar.textContent).toMatch(/getting the login link/i);
+    expect(bar.textContent).not.toMatch(/%/);
+    release({ ok: true, authUrl: "https://login.tailscale.com/a/x" });
+    await waitFor(() =>
+      expect(within(stepRow("login")).queryByTestId("ts-step-progress")).toBeNull()
+    );
+  });
+
+  it("焦点回到窗口时重探一次（在浏览器里登录完切回来 → 登录步自动翻已完成；不做时刻轮询）", async () => {
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    // 夹具自检：默认载荷是"有链接、登录未完成"——这正是用户会离开窗口的那一态
+    expect(within(stepRow("login")).getByTestId("ts-auth-link")).toBeTruthy();
+    const before = invokeMock.mock.calls.filter((c) => c[0] === "remote_ts_probe").length;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await waitFor(() => {
+      const after = invokeMock.mock.calls.filter((c) => c[0] === "remote_ts_probe").length;
+      expect(after).toBeGreaterThan(before);
+    });
+  });
+
+  // **M5（2026-10-08 架构评审）**：focus 复评的作用域**收窄到"链接已在屏幕上"这一窗口**。
+  // 旧判据只有"登录步未完成"，于是"已装未登录"的整段时间里每次聚焦都白跑一轮探测
+  // （一轮 = 3 个 CLI 派生：status / get / funnel status）——用户切个窗口回来就付这个代价。
+  // 用户路径（点链接 → 浏览器登录 → 切回）**必然先有链接**；没有链接时手上还有
+  // 「获取登录链接」与「刷新状态」两条明路，不需要后台偷跑 CLI。
+  it("M5：无链接（还没到可点之处）时 focus 不重探——作用域收窄，不白跑 CLI", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_ts_probe") return macProbe({ authUrl: "" });
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    expect(within(stepRow("login")).queryByTestId("ts-auth-link")).toBeNull();
+    const before = invokeMock.mock.calls.filter((c) => c[0] === "remote_ts_probe").length;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    // 给微任务/副作用一个落地机会再判"没有新增探测"
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const after = invokeMock.mock.calls.filter((c) => c[0] === "remote_ts_probe").length;
+    expect(after).toBe(before);
+  });
+
+  it("M5：登录已完成（登录步 done）时 focus 也不重探", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_ts_probe")
+        return macProbe({
+          states: macProbe().states.map((s: { id: string; done: boolean }) =>
+            s.id === "login" ? { ...s, done: true } : s
+          ),
+        });
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    const before = invokeMock.mock.calls.filter((c) => c[0] === "remote_ts_probe").length;
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const after = invokeMock.mock.calls.filter((c) => c[0] === "remote_ts_probe").length;
+    expect(after).toBe(before);
+  });
+
+  it("登录已完成 → 不渲染「获取登录链接」按钮，也不挂兜底文案", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "remote_ts_probe")
+        return macProbe({
+          authUrl: "",
+          states: macProbe().states.map(
+            (s: { id: string; done: boolean; blockedReason: string | null }) =>
+              s.id === "login" ? { ...s, done: true } : s
+          ),
+        });
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    expect(within(stepRow("login")).queryByTestId("ts-login-link-btn")).toBeNull();
+    expect(within(stepRow("login")).queryByTestId("ts-login-hint")).toBeNull();
+  });
+});
+
 describe("TailscaleWizard A1：Funnel 批准是「可能不出现」的分支，不是必经步骤", () => {
   it("可选人工步（humanOptional）带「可能无需此步」弱提示；必需人工步不带", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -922,6 +1152,21 @@ describe("TailscaleWizard i18n zh/en（tsWizard 两级键）", () => {
     ]) {
       expect(zhKeys.has(k)).toBe(true);
       expect(enKeys.has(k)).toBe(true);
+    }
+  });
+
+  // **I3（2026-10-08 架构评审）**：登录行的动作文案必须指向**行内真实存在**的按钮——两
+  // locale 都要。有链接 ⇒ 行内是「去登录」（openAuthUrl）；无链接 ⇒ 行内只有「获取登录
+  // 链接」（getLoginLink），故无链接那条键必须点名**后者**。语言级锁（渲染级锁见 ⑤ 组）。
+  it("I3：两 locale 的登录动作文案各自点名本 locale 真正会渲染的那个按钮", () => {
+    const zh = JSON.parse(readFileSync(path.join(root, "src/i18n/locales/zh.json"), "utf8"));
+    const en = JSON.parse(readFileSync(path.join(root, "src/i18n/locales/en.json"), "utf8"));
+    for (const loc of [zh, en]) {
+      const w = loc.settings.remote.tsWizard;
+      expect(w.actLogin).toContain(w.openAuthUrl); // 有链接 ⇒ 指向「去登录」
+      expect(w.actLoginNoLink).toContain(w.getLoginLink); // 无链接 ⇒ 指向「获取登录链接」
+      // 无链接那条**不得**再叫用户点「去登录」（那个按钮此刻根本没渲染）
+      expect(w.actLoginNoLink).not.toContain(w.openAuthUrl);
     }
   });
 });
