@@ -993,7 +993,11 @@ fn kimi_footer_line(lines: &[String]) -> Option<&String> {
 /// - `DeepSeek…`（manual × plan OFF）→ Default。
 fn parse_kimi_footer(lines: &[String]) -> Option<MamMode> {
     let footer = kimi_footer_line(lines)?;
-    if footer.to_lowercase().split_whitespace().any(|w| w == "plan") {
+    if footer
+        .to_lowercase()
+        .split_whitespace()
+        .any(|w| w == "plan")
+    {
         Some(MamMode::Plan)
     } else {
         // 缺席推断（§2.6 表末）：底栏在、没有独立词 plan → 默认档
@@ -1017,9 +1021,8 @@ fn parse_kimi_permission_footer(lines: &[String]) -> Option<MamMode> {
     let footer = kimi_footer_line(lines)?;
     let lower = footer.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
-    let starts_with = |label: &[&str]| {
-        words.len() >= label.len() && words.iter().zip(label).all(|(w, l)| w == l)
-    };
+    let starts_with =
+        |label: &[&str]| words.len() >= label.len() && words.iter().zip(label).all(|(w, l)| w == l);
     if starts_with(&["ask", "when", "needed"]) {
         Some(MamMode::AcceptEdits)
     } else if starts_with(&["never", "ask"]) {
@@ -1035,11 +1038,7 @@ fn parse_kimi_permission_footer(lines: &[String]) -> Option<MamMode> {
 /// - 模式轴：四家各自底栏（[`parse_mode_from_screen`]）；
 /// - 权限轴：**仅 kimi 有底栏回读源**（2.1.1 起）；codex 权限组底栏仍只有模式文本
 ///   → None；其余工具无两轴结构 → None。
-pub fn parse_axis_from_screen(
-    tool: &str,
-    group: ModeGroupId,
-    lines: &[String],
-) -> Option<MamMode> {
+pub fn parse_axis_from_screen(tool: &str, group: ModeGroupId, lines: &[String]) -> Option<MamMode> {
     match group {
         ModeGroupId::Mode => parse_mode_from_screen(tool, lines),
         ModeGroupId::Permission => match tool {
@@ -1216,8 +1215,7 @@ where
         reads: 0,
     };
     for i in 0..effective {
-        let observed =
-            read().and_then(|lines| parse_axis_from_screen(tool, group, &lines));
+        let observed = read().and_then(|lines| parse_axis_from_screen(tool, group, &lines));
         let verdict = verify_mode_switch(expected, observed);
         last = ModeReadbackOutcome {
             verdict,
@@ -3689,7 +3687,10 @@ mod tests {
         );
         // 模式轴在无 plan 词的新版式下 → Default（2.1.1 × yolo × plan OFF 由分词判）
         let plan_off = lines(&["Ask When Needed  DeepSeek V4.1 Flash thinking: high  C:\\p"]);
-        assert_eq!(parse_mode_from_screen("kimi", &plan_off), Some(MamMode::Default));
+        assert_eq!(
+            parse_mode_from_screen("kimi", &plan_off),
+            Some(MamMode::Default)
+        );
         // codex 无权限轴回读源（其底栏仍只有模式文本）→ None
         assert_eq!(
             parse_axis_from_screen("codex", ModeGroupId::Permission, &yolo),
@@ -6121,7 +6122,10 @@ mod tests {
         // 普通行的属性差 = 粗体/加亮是否属性级可读的判据
         match crate::inject::windows_console::read_screen_window_attrs(pid) {
             Ok(rows) => {
-                eprintln!("==== 属性层 {} 行（行程压缩：起点x-长度:0x掩码）====", rows.len());
+                eprintln!(
+                    "==== 属性层 {} 行（行程压缩：起点x-长度:0x掩码）====",
+                    rows.len()
+                );
                 for (i, row) in rows.iter().enumerate() {
                     let mut runs: Vec<String> = Vec::new();
                     let mut cur = row.first().copied().unwrap_or(0);

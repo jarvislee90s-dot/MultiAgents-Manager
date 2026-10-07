@@ -4436,11 +4436,7 @@ mod tests {
         let state = inject_state(fake.clone());
         persist_named_device(&state, "mm", "测试设备");
         state.store.with(|conn| {
-            crate::database::dao::settings::set_setting_conn(
-                conn,
-                "remote_message_signature",
-                "on",
-            )
+            crate::database::dao::settings::set_setting_conn(conn, "remote_message_signature", "on")
         });
         let app = router(state.clone());
         let r = app
@@ -4851,8 +4847,7 @@ mod tests {
         assert_eq!(r.status(), 200);
         let body = body_string(r).await;
         assert!(
-            body.contains(&format!("\"id\":{item_id}"))
-                && body.contains("修改后重发"),
+            body.contains(&format!("\"id\":{item_id}")) && body.contains("修改后重发"),
             "queueOnly 条目应留在队列等自动放行：{body}"
         );
     }
@@ -8182,9 +8177,7 @@ mod tests {
         // （2026-10-05 深夜；2026-10-06 扩 codex）——opencode=多选回删语义实证；
         // codex=Tab 清空备注（footer 活体明文「tab or esc to clear note」）；
         // kimi 多选自由作答未接入 → false
-        for (sid, expect_mft, expect_ovw) in
-            [("sess_al", true, true), ("sess_an", false, false)]
-        {
+        for (sid, expect_mft, expect_ovw) in [("sess_al", true, true), ("sess_an", false, false)] {
             let r = app
                 .clone()
                 .oneshot(req(

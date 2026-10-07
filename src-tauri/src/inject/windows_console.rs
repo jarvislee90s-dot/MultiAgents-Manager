@@ -55,8 +55,7 @@ use windows::Win32::Storage::FileSystem::{
 use windows::Win32::System::Console::{
     AttachConsole, FreeConsole, GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents,
     ReadConsoleOutputAttribute, ReadConsoleOutputCharacterW, WriteConsoleInputW,
-    CONSOLE_SCREEN_BUFFER_INFO, COORD,
-    INPUT_RECORD, KEY_EVENT,
+    CONSOLE_SCREEN_BUFFER_INFO, COORD, INPUT_RECORD, KEY_EVENT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, VkKeyScanW, MAPVK_VK_TO_VSC};
 
@@ -766,8 +765,12 @@ pub(crate) fn read_screen_window_attrs(pid: u32) -> Result<Vec<Vec<u16>>, String
     read_via(pid, |handle| {
         let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
         // SAFETY: FFI 调用；info 为本函数栈上缓冲
-        unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }
-            .map_err(|e| format!("GetConsoleScreenBufferInfo 失败（0x{:08X}）", e.code().0 as u32))?;
+        unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }.map_err(|e| {
+            format!(
+                "GetConsoleScreenBufferInfo 失败（0x{:08X}）",
+                e.code().0 as u32
+            )
+        })?;
         let win = info.srWindow;
         let width = (win.Right - win.Left + 1).max(0) as usize;
         let height = (win.Bottom - win.Top + 1).max(0) as usize;
@@ -775,10 +778,19 @@ pub(crate) fn read_screen_window_attrs(pid: u32) -> Result<Vec<Vec<u16>>, String
         for row in 0..height {
             let mut buf = vec![0u16; width];
             let mut read = 0u32;
-            let start = COORD { X: win.Left, Y: win.Top + row as i16 };
+            let start = COORD {
+                X: win.Left,
+                Y: win.Top + row as i16,
+            };
             // SAFETY: FFI 调用；buf 长度即读取上限
-            unsafe { ReadConsoleOutputAttribute(handle, &mut buf, start, &mut read) }
-                .map_err(|e| format!("ReadConsoleOutputAttribute 失败（0x{:08X}）", e.code().0 as u32))?;
+            unsafe { ReadConsoleOutputAttribute(handle, &mut buf, start, &mut read) }.map_err(
+                |e| {
+                    format!(
+                        "ReadConsoleOutputAttribute 失败（0x{:08X}）",
+                        e.code().0 as u32
+                    )
+                },
+            )?;
             buf.truncate(read as usize);
             rows.push(buf);
         }

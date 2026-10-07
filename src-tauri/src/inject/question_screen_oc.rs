@@ -320,7 +320,9 @@ pub fn kimi_question_screen_snapshot(lines: &[String]) -> Option<QuestionScreenS
                 }
                 let close = t.find(']')?;
                 let after = t[close + 1..].trim();
-                after.to_lowercase().starts_with("other")
+                after
+                    .to_lowercase()
+                    .starts_with("other")
                     .then(|| after.split_once(':').map(|(_, v)| v.trim().to_string()))
                     .flatten()
                     .filter(|v| !v.is_empty())
@@ -410,7 +412,11 @@ mod tests {
             "单选未选行 = Some(false)（无任何标记）；own 行不计——长度必须等于\
              选项数，否则 advance 回执快照被前端归属校验整体拒收（2026-10-06 修复）"
         );
-        assert_eq!(snap.free_text.as_deref(), Some("能否融合上述2篇的"), "残留必须同步（覆盖写入按钮的数据源）");
+        assert_eq!(
+            snap.free_text.as_deref(),
+            Some("能否融合上述2篇的"),
+            "残留必须同步（覆盖写入按钮的数据源）"
+        );
         assert!(snap.free_text_present);
         assert!(snap.heading.contains("这个页面的主要使用场景是"));
     }
@@ -484,14 +490,17 @@ mod tests {
             "".to_string(),
             "  ↑↓ select  1-4 / ? toggle  ←/→/tab switch  esc cancel".to_string(),
         ];
-        let snap =
-            kimi_question_screen_snapshot(&kimi_page).expect("kimi 多选页必须出快照");
+        let snap = kimi_question_screen_snapshot(&kimi_page).expect("kimi 多选页必须出快照");
         assert_eq!(
             snap.checked,
             vec![Some(false), Some(true), Some(false)],
             "逐选项勾选态（Other 行不计入 checked）"
         );
-        assert_eq!(snap.free_text.as_deref(), Some("有个想法"), "Other 残留同步");
+        assert_eq!(
+            snap.free_text.as_deref(),
+            Some("有个想法"),
+            "Other 残留同步"
+        );
         assert!(snap.free_text_present);
         // heading = `? ` 题干行（2026-10-06 刷新对位修复：不再拼 tab 栏杂讯——
         // 前端 findQuestionByHeading 拿它与载荷 question 字段 exact/partial 对位）
@@ -528,7 +537,10 @@ mod tests {
         assert_eq!(snap.checked, vec![Some(false), Some(false)]);
         assert!(!snap.free_text_present);
         // 无 checkbox 行（普通正文）→ None
-        assert_eq!(kimi_question_screen_snapshot(&["1. 普通".to_string()]), None);
+        assert_eq!(
+            kimi_question_screen_snapshot(&["1. 普通".to_string()]),
+            None
+        );
     }
 
     #[test]

@@ -221,7 +221,10 @@ mod tests {
     #[test]
     fn compose_flagged_signature_off_is_bare() {
         use super::compose_injection_flagged as compose;
-        assert_eq!(compose("iPhone", "帮我看看这个文件", false), "帮我看看这个文件");
+        assert_eq!(
+            compose("iPhone", "帮我看看这个文件", false),
+            "帮我看看这个文件"
+        );
         assert_eq!(
             compose("iPhone", "帮我看看这个文件", true),
             "帮我看看这个文件 [mobile iPhone]",

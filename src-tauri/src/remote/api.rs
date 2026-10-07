@@ -1016,14 +1016,11 @@ pub async fn session_send(
     // [`audit_action_for`] 的职责划分。
     // 签名开关（2026-10-05 用户裁决）：设置「远程消息带设备签名」默认关（省 token；
     // 溯源真源在注入审计页）。经 store.with 走会话自己的库（测试内存库零污染）
-    let signature_on = st.store.with(|conn| {
-        crate::inject::normalize::message_signature_enabled_conn(conn)
-    });
-    let content = crate::inject::normalize::compose_injection_flagged(
-        &device_name,
-        &req.text,
-        signature_on,
-    );
+    let signature_on = st
+        .store
+        .with(|conn| crate::inject::normalize::message_signature_enabled_conn(conn));
+    let content =
+        crate::inject::normalize::compose_injection_flagged(&device_name, &req.text, signature_on);
     // D6 修改重发：queueOnly=true 只跳过 ⑥ 的直发尝试（语义见 SessionSendReq::queue_only
     // 注释），入队与 ⑦ 运行中留队完全同路径同审计口径（action=queue）——flush 循环对
     // queueOnly 项与普通队列项同权（转闲按序自动放行），队列存储不携带该标志
@@ -4003,8 +4000,7 @@ pub async fn session_question(
     // 多题切页键未验 → 旗标 false，前端对这两家的多选题渲染「请到终端切题」引导。
     // 单题卡无页可切，恒 false。
     // kimi 加入（2026-10-06，2.1.1 活体定案 `→`/`←` 切题 + Review 返回修改）
-    let advance = matches!(tool_id.as_str(), "opencode" | "claude" | "kimi")
-        && questions.len() > 1;
+    let advance = matches!(tool_id.as_str(), "opencode" | "claude" | "kimi") && questions.len() > 1;
     // **←/→ 双向导航 + 多选自由作答**（2026-10-02/03，用户裁决 ←/→ 通用对应上一题/
     // 下一题）：仅 claude 的 ←/→ 键序已活体取证（含 Review 导航环）。opencode 的切页
     // 是 tab **前向**（会回绕），prev 语义不成立——前端据本旗标分流：navBoth=true
@@ -4019,8 +4015,7 @@ pub async fn session_question(
     // null（前端维持本地状态）。
     let screen_snapshot = match session_pid {
         Some(pid) if !questions.is_empty() => {
-            let snapshot_supported =
-                matches!(tool_id.as_str(), "claude" | "opencode" | "kimi");
+            let snapshot_supported = matches!(tool_id.as_str(), "claude" | "opencode" | "kimi");
             if !snapshot_supported {
                 None
             } else {
@@ -4131,62 +4126,62 @@ pub async fn session_question(
     json_no_store(
         StatusCode::OK,
         serde_json::json!({
-            "available": !questions.is_empty(),
-            "answerable": answerable,
-            // 前端契约：`freeText` 缺省按 false 处理（旧后端不识别则走降级文案）
-            "freeText": free_text_supported,
-            // E4-E6：多题交互旗标（缺省按 false → 只读卡）
-            "multiQuestion": multi_question,
-            // 切换题目能力旗标（缺省按 false → 不渲染切换钮，旧后端前向兼容）
-            "advance": advance,
-            // ←/→ 双向导航旗标（2026-10-02；缺省 false → 前端维持旧单钮，旧后端前向兼容）
-            "navBoth": nav_both,
-            // **多选卡自由作答**旗标（缺省 false → 旧后端前向兼容）。claude 此前经
-            // navBoth 间接点亮，本旗标为显式能力位（前端判 `navBoth ∨ multiFreeText`，
-            // 两旗任一即可）。2026-10-05 codex 实测点亮（Space 选中 + Tab notes 在
-            // 多选题全链实证——探测批 C）；**2026-10-06 kimi 点亮**（用户指令：多题
-            // 卡要有文字填写行——Other 输入格 + 发送 + 覆盖写入/清空按钮组。键序
-            // 走 KimiFreeText 阶段机：Other 行编号**按屏自适应**——单选子题 Other
-            // 有编号 → 全链通；多选 Other 无编号 → 第 1 段如实中止引导终端，
-            // 「未验不出手」由阶段机本身把守而非旗标一刀切）
-            "multiFreeText": matches!(tool_id.as_str(), "claude" | "opencode" | "codex" | "kimi"),
-            // **覆盖写入/清空能力位**（2026-10-05 深夜）：这两个按钮的键序语义须逐
-            // 工具实机取证才可出手——opencode 已取证（enter 探针走位 + 退格清空闭环，
-            // 本机自建会话活体验证）；codex 的 notes 覆盖语义未取证、kimi 多选自由
-            // 作答未接入 → false（前端对这两家**不渲染**覆盖写入/清空按钮——「未取证
-            // 不出手」）。缺省 false（旧后端前向兼容）
-            // 覆盖写入/清空能力位（2026-10-06 扩 codex）：opencode=多选回删语义
-            // （1754 行）；codex=Tab 清空备注（footer 活体明文「tab or esc to
-            // clear note」）。kimi 多选 Other 未点亮（multiFreeText=false 无面）
-            // kimi 加入（2026-10-06，2.1.1 定案 K7 重进带旧文本 + 退格可清；清空面
-    // 因「空回车 no-op」定案如实前置拒——前端收到失败回执引导终端操作）
-            "freeTextOverwrite": matches!(tool_id.as_str(), "opencode" | "codex" | "kimi"),
-            // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
-            // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
-            "screen": screen_snapshot,
-            "questions": questions
-                .iter()
-                .map(|q| serde_json::json!({
-                    "header": q.header,
-                    "question": q.question,
-                    "multiSelect": q.multi_select,
-                    "options": q
-                        .options
-                        .iter()
-                        .map(|o| serde_json::json!({
-                            "label": o.label,
-                            "description": o.description,
-                        }))
-                        .collect::<Vec<_>>(),
-                }))
-                .collect::<Vec<_>>(),
-            // 识别通道（诊断用；不可用时 null）
-            "source": if source.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::json!(source)
-            },
-        }),
+                "available": !questions.is_empty(),
+                "answerable": answerable,
+                // 前端契约：`freeText` 缺省按 false 处理（旧后端不识别则走降级文案）
+                "freeText": free_text_supported,
+                // E4-E6：多题交互旗标（缺省按 false → 只读卡）
+                "multiQuestion": multi_question,
+                // 切换题目能力旗标（缺省按 false → 不渲染切换钮，旧后端前向兼容）
+                "advance": advance,
+                // ←/→ 双向导航旗标（2026-10-02；缺省 false → 前端维持旧单钮，旧后端前向兼容）
+                "navBoth": nav_both,
+                // **多选卡自由作答**旗标（缺省 false → 旧后端前向兼容）。claude 此前经
+                // navBoth 间接点亮，本旗标为显式能力位（前端判 `navBoth ∨ multiFreeText`，
+                // 两旗任一即可）。2026-10-05 codex 实测点亮（Space 选中 + Tab notes 在
+                // 多选题全链实证——探测批 C）；**2026-10-06 kimi 点亮**（用户指令：多题
+                // 卡要有文字填写行——Other 输入格 + 发送 + 覆盖写入/清空按钮组。键序
+                // 走 KimiFreeText 阶段机：Other 行编号**按屏自适应**——单选子题 Other
+                // 有编号 → 全链通；多选 Other 无编号 → 第 1 段如实中止引导终端，
+                // 「未验不出手」由阶段机本身把守而非旗标一刀切）
+                "multiFreeText": matches!(tool_id.as_str(), "claude" | "opencode" | "codex" | "kimi"),
+                // **覆盖写入/清空能力位**（2026-10-05 深夜）：这两个按钮的键序语义须逐
+                // 工具实机取证才可出手——opencode 已取证（enter 探针走位 + 退格清空闭环，
+                // 本机自建会话活体验证）；codex 的 notes 覆盖语义未取证、kimi 多选自由
+                // 作答未接入 → false（前端对这两家**不渲染**覆盖写入/清空按钮——「未取证
+                // 不出手」）。缺省 false（旧后端前向兼容）
+                // 覆盖写入/清空能力位（2026-10-06 扩 codex）：opencode=多选回删语义
+                // （1754 行）；codex=Tab 清空备注（footer 活体明文「tab or esc to
+                // clear note」）。kimi 多选 Other 未点亮（multiFreeText=false 无面）
+                // kimi 加入（2026-10-06，2.1.1 定案 K7 重进带旧文本 + 退格可清；清空面
+        // 因「空回车 no-op」定案如实前置拒——前端收到失败回执引导终端操作）
+                "freeTextOverwrite": matches!(tool_id.as_str(), "opencode" | "codex" | "kimi"),
+                // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
+                // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
+                "screen": screen_snapshot,
+                "questions": questions
+                    .iter()
+                    .map(|q| serde_json::json!({
+                        "header": q.header,
+                        "question": q.question,
+                        "multiSelect": q.multi_select,
+                        "options": q
+                            .options
+                            .iter()
+                            .map(|o| serde_json::json!({
+                                "label": o.label,
+                                "description": o.description,
+                            }))
+                            .collect::<Vec<_>>(),
+                    }))
+                    .collect::<Vec<_>>(),
+                // 识别通道（诊断用；不可用时 null）
+                "source": if source.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(source)
+                },
+            }),
     )
 }
 
@@ -4395,11 +4390,8 @@ pub async fn session_question_answer(
             Some(q_idx + 1).filter(|i| *i < hit.questions.len())
         };
         // 载荷 question 全集（保存后 sheet 落点校验的基准）
-        let payload_questions: Vec<String> = hit
-            .questions
-            .iter()
-            .map(|q| q.question.clone())
-            .collect();
+        let payload_questions: Vec<String> =
+            hit.questions.iter().map(|q| q.question.clone()).collect();
         let pages = hit.questions.len() + 1; // 题目数 + Submit 页（opencode prev 用）
         let q = hit.questions.into_iter().nth(q_idx).unwrap_or_else(|| {
             // unreachable（上面已判界内），防御性占位——序列构造会因选项越界拒绝
@@ -4477,7 +4469,17 @@ pub async fn session_question_answer(
                 }
             })?,
         };
-        Ok((session, seq, q, tool_id, multi_question, pages, payload_questions, expected_idx, q_idx))
+        Ok((
+            session,
+            seq,
+            q,
+            tool_id,
+            multi_question,
+            pages,
+            payload_questions,
+            expected_idx,
+            q_idx,
+        ))
     })
     .await
     {
@@ -4490,8 +4492,17 @@ pub async fn session_question_answer(
             );
         }
     };
-    let (session, sequence, q_for_plan, q_tool, multi_flow, pages, payload_questions, expected_idx, q_idx) =
-        match lookup {
+    let (
+        session,
+        sequence,
+        q_for_plan,
+        q_tool,
+        multi_flow,
+        pages,
+        payload_questions,
+        expected_idx,
+        q_idx,
+    ) = match lookup {
         Ok(v) => v,
         Err(code) => {
             // 校验失败零注入零审计（approve guards 同口径）：
@@ -5387,15 +5398,9 @@ fn dispatch_question_action(
             const POLLUTION_SETTLE_MS: u64 = 250;
             for _round in 0..=(own_pos + 2) {
                 let before = probe("base");
-                let before_target = before
-                    .as_ref()
-                    .and_then(|l| {
-                        crate::inject::question::opencode_option_checked_at(
-                            l,
-                            target_row,
-                            &d,
-                        )
-                    });
+                let before_target = before.as_ref().and_then(|l| {
+                    crate::inject::question::opencode_option_checked_at(l, target_row, &d)
+                });
                 let before_own = before.as_ref().and_then(|l| {
                     crate::inject::question::opencode_single_own_row_content_at(l, *own_pos)
                 });
@@ -5447,7 +5452,10 @@ fn dispatch_question_action(
                 }
                 // Toggle 翻转判定（目标行勾选态前后变化）
                 if matches!((before_target, after_target), (Some(b), Some(a)) if b != a) {
-                    let screen = crate::inject::question_screen_oc::opencode_question_screen_snapshot(&after_lines);
+                    let screen =
+                        crate::inject::question_screen_oc::opencode_question_screen_snapshot(
+                            &after_lines,
+                        );
                     if *verify_flip {
                         return QuestionDispatch::ToggleDone {
                             checked: after_target,
@@ -5464,16 +5472,15 @@ fn dispatch_question_action(
                 if *advance_success {
                     let own_before = before
                         .as_ref()
-                        .and_then(|l| {
-                            crate::inject::question::opencode_single_own_row(l)
-                        })
+                        .and_then(|l| crate::inject::question::opencode_single_own_row(l))
                         .is_some();
-                    let own_after = crate::inject::question::opencode_single_own_row(
-                        &after_lines,
-                    )
-                    .is_some();
+                    let own_after =
+                        crate::inject::question::opencode_single_own_row(&after_lines).is_some();
                     if own_before && !own_after {
-                        let screen = crate::inject::question_screen_oc::opencode_question_screen_snapshot(&after_lines);
+                        let screen =
+                            crate::inject::question_screen_oc::opencode_question_screen_snapshot(
+                                &after_lines,
+                            );
                         return QuestionDispatch::SelectDone { screen };
                     }
                 }
@@ -5510,9 +5517,7 @@ fn dispatch_question_action(
                             }
                         }
                         // 删完等一拍再退（250ms；150ms 实机读旧屏——见上等待拍长注）
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            POLLUTION_SETTLE_MS,
-                        ));
+                        std::thread::sleep(std::time::Duration::from_millis(POLLUTION_SETTLE_MS));
                     }
                 }
                 // 退出/换位键按**字段余量分派**（2026-10-06 用户实测细化——
@@ -5541,9 +5546,7 @@ fn dispatch_question_action(
                 if let Err(e) = injector.locate_and_send_key_spec(pid, exit_key, spec) {
                     return QuestionDispatch::Failed(e);
                 }
-                std::thread::sleep(std::time::Duration::from_millis(
-                    POLLUTION_SETTLE_MS,
-                ));
+                std::thread::sleep(std::time::Duration::from_millis(POLLUTION_SETTLE_MS));
             }
             if *verify_flip {
                 // 键已发出但未能核验翻转——不谎报（同 claude toggle 读屏失败语义）
@@ -5570,9 +5573,9 @@ fn dispatch_question_action(
             let digit = format!("{}", index + 1);
             // 一次屏读双份消费：原始行作轮询基准，快照作翻转/污染判定
             let before_lines = probe("pre");
-            let before = before_lines.as_ref().and_then(|l| {
-                crate::inject::question_screen_oc::kimi_question_screen_snapshot(l)
-            });
+            let before = before_lines
+                .as_ref()
+                .and_then(|l| crate::inject::question_screen_oc::kimi_question_screen_snapshot(l));
             for _round in 0..=4 {
                 // 发数字（kimi 数字直选 = 编号行 toggle，与高亮无关）
                 if let Err(e) = injector.locate_and_send_key_spec(pid, &digit, spec) {
@@ -5588,7 +5591,11 @@ fn dispatch_question_action(
                             crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
                         );
                         match poll_screen_changed(
-                            &probe, "post", b, rounds, crate::inject::timing::POLL_STEP_MS,
+                            &probe,
+                            "post",
+                            b,
+                            rounds,
+                            crate::inject::timing::POLL_STEP_MS,
                         ) {
                             ScreenChange::Changed(lines) => Some(lines),
                             other => {
@@ -5667,9 +5674,8 @@ fn dispatch_question_action(
                 }
             }
             for _round in 0..=20 {
-                let cur = probe("hl").and_then(|l| {
-                    crate::inject::question::codex_highlight_row(&l)
-                });
+                let cur =
+                    probe("hl").and_then(|l| crate::inject::question::codex_highlight_row(&l));
                 match cur {
                     Some(hl) if hl == *target => {
                         // 到达目标行 → Space 选中
@@ -5722,9 +5728,9 @@ fn dispatch_question_action(
                     );
                 }
             }
-            let snapshot = after
-                .as_ref()
-                .and_then(|l| crate::inject::question_screen_oc::opencode_question_screen_snapshot(l));
+            let snapshot = after.as_ref().and_then(|l| {
+                crate::inject::question_screen_oc::opencode_question_screen_snapshot(l)
+            });
             QuestionDispatch::AdvanceDone {
                 advanced: true,
                 direction: *direction,
@@ -5736,9 +5742,7 @@ fn dispatch_question_action(
             // select（数字直选即交）——备注编辑器开启时数字会写进备注，检出即拒。
             if tool == "codex" {
                 let probe = question_probe(st, tool, pid);
-                if let Err(e) =
-                    crate::inject::question::codex_ensure_notes_closed(probe("guard"))
-                {
+                if let Err(e) = crate::inject::question::codex_ensure_notes_closed(probe("guard")) {
                     return dispatch_abort(e);
                 }
             }
@@ -5812,10 +5816,7 @@ fn dispatch_question_action(
                     );
                     match cur_idx {
                         Some(i) if i == q_idx + 1 => {
-                            log::info!(
-                                "kimi 单选落点：第 {round} 拍落在预期题 {} ✓",
-                                q_idx + 1
-                            );
+                            log::info!("kimi 单选落点：第 {round} 拍落在预期题 {} ✓", q_idx + 1);
                             break;
                         }
                         _ => {
@@ -5825,8 +5826,7 @@ fn dispatch_question_action(
                                     "kimi 单选落点第 {round} 拍：cur={cur_idx:?} exp={} → ← 拉回",
                                     q_idx + 1
                                 );
-                                if let Err(e) =
-                                    injector.locate_and_send_key_spec(pid, "left", spec)
+                                if let Err(e) = injector.locate_and_send_key_spec(pid, "left", spec)
                                 {
                                     return QuestionDispatch::Failed(e);
                                 }
@@ -6095,7 +6095,8 @@ fn dispatch_question_action(
                     if let Some(post) = probe("adv-post-edit") {
                         if crate::inject::question::kimi_editor_mode(&post) {
                             return QuestionDispatch::Failed(
-                                "当前在文字编辑行且 ↑ 未退出编辑态——切题无效，请人工核对终端".to_string(),
+                                "当前在文字编辑行且 ↑ 未退出编辑态——切题无效，请人工核对终端"
+                                    .to_string(),
                             );
                         }
                     }
@@ -6125,9 +6126,8 @@ fn dispatch_question_action(
                     ));
                 }
             }
-            let snapshot = probe("adv-snapshot").and_then(|l| {
-                crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l)
-            });
+            let snapshot = probe("adv-snapshot")
+                .and_then(|l| crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l));
             QuestionDispatch::AdvanceDone {
                 advanced: true,
                 direction: *direction,
@@ -6338,7 +6338,9 @@ fn stage_from_abort(err: &str) -> &'static str {
     // opencode own answer 编辑态守卫中止（2026-10-05：先于切勾臂匹配——中止文案含
     // 「勾选翻转」字样会被下方 toggle 关键词误收成「定位选项行并切勾」；本中止发生
     // 在 enter 开编辑之后、打字之前，归 free-row 段）
-    if err.contains("编辑态未开启") || err.contains("输入行未开启") || err.contains("编辑态似乎已开启")
+    if err.contains("编辑态未开启")
+        || err.contains("输入行未开启")
+        || err.contains("编辑态似乎已开启")
     {
         return QUESTION_STAGE_FREE_ROW;
     }
@@ -6752,7 +6754,13 @@ fn read_mode_from_screen(
     tool: &str,
     readback: bool,
 ) -> Option<crate::inject::mode::MamMode> {
-    read_axis_from_screen(st, session, tool, readback, crate::inject::mode::ModeGroupId::Mode)
+    read_axis_from_screen(
+        st,
+        session,
+        tool,
+        readback,
+        crate::inject::mode::ModeGroupId::Mode,
+    )
 }
 
 /// 按组版屏读（权限轴消费：kimi 权限组 2.1.1 起底栏有权限标签——GET 当前档与
@@ -6770,7 +6778,12 @@ fn read_axis_from_screen(
     match (st.screen_probe)(session.id.as_str(), session.pid) {
         Some(lines) => {
             let m = crate::inject::mode::parse_axis_from_screen(tool, group, &lines);
-            log::debug!("模式屏读（{tool}/{} pid={}）→ {:?}", group.wire(), session.pid, m);
+            log::debug!(
+                "模式屏读（{tool}/{} pid={}）→ {:?}",
+                group.wire(),
+                session.pid,
+                m
+            );
             m
         }
         None => {
@@ -8761,14 +8774,11 @@ pub async fn session_create(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty())
         .unwrap_or_else(|| CREATE_DEFAULT_FIRST_MESSAGE.to_string());
-    let signature_on = st.store.with(|conn| {
-        crate::inject::normalize::message_signature_enabled_conn(conn)
-    });
-    let composed = crate::inject::normalize::compose_injection_flagged(
-        &device_name,
-        &text,
-        signature_on,
-    );
+    let signature_on = st
+        .store
+        .with(|conn| crate::inject::normalize::message_signature_enabled_conn(conn));
+    let composed =
+        crate::inject::normalize::compose_injection_flagged(&device_name, &text, signature_on);
     let run = CreateRun {
         task_id,
         tool,
