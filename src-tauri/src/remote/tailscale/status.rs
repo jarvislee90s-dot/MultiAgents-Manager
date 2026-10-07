@@ -229,29 +229,28 @@ fn service_image_path() -> Option<String> {
             return None;
         }
     };
-    match key.get_raw_value("ImagePath") {
-        Ok(raw) if raw.vtype == REG_SZ || raw.vtype == REG_EXPAND_SZ => {
-            // 形态对：解码（FromRegValue 认 REG_SZ / REG_EXPAND_SZ），按类型决定展开
-            let s = String::from_reg_value(&raw).ok()?;
-            Some(image_path_value(&s, raw.vtype == REG_EXPAND_SZ, |n| {
-                std::env::var(n).ok()
-            }))
-        }
-        // 形态不对（REG_DWORD / REG_MULTI_SZ / …）：**不猜**——宁可如实报「未检测到」
-        Ok(other) => {
-            log::debug!(
-                "服务登记 ImagePath 的值类型不是字符串（{:?}）——第二来源按空处理",
-                other.vtype
-            );
-            None
-        }
+    let raw = match key.get_raw_value("ImagePath") {
+        Ok(raw) => raw,
         Err(e) => {
             log::debug!(
                 "读取服务登记 ImagePath 失败（{TS_SERVICE_REG_PATH}）: {e}——第二来源按空处理"
             );
-            None
+            return None;
         }
+    };
+    // 形态不对（REG_DWORD / REG_MULTI_SZ / …）：**不猜**——宁可如实报「未检测到」
+    if raw.vtype != REG_SZ && raw.vtype != REG_EXPAND_SZ {
+        log::debug!(
+            "服务登记 ImagePath 的值类型不是字符串（{:?}）——第二来源按空处理",
+            raw.vtype
+        );
+        return None;
     }
+    // 形态对：解码（FromRegValue 认 REG_SZ / REG_EXPAND_SZ），按类型决定展开
+    let s = String::from_reg_value(&raw).ok()?;
+    Some(image_path_value(&s, raw.vtype == REG_EXPAND_SZ, |n| {
+        std::env::var(n).ok()
+    }))
 }
 
 /// 注册表值 → 可交给 [`parse_service_image_path_with`] 的 `ImagePath` 串（**纯函数**，
