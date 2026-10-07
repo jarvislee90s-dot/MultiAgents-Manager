@@ -305,9 +305,6 @@
       "tsRecoveringHint": "The Tailscale backend is reconnecting (usually 1–2 minutes after a reboot) — your configuration and address stay the same; nothing to do.",
       "tsWizard": {
         "title": "Tailscale Fixed-URL Setup Wizard",
-        "desc": "Turn Tailscale Funnel into a permanent board address (https://<machine>.<tailnet>.ts.net/m). Guided flow: download → install → login → enable.",
-        "open": "Open setup wizard",
-        "close": "Collapse wizard",
         "windowsUnverified": "⚠ Only the second half of the Windows flow has been machine-verified: {{steps}} have not been run end-to-end on a real machine (prefilled from official docs; actual behavior may differ). The remaining steps are machine-verified.",
         "statePending": "To do",
         "stateActive": "Running…",
