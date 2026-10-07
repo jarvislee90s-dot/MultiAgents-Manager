@@ -382,6 +382,19 @@
             <div class="step"><span class="badge b-amber">恢复中</span> Tailscale 后端正在重连中——开机后通常 1–2 分钟自动恢复；配置与地址都不会变，无需任何操作。<span class="side">（成因 = 后端重连，不是域名发布；此时不给地址）</span></div>
             <div class="step"><span class="badge b-amber">发布中</span> Funnel 刚重新开通，公网 DNS 记录正在重新发布——通常 30 秒～1 分钟；地址不会变。<span class="side">（本进程内 MAM 执行过 funnel reset 时才给这一档）</span></div>
             <div class="step">公网 DNS 记录尚未发布——首次开通实测约需 5–6 分钟；若本机此前开通过，恢复通常快得多（1 分钟内）。地址要等记录发布后才从外网可达。<span class="side">（此时不给地址，见状态三说明）</span></div>
+            <!-- 2026-10-07 九次回写（③ 用户要求：让用户知道 Tailscale 是什么）：
+                 向导里此前**没有任何地方解释 Tailscale 是什么**——用户被要求装一个没听过的
+                 第三方软件、还要去它的官网登录一次，却看不到一句"这是干什么的、为什么需要
+                 它"。故向导**页脚**（步骤列表之下）恒挂一行说明（i18n
+                 `settings.remote.tsWizard.aboutTailscale`，zh/en 双语）：
+                 ① 它是什么 = 免费的个人组网工具；
+                 ② **为什么需要它** = 它给每台设备一个固定的私有地址，MAM 因此**不需要你
+                    自备域名**就能给出永久链接（正是本卡的卖点"免域名"的原理）；
+                 ③ 官网 = tailscale.com（外链，新窗口：target="_blank" +
+                    rel="noreferrer noopener"——安全惯例，不给 opener 句柄）。
+                 恒在（不随相位/平台变化）：未装、配置中、恢复中、未运行等任何挂载向导的
+                 形态都要能回答"这是什么"。 -->
+            <div class="step">这是什么？Tailscale 是一款免费的个人组网工具：它给每台设备一个固定的私有地址，所以我们不用你自备域名也能给出永久链接。<span class="side">官网 <a href="https://tailscale.com/" target="_blank" rel="noreferrer noopener">tailscale.com</a></span></div>
           </div>
           <div class="tri">
             <div class="tri-label"><span class="badge b-green">状态三 · 已配置</span><span class="side">地址只有<b>可达性校验通过</b>才上墙（§C3：不许把打不开的地址当可用呈现）</span></div>

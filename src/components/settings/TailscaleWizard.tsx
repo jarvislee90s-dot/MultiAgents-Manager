@@ -391,6 +391,27 @@ export function TailscaleWizard() {
           </a>
         </p>
       )}
+      {/* ③ 让用户知道 Tailscale 是什么（2026-10-07 用户要求）：向导此前**没有任何地方
+          解释它是什么**，而用户被要求装一个没听过的第三方软件、还要去它的官网登录一次。
+          页脚恒挂一行（不随相位/平台变化——未装 / 配置中 / 恢复中 / 未运行任何挂载形态
+          都要能回答「这是什么」）：① 它是什么 = 免费的个人组网工具；② **为什么需要它**
+          = 它给每台设备一个固定的私有地址，MAM 因此**不需要用户自备域名**就能给出永久
+          链接（正是本卡卖点「免域名」的原理）；③ 官网外链（新窗口 + noreferrer noopener:
+          不给新窗口 opener 句柄，安全惯例——与会话内其它外链同口径）。 */}
+      <p
+        data-testid="ts-about-tailscale"
+        className="text-muted-foreground mt-2 text-[11px] leading-snug"
+      >
+        {t("settings.remote.tsWizard.aboutTailscale")}{" "}
+        <a
+          href="https://tailscale.com/"
+          target="_blank"
+          rel="noreferrer noopener"
+          className="text-blue-500 underline"
+        >
+          tailscale.com
+        </a>
+      </p>
     </div>
   );
 }

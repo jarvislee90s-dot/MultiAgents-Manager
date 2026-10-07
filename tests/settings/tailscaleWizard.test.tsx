@@ -319,6 +319,55 @@ describe("TailscaleWizard Windows 验证位按覆盖面表述（I-3：验证位�
   });
 });
 
+// ③ 让用户知道 Tailscale 是什么（用户要求）：向导里此前没有任何地方解释它是什么，
+// 而用户被要求装一个没听过的第三方软件并去它的官网登录一次。故向导页脚恒挂一行说明
+// ——它是什么 + **为什么需要它**（固定私有地址 ⇒ 免自备域名的原理）+ 官网外链。
+describe("TailscaleWizard ③向导页脚解释 Tailscale 是什么（含官网外链）", () => {
+  it("页脚说明恒在（未装/配置中/恢复中任何挂载形态都回答「这是什么」），并说清「免域名」原理", async () => {
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    const line = screen.getByTestId("ts-about-tailscale");
+    // 一句话说清它是免费的组网工具 + 为什么需要它（固定地址 ⇒ 不需要自备域名）
+    expect(line.textContent).toMatch(/free/i);
+    expect(line.textContent).toMatch(/domain/i);
+  });
+
+  it("外链安全惯例：href = tailscale.com + target=_blank + rel 同时含 noreferrer 与 noopener", async () => {
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    const link = within(screen.getByTestId("ts-about-tailscale")).getByRole(
+      "link"
+    ) as HTMLAnchorElement;
+    expect(link.getAttribute("href")).toBe("https://tailscale.com/");
+    expect(link.getAttribute("target")).toBe("_blank");
+    const rel = link.getAttribute("rel") ?? "";
+    expect(rel).toContain("noreferrer");
+    expect(rel).toContain("noopener");
+  });
+
+  it("zh/en 双语齐备且两 locale 键集相等（新增键不许单边）", () => {
+    const root = process.cwd();
+    const zh = JSON.parse(readFileSync(path.join(root, "src/i18n/locales/zh.json"), "utf8"));
+    const en = JSON.parse(readFileSync(path.join(root, "src/i18n/locales/en.json"), "utf8"));
+    const flat = (obj: Record<string, unknown>, prefix = ""): string[] =>
+      Object.entries(obj).flatMap(([k, v]) =>
+        typeof v === "object" && v !== null
+          ? flat(v as Record<string, unknown>, `${prefix}${k}.`)
+          : [`${prefix}${k}`]
+      );
+    const zhKeys = new Set(flat(zh.settings.remote));
+    const enKeys = new Set(flat(en.settings.remote));
+    expect([...zhKeys].filter((k) => !enKeys.has(k))).toEqual([]);
+    expect([...enKeys].filter((k) => !zhKeys.has(k))).toEqual([]);
+    const zk = "tsWizard.aboutTailscale";
+    expect(zhKeys.has(zk)).toBe(true);
+    expect(enKeys.has(zk)).toBe(true);
+    // 中文那句也要说清「免费」与「不需要域名」
+    expect(zh.settings.remote.tsWizard.aboutTailscale).toMatch(/免费/);
+    expect(zh.settings.remote.tsWizard.aboutTailscale).toMatch(/域名/);
+  });
+});
+
 describe("TailscaleWizard A1：Funnel 批准是「可能不出现」的分支，不是必经步骤", () => {
   it("可选人工步（humanOptional）带「可能无需此步」弱提示；必需人工步不带", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {

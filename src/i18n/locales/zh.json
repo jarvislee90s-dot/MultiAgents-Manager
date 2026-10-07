@@ -306,6 +306,7 @@
       "tsWizard": {
         "title": "Tailscale 固定网址配置向导",
         "windowsUnverified": "⚠ Windows 实测覆盖从「{{from}}」起：{{steps}} 尚未端到端实机跑过（按官方文档预填，实际形态可能不同）；起点及其后的步骤已实机校验。",
+        "aboutTailscale": "这是什么？Tailscale 是一款免费的个人组网工具：它给每台设备一个固定的私有地址，所以我们不用你自备域名也能给出永久链接。官网：",
         "statePending": "待做",
         "stateActive": "进行中…",
         "stateDone": "已完成",
