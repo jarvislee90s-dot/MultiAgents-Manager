@@ -193,6 +193,13 @@ export type TsStepResult = {
   skipped?: string;
   triggered?: boolean;
   done?: boolean;
+  /** 后端下发的**成因说明**（中文人话；Deferred / unreadable 回执里带）。
+   *  **前端当前零消费者**（全仓无 `.note` 读取点，2026-10-07 核实）：用户可见的成因说明
+   *  一律走**静态 i18n 键**（如 `settings.remote.tsDisableDescUnreadable`，与后端文案同义，
+   *  英文界面出英文）；本字段的消费方目前只有**后端自己的测试锚点**
+   *  （`tailscale/mod.rs` 的 I2/W-A 用例逐字断言它含「重连」）。
+   *  保留声明 = 如实描述载荷形状（日志 / 移动端将来可用）；**要渲染它先做 i18n 化**——
+   *  后端串是中文硬编码，直接上屏会绕过 i18n。 */
   note?: string;
   reach?: TsReachability;
   foreign?: boolean;
@@ -200,7 +207,8 @@ export type TsStepResult = {
   entries?: TsServeEntry[];
   /** W-A（第三处判据点）：后端重连中读不到现有 serve 配置形态——**不是「没有条目」**。
    *  前端必须照 foreign 处理（先弹确认框并说明读不到），绝不静默直接撤销。
-   *  成因说明走上面既有的 `note`（后端下发，人话） */
+   *  成因说明在 **UI 侧**走等效的静态 i18n 键 `settings.remote.tsDisableDescUnreadable`
+   *  （RemoteSection 按本字段分支渲染），**不读**回执的 `note`（消费方见上方 `note` 注释） */
   unreadable?: boolean;
   clearedExtraServeEntries?: number;
   /** M-1：随本次 `funnel reset` **实际**被一并清除的非 MAM 条目（与

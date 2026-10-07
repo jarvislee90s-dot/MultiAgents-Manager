@@ -930,6 +930,13 @@ pub(crate) fn run_step(step: &str, port: u16) -> Result<serde_json::Value, Strin
                     format!("读不到 Tailscale 状态，拒绝预览撤销（无法确认会清掉什么）: {e}")
                 })?;
             if backend_initializing(&st.backend_state) {
+                // **本 `note` 的消费方（2026-10-07 核实）**：前端**不读**本字段——撤销
+                // 确认框的成因说明走等效的**静态 i18n 键**
+                // `settings.remote.tsDisableDescUnreadable`（RemoteSection 按 `unreadable`
+                // 分支渲染；后端串是中文硬编码，直接上屏会绕过 i18n）。本字段当前只被本
+                // 模块的测试逐字断言（`tailscale/mod.rs`
+                // `disable_preview_reports_unreadable_while_backend_is_initializing`）。
+                // 保留 = 回执形态如实（日志 / 移动端将来可用）；**要渲染先 i18n 化**。
                 return Ok(serde_json::json!({
                     "ok": true,
                     "unreadable": true,
