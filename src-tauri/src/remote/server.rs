@@ -4948,6 +4948,8 @@ mod tests {
     /// sess_ab（标记载荷损坏 → 回落通道 B）/ sess_ac（bad_index 400）/
     /// sess_ad（仅审批标记——隔离反差用）/ sess_ae（问题标记 + detect 命中文案——
     /// 问题标记压审批卡的最强隔离形态）/ sess_af（无标记——no_question 409）/
+    /// sess_qadv / sess_qsub（阶段机 advance / 已在 Review submit **各自独占**——
+    /// 守卫 id 立规：投递类用例不得共用裸 id）/
     /// sess_ai / sess_aj（Processing 无标记——通道 B 可用/已答反例）/
     /// sess_ak（**阶段机中途投递失败**：首错即停 + `failed:<e>` 审计独占——原为
     /// 批次乙「submit 首错即停」用例的夹具，本批重构时该用例被误删（复评 Important-2），
@@ -4980,6 +4982,13 @@ mod tests {
             sess("sess_ab", 38, crate::session::SessionStatus::Waiting),
             sess("sess_ac", 39, crate::session::SessionStatus::Waiting),
             sess("sess_ad", 40, crate::session::SessionStatus::Waiting),
+            // 守卫 id 立规补正（2026-10-07 存量红清理）：**问题投递**类用例各自独占 id。
+            // 原「stage 机 advance」与「已在 Review submit」两条用例都借 sess_ad，而
+            // INFLIGHT 守卫按**裸 id 字符串全局占用**（见 inject_state_with_probe 文档）
+            // ⇒ 二者并行跑必有一条吃「投递进行中，请稍后重试」（实测并行 3/3 红、
+            // 串行 3/3 绿）；sess_ad 归还给它的既定主人「仅审批标记——隔离反差用」。
+            sess("sess_qadv", 26, crate::session::SessionStatus::Waiting),
+            sess("sess_qsub", 27, crate::session::SessionStatus::Waiting),
             {
                 // 最强隔离形态：问题标记 + last_message 恰为审批 marker 命中句——
                 // 证明问题标记压审批卡不依赖 detect 未达
@@ -7040,14 +7049,15 @@ mod tests {
             ],
             false,
         );
-        mark_question(&state, "claude", "sess_ad", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
+        // 守卫 id 立规：本用例独占 sess_qadv（原借 sess_ad 与 submit 用例并行串键）
+        mark_question(&state, "claude", "sess_qadv", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
         let app = router(state.clone());
         let r = app
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-question/answer",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_ad","action":"advance","direction":"next"}"#),
+                Some(r#"{"sessionId":"sess_qadv","action":"advance","direction":"next"}"#),
             ))
             .await
             .unwrap();
@@ -7106,14 +7116,15 @@ mod tests {
             vec![screen_fixtures::review(), screen_fixtures::answered()],
             false,
         );
-        mark_question(&state, "claude", "sess_ad", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
+        // 守卫 id 立规：本用例独占 sess_qsub（原借 sess_ad 与 advance 用例并行串键）
+        mark_question(&state, "claude", "sess_qsub", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
         let app = router(state.clone());
         let r = app
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-question/answer",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_ad","action":"submit"}"#),
+                Some(r#"{"sessionId":"sess_qsub","action":"submit"}"#),
             ))
             .await
             .unwrap();
@@ -7125,7 +7136,7 @@ mod tests {
         );
         assert_eq!(
             fake.recorded_keys(),
-            vec![(40u32, "1".to_string())],
+            vec![(27u32, "1".to_string())],
             "键序 = ['1']（抄屏上编号；零走位零回车）：{:?}",
             fake.recorded_keys()
         );
