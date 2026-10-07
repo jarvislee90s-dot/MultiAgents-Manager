@@ -34,21 +34,28 @@ Real-time traffic-light status board for all active AI coding tool sessions.
 - Sorts by priority: waiting → running → idle
 - System tray icon reflects aggregate status (🔴/🟡/🟢)
 
-### Remote Access & Mobile Board (LAN / Quick Tunnel / Named Tunnel)
+### Remote Access & Mobile Board (LAN / Quick Tunnel / Own Domain / External Domain)
 
-Open the same eight-tool session board from your phone browser. Settings → Remote Access offers **three connection methods, each with its own switch and usable simultaneously**:
+Open the same eight-tool session board from your phone browser. Settings → Remote Access offers **four channel cards, each with its own switch and usable simultaneously**:
 
-| Method                          | When to use                                                   | Notes                                                                                                                                                                                                 |
-| ------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 📶 LAN                          | Phone and computer on the same WiFi / cable (**recommended**) | Fastest; requires the access PIN                                                                                                                                                                      |
-| 🔀 Quick tunnel                 | You're away and your phone is on cellular                     | Public, no signup (Cloudflare); **address changes every time it's enabled**                                                                                                                           |
-| 🌐 Named tunnel (custom domain) | You want a stable entry point                                 | Needs a Cloudflare account (free plan works) + a Tunnel Token; the address is **permanent** once configured — MAM downloads and supervises cloudflared for you, with a step-by-step guide in Settings |
+| Channel card                         | When to use                                                    | Notes                                                                                                                                                                                                 |
+| ----------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 📶 LAN connection                   | Phone and computer on the same WiFi / cable (**recommended**)  | Fastest; requires the access PIN; **your own browser on this computer uses this card's address too** (its switch must be on)                                                                          |
+| 🔀 Quick tunnel                     | You're away and your phone is on cellular                      | Public, no signup (Cloudflare); **address changes every time it's enabled**                                                                                                                           |
+| 🌐 Own domain                       | You want a stable entry point                                  | Needs a Cloudflare account (free plan works) + a Tunnel Token; the address is **permanent** once configured — MAM downloads and supervises cloudflared for you, with a step-by-step guide in Settings |
+| 🛰 External domain (no domain needed) | You don't have a domain but still want a permanent address     | **No domain required**: the card's wizard walks you through installing Tailscale and enabling Funnel to get a **permanent** address like `https://<machine>.<tailnet>.ts.net/m`; you only install and sign in to Tailscale once on this computer |
 
-A "Local" channel is always on alongside the master switch: loopback-only, no PIN, and it doubles as the relay endpoint for tunnel traffic (not used by phones).
+**The access PIN applies to this computer too**: loopback access is **no longer PIN-free** — opening the board from this machine's own browser is treated exactly like a remote device (enter the PIN once, then remembered for 180 days). "Local" is **no longer a channel card**: it is just one way to connect, using the address shown on the "LAN connection" card.
 
 ![Remote Access · desktop settings page](docs/images/remote-settings-v0.5.0.png)
 
-How to connect: turn on "Enable Remote Access" → enable the channel you want → click its card to reveal the address / QR code (**the link already contains the PIN, so scanning fills it in automatically**) → open it on your phone (**the URL must end with `/m`**). The PIN applies to LAN and both tunnels: enter it once per device for **180 days**, and after a PIN change every device must re-enter it. Paired devices can be renamed or kicked from the "Paired Devices" list (up to 10).
+How to connect: turn on "Enable Remote Access" → enable the channel you want → click its card to reveal the address / QR code (**the link already contains the PIN, so scanning fills it in automatically**) → open it on your phone (**the URL must end with `/m`**). **The first run of "External domain (no domain needed)" goes through the card's wizard**: click "One-click setup" and it walks through detect → download from the official source with checksum verification → install (one admin prompt from the system) → sign in to Tailscale (MAM turns the authorization link into a button; you finish in the browser) → turn off "block incoming connections" → enable Funnel → **reachability verification** — no command line at any point; on macOS you also approve Tailscale's system extension once in System Settings, and the first Funnel enablement may additionally need one browser approval (or none at all).
+
+**The address is only shown after it passes a real check from outside the tailnet**: while verifying or not yet effective, the card honestly reports "taking effect" and gives the expected wait for the situation (about 5–6 minutes on first setup; usually under a minute if it was enabled before, in which case the address does not change; about 1–2 minutes when recovering after boot) — it never puts a dead link in front of you. Once verified it is re-checked every minute and recovers automatically on failure. The address never changes, paired devices never need re-pairing, and **MAM restores the channel automatically on every boot** (it waits for the Tailscale backend to be ready before re-enabling, so it never wipes a config that is still coming back).
+
+The PIN applies to **all four channels** (**including access from this computer**): enter it once per device for **180 days**, and after a PIN change every device must re-enter it. Paired devices can be renamed or kicked from the "Paired Devices" list (up to 10).
+
+> **Stated honestly**: the platform notes inside the wizard match the implementation — on Windows only the second half has been tested on a real machine (detect, enable, revoke and restart recovery after "installed / signed in"), while the **install and sign-in flow has not been run end to end**; on macOS the **write paths** (enable / revoke / self-heal) are **not yet verified on a real machine** either (read-only probing has been). The wizard says so on the spot per platform and does not pretend the whole flow has been verified.
 
 **Live board**: session status changes are pushed to your phone within ~2 seconds (SSE as the primary channel) — banner, chime, and vibration, with a tap taking you straight to that session; if the stream drops it degrades to 3-second polling automatically. Transition deduplication uses the same server-side logic as desktop notifications.
 
@@ -58,6 +65,7 @@ How to connect: turn on "Enable Remote Access" → enable the channel you want �
 - Markdown rendering (headings / lists / tables / code highlighting); project file paths in the text become clickable links
 - **File panel**: aggregates the files a session touched, newest first, with document/image filters and a **200 / 500 / 1000 message** look-back range; **modified** files are highlighted and **read-only** ones are neutral (both previewable), and tapping the secondary line reveals the full path
 - **File preview**: markdown / syntax highlighting / inline images; three switchable layouts — side-by-side (chat left, file right), stacked, and fullscreen overlay — with a draggable splitter; readable scope is the session project directory plus your home directory (sensitive directories such as keys are always refused)
+- **Transfer progress and honest bandwidth disclosure**: uploads and downloads both show a **progress bar** (bytes transferred / percentage / instantaneous rate / ETA); **when the rate or the total size is unknown it shows bytes transferred only and never invents a percentage**. On a bandwidth-limited tunnel channel the file panel and the attachment area say **in place** that this is a channel limit, not a malfunction, with time estimates based on this channel's measured rate (about 1.5 minutes to download and 3.3 minutes to upload a 20 MB attachment) and a **full-speed upgrade path** (install Tailscale on your phone and join the tailnet to connect directly, 1–2 orders of magnitude faster)
 - **Message bookmarks**: mark a spot to revisit with a colored dot (up to 10, one per color), jump back by tapping it, delete individually or clear all; stored in the browser — refresh-proof, cleared when MAM restarts or the tab is closed
 - **Font size**: 50% / 75% / 100% / 125% for message and file text only
 - **Archived history**: finished or unreachable sessions stop cluttering the board — registry-based archiving (history page lazy-loads 1/3/7 days), tap a card for a read-only detail view with one-tap reactivation; board cards can be closed/archived (CLI sessions stop their process, APP sessions get a true "close")
@@ -405,6 +413,7 @@ The app stores its data in `~/.mam/`:
 - [x] Auto-update via GitHub Releases
 - [x] Dark/light theme sync with system
 - [x] Windows support (NSIS installer + deep links + nearest-ancestor window focus)
+- [x] Remote access · External domain (no domain needed) fixed-address channel (one-click Tailscale onboarding + public-side reachability verification + automatic recovery on boot; access from this computer now requires the PIN)
 - [ ] Linux support
 - [ ] Kitty & WezTerm terminal jump support
 
