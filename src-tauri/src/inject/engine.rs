@@ -455,6 +455,20 @@ pub trait Injector: Send + Sync {
     ) -> Result<(), String> {
         Err("草稿注入（无提交回车）仅 Windows ConPTY 通道支持".to_string())
     }
+
+    /// **批量退格**（2026-10-04 计划反馈通道）：`count` 个 VK_BACK 一次通道
+    /// 往返批量写入（纯删除键无逐键重绘耦合，探针见 windows_console 模块文档）。
+    /// 默认实现报错（macOS 三通道无批量原语；唯一消费者 = 计划反馈编排的
+    /// 清空草稿）；Windows ConPTY 通道覆写
+    /// （[`crate::inject::windows_console::inject_backspaces_spec`]）。
+    fn locate_and_send_backspaces_spec(
+        &self,
+        _pid: u32,
+        _count: usize,
+        _spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        Err("批量退格仅 Windows ConPTY 通道支持".to_string())
+    }
     fn locate_and_send_key_spec(
         &self,
         pid: u32,
@@ -614,6 +628,14 @@ impl Injector for RealInjector {
         spec: &crate::inject::families::FamilySpec,
     ) -> Result<(), String> {
         crate::inject::windows_console::inject_key_spec(pid, key, spec)
+    }
+    fn locate_and_send_backspaces_spec(
+        &self,
+        pid: u32,
+        count: usize,
+        spec: &crate::inject::families::FamilySpec,
+    ) -> Result<(), String> {
+        crate::inject::windows_console::inject_backspaces_spec(pid, count, spec)
     }
 }
 

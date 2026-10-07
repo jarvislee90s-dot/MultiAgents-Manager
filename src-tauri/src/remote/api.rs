@@ -3126,8 +3126,9 @@ fn composer_content_len(lines: &[String]) -> Option<usize> {
 /// 文本通道（**不带提交回车**）/ 单发回车 / 步进等待。
 pub(crate) trait PlanFeedbackTerminal {
     fn read(&mut self) -> Option<Vec<String>>;
-    /// 批量退格 `count` 个字符（批量原语见
-    /// [`crate::inject::windows_console::inject_backspaces_spec`]）
+    /// 批量退格 `count` 个字符（批量原语经 Injector trait 缝送达：Windows
+    /// ConPTY 覆写 [`crate::inject::engine::Injector::locate_and_send_backspaces_spec`]，
+    /// 其余平台默认报错——跨平台可编译，生产消费面仅 Windows）
     fn clear_chars(&mut self, count: usize) -> Result<(), String>;
     fn send_text(&mut self, text: &str) -> Result<(), String>;
     fn send_enter(&mut self) -> Result<(), String>;
@@ -3359,7 +3360,8 @@ impl PlanFeedbackTerminal for PlanFeedbackClosures<'_> {
         (self.screen_probe)(self.tool, self.pid)
     }
     fn clear_chars(&mut self, count: usize) -> Result<(), String> {
-        crate::inject::windows_console::inject_backspaces_spec(self.pid, count, self.spec)
+        self.injector
+            .locate_and_send_backspaces_spec(self.pid, count, self.spec)
     }
     fn send_text(&mut self, text: &str) -> Result<(), String> {
         // 草稿口径（不带提交回车——回车只在 submit 段显式发）
