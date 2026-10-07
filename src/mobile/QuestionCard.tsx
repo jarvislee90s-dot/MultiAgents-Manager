@@ -323,41 +323,36 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   // Review 在场 → 进确认卡；题屏 → heading 对位 + writeSnapshotState 回填
   /** Review 页屏读摘要（确认卡权威源）：题干归一键 → 终端答案（2026-10-07） */
   const [confirmSummary, setConfirmSummary] = useState<Record<string, string>>({});
-  const applyScreenSync = useCallback(
-    (v: QuestionInfoView) => {
-      if (!v.available || !v.screen) return;
-      if (v.screen.review) {
-        // **确认卡摘要权威源切换**（2026-10-07）：summary = Review 页屏读解析的
-        // 逐题（题干, 答案）——覆盖本地缓存记录（终端真值优先；终端没答的题如实
-        // 显示未作答）。summary 缺失（解析不出）→ 维持本地缓存渲染（不猜）。
-        setMqIndex(v.questions.length);
-        if (v.screen.summary) {
-          setConfirmSummary(
-            Object.fromEntries(
-              v.screen.summary.map((s) => [normalizeQuestionText(s.q), s.a])
-            )
-          );
-        }
-        return;
+  const applyScreenSync = useCallback((v: QuestionInfoView) => {
+    if (!v.available || !v.screen) return;
+    if (v.screen.review) {
+      // **确认卡摘要权威源切换**（2026-10-07）：summary = Review 页屏读解析的
+      // 逐题（题干, 答案）——覆盖本地缓存记录（终端真值优先；终端没答的题如实
+      // 显示未作答）。summary 缺失（解析不出）→ 维持本地缓存渲染（不猜）。
+      setMqIndex(v.questions.length);
+      if (v.screen.summary) {
+        setConfirmSummary(
+          Object.fromEntries(v.screen.summary.map((s) => [normalizeQuestionText(s.q), s.a]))
+        );
       }
-      if (!v.screen.heading) return;
-      const qi = findQuestionByHeading(v.questions, v.screen.heading);
-      if (qi === null) return;
-      setMqIndex(qi);
-      writeSnapshotState(
-        v.screen,
-        qi,
-        v.questions.length === 1,
-        { setChecked, setMqChecked, setMqFreeText, setMqSelected, setFreeText },
-        v.questions[qi]?.multiSelect ?? true
-      );
-      // 已打字（屏上文本）→ 只读呈现「已写入 + 编辑」（自旧内联逻辑归并）
-      if (v.screen.freeText !== null && v.screen.freeText !== undefined) {
-        setEditingFreeText(false);
-      }
-    },
-    []
-  );
+      return;
+    }
+    if (!v.screen.heading) return;
+    const qi = findQuestionByHeading(v.questions, v.screen.heading);
+    if (qi === null) return;
+    setMqIndex(qi);
+    writeSnapshotState(
+      v.screen,
+      qi,
+      v.questions.length === 1,
+      { setChecked, setMqChecked, setMqFreeText, setMqSelected, setFreeText },
+      v.questions[qi]?.multiSelect ?? true
+    );
+    // 已打字（屏上文本）→ 只读呈现「已写入 + 编辑」（自旧内联逻辑归并）
+    if (v.screen.freeText !== null && v.screen.freeText !== undefined) {
+      setEditingFreeText(false);
+    }
+  }, []);
   // **交互纪元**（评审 I4）：每次应答动作自增——GET 快照落地时纪元已变 = 用户已
   // 交互，快照是旧时刻的屏面，**跳过应用**（防止晚到的快照把已前进的卡拉回去）
   const interactionEpoch = useRef(0);
@@ -555,8 +550,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 return n;
               });
               const snapCheckedLen = (res.screen?.checked ?? []).length;
-              const headingOnly =
-                res.screen?.heading != null && snapCheckedLen === 0;
+              const headingOnly = res.screen?.heading != null && snapCheckedLen === 0;
               if (
                 res.screen &&
                 res.screen.heading &&
@@ -565,7 +559,8 @@ export default function QuestionCard({ session }: QuestionCardProps) {
                 (snapCheckedLen === info.questions[dest]?.options.length ||
                   // 单选页快照：无勾选框 → checked 空——heading 唯一命中即对位
                   // （勾选态不写，如实），页面位置同步不再被 checked 长度卡死
-                  (headingOnly && findQuestionByHeading(info.questions, res.screen.heading) !== null))
+                  (headingOnly &&
+                    findQuestionByHeading(info.questions, res.screen.heading) !== null))
               ) {
                 writeSnapshotState(
                   res.screen,
@@ -853,16 +848,16 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             指令：不等屏读回执——输入了就该能清）+ 已写入态；按能力位门控 */}
         {info.freeTextOverwrite === true &&
           (mqFreeText[qi] !== undefined || freeText.trim() !== "") && (
-          <button
-            type="button"
-            data-testid="question-multi-freetext-clear"
-            disabled={busy}
-            onClick={() => handleAnswer("freeText", undefined, "", qi, undefined, true)}
-            className="shrink-0 rounded-full bg-rose-500/10 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-500/20 disabled:opacity-40 dark:bg-rose-400/10 dark:text-rose-300"
-          >
-            清空
-          </button>
-        )}
+            <button
+              type="button"
+              data-testid="question-multi-freetext-clear"
+              disabled={busy}
+              onClick={() => handleAnswer("freeText", undefined, "", qi, undefined, true)}
+              className="shrink-0 rounded-full bg-rose-500/10 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-500/20 disabled:opacity-40 dark:bg-rose-400/10 dark:text-rose-300"
+            >
+              清空
+            </button>
+          )}
       </div>
       {mqFreeText[qi] !== undefined && (
         <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">
