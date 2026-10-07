@@ -54,7 +54,9 @@ describe("usage-minibar-layout（计划② Task 13 步骤 2：浮窗几何与工
     expect(MINI_LINE_H).toBe(17.4);
     expect(MINI_BAR_MAX_H).toBe(120);
     expect(MINI_HOVER_MS).toBe(500);
-    expect(MINI_GRACE_MS).toBe(200);
+    // 2026-10-07 用户裁决 200 → 2000：200ms 时「从宠物拖到浮窗」够不到（浮窗先消失）。
+    // 本断言是**刻意**的硬编码锁：这个值是用户可感知的交互参数，改动必须显式过审。
+    expect(MINI_GRACE_MS).toBe(2000);
     expect(MINI_RESTORE_MS).toBe(500);
     // D20 原文口径：`round((行数 × 17.4 + 16) × scale)`
     expect(miniBarHeight(1, 8)).toBe(155);

@@ -35,7 +35,12 @@ export const MINI_BAR_MAX_H = 120;
 export const MINI_HOVER_MS = 500;
 
 /** 离开精灵后的宽限期（D13）：留出从精灵移到浮窗、点「详情 »」的时间。 */
-export const MINI_GRACE_MS = 200;
+// 2026-10-07 用户实测裁决：200ms 的宽限**够不到浮窗** ——
+// 「我把鼠标放在宠物身上，上面会出现一个悬浮窗；移开鼠标时，悬浮窗会立刻消失」，
+// 从精灵拖到浮窗的这段时间里指针既不在精灵上、也不在浮窗上（200ms 根本来不及）⇒ 浮窗先消失了。
+// 改成 2 秒：给「从宠物移向浮窗」留出容错窗口（进入浮窗会由 clearMiniGrace 立刻取消隐藏）。
+// 注意：拖拽路径在 pointerdown 里显式 clearMiniGrace()，不受本值影响（不会让拖拽后残留浮窗）。
+export const MINI_GRACE_MS = 2000;
 
 /** 松手后多久恢复浮窗（D13：拖拽宠物期间浮窗隐藏、松手 0.5s 后恢复）。 */
 export const MINI_RESTORE_MS = 500;

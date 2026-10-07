@@ -555,7 +555,7 @@ export function FoxbellPet() {
     startMiniGrace();
   };
 
-  /** 指针进入浮窗（或其内的「详情 »」）：算「在宠物身上」，并取消 200ms 宽限 */
+  /** 指针进入浮窗（或其内的「详情 »」）：算「在宠物身上」，并取消宽限（MINI_GRACE_MS，2026-10-07 起 2s） */
   const onMiniWrapPointerEnter = () => {
     pointerOnPetRef.current = true;
     clearMiniGrace();
@@ -797,7 +797,7 @@ export function FoxbellPet() {
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
         onDoubleClick={onDoubleClick}
-        // 浮窗悬停时序（D13）：进入即（重）起 500ms 悬停定时器 + 取消宽限；移开则停悬停、起 200ms 宽限
+        // 浮窗悬停时序（D13）：进入即（重）起 500ms 悬停定时器 + 取消宽限；移开则停悬停、起 MINI_GRACE_MS（2026-10-07 起 2s）宽限
         onPointerEnter={onSpritePointerEnter}
         onPointerLeave={onSpritePointerLeave}
         onContextMenu={(e) => {
@@ -824,7 +824,7 @@ export function FoxbellPet() {
         <div
           ref={miniWrapRef}
           data-testid="pet-mini-wrap"
-          // 指针进/出浮窗都维护「在不在宠物身上」的对账位（悬停层揭幕要用），并处理 200ms 宽限
+          // 指针进/出浮窗都维护「在不在宠物身上」的对账位（悬停层揭幕要用），并处理宽限（MINI_GRACE_MS）
           onPointerEnter={onMiniWrapPointerEnter}
           onPointerLeave={onMiniWrapPointerLeave}
           style={{
