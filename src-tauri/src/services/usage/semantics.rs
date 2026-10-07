@@ -11,6 +11,18 @@ pub enum CacheSemantics {
     Exclusive,
     Subset,
     TotalOnly,
+    /// **`backfill`：不是「缓存语义」，是「来源标记」**（第 14 轮 dsh 时间归属改造）。
+    ///
+    /// 语义：这一行的量**不是**按事件时间实测到的，而是「日志已被清理、只能从投影缓存累计差额
+    /// 补录」的部分 —— 只进**全天账**（`hour_key` = 日键），**不进任何短窗口**。
+    /// 为什么复用 `cache_semantics` 列而不是新增列：任务书 §3.2 明确允许（「可用 `cache_semantics`
+    /// 或新增列；新增列必须走 migration 并申报接口变更」）；本列是 TEXT、取值集合由本枚举定义，
+    /// 扩充取值不需要 migration。**取值的扩充已在契约里做日期化申报**（见
+    /// `docs/superpowers/plans/2026-10-03-usage-interface-contract.md` 的 2026-10-07 变更申报）。
+    ///
+    /// **不得**拿它当语义用：`normalize()` 对它返回 `None`（补录行由采集器按 `Exclusive`
+    /// 构造好四桶，不经过归一化）。
+    Backfill,
 }
 
 impl CacheSemantics {
@@ -19,14 +31,21 @@ impl CacheSemantics {
             CacheSemantics::Exclusive => "exclusive",
             CacheSemantics::Subset => "subset",
             CacheSemantics::TotalOnly => "total-only",
+            CacheSemantics::Backfill => "backfill",
         }
     }
     pub fn from_db(s: &str) -> Self {
         match s {
             "subset" => CacheSemantics::Subset,
             "total-only" => CacheSemantics::TotalOnly,
+            "backfill" => CacheSemantics::Backfill,
             _ => CacheSemantics::Exclusive,
         }
+    }
+
+    /// 是不是「补录」（来源标记，非实测）。UI/导出将来据此区分「实测 / 补录」。
+    pub fn is_backfill(&self) -> bool {
+        matches!(self, CacheSemantics::Backfill)
     }
 }
 
@@ -141,6 +160,9 @@ pub fn normalize(raw: &RawUsage, sem: CacheSemantics) -> Option<NormalizedUsage>
             (fresh, raw.input_raw) // Subset 请求输入 = input 原文（= fresh + cache_read）
         }
         CacheSemantics::TotalOnly => return None,
+        // 补录是**来源标记**、不是语义：真走到这里说明有人拿它当语义用 —— 拒绝归一
+        //（不猜一个语义出来；补录行由采集器按 Exclusive 构造好四桶）。
+        CacheSemantics::Backfill => return None,
     };
     Some(NormalizedUsage {
         buckets: UsageBuckets {
