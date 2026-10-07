@@ -636,7 +636,11 @@ describe("tailscale 卡展开区集成（Task 9 收敛：向导挂进卡片详�
       expect(invokeMock.mock.calls.some((c) => c[0] === "remote_ts_probe")).toBe(true)
     );
     const phase = await screen.findByTestId("ts-phase");
-    expect(phase.getAttribute("data-phase")).toBe("notInstalled");
+    // data-phase 由展开区的探测回执**派生**（ts-phase 元素先挂、属性后更）：等它落定再读，
+    // 否则读到的是回执到达前的 "unknown"。2026-10-07 定位：把 mock 回执人为延后即 100%
+    // 复现（同一类"读到回执到达之前"）；等条件后 100% 绿。断言强度不变（仍要求
+    // notInstalled——真回归 / 相位判错照样红）。
+    await waitFor(() => expect(phase.getAttribute("data-phase")).toBe("notInstalled"));
     // 向导本体先不挂；一键配置按钮 → 向导上墙
     expect(screen.queryByTestId("ts-wizard")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /set up in one click/i }));

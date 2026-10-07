@@ -464,7 +464,10 @@ describe("RemoteSection 命名隧道：Token 保存与教程 popover（M5 A6）"
         value: "eyJh-new-token",
       })
     );
-    expect(toastSuccessMock).toHaveBeenCalled();
+    // toast 在 `await set_setting` 的续体里才弹，而上面的 waitFor 只看"**调用**已发生"
+    // （mock 的调用在 promise 落定前就记账）——两者之间隔着一个微任务，满载时会早读。
+    // 2026-10-07：所有命令人为延后 30ms 即稳定复现（同一类"读到回执到达之前"）。
+    await waitFor(() => expect(toastSuccessMock).toHaveBeenCalled());
   });
 
   it("教程 popover：点击展开六步教程，再点收起（可保持展开边看边操作）", async () => {
@@ -633,7 +636,12 @@ describe("RemoteSection tailscale 卡三态（§C4 / 简报 Step 4）", () => {
     await waitFor(() => expect(phaseEl().getAttribute("data-phase")).toBe("configuring"));
     // 向导进度渲染 remote_ts_probe 的平台步骤表（每步一行），卡点随行展示原因
     expect(await screen.findByTestId("ts-wizard")).toBeTruthy();
-    expect(document.querySelectorAll("[data-step]").length).toBe(9);
+    // 步骤行来自 remote_ts_probe 的回执（ts-wizard **根元素**先挂、行后到）：必须等"行齐"
+    // 再数，否则读到的是回执到达**之前**的 DOM（0 行）——满载/慢机器上偶发恒红。
+    // 2026-10-07 定位：把 mock 回执人为延后 50ms，旧写法 100% 复现（收到 0 而非 18，
+    // 故**不是**"别的测试留下的 DOM"；本文件 afterEach 亦有 cleanup）；改等条件后同一
+    // 延后下 100% 绿。**断言强度不变**：仍要求恰好 9 行（真回归 / 多挂一份向导照样红）。
+    await waitFor(() => expect(document.querySelectorAll("[data-step]").length).toBe(9));
     expect(document.querySelector("[data-testid='ts-blocked']")?.textContent).toContain(
       "sha256 校验失败（模拟）"
     );
