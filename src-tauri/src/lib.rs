@@ -10,6 +10,10 @@ pub mod services;
 pub mod session;
 pub mod window;
 
+/// 测试专用工具（临时目录工厂等）：仅测试构建可见，不进发布产物。
+#[cfg(test)]
+pub(crate) mod test_support;
+
 use tauri::Manager;
 #[tauri::command]
 fn greet(name: &str) -> String {

@@ -3073,7 +3073,7 @@ mod tests {
         }
     }
 
-    /// Task 6 专用 state：夹具与 [`inject_state_with_probe`] 同一套，确认缝缺省
+    /// Task 6 专用 state：夹具与 `inject_state_with_probe`（Windows-only）同一套，确认缝缺省
     /// 恒命中（首轮即中，零延迟零等待）+ 指定注入器
     fn inject_state(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
@@ -3108,6 +3108,15 @@ mod tests {
     /// 测试与 approve_state 的 approve_sends_key 双方使用，实测 2/30 假红；本夹具侧
     /// 已改名 sess_i 让 sess_h 归 approve 族独占；sess_t3 同规——T3 端点测试 ~5s
     /// 轮询窗内守卫全程占用，撞 id 会把对方挤成 queued 假红）
+    ///
+    /// **平台门控（2026-10-07 存量债清理）**：本夹具的**唯一**消费方是
+    /// `#[cfg(windows)]` 的 `send_reports_submitted_when_stamp_missed_no_stuck_draft`
+    /// ——它依赖 Windows 屏读（假 pid 无滞留草稿 → submitted 中性回执）这条
+    /// 非 Windows 平台不存在的能力。非 Windows 上没有消费方 ⇒ 会被
+    /// `cargo clippy --all-targets -- -D warnings` 判 dead_code（实测 macOS 红 1 条）。
+    /// 因此把门控**加在夹具本身**（而不是无理由 `#[allow(dead_code)]`）：
+    /// 与消费方同 cfg，Windows 上门控开启、夹具照旧被使用，其余平台则不编译。
+    #[cfg(windows)]
     fn inject_state_with_probe(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         confirm_probe: std::sync::Arc<crate::remote::server::ConfirmProbeFn>,
@@ -4939,6 +4948,8 @@ mod tests {
     /// sess_ab（标记载荷损坏 → 回落通道 B）/ sess_ac（bad_index 400）/
     /// sess_ad（仅审批标记——隔离反差用）/ sess_ae（问题标记 + detect 命中文案——
     /// 问题标记压审批卡的最强隔离形态）/ sess_af（无标记——no_question 409）/
+    /// sess_qadv / sess_qsub（阶段机 advance / 已在 Review submit **各自独占**——
+    /// 守卫 id 立规：投递类用例不得共用裸 id）/
     /// sess_ai / sess_aj（Processing 无标记——通道 B 可用/已答反例）/
     /// sess_ak（**阶段机中途投递失败**：首错即停 + `failed:<e>` 审计独占——原为
     /// 批次乙「submit 首错即停」用例的夹具，本批重构时该用例被误删（复评 Important-2），
@@ -4971,6 +4982,13 @@ mod tests {
             sess("sess_ab", 38, crate::session::SessionStatus::Waiting),
             sess("sess_ac", 39, crate::session::SessionStatus::Waiting),
             sess("sess_ad", 40, crate::session::SessionStatus::Waiting),
+            // 守卫 id 立规补正（2026-10-07 存量红清理）：**问题投递**类用例各自独占 id。
+            // 原「stage 机 advance」与「已在 Review submit」两条用例都借 sess_ad，而
+            // INFLIGHT 守卫按**裸 id 字符串全局占用**（见 inject_state_with_probe 文档）
+            // ⇒ 二者并行跑必有一条吃「投递进行中，请稍后重试」（实测并行 3/3 红、
+            // 串行 3/3 绿）；sess_ad 归还给它的既定主人「仅审批标记——隔离反差用」。
+            sess("sess_qadv", 26, crate::session::SessionStatus::Waiting),
+            sess("sess_qsub", 27, crate::session::SessionStatus::Waiting),
             {
                 // 最强隔离形态：问题标记 + last_message 恰为审批 marker 命中句——
                 // 证明问题标记压审批卡不依赖 detect 未达
@@ -7031,14 +7049,15 @@ mod tests {
             ],
             false,
         );
-        mark_question(&state, "claude", "sess_ad", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
+        // 守卫 id 立规：本用例独占 sess_qadv（原借 sess_ad 与 submit 用例并行串键）
+        mark_question(&state, "claude", "sess_qadv", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
         let app = router(state.clone());
         let r = app
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-question/answer",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_ad","action":"advance","direction":"next"}"#),
+                Some(r#"{"sessionId":"sess_qadv","action":"advance","direction":"next"}"#),
             ))
             .await
             .unwrap();
@@ -7097,14 +7116,15 @@ mod tests {
             vec![screen_fixtures::review(), screen_fixtures::answered()],
             false,
         );
-        mark_question(&state, "claude", "sess_ad", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
+        // 守卫 id 立规：本用例独占 sess_qsub（原借 sess_ad 与 advance 用例并行串键）
+        mark_question(&state, "claude", "sess_qsub", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
         let app = router(state.clone());
         let r = app
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-question/answer",
                 Some("mam_device=mm"),
-                Some(r#"{"sessionId":"sess_ad","action":"submit"}"#),
+                Some(r#"{"sessionId":"sess_qsub","action":"submit"}"#),
             ))
             .await
             .unwrap();
@@ -7116,7 +7136,7 @@ mod tests {
         );
         assert_eq!(
             fake.recorded_keys(),
-            vec![(40u32, "1".to_string())],
+            vec![(27u32, "1".to_string())],
             "键序 = ['1']（抄屏上编号；零走位零回车）：{:?}",
             fake.recorded_keys()
         );
@@ -10019,15 +10039,12 @@ mod tests {
         b.body(body).unwrap()
     }
 
-    fn attach_tempdir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "mam-attach-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    /// 附件 E2E 的项目目录：唯一性来自 `test_support`（pid + 进程内原子序号），
+    /// **不再**用 `as_nanos()`——旧写法同一微秒内撞名，与同进程并行跑的
+    /// `remote::attachments` 族互相 `remove_dir_all`（存量 flake 同根因，
+    /// 见 `test_support` 模块文档）。
+    fn attach_tempdir() -> crate::test_support::TestDir {
+        let d = crate::test_support::temp_dir("mam-attach-e2e");
         std::fs::create_dir_all(d.join(".git").join("info")).unwrap();
         d
     }
@@ -10037,7 +10054,7 @@ mod tests {
         let proj = attach_tempdir();
         // 单一 state 实例：设备注册与 router 必须同源（DeviceStore::memory 每个实例独立，
         // 分开构造会让注册的设备在 app 里不存在 → 403 假阴性）
-        let state = attach_state(proj.clone(), false);
+        let state = attach_state(proj.path().to_path_buf(), false);
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
         let r = app
@@ -10085,14 +10102,13 @@ mod tests {
         let exclude =
             std::fs::read_to_string(proj.join(".git").join("info").join("exclude")).unwrap();
         assert_eq!(exclude.matches(".mam-attachments/").count(), 1, "幂等");
-        std::fs::remove_dir_all(&proj).ok();
     }
 
     #[tokio::test]
     async fn attachment_gate_and_error_contracts() {
         // 403：无设备 cookie（门禁防御）
         let proj = attach_tempdir();
-        let state = attach_state(proj.clone(), false);
+        let state = attach_state(proj.path().to_path_buf(), false);
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
         let r = app
@@ -10116,7 +10132,7 @@ mod tests {
         assert_eq!(r.status(), 404);
         assert!(body_string(r).await.contains("no_session"));
         // 404 no_cwd：会话无项目目录（与 resume 同源口径）；empty-cwd state 需另注册设备
-        let empty_state = attach_state(proj.clone(), true);
+        let empty_state = attach_state(proj.path().to_path_buf(), true);
         persist_named_device(&empty_state, "mm", "测试设备");
         let r = router(empty_state)
             .oneshot(attach_req(
@@ -10139,7 +10155,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 413);
-        std::fs::remove_dir_all(&proj).ok();
     }
 
     // ===== 丁T3 接入①：模式切换的对话框在场守卫（§2.7 裁8/9，问题 5）=====
@@ -10967,10 +10982,16 @@ mod tests {
 
     /// POST：**显式 group 路由**（丁T4 新增字段）——codex 权限组「完全信任」→ 走
     /// `/permissions` 两段式的**第一段**（文本 + 回车；第二段无真屏读 → 中止并如实回执）
+    /// 平台门控（2026-10-07 存量债清理）：本测断言的是「两段式的**第一段照常投递**」，
+    /// 而第一段之后的菜单定位/导航**必须屏读**，屏读是 **Windows 能力**——
+    /// `remote/api.rs::menu_stages` 在 `not(windows)` 下按设计恒回
+    /// Err「本平台无屏读，权限菜单无法定位」（如实回执，不盲发）。故该行为在非 Windows
+    /// 上**不可能发生**，属平台不适用而非行为回归；门控取严 = 原注入平台门
+    /// （inject/routing.rs：仅 Windows/macOS 可注入）∩ 屏读能力（仅 Windows）。
     #[tokio::test]
     #[cfg_attr(
-        not(any(windows, target_os = "macos")),
-        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+        not(windows),
+        ignore = "屏读是 Windows 能力：非 Windows 下 menu_stages 恒回 Err「本平台无屏读，权限菜单无法定位」，第一段投递不可发生（平台不适用）"
     )]
     async fn session_mode_switch_routes_explicit_permission_group() {
         let fake = FakeInjector::ok();
@@ -11180,10 +11201,14 @@ mod tests {
 
     /// codex 运行中门**只管 Plan 档**：同一 Processing 会话切权限组 → 照常出手
     /// （权限菜单的可用性与回合状态无关；未实测有同类限制 → 不扩张）。
+    /// 平台门控（2026-10-07 存量债清理）：本测断言「运行中门只拦 Plan 档 → 权限组
+    /// 照常出手」，而权限组出手 = 走两段式的第一段，第二段的菜单定位**必须屏读**
+    /// （Windows 能力）——非 Windows 下 `menu_stages` 恒回 Err「本平台无屏读」，
+    /// 记录里不会有 `/permissions`。属平台不适用而非行为回归。
     #[tokio::test]
     #[cfg_attr(
-        not(any(windows, target_os = "macos")),
-        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+        not(windows),
+        ignore = "屏读是 Windows 能力：非 Windows 下 menu_stages 恒回 Err「本平台无屏读，权限菜单无法定位」，权限组出手不可发生（平台不适用）"
     )]
     async fn session_mode_switch_codex_busy_only_blocks_plan() {
         let fake = FakeInjector::ok();
@@ -11222,10 +11247,14 @@ mod tests {
     ///
     /// **本用例能证明什么**：探针只在**第一段之前**被调用一次（守卫位）→ 断「调用
     /// 次数恰好 1」+「第一段照常投递」。若有人在第二段前再插一次探针，计数变 2 → 先红。
+    /// 平台门控（2026-10-07 存量债清理）：本测断言「第一段照常投递 + 守卫恰好调用一次」，
+    /// 而投递第一段的**前提**是菜单路径可行——菜单定位/导航必须屏读（Windows 能力），
+    /// 非 Windows 下 `menu_stages` 恒回 Err「本平台无屏读，权限菜单无法定位」，
+    /// 记录为空 ⇒ 断言不可满足。属平台不适用而非行为回归。
     #[tokio::test]
     #[cfg_attr(
-        not(any(windows, target_os = "macos")),
-        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+        not(windows),
+        ignore = "屏读是 Windows 能力：非 Windows 下 menu_stages 恒回 Err「本平台无屏读，权限菜单无法定位」，第一段投递不可发生（平台不适用）"
     )]
     async fn session_mode_switch_menu_guard_runs_once_before_first_stage() {
         let fake = FakeInjector::ok();

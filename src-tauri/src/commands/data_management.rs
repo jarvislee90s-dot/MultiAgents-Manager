@@ -79,19 +79,14 @@ pub fn clean_attachment_project(project: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{temp_dir, TestDir};
     use std::path::Path;
 
-    fn tempdir() -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "mam-datamgmt-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    /// 本族每个用例的临时目录：唯一性来自 `test_support`（pid + 进程内原子序号），
+    /// **不再**用 `as_nanos()`——旧写法在同一微秒内会撞名，并行用例互相
+    /// `remove_dir_all`（存量 flake 根因，见 `test_support` 模块文档）。
+    fn tempdir() -> TestDir {
+        temp_dir("mam-datamgmt-test")
     }
 
     fn seed_attachment(home: &Path, project: &Path, session: &str, name: &str, bytes: &[u8]) {
@@ -124,9 +119,6 @@ mod tests {
         assert_eq!(a.bytes, 7);
         let b = out.iter().find(|s| s.files == 1).expect("proj_b");
         assert_eq!(b.bytes, 3);
-        std::fs::remove_dir_all(&home).ok();
-        std::fs::remove_dir_all(&proj_a).ok();
-        std::fs::remove_dir_all(&proj_b).ok();
     }
 
     #[test]
@@ -139,8 +131,6 @@ mod tests {
         // 目录删除（含宿主空壳 .mam-attachments 移除）+ 索引剔空
         assert!(!proj.join(".mam-attachments").exists());
         assert!(crate::remote::attachments::read_index(&home).is_empty());
-        std::fs::remove_dir_all(&home).ok();
-        std::fs::remove_dir_all(&proj).ok();
     }
 
     #[test]
@@ -148,7 +138,6 @@ mod tests {
         let home = tempdir();
         let err = clean_attachment_project_with(&home, "E:/not-in-index").unwrap_err();
         assert_eq!(err, "unknown_project");
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
@@ -160,8 +149,6 @@ mod tests {
         std::fs::remove_dir_all(proj.join(".mam-attachments")).unwrap();
         clean_attachment_project_with(&home, proj.to_string_lossy().as_ref()).unwrap();
         assert!(crate::remote::attachments::read_index(&home).is_empty());
-        std::fs::remove_dir_all(&home).ok();
-        std::fs::remove_dir_all(&proj).ok();
     }
 
     #[test]
@@ -173,7 +160,5 @@ mod tests {
         seed_attachment(&home, &proj, "s1", "a.png", b"1");
         let (files, _) = crate::remote::attachments::project_attachment_stats(&proj);
         assert_eq!(files, 1);
-        std::fs::remove_dir_all(&home).ok();
-        std::fs::remove_dir_all(&proj).ok();
     }
 }

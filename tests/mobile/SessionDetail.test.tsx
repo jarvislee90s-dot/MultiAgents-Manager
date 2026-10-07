@@ -938,14 +938,24 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     );
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     await screen.findByText("m199");
+    // **排空挂载那一次数据落地的对齐 effect**（存量 flake 根因，2026-10-07 探针实证）。
+    // `findByText` 只保证 DOM 已提交，**不保证被动 effect 已冲刷**：React 的 passive
+    // effect 经调度器异步冲刷，负载下可拖到 `fireEvent.click` 的 act 作用域里才跑。
+    // 而 click 的派发发生在 act 冲刷**之前**——于是「挂载落地的对齐 effect」会看到
+    // click 刚装好的锚，用 `inserted = 5000 - 5000 = 0` 把它消费掉（补偿退化成空操作），
+    // 随后真正的 limit=400 落地走 `pollFollow === true` 分支
+    // `el.scrollTop = el.scrollHeight = 8000` → 断言偶发红（实测 12 次重压跑红 1 次、
+    // 3 次全量套件跑红 1 次，探针逐字轨迹：click 后紧跟 align-PENDING{inserted:0,
+    // result:1000}，再 align-BOTTOM{scrollHeight:8000}）。
+    // 显式 act 冲刷把这一步提前到几何量注入**之前**，竞态窗口随之消失（不是加等待）。
+    await act(async () => {});
     const area = screen.getByTestId("message-area");
-    // 模拟：当前滚动位置 1000，内容总高 5000
+    // 模拟：当前滚动位置 1000，内容总高 5000（此刻挂载对齐已跑完，不会再覆写）
     Object.defineProperty(area, "scrollHeight", { value: 5000, configurable: true });
     area.scrollTop = 1000;
     // 点「加载更早」→ 记录锚点；limit=400 重拉在途。先挂起响应、注入新内容总高
-    // （8000）后放行——根治顺序竞态（旧版靠 detail-refresh 二次触发对齐断言瞬时值：
-    // 若首响落在几何量注入前，锚被 0 插入量消费，二次落底把 scrollTop 盖写为
-    // 8000，机器负载下偶发翻车）。
+    // （8000）后放行——保证补偿算的是「新高度 - 旧高度 = 3000」这一真实插入量，
+    // 而不是被别的落地抢先把锚消费掉。
     const inner = fetchMock;
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
