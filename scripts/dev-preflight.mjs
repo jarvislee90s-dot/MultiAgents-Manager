@@ -47,6 +47,40 @@ function cleanStaleDepCache() {
   say(`依赖已变更（${deps.map((d) => d.f).join(" / ")} 比预打包缓存新）→ 已清理 node_modules/.vite`);
 }
 
+/** 这个 PID 是不是**本仓自己的** vite（按命令行判断，避免误杀别人的软件） */
+function isOurVite(pid) {
+  try {
+    const cmd = execSync(`ps -o command= -p ${pid}`, { encoding: "utf8" });
+    return cmd.includes(ROOT) && cmd.includes("vite");
+  } catch {
+    return false;
+  }
+}
+
+/** 本仓的 **dev app 孤儿**（`target/debug/multi-agents-manager`）：dev 会话被 Ctrl+C 之后它常常活下来，
+ *  而它此时已经**加载不到任何页面**（dev server 没了）⇒ 所有窗口空白，且占着托盘/SQLite。
+ *  只杀 dev 构建产物，**不碰** Release 安装版（路径不同）。 */
+function killStaleDevApp() {
+  if (process.platform === "win32") return;
+  let pids = "";
+  try {
+    pids = execSync(
+      `pgrep -f "${ROOT}/src-tauri/target/debug/multi-agents-manager"`,
+      { encoding: "utf8" }
+    ).trim();
+  } catch {
+    return; // pgrep 无命中即退出码 1
+  }
+  for (const pid of pids.split("\n").filter(Boolean)) {
+    try {
+      process.kill(Number(pid), "SIGKILL");
+      say(`清掉上一次会话残留的 dev app（PID ${pid}，它已加载不到页面 ⇒ 窗口全空白）`);
+    } catch (e) {
+      say(`结束残留 dev app ${pid} 失败：${e.message}`);
+    }
+  }
+}
+
 /** 探活：能拿到任何 HTTP 响应字节就算「活着」；超时/拒连算「没应答」 */
 function probe(host) {
   return new Promise((resolve) => {
@@ -67,38 +101,49 @@ function probe(host) {
 }
 
 /** ② 端口被卡死进程占用 ⇒ 杀掉（只在探活明确超时时） */
-async function rescueHungPort() {
+async function takeOverPort() {
   const v4 = await probe("127.0.0.1");
   const v6 = await probe("::1");
-  if (!v4.startsWith("hung") && !v6.startsWith("hung")) {
-    if (v4 === "alive" || v6 === "alive") {
-      say(`注意：${PORT} 已有一个**正常应答**的服务在跑（交给 strictPort 处理，不插手）`);
-    }
-    return;
-  }
+  const alive = v4 === "alive" || v6 === "alive";
+  if (v4 === "free" && v6 === "free") return; // 端口没人占，直接开
+
   if (process.platform === "win32") {
-    say(`${PORT} 端口有进程但不应答；Windows 请手动结束它（任务管理器找 node.exe）`);
+    say(`${PORT} 已被占用（${alive ? "有应答" : "无应答"}）；Windows 请手动结束它（任务管理器找 node.exe）`);
     return;
   }
   let pids = "";
   try {
     pids = execSync(`lsof -ti tcp:${PORT} -sTCP:LISTEN`, { encoding: "utf8" }).trim();
   } catch {
-    /* lsof 没找到就不管 */
+    /* 查不到就当没人占 */
   }
-  if (!pids) {
-    say(`${PORT} 端口无人应答但也查不到监听进程（可能正在退出），继续启动`);
-    return;
+  if (!pids) return;
+
+  // **本仓自己的 vite：一律接管**（2026-10-07 第二次踩坑后改成这样）。
+  // 原先的设计是「只杀不应答的，应答的交给 strictPort 报错」—— 结果用户撞上的是
+  // **上一次会话留下的、仍在正常应答的 vite**：strictPort 只会甩一段 vite 堆栈，
+  // 用户既不知道该杀谁、也看不出「这是我自己另一个终端里的会话」。
+  // 现在：本仓 vite ⇒ 结束它并继续（`pnpm tauri:dev` 的语义变成「总是给你一个干净的新会话」）；
+  //       不是本仓的进程 ⇒ **不动手**，打印清楚原因并让启动停下来。
+  const ours = pids.split("\n").filter(Boolean).filter(isOurVite);
+  const others = pids.split("\n").filter(Boolean).filter((p) => !isOurVite(p));
+  if (ours.length === 0) {
+    say(`${PORT} 被**别的程序**占着（PID ${others.join(", ")}），不是本仓的 dev server ⇒ 不接管。`);
+    say(`请先结束它，或改端口后再跑 pnpm tauri:dev。`);
+    process.exit(1);
   }
-  for (const pid of pids.split("\n")) {
+  for (const pid of ours) {
     try {
       process.kill(Number(pid), "SIGKILL");
-      say(`上一个 dev server 卡死（探测无应答）→ 已结束 PID ${pid}`);
+      say(`接管 ${PORT}：结束上一次会话的 vite（PID ${pid}）${alive ? "（它还在应答）" : "（已无应答）"}`);
     } catch (e) {
       say(`结束 PID ${pid} 失败：${e.message}`);
     }
   }
+  // 给内核一点时间释放监听
+  await new Promise((r) => setTimeout(r, 500));
 }
 
 cleanStaleDepCache();
-await rescueHungPort();
+killStaleDevApp();
+await takeOverPort();

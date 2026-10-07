@@ -186,6 +186,36 @@ fn build_pet_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
         .visible(true)
         .inner_size(PET_W, PET_H)
         .position(x, y)
+        // **页面加载判据（2026-10-07）**：宠物窗口的问题一路查到「页面从不执行」，而「没加载」与
+        // 「加载了但 JS 死了」在 Rust 侧长得一模一样（都只表现为「没有 `set_pet_visible`」）。
+        // 这两步把它们分开：
+        //   * 出现 `pet page load: …` ⇒ 文档**确实加载了** ⇒ 问题在页面 JS（看后面的错误探针）；
+        //   * 从不出现 ⇒ 文档压根没加载 ⇒ 问题在窗口 / URL / WebView 层。
+        // 顺带装个**错误探针**：把第一个未捕获错误写进 `document.title`，3 秒后由 Rust 读回来
+        // —— 标题是 Rust 唯一能直接读到的页面状态，这样不必为探针新增 IPC 命令。
+        .on_page_load(|w, payload| {
+            log::info!(
+                "pet page load: event={:?} url={}",
+                payload.event(),
+                payload.url()
+            );
+            if let Err(e) = w.eval(
+                "window.addEventListener('error', function (e) { \
+                   document.title = 'PETERR:' + (e.message || 'unknown'); \
+                 });",
+            ) {
+                log::warn!("pet 错误探针注入失败：{}", e);
+            }
+            let w2 = w.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(3000));
+                match w2.title() {
+                    // 标题没被改写 ⇒ 页面没抛未捕获错误（`PETERR:` 前缀才是异常）
+                    Ok(t) => log::info!("pet title after 3s = {t}"),
+                    Err(e) => log::warn!("pet 读标题失败：{}", e),
+                }
+            });
+        })
         .build()
         .map_err(|e| format!("创建桌宠窗口失败: {}", e))?;
     // dev 模式下 WebView2 可能给 webview 自动附加 DevTools 独立窗口，显式关闭
