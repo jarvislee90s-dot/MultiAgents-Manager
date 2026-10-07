@@ -859,6 +859,13 @@ pub(crate) fn run_step(step: &str, port: u16) -> Result<serde_json::Value, Strin
             // 读不到状态 = Err（fail-closed：绝不拿"读不到"当"可以写"）
             let st = run_cli(&["status", "--json"]).and_then(|j| parse_status(&j))?;
             if backend_initializing(&st.backend_state) {
+                // 本回执的 `deferred` / `backendState` / `note`：**前端只声明不消费**
+                // （2026-10-07 核实）。语义 =「这一步**没做**（后端在恢复窗口内拒绝写入），
+                // **不是失败**」；向导动作后必重探，probe_steps_from 的 shields_up 分支
+                // 把同一事实呈现成 amber「后端正在重连…」（既不是"待做"也不是"卡住"）——
+                // 故前端不消费的**判断与理由**见 src/lib/api/remote.ts 的
+                // TsStepResult.deferred 注释；`note` 的消费方核实结论见 disable_preview
+                // 分支的同名说明。
                 return Ok(serde_json::json!({
                     "ok": true,
                     "deferred": true,
@@ -881,6 +888,10 @@ pub(crate) fn run_step(step: &str, port: u16) -> Result<serde_json::Value, Strin
             FunnelOutcome::Opened(approval) => {
                 serde_json::json!({ "ok": true, "approvalUrl": approval })
             }
+            // 同 shields_up：`deferred` 语义 =「这一步没做，**不是失败**」——此处**期望态
+            // 已记**（DESIRED），后端就绪后由 `status::deferred_open_due` 自动复评/补开通。
+            // 前端只声明不消费（理由同 shields_up 处注释：动作后重探的载荷已如实呈现，
+            // 不引入第二份回执派生的状态源）。
             FunnelOutcome::Deferred { backend_state } => serde_json::json!({
                 "ok": true,
                 "deferred": true,

@@ -188,11 +188,23 @@ export type TsStepResult = {
   ok: boolean;
   approvalUrl?: string | null;
   authUrl?: string;
+  /** Tailscale 后端状态（`sys_ext` / `login` 步回读；Deferred 回执里点明「卡在哪个态」） */
   backendState?: string;
   path?: string;
   skipped?: string;
   triggered?: boolean;
   done?: boolean;
+  /** W-A：后端重连/初始化窗口内这一步**没做**（后端拒绝写入，或不判定既有配置形态）——
+   *  `true` **不是失败**（回执 `ok: true`），配套 `backendState` + `note` 说明成因；
+   *  期望态已记（如 Funnel 的 DESIRED），后端就绪后由轮询自动复评/补开通。
+   *  **前端只声明不消费**（2026-10-07 判断，非疏漏）：动作回执后必重探
+   *  （TailscaleWizard.run 的 `await load()`），重探载荷的 `states[]` 已把**同一事实**
+   *  如实呈现成 amber「后端正在重连…」而非「待做 / 卡住」（后端 `probe_steps_from` 的
+   *  shields_up / funnel 两处 `blocked_amber` + 前端 blockedTone 分支），用户可见的
+   *  诚实性不缺；再引入回执派生的第二份状态源要额外管生命周期（探测定稿后残留的
+   *  「本次已推迟」会变成假话），且回执里的 `note` 是中文、上屏会绕过 i18n。
+   *  故：**只补类型**，UI 仍以重探为权威源。 */
+  deferred?: boolean;
   /** 后端下发的**成因说明**（中文人话；Deferred / unreadable 回执里带）。
    *  **前端当前零消费者**（全仓无 `.note` 读取点，2026-10-07 核实）：用户可见的成因说明
    *  一律走**静态 i18n 键**（如 `settings.remote.tsDisableDescUnreadable`，与后端文案同义，
