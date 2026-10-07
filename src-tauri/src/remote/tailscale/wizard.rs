@@ -463,7 +463,7 @@ pub(super) const LOGIN_LINK_POLL_DELAYS_MS: &[u64] = &[
 /// 如实回空串 + 成因（前端给"去客户端点登录"的兜底文案），**绝不无限等**。
 ///
 /// **等待者的生命周期（I1，2026-10-08 架构评审；注入口 = `cleanup`）**：子进程由
-/// [`spawn_login_attempt`] 登记进单飞槽，本函数**每次返回前**都经 `cleanup` 交代它的去向
+/// [`spawn_login_attempt`] 登记进单飞槽，本函数**每次成功返回前**都经 `cleanup` 交代它的去向
 /// （[`finish_login_attempt`]）——窗尽且没拿到链接 ⇒ [`LoginCleanup::Kill`]（否则它会按
 /// 默认 0s 一直等，MAM 退出后成孤儿）；拿到链接 / 已登录 ⇒ [`LoginCleanup::Keep`]
 /// （**保守**：杀是否让已生成的 AuthURL 失效**待真机复核**，见 [`LoginCleanup`] 的注释）。
@@ -546,6 +546,11 @@ pub(super) fn login_step_with(
             LOGIN_LINK_POLL_WINDOW
         ),
     }))
+    // **已知边界（2026-10-08 收口轮登记）**：上面的 `?` 错误返回（首次读状态 / 发起登录 /
+    // 轮询读状态，共三条）**不经 `cleanup`**——故本文档的措辞是"每次**成功**返回前"，不是
+    // "每次返回前"。那三条路径下的槽要么还是空的（尚未 spawn），要么留一个会在
+    // `--timeout 15s` 内自然退出、且由应用退出钩子 `cancel_login_attempt` kill + wait 的句柄
+    // ——不是无界泄漏（I1 的出口条件仍然成立）。
 }
 
 /// 有界等待参数（I1）：`login` 的 `--timeout` **默认 0s = 一直等**（1.102.4 `login --help`
@@ -573,7 +578,18 @@ pub(super) const LOGIN_TIMEOUT_ARG: &str = "15s";
 ///   别照抄旧结论。
 pub(super) const LOGIN_ARGS: &[&str] = &["login", "--timeout", LOGIN_TIMEOUT_ARG];
 
-/// 轮询收尾时对等待者的处置（I1；纯函数 [`login_cleanup_decision`] 算出来）。
+/// 轮询收尾时对等待者的处置（I1）。
+///
+/// **决策从哪来（2026-10-08 收口轮如实更正）**：生产里**只有「窗尽且没拿到链接」那 1 条**
+/// 走决策表（[`login_cleanup_decision`]），其余 **4 条 Ok 返回处是硬编码 [`LoginCleanup::Keep`]**
+/// （已登录 / 已有链接 / 轮询中已登录 / 轮询中拿到链接）——今天两条口径同值，**无行为差异**；
+/// 旧文档写"纯函数算出来"，是对生产形态的以偏概全。
+///
+/// ⚠️ **漂移风险（登记在案）**：将来若真机复核后调整决策表（例如把 `has_link` 也判 `Kill`），
+/// **那 4 处硬编码不会跟着变**——`login_step_settles_waiter_conservatively` 抓不到这种漂移
+/// （它注入的 `cleanup` 只看两条路各自的决策，看不到"另外 4 处没走决策表"）。动保守口径时
+/// **必须同时人工复核那 4 个调用点**。控制方判定：为这 4 处引入位置布尔/枚举**不划算**，
+/// 本轮只登记、不改代码。
 ///
 /// ⚠️ **待真机复核（本机无法验证 Windows 行为）**：杀掉等待者会不会让**已经生成的
 /// AuthURL** 失效？在拿到答案之前，杀法取**保守口径**——只有"轮询窗已尽**且拿不到链接**"
@@ -608,7 +624,13 @@ pub(super) fn login_cleanup_decision(done: bool, has_link: bool) -> LoginCleanup
 /// 有"可杀之物"；顺带把每次点击泄漏的**一个阻塞线程**去掉（旧收尸线程）。
 ///
 /// 收尸纪律：自然退出的子进程由 [`reap_login_attempt`]（`try_wait`，无阻塞）在**下一次**
-/// 发起/收尾时清出槽位——槽里至多留一个"已退出但未收尸"的句柄，**不是一个活着的进程**；
+/// 发起/收尾时清出槽位——"槽里至多留一个『已退出但未收尸』的句柄，不是一个活着的进程"
+/// 这句话**只对"自然退出之后"成立**（2026-10-08 收口轮限定语境：旧措辞漏了这个前提）。
+///
+/// ⚠️ **单飞设计的常态恰恰是槽里有一个『活着』的等待者**：拿到授权链接后走
+/// [`LoginCleanup::Keep`] 就是**有意让它继续活着**——直到 `--timeout 15s` 自然退出，
+/// 或应用退出钩子 [`cancel_login_attempt`] 把它 kill + wait。故"槽里有一个活着的进程"
+/// 是**正常状态**而非异常（单飞门正是为它而设：拦掉第二个等待者）；
 /// 应用退出路径 [`cancel_login_attempt`] 一律 kill + wait。
 static LOGIN_CHILD: once_cell::sync::Lazy<std::sync::Mutex<Option<std::process::Child>>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
@@ -624,7 +646,11 @@ fn adopt_login_child(child: std::process::Child) {
     *login_child_lock() = Some(child);
 }
 
-/// 槽是否为空（测试断言用；不含任何进程操作）
+/// 槽是否为空（**单飞判据 + 测试断言**；不含任何进程操作）
+///
+/// "单飞判据"不是修辞：生产入口 [`spawn_login_attempt`] 就靠它拦第二个等待者
+/// （`if !login_child_slot_is_empty() { return Ok(()) }`）——测试与生产消费的是**同一个**
+/// 判据，只有一份语义（2026-10-08 收口轮更正：旧文档只写"测试断言用"，与生产用途不符）。
 pub(super) fn login_child_slot_is_empty() -> bool {
     login_child_lock().is_none()
 }

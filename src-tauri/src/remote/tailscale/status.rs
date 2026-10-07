@@ -384,8 +384,14 @@ pub(super) fn cli_beside_service_exe(service_exe: &str) -> Option<String> {
 /// 治本依据：Windows MSI 让用户自选安装路径（MAM 执行 `msiexec /i`，**刻意不加 `/qn`**），
 /// 装到哪由用户定；而**服务登记必然指向真实安装位置**，与盘符 / 目录名 / 中文都无关。
 ///
-/// 返回的是**候选**（此处不判存在：存在性由 [`find_cli_with`] 在链尾统一收口，整条链上
-/// 只有一道门）；读不到登记 / 解析不出 exe / 推不出目录——任一步落空即 `None`（**不猜**）。
+/// 返回的是**候选**（**CLI 路径**此处不判存在：存在性由 [`find_cli_with`] 在链尾统一收口，
+/// **CLI 那一次**才是门）；读不到登记 / 解析不出 exe / 推不出目录——任一步落空即 `None`（**不猜**）。
+///
+/// ⚠️ **链上其实有两次 `exists`，别把前一次当成门**（2026-10-08 收口轮限定语境）：上面第 ② 步
+/// 的 [`parse_service_image_path_with`] 对**不带引号**的 `ImagePath` 会逐段加长地试候选，
+/// 那里的 `exists`（生产注入 `Path::exists`）**确实会碰文件系统**——但它是**解析手段**
+/// （用来切出参数边界、定位服务本体 exe），判的是"服务本体在哪"，**不是**"CLI 在不在"；
+/// CLI 的存在性只在链尾那一道门判。（带引号形态零 FS 访问，见该函数的形态规则 ②。）
 #[cfg(windows)]
 pub(super) fn discovered_cli() -> Option<PathBuf> {
     let raw = service_image_path()?; // ① 读服务登记
