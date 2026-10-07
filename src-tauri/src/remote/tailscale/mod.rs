@@ -2140,6 +2140,14 @@ mod tests {
     ///
     /// 变异：在 `spawn_login_attempt` 里加 `.args(&["--auth-key", "x"])` → 必红（实测报错见
     /// 提交说明）；把 `login_command(&bin)` 换成任何别的东西 → 必红。
+    ///
+    /// **2026-10-08 评审 Important #2（TOCTOU）**：单飞门从「reap / 判空 / 登记三次各自
+    /// 取锁」收紧为**一锁到底**——判空与 spawn/登记之间不许再有放锁窗口（旧形态两个并发
+    /// `run_step("login")` 可同时通过判空 ⇒ 双 spawn、第二次登记覆盖第一次句柄）。判据
+    /// 同步改为：体内取 `login_child_lock()` 守卫、判空看 `slot.is_some()`、登记走
+    /// `adopt_login_child_locked(&mut slot, child)`（同一守卫）。变异：把判空改回免锁版
+    /// `login_child_slot_is_empty()`、或把登记改回独立取锁 → 必红。入口接线由
+    /// [`login_arm_dispatches_only_through_spawn_login_attempt`] 补锁（评审 Important #1）。
     #[test]
     fn login_attempt_spawns_detached_and_never_waits() {
         let src = std::fs::read_to_string(concat!(
@@ -2171,15 +2179,23 @@ mod tests {
             );
         }
         // I1：spawn 出来的子进程必须**登记进单飞槽**（否则窗尽/退出时无从 kill + wait，
-        // 就成了评审说的"每次点击泄漏 1 进程 + 1 阻塞线程、退出后成孤儿"）
+        // 就成了评审说的"每次点击泄漏 1 进程 + 1 阻塞线程、退出后成孤儿"）。
+        // TOCTOU 修复：登记必须是**持同一守卫**的带锁版——登记与 spawn 同临界区
+        // （旧形态 spawn 后放开锁、二次取锁再登记，两次取锁之间可被并发发起插队，
+        // 第二次登记覆盖第一次的句柄）。
         assert!(
-            body.contains("adopt_login_child("),
-            "spawn 出来的 wait 者必须交给单飞槽登记（I1：窗尽/应用退出要能 kill + wait）: {body}"
+            body.contains("adopt_login_child_locked(&mut slot, child)"),
+            "spawn 出来的 wait 者必须在**同一临界区**登记进单飞槽（I1 + TOCTOU：\n\
+             窗尽/应用退出要能 kill + wait，且并发发起不得互相覆盖句柄）: {body}"
         );
-        // I1：单飞门——槽里还有活着的等待者就不再派生第二个（连点不该派生两个进程）
+        // I1：单飞门——「取锁 → 判空 → spawn → 登记」必须**一锁到底**（TOCTOU 修复）。
+        // 旧形态三次取锁（reap/判空/登记各自取放），判空与登记之间放锁做 IO + spawn
+        // ⇒ 两个并发发起可同时通过判空、双 spawn、第二次登记覆盖第一次句柄。
+        // 变异：把判空改回免锁版 `login_child_slot_is_empty()`（放锁读）→ 本断言红。
         assert!(
-            body.contains("login_child_slot_is_empty()"),
-            "必须有单飞门（同一时刻至多一个 `tailscale login`）: {body}"
+            body.contains("let mut slot = login_child_lock();") && body.contains("slot.is_some()"),
+            "单飞门必须持锁判空（`login_child_lock()` 取守卫后，在同一守卫上看 \
+             `slot.is_some()`）——同一时刻至多一个 `tailscale login`: {body}"
         );
         // I2（2026-10-08 收口轮补强）：argv 一律经**唯一拼装点** `login_command`。
         // 调用逐字锁死——多传/少传实参、换成别的构造都会让这一行不匹配。
@@ -2206,6 +2222,68 @@ mod tests {
             "必须调 `tailscale login`（只发起交互式登录、让尾网生成授权链接）: {:?}",
             login_argv()
         );
+    }
+
+    // ============================================================
+    // 红线守卫链的最后一环（2026-10-08 评审 Important #1）：入口接线
+    // ============================================================
+
+    /// **login 臂只能经 [`spawn_login_attempt`] 发起**：argv 三层守卫（常量内容断言 /
+    /// 唯一拼装点形态针 / `get_args()` 行为断言）锁的全是**对象内部**（`login_command` /
+    /// `spawn_login_attempt` 两个函数体），而消费它们的入口——`run_step` 的 login 臂——
+    /// 此前没有任何测试锁。实测变异：把臂里的 `spawn_login_attempt` 换成就地拼装的
+    /// `Command::new(bin).args(&["login","--timeout","15s","--auth-key",…]).spawn()`，
+    /// 定向 138 个测试**全绿**（同时静默绕掉单飞槽、kill 路径与退出钩子——孤儿进程
+    /// 回归也不红）。本形态针补上这一环：臂内不得出现任何 argv 拼装形态 / `Command::new` /
+    /// 裸 `.spawn(`，发起只能以函数值 `spawn_login_attempt` 交给 `login_step_with` 编排；
+    /// 臂内唯一允许的 CLI 调用是状态读（`run_cli` 是同步等待的，经它跑 `login` 是另一条
+    /// 逃逸路——同步挂死向导）。
+    /// 变异：把臂的 trigger 换成就地拼 argv + 裸 spawn → 必红（`.args(` / `Command::new` /
+    /// `.spawn(` 任一出现即红）。
+    #[test]
+    fn login_arm_dispatches_only_through_spawn_login_attempt() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/remote/tailscale/wizard.rs"
+        ))
+        .expect("读 wizard.rs");
+        let start = src
+            .find("\"login\" => login_step_with(")
+            .expect("run_step 的 login 臂必须存在，且直接经 login_step_with 编排");
+        let rest = &src[start..];
+        let end = rest
+            .find("\"shields_up\" =>")
+            .expect("login 臂之后应衔接 shields_up 臂（截取臂体用）");
+        let arm = &rest[..end];
+        assert!(
+            arm.contains("spawn_login_attempt,"),
+            "login 臂的发起口只能是生产入口 `spawn_login_attempt`（函数值直传）——argv \
+             白名单 / 单飞槽 / kill 路径全挂在那条链上，绕过即失控: {arm}"
+        );
+        // 读侧一并锁形：臂内恰好一条 run_cli 调用，且就是状态读
+        assert_eq!(
+            arm.matches("run_cli(&[").count(),
+            1,
+            "login 臂内 run_cli 调用必须恰好一条（状态读）——多一条就可能经它跑别的命令: {arm}"
+        );
+        assert!(
+            arm.contains("run_cli(&[\"status\", \"--json\"])"),
+            "login 臂内的 CLI 读必须是 `status --json`（别的命令走这条口就是逃逸）: {arm}"
+        );
+        for forbidden in ["Command::new", "std::process::", ".spawn("] {
+            assert!(
+                !arm.contains(forbidden),
+                "login 臂**不得**就地构造/派生进程（出现 {forbidden}）——发起一律经 \
+                 `spawn_login_attempt`: {arm}"
+            );
+        }
+        for &pat in ARGV_ADDING_PATTERNS {
+            assert!(
+                !arm.contains(pat),
+                "login 臂**不得**就地拼 argv（出现 {pat}）——argv 只能经 `login_command` / \
+                 `login_argv` 从白名单来（合规红线：不带任何凭据参数、不碰偏好）: {arm}"
+            );
+        }
     }
 
     // ============================================================

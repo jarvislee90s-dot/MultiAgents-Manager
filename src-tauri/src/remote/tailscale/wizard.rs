@@ -641,8 +641,9 @@ pub(super) fn login_cleanup_decision(done: bool, has_link: bool) -> LoginCleanup
 /// 就是一个孤儿进程（评审 I1 三条中的第 3 条）。把句柄放在模块级槽里，窗尽/应用退出才
 /// 有"可杀之物"；顺带把每次点击泄漏的**一个阻塞线程**去掉（旧收尸线程）。
 ///
-/// 收尸纪律：自然退出的子进程由 [`reap_login_attempt`]（`try_wait`，无阻塞）在**下一次**
-/// 发起/收尾时清出槽位——"槽里至多留一个『已退出但未收尸』的句柄，不是一个活着的进程"
+/// 收尸纪律：自然退出的子进程在**下一次**发起/收尾时被清出槽位（发起走持守卫的
+/// `reap_login_attempt_locked`，收尾走其免锁包装 [`reap_login_attempt`]；都是
+/// `try_wait`，无阻塞）——"槽里至多留一个『已退出但未收尸』的句柄，不是一个活着的进程"
 /// 这句话**只对"自然退出之后"成立**（2026-10-08 收口轮限定语境：旧措辞漏了这个前提）。
 ///
 /// ⚠️ **单飞设计的常态恰恰是槽里有一个『活着』的等待者**：拿到授权链接后走
@@ -659,28 +660,44 @@ fn login_child_lock() -> std::sync::MutexGuard<'static, Option<std::process::Chi
     LOGIN_CHILD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// 登记刚 spawn 的等待者（单飞槽的唯一写入口）
-fn adopt_login_child(child: std::process::Child) {
-    *login_child_lock() = Some(child);
+/// 登记刚 spawn 的等待者（**单飞槽的唯一写入口**，带守卫版）：在 [`spawn_login_attempt`]
+/// 的临界区内调用——**登记与 spawn 同临界区**正是 TOCTOU 修复的核心。旧形态（spawn 之后
+/// 放开锁、由独立取锁的 `adopt_login_child` 登记）里，并发的第二次发起可以在两次取锁
+/// 之间插队，第二次登记**覆盖**第一次的句柄（第一个进程 15 秒内无人可杀）。
+fn adopt_login_child_locked(
+    slot: &mut std::sync::MutexGuard<'static, Option<std::process::Child>>,
+    child: std::process::Child,
+) {
+    **slot = Some(child);
 }
 
-/// 槽是否为空（**单飞判据 + 测试断言**；不含任何进程操作）
+/// 槽是否为空（**单飞不变式的读侧**，测试断言用；不含任何进程操作）。
 ///
-/// "单飞判据"不是修辞：生产入口 [`spawn_login_attempt`] 就靠它拦第二个等待者
-/// （`if !login_child_slot_is_empty() { return Ok(()) }`）——测试与生产消费的是**同一个**
-/// 判据，只有一份语义（2026-10-08 收口轮更正：旧文档只写"测试断言用"，与生产用途不符）。
+/// 2026-10-08 TOCTOU 修复：生产判空**移进了临界区**——[`spawn_login_attempt`] 持锁后
+/// 直接看 `slot.is_some()`（判空与 spawn/登记之间不再有放锁窗口）；本函数保留为测试
+/// 可见的免锁快照，读的是同一个槽（仅测试构建存在，与 `reach::set_reachability`
+/// 的再导出纪律同款）。
+#[cfg(test)]
 pub(super) fn login_child_slot_is_empty() -> bool {
     login_child_lock().is_none()
+}
+
+/// 无阻塞收尸（带守卫版，临界区内复用同一守卫、不二次取锁）：
+/// 已自然退出的子进程清出槽位（不阻塞、不杀）
+fn reap_login_attempt_locked(
+    slot: &mut std::sync::MutexGuard<'static, Option<std::process::Child>>,
+) {
+    if let Some(child) = slot.as_mut() {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            **slot = None;
+        }
+    }
 }
 
 /// 无阻塞收尸：已自然退出的子进程清出槽位（不阻塞、不杀）
 pub(super) fn reap_login_attempt() {
     let mut slot = login_child_lock();
-    if let Some(child) = slot.as_mut() {
-        if matches!(child.try_wait(), Ok(Some(_))) {
-            *slot = None;
-        }
-    }
+    reap_login_attempt_locked(&mut slot);
 }
 
 /// **收尾口（应用退出 / 窗尽）**：把还在等待的 `tailscale login` kill + wait，不留孤儿。
@@ -739,21 +756,31 @@ pub(super) fn login_command(bin: &std::path::Path) -> std::process::Command {
 /// 即红，argv 不许就地拼）；argv 本身的行为由 [`login_command`] 一处拼装、由其行为测试锁死。
 ///
 /// **单飞（I1）**：槽里还有活着的等待者就**不再起第二个**——用户连点两次不该派生两个进程
-/// （第二个也没有额外信息：链接由 tailscaled 持有，轮询照旧能取到）。
+/// （第二个也没有额外信息：链接由 tailscaled 持有，轮询照旧能取到）。判空与 spawn/登记
+/// 在**同一临界区**（2026-10-08 评审 Important #2 的 TOCTOU 修复，见函数体内注释）。
 ///
 /// **不代登录**：argv 里没有任何凭据参数、不读任何凭据、不解析登录结果——只让尾网生成链接。
 pub(super) fn spawn_login_attempt() -> Result<(), String> {
-    reap_login_attempt(); // 先收掉已经自然退出的（单飞判据只看活着的）
-    if !login_child_slot_is_empty() {
+    // CLI 发现（IO）在临界区外做——临界区里只留「判空 → spawn → 登记」三件事
+    let bin = find_cli().ok_or_else(|| "未检测到 Tailscale（尚未安装）".to_string())?;
+    // **一锁到底（TOCTOU 修复）**：旧形态里 reap / 判空 / 登记三次各自取锁，中间还放开锁
+    // 做 find_cli 的 IO 与 spawn——两个并发的 `run_step("login")`（向导重挂后旧步复位再点
+    // 一次等场景）可同时通过判空 ⇒ 双 spawn，第二次登记**覆盖**第一个句柄：第一个进程
+    // 15 秒内无人可杀（`--timeout 15s` 有界，但 MAM 退出时 [`cancel_login_attempt`] 只够到
+    // 槽里那个）。判空+spawn+登记并入同一临界区后，「同一时刻至多一个等待者」才真正成立。
+    // 持锁跨 spawn（毫秒级系统调用，无 await、无其它锁序）不会长阻塞；本函数跑在
+    // spawn_blocking 线程上，短暂等锁不等用户。
+    let mut slot = login_child_lock();
+    reap_login_attempt_locked(&mut slot); // 先收掉已经自然退出的（单飞判据只看活着的）
+    if slot.is_some() {
         return Ok(()); // 单飞：已有等待者在跑，不再派生第二个
     }
-    let bin = find_cli().ok_or_else(|| "未检测到 Tailscale（尚未安装）".to_string())?;
     // 命令与 argv 一律由 login_command 一处拼装（本函数体内不得出现 argv 拼装，形态针锁死）
     let mut cmd = login_command(&bin);
     let child = cmd
         .spawn()
         .map_err(|e| format!("启动 `tailscale login` 失败: {e}"))?;
-    adopt_login_child(child);
+    adopt_login_child_locked(&mut slot, child);
     Ok(())
 }
 
