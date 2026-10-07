@@ -88,6 +88,17 @@ Not just looking — you can **act**: send messages, approve tool calls, answer 
 |                  **Approvals · plan**                   |             **Q&A · multi-select**             |
 |   ![Approvals](docs/images/mobile-approve-v0.5.0.png)   | ![Q&A](docs/images/mobile-question-v0.5.0.png) |
 
+**Can't connect? Check these first (every item below is a pit we actually hit):**
+
+1. **The router has "client isolation / AP isolation / guest network" enabled** — the most elusive one: your phone and computer are on the same WiFi, yet the router forbids wireless clients from talking to each other, so nothing connects. Turn that setting off in the router's admin page (field note: everything else checked out; this turned out to be it).
+2. **The quick tunnel address changes every time it is toggled** — each time you enable the quick tunnel a new public address is generated (the old link / QR code dies immediately), so don't treat it as a long-term entry point; for a fixed address use "Own domain" or "External domain (no domain needed)". Toggling other settings does not affect this channel.
+3. **The phone URL must end with `/m`** — a full address looks like `http://192.168.x.x:9420/m`; scanning the QR code is recommended (**the link already contains the PIN, filled in automatically**), and typing it without `/m` gives you an empty 404 page.
+4. **Access from this computer needs the PIN too** — "Local" is no longer a channel card: opening the board in this machine's own browser is treated exactly like a remote device (enter the PIN once), using the address shown on the "LAN connection" card, and **that switch must be on** (the address is unreachable when the server only listens on loopback); on your phone use the "LAN connection" or a tunnel address.
+5. **Firewall** — on Windows the first listen triggers an "allow access" prompt; if it was dismissed, inbound traffic is blocked: Windows Security → Firewall & network protection → Allow an app through firewall → tick MultiAgents Manager (both Private and Public).
+6. **The TLS confirmation dialog** — a direct LAN connection is plain HTTP; ticking the box means "I understand / I have a TLS reverse proxy in front"; for a home LAN just tick it — you don't need to actually set up a reverse proxy.
+7. **"Own domain" shows running but the domain won't open** — check whether **Public Hostname** is configured on the Cloudflare side (subdomain + domain + Service `HTTP://localhost:9420`); without that step the tunnel may look Healthy while the domain has no DNS record and won't open (the in-app "tutorial" has the step-by-step).
+8. **The "External domain (no domain needed)" card keeps saying "taking effect"** — after the first setup the public DNS record takes about 5–6 minutes to be published: direct access from this machine works right away while outside access has to wait for the record, so the card withholding the address is **honest reporting, not a malfunction**; if it stays that way for long, use "open the wizard to retry" inside the card — MAM also resets and re-enables Funnel to self-heal. If you see "recovering" after a boot, the Tailscale backend is reconnecting (usually 1–2 minutes): the configuration and the address are unchanged and nothing is required from you.
+
 ### Foxbell Desktop Pet
 
 A talking fox companion that lives in the corner of your screen and watches every session in real time.
@@ -415,6 +426,8 @@ The app stores its data in `~/.mam/`:
 - [x] Auto-update via GitHub Releases
 - [x] Dark/light theme sync with system
 - [x] Windows support (NSIS installer + deep links + nearest-ancestor window focus)
+- [x] Remote control phase 2 (v0.5.0, experimental) — send messages / queue & jump the queue / remote approvals / Q&A / permission switching from your phone (Claude Code / Codex CLI / Kimi Code / OpenCode)
+- [x] Mobile archived history (registry-based archiving + reactivation loop)
 - [x] Remote access · External domain (no domain needed) fixed-address channel (one-click Tailscale onboarding + public-side reachability verification + automatic recovery on boot; access from this computer now requires the PIN)
 - [ ] Linux support
 - [ ] Kitty & WezTerm terminal jump support
