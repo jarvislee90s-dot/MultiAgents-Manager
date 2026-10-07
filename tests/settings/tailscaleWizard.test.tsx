@@ -368,6 +368,79 @@ describe("TailscaleWizard ③向导页脚解释 Tailscale 是什么（含官网�
   });
 });
 
+// ④ 下载安装包时给「在走动」的反馈（2026-10-07 用户裁决）：download 步是**一次同步
+// 下载**（Rust 侧 `download_url_to` 一次性取回），期间前端此前完全没有动静——用户不知道
+// 是不是卡住了。用户原话：「如果下载没有百分比，你可以给一个模拟进度条，表示在走动。
+// 因为下载也不会花很长时间，就让用户知道没有卡住就行了。如果工作量很大，你也不用特意去
+// 做一个准确的下载百分比条了。」
+// 关键前提（已读码验证）：`remote_ts_run_step` 是 async + spawn_blocking（Rust 主线程/
+// IPC 派发线程不被占用），`invoke()` 返回 Promise 不阻塞 JS 事件循环 ⇒ **纯前端动画够用**。
+// 故：不确定进度指示器（转圈 + 「在走动」条，role=progressbar 无 aria-valuenow）+
+// 文案；发起即显示、返回即收起；**绝不给假百分比**（与移动端「速率未知只显示已传字节，
+// 不显示假百分比」同一条纪律）。
+describe("TailscaleWizard ④下载步「在走动」反馈（不确定进度，不给假百分比）", () => {
+  it("download 在途（IPC 未返回）即渲染不确定进度指示器——阻塞期前端仍能渲染；返回后收起", async () => {
+    let release: (v: unknown) => void = () => {};
+    invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
+      if (cmd === "remote_ts_probe") return macProbe();
+      if (cmd === "remote_ts_run_step" && args?.step === "download")
+        // 挂住不 resolve：模拟 Rust 侧正在同步下载（IPC 尚未返回）
+        return await new Promise((r) => {
+          release = r;
+        });
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    // 未发起时没有指示器
+    expect(screen.queryByTestId("ts-step-progress")).toBeNull();
+    fireEvent.click(within(stepRow("download")).getByRole("button", { name: /run/i }));
+    // **核心断言**：invoke 仍挂着，但界面已经显示「在走动」——证明下载阻塞期间前端能渲染
+    const bar = await within(stepRow("download")).findByTestId("ts-step-progress");
+    expect(bar.getAttribute("role")).toBe("progressbar");
+    // 不确定态：没有 aria-valuenow（有值就是"假百分比"的前身）
+    expect(bar.getAttribute("aria-valuenow")).toBeNull();
+    expect(bar.textContent).toMatch(/downloading/i);
+    // 纪律：不知道总量就不给百分比
+    expect(bar.textContent).not.toMatch(/%|\d+\s*\/\s*\d+/);
+    // 步骤返回 → 收起
+    release({ ok: true });
+    await waitFor(() => expect(screen.queryByTestId("ts-step-progress")).toBeNull());
+  });
+
+  it("install 在途也给走动反馈（msiexec/installer 等待期同样没有其它动静）", async () => {
+    let release: (v: unknown) => void = () => {};
+    invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
+      if (cmd === "remote_ts_probe") return macProbe();
+      if (cmd === "remote_ts_run_step" && args?.step === "install")
+        return await new Promise((r) => {
+          release = r;
+        });
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    fireEvent.click(within(stepRow("install")).getByRole("button", { name: /run/i }));
+    const bar = await within(stepRow("install")).findByTestId("ts-step-progress");
+    expect(bar.textContent).toMatch(/installing/i);
+    expect(bar.textContent).not.toMatch(/%/);
+    release({ ok: true });
+    await waitFor(() => expect(screen.queryByTestId("ts-step-progress")).toBeNull());
+  });
+
+  it("非长阻塞步（shields_up）不挂走动反馈——不给每一步都加噪音", async () => {
+    invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
+      if (cmd === "remote_ts_probe") return macProbe();
+      if (cmd === "remote_ts_run_step" && args?.step === "shields_up")
+        return await new Promise((r) => setTimeout(() => r({ ok: true }), 0));
+      return null;
+    });
+    render(<TailscaleWizard />);
+    await screen.findByText("Detect Tailscale");
+    fireEvent.click(within(stepRow("shields_up")).getByRole("button", { name: /run/i }));
+    expect(within(stepRow("shields_up")).queryByTestId("ts-step-progress")).toBeNull();
+  });
+});
 describe("TailscaleWizard A1：Funnel 批准是「可能不出现」的分支，不是必经步骤", () => {
   it("可选人工步（humanOptional）带「可能无需此步」弱提示；必需人工步不带", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {

@@ -342,7 +342,7 @@
           <div class="tri">
             <div class="tri-label"><span class="badge b-violet">状态二 · 配置中</span><span class="side">每一步都能看出进展与卡点</span></div>
             <div class="step done">✓ 检测与下载（官方源 + sha256 校验通过）</div>
-            <!-- 2026-10-08 七次回写（用户实测缺口：Tailscale 装在非默认路径 ⇒ MAM 找不到）：
+<!-- 2026-10-08 七次回写（用户实测缺口：Tailscale 装在非默认路径 ⇒ MAM 找不到）：
                  MAM 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权本就该给
                  用户（用户裁决原话：「你不能限制用户安装在哪里」）。但 MAM 原先只在
                  `C:\Program Files\Tailscale` 找 CLI：用户装到 `D:\软件\Tailscale`（尤其
@@ -356,6 +356,21 @@
                  ② **事后可查**——安装行的弱提示说清 MAM 的**两个查找位置**（默认安装目录 +
                     「Tailscale」服务登记的可执行路径）并给出「装完点刷新状态」的动作，
                     让"装完仍显示未安装"有据可查、不至于反复重装。 -->
+<!-- 2026-10-07 十次回写（④ 用户实测 + 用户裁决）：下载安装包这一步此前**没有任何
+                 进度反馈**（Rust 侧是一次同步下载，前端在整段下载里看不到动静），用户不知道
+                 是不是卡住了。用户原话：「如果下载没有百分比，你可以给一个模拟进度条，表示
+                 在走动。因为下载也不会花很长时间，就让用户知道没有卡住就行了。如果工作量
+                 很大，你也不用特意去做一个准确的下载百分比条了。」
+                 故：download（以及同样"没有任何其它动静"的 install 等待期）发起即挂一条
+                 **不确定进度（indeterminate）**指示器——转圈 + 「正在下载安装包…」文案，
+                 步骤返回即收起；**绝不给假百分比**（与移动端「速率未知只显示已传字节，
+                 不显示假百分比」同一条纪律）。实现为纯前端即可（已读码验证：
+                 `remote_ts_run_step` 是 async + spawn_blocking，Rust 主线程不被占用；
+                 `invoke()` 返回 Promise 不阻塞 JS 事件循环 ⇒ 动画照常跑）。 -->
+            <div class="step done">✓ 安装 Tailscale（已获管理员确认）</div>
+            
+            <div class="step cur">⏳ 正在下载安装包（官方源 + sha256 校验）… <span class="side">（总量未知 ⇒ 只表示「在走动」，不给百分比；i18n `tsWizard.downloading`）</span></div>
+            
             <div class="step done">✓ 安装 Tailscale（已获管理员确认）<span class="side">（Windows MSI 版：安装向导会让你选安装路径——动作文案点明「用默认路径最省事」；安装行常驻弱提示，说明 MAM 的两个查找位置 + 装完点「刷新状态」）</span></div>
             <div class="step cur">⏳ 登录 Tailscale —— <button class="btn">打开登录页</button> 等待你在浏览器完成登录…</div>
             <!-- 2026-10-07 三次回写（A1 实测）：Windows 11 家庭版 / Tailscale 1.102.4 MSI

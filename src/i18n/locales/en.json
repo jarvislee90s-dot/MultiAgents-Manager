@@ -306,6 +306,8 @@
       "tsWizard": {
         "title": "Tailscale Fixed-URL Setup Wizard",
         "windowsUnverified": "⚠ Windows has been machine-verified from “{{from}}” onward: {{steps}} have not been run end-to-end on a real machine (prefilled from official docs; actual behavior may differ). The start step and everything after it are machine-verified.",
+        "downloading": "Downloading the installer… (total size unknown, so this shows activity instead of a percentage)",
+        "installing": "Installing Tailscale… (installer verified; confirm the system prompt and wait)",
         "aboutTailscale": "What is this? Tailscale is a free personal mesh-networking tool: it gives every device a fixed private address, which is why we can hand you a permanent link without you owning a domain. Official site:",
         "statePending": "To do",
         "stateActive": "Running…",

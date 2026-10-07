@@ -51,6 +51,17 @@ const stepLabel = (t: ReturnType<typeof useAppTranslation>["t"], id: string) =>
 //（§C3，未验/失败都要能重触发校验）；autostart 是 MAM 自身行为（恒已完成）
 const RUNNABLE = new Set(["download", "install", "shields_up", "funnel"]);
 
+// ④ 「在走动」反馈的适用范围（2026-10-07 用户裁决）：只有这两步会给用户一段
+// **没有任何其它动静**的等待——download = 一次同步下载（Rust 侧 download_url_to 一次性
+// 取回，期间零反馈）；install = 系统授权框之后到安装器返回之间（msiexec/installer 阻塞）。
+// 其余步（shields_up / funnel）是秒级 CLI 写，不给每一步都挂噪音。
+// **不确定进度（indeterminate）**：总量未知 ⇒ 不给百分比（与移动端「速率未知只显示已传
+// 字节，不显示假百分比」同一条纪律），只表示「正在传输，没有卡住」。
+const LONG_STEP_HINT: Record<string, string> = {
+  download: "settings.remote.tsWizard.downloading",
+  install: "settings.remote.tsWizard.installing",
+};
+
 // **M3（2026-10-07 评审 Minor）**：线稿状态二的两行琥珀提示（wireframe 354-355：
 // 「恢复中」「发布中」）**带 badge**，与状态五同形（`b-amber` = 正在进行、无需操作的
 // 中间态，既不是故障 rose 也不是完成 green）；实现侧此前是纯文本 `<p>`，线稿与实现
@@ -302,6 +313,28 @@ export function TailscaleWizard() {
                     </Button>
                   )}
                 </div>
+                {/* ④ 长阻塞步的「在走动」反馈（用户裁决：不确定进度条即可，不要假百分比）：
+                    发起即显示（busy 在本步发起时同步置上）、步骤返回即收起。
+                    为什么纯前端够用（已读码验证，不是猜）：`remote_ts_run_step` 是
+                    `async fn` + `tauri::async_runtime::spawn_blocking`（Rust 主线程/IPC
+                    派发线程不被占用），前端 `invoke()` 返回 Promise 也**不阻塞 JS 事件
+                    循环** ⇒ 下载阻塞期间本行照常渲染、`animate-spin` 照常转。
+                    role=progressbar 且**不带 aria-valuenow** = 标准的「不确定进度」语义
+                    （有值就是假百分比的前身）；文案也如实说"总量未知，故不给百分比"。 */}
+                {busy && LONG_STEP_HINT[step.id] && (
+                  <p
+                    data-testid="ts-step-progress"
+                    role="progressbar"
+                    aria-label={t(LONG_STEP_HINT[step.id])}
+                    className="text-muted-foreground mt-1 flex items-center gap-1.5 text-[11px]"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="inline-block h-3 w-3 flex-none animate-spin rounded-full border-2 border-blue-500 border-t-transparent"
+                    />
+                    {t(LONG_STEP_HINT[step.id])}
+                  </p>
+                )}
                 {/* 需要人的步骤：动作文案突出显示（后端 humanActionKey 下发，前端只翻译）。
                     A1：可选人工步（humanOptional，目前只有 funnel 批准）额外挂一条弱提示
                     ——实测两平台各执一端（Windows 1.102.4 零批准链接、零点击；macOS 首开
