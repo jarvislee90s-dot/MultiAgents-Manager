@@ -1,0 +1,3 @@
+# kimi 2.1.1 底栏 · manual（无权限标签=缺席推断）+ plan ON · 活体 dump 2026-10-06 探针会话 wd_probe-kimi-211（自建）
+plan  DeepSeek V4.1 Flash thinking: high  C:\Users\bunny\AppData\Local\Temp\probe-kimi-211
+                                                                                                context: 4% (35.4k/1M)

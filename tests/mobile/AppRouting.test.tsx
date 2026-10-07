@@ -57,6 +57,7 @@ function installFetch() {
           JSON.stringify({
             host: { name: "JARVIS-Mac", platform: "macos", version: "0.4.1" },
             enabledTools: ["claude"],
+            installedTools: ["claude", "codex", "kimi", "opencode"],
           }),
           { status: 200 }
         );

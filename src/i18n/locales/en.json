@@ -208,6 +208,8 @@
       "enableCloseHint": "Turning it off only stops external access: paired devices reconnect automatically when it's back on; only 'Reset devices' or changing the access PIN clears devices",
       "keepalive": "Keep awake",
       "keepaliveHint": "Prevents system and disk sleep while remote access is on (the screen may still turn off). macOS still sleeps when the lid is closed; on battery, macOS needs AC power for the full effect, and Windows forces sleep at critical battery level",
+      "signature": "Sign remote messages with device name",
+      "signatureHint": "Appends [mobile <device>] to each sent message so its origin is visible in the terminal; off by default to save tokens. Traceability is always kept in the injection audit page regardless",
       "hostName": "Machine name",
       "groupGeneral": "1. General",
       "groupChannels": "2. Channels (independent switches, can be on at the same time; click a card to expand its details below)",

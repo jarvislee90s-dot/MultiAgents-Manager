@@ -128,7 +128,7 @@ export default function InteractiveCard({
       data-testid={testId}
       data-mode={mode}
       data-tone={tone}
-      className={`shrink-0 px-3 py-2 ${t.box}`}
+      className={`card-slide-enter shrink-0 px-3 py-2 ${t.box}`}
     >
       {/* 状态色条头部：脉冲圆点 + 类型徽标（+ 可选附加） */}
       <div className="flex flex-wrap items-center gap-1.5">

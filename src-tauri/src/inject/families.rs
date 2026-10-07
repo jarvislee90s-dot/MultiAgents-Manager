@@ -74,7 +74,7 @@ pub fn family_for(tool: &str) -> Option<FamilySpec> {
     let (family, verified_with, slow_consumer) = match tool {
         "claude" => (TuiFamily::RawVt, "2.1.251", false),
         "kimi" => (TuiFamily::RawVt, "2.0.0", false),
-        "opencode" => (TuiFamily::RawVt, "1.18.31", true),
+        "opencode" => (TuiFamily::RawVt, "2.0.22", true),
         "codex" => (TuiFamily::Crossterm, "0.154.0", false),
         _ => return None,
     };
@@ -175,7 +175,7 @@ mod tests {
         assert_eq!(c.verified_with, "2.1.251");
         let o = family_for("opencode").unwrap();
         assert!(o.slow_consumer);
-        assert_eq!(o.verified_with, "1.18.31");
+        assert_eq!(o.verified_with, "2.0.22");
         let x = family_for("codex").unwrap();
         assert_eq!(x.family, TuiFamily::Crossterm);
         assert_eq!(x.verified_with, "0.154.0");

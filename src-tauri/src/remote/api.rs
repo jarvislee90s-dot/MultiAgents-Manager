@@ -14,7 +14,7 @@ use axum::{
 };
 use futures::stream::{Stream, StreamExt as _};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
@@ -57,19 +57,20 @@ pub async fn sessions(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
     // 闭包捕获 state 的 Arc（Send + Sync + 'static）：`session_source` 是 Box<dyn Fn> 不可
     // clone，故整体 move 进阻塞线程池，在池内调用注入源
     let st = st.clone();
-    let response =
-        tokio::task::spawn_blocking(move || apply_board_hidden(&st, (st.session_source)()))
-            .await
-            .unwrap_or_else(|e| {
-                // JoinError（任务 panic/取消）降级为空响应：移动端拿到 0 会话而非连接错误，
-                // 与桌面侧 sessions 命令的降级形态一致
-                log::error!("远程会话扫描任务异常: {e}");
-                crate::session::SessionsResponse {
-                    sessions: Vec::new(),
-                    total_count: 0,
-                    waiting_count: 0,
-                }
-            });
+    let response = tokio::task::spawn_blocking(move || {
+        let resp = apply_board_hidden(&st, (st.session_source)());
+        // C7：配对不确定打标（spec §5）——进程缝与快照同段取得（生产同为 sysinfo
+        // 同步重活）；打标在 Value 层做，Session 结构体与其构造点零改动
+        let ambiguous = pairing_ambiguous_set(&st);
+        tag_pairing_ambiguous(resp, &ambiguous)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        // JoinError（任务 panic/取消）降级为空响应：移动端拿到 0 会话而非连接错误，
+        // 与桌面侧 sessions 命令的降级形态一致
+        log::error!("远程会话扫描任务异常: {e}");
+        empty_sessions_value()
+    });
     // M2-R2 顺手项：会话数据是设备门禁下的私有数据，禁止中间层/浏览器缓存
     (
         [(axum::http::header::CACHE_CONTROL, "no-store")],
@@ -82,6 +83,74 @@ pub async fn sessions(State(st): State<Arc<RemoteState>>) -> impl IntoResponse {
 /// （C 风格字段无 map 键/浮点 NaN）时的防御性降级——前端拿到合法空载荷而非空串
 /// （空串会让 JSON.parse 抛错、看板卡死）
 const EMPTY_SESSIONS_JSON: &str = r#"{"sessions":[],"totalCount":0,"waitingCount":0}"#;
+
+/// 空快照 Value（C7 打标路径的防御性降级）：与 [`EMPTY_SESSIONS_JSON`] 同形——
+/// 前端拿到合法空载荷而非空串/Null（JSON.parse 不抛错、看板不卡死）
+fn empty_sessions_value() -> serde_json::Value {
+    serde_json::json!({ "sessions": [], "totalCount": 0, "waitingCount": 0 })
+}
+
+/// C7 配对键归一（与桌面跳转门 require_evidence 同判据）：工具小写；项目先走
+/// `normalize_cwd_for_match` 同域归一（尾分隔符/反斜杠/Windows 大小写），再整体
+/// 小写以对齐桌面门的 `to_lowercase` 口径（Unix 大小写敏感差异在此抹平）。
+/// 会话侧取 `Session.project_name`（与进程侧 cwd file_name 同源：均为目录名）。
+fn pairing_key(tool: &str, project: &str) -> (String, String) {
+    (
+        tool.to_lowercase(),
+        crate::monitor::cwd::normalize_cwd_for_match(project).to_lowercase(),
+    )
+}
+
+/// C7 配对不确定集合（spec §5）：缝取运行进程 (工具, 项目) 表 → 按 [`pairing_key`]
+/// 归一计数 → 出现 **≥2** 的键入集合。端点只做集合查询（/sessions 逐会话打标、
+/// session-send 回执提示）；「≥2 运行进程」是发现层配对启发式（kimi wire mtime /
+/// opencode time_updated）可能交叉的实证判据（桌面跳转域 issue #48 系）。
+fn pairing_ambiguous_set(st: &Arc<RemoteState>) -> HashSet<(String, String)> {
+    let mut counts: HashMap<(String, String), usize> = HashMap::new();
+    for (tool, project) in (st.pairing_counter)() {
+        *counts.entry(pairing_key(&tool, &project)).or_insert(0) += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(k, _)| k)
+        .collect()
+}
+
+/// C7：/sessions 响应打标——序列化成 `serde_json::Value` 后逐会话附加
+/// `pairingAmbiguous`（**恒在场** true/false）。为什么恒在场而非仅 true 时附加：
+/// 移动端「缺省 = false」语义下两者等价，但恒在场让「单会话 → false」可判、
+/// 消费方无需区分字段缺失与 false（C7 自裁决登记）。Session 结构体与其构造点
+/// 零改动（计划红线），打标只在此 Value 层。
+fn tag_pairing_ambiguous(
+    resp: crate::session::SessionsResponse,
+    ambiguous: &HashSet<(String, String)>,
+) -> serde_json::Value {
+    let mut v = serde_json::to_value(&resp).unwrap_or_else(|e| {
+        // 理论不可达（字段无 map 键/浮点 NaN）；防御性降级为空快照（同形 EMPTY_SESSIONS_JSON）
+        log::warn!("会话快照序列化失败，降级为空快照: {e}");
+        empty_sessions_value()
+    });
+    if let Some(sessions) = v.get_mut("sessions").and_then(|s| s.as_array_mut()) {
+        for s in sessions {
+            let key = pairing_key(
+                s.get("agentType")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default(),
+                s.get("projectName")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or_default(),
+            );
+            if let Some(obj) = s.as_object_mut() {
+                obj.insert(
+                    "pairingAmbiguous".to_string(),
+                    serde_json::Value::Bool(ambiguous.contains(&key)),
+                );
+            }
+        }
+    }
+    v
+}
 
 /// GET /m/api/v1/events（M3 Task 6，C1 后半）：SSE 实时通道。
 /// - 首帧 = 全量会话快照（**直调注入源**，数据同源铁律 3），此后只推跃迁边沿
@@ -707,7 +776,8 @@ pub async fn session_messages(
 
 // ==== M7 Task 6：注入三端点（session-send / send-info / queue 系）====
 // 契约（JSON camelCase；所有 Json 响应带 Cache-Control: no-store——门禁下私有写路径）：
-//   POST /session-send          → delivered | queued{itemId,position} | failed{error} | 400 | 404 | 403
+//   POST /session-send          → delivered{pairingHint} | queued{itemId,position} | failed{error} | 400 | 404 | 403
+//                                 （pairingHint = C7 配对不确定提示，恒在场 true/false，不拦截）
 //   GET  /session-send-info     → {injectable, reasonCode?, reason?, channels, visibility}
 //   GET  /session-queue         → {items:[{id,content,enqueuedAt,position}]}
 //   POST /session-queue/jump    → delivered | queued{itemId,position} | failed{error} | 400 | 404 | 403
@@ -892,17 +962,24 @@ pub async fn session_send(
     // ③ 会话查找（spawn_blocking：扫描是重活）+ 路由判定
     let probe_st = st.clone();
     let probe_sid = sid.clone();
-    let session =
-        match tokio::task::spawn_blocking(move || find_session_sync(&probe_st, &probe_sid)).await {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("session-send 会话扫描任务异常: {e}");
-                return json_no_store(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    serde_json::json!({ "error": "internal" }),
-                );
-            }
-        };
+    let (session, pairing_ambiguous) = match tokio::task::spawn_blocking(move || {
+        let session = find_session_sync(&probe_st, &probe_sid);
+        // C7：配对不确定集合与快照同段取得（缝 = 运行进程表；生产为 sysinfo 全量
+        // 扫描，与 session_source 同为同步重活，不留在 async worker）
+        let ambiguous = pairing_ambiguous_set(&probe_st);
+        (session, ambiguous)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-send 会话扫描任务异常: {e}");
+            return json_no_store(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "internal" }),
+            );
+        }
+    };
     let Some(session) = session else {
         return json_no_store(
             StatusCode::NOT_FOUND,
@@ -911,6 +988,10 @@ pub async fn session_send(
     };
     // ④ 路由判定（W3 纯核；platform = 本机 OS）。不可注入 → 403（带原因），不入队
     let tool = session.agent_type.tool_id().to_string();
+    // C7 配对不确定提示（spec §5）：同工具同项目 ≥2 运行进程 → 成功回执附
+    // `pairingHint=true`；**不拦截**——投递路径与 status 语义零变化（提示 ≠ 拒绝）。
+    // 与表单黄字（C6 ≥1 活跃会话）是两个分层信号：本判据只数运行进程。
+    let pairing_hint = pairing_ambiguous.contains(&pairing_key(&tool, &session.project_name));
     if let crate::inject::routing::RouteOutcome::NotInjectable {
         reason_code,
         reason,
@@ -933,7 +1014,13 @@ pub async fn session_send(
     // 产物（flush 层无需再判一次，也就不会有「入队形态与投递形态不一致」的漂移面）。
     // 审计 action 由同一判据（`is_slash_message`）给出 slash，见下方
     // [`audit_action_for`] 的职责划分。
-    let content = crate::inject::normalize::compose_injection(&device_name, &req.text);
+    // 签名开关（2026-10-05 用户裁决）：设置「远程消息带设备签名」默认关（省 token；
+    // 溯源真源在注入审计页）。经 store.with 走会话自己的库（测试内存库零污染）
+    let signature_on = st
+        .store
+        .with(crate::inject::normalize::message_signature_enabled_conn);
+    let content =
+        crate::inject::normalize::compose_injection_flagged(&device_name, &req.text, signature_on);
     // D6 修改重发：queueOnly=true 只跳过 ⑥ 的直发尝试（语义见 SessionSendReq::queue_only
     // 注释），入队与 ⑦ 运行中留队完全同路径同审计口径（action=queue）——flush 循环对
     // queueOnly 项与普通队列项同权（转闲按序自动放行），队列存储不携带该标志
@@ -971,7 +1058,49 @@ pub async fn session_send(
     //    提前释放守卫，detached 投递期间新触发经 INFLIGHT 互斥让位。
     //    D6：queueOnly=true 时整个分支不触达（in-flight 守卫取用、五态回执映射、
     //    send/unconfirmed/failed 直发审计全部跳过），直接落 ⑦ 入队路径
-    if !queue_only && crate::inject::queue::is_input_ready(&session.status) {
+    //
+    //    2026-10-04 屏读兜底（仅 claude）：黄态（Thinking/Processing）一律入队，但
+    //    文件推导状态可能落后于真实终端（实测形态：回合以「工具被拒+中断标记」收尾后
+    //    终端已空闲，看板仍黄 → 消息误入队且 flush 等不到可输入态，队首滞留）。兜底 =
+    //    复用插队路径的稳定闸 `poll_turn_stopped`（`esc to interrupt` 忙锚连续 2 拍
+    //    缺席 = 回合真停）：屏上真空闲 → 视为可直发；真忙 / 屏读不可用 → 维持入队
+    //    （保守）。仅 claude——忙锚是 claude 账本槽（TURN_STATE），其他工具未取证
+    //    不出手。对话框在场的危险性由 flush_one 既有的 dialog_probe 守卫兜住（在场
+    //    即 Suspend），不会把字打进对话框。
+    let mut input_ready = crate::inject::queue::is_input_ready(&session.status);
+    if !queue_only && !input_ready && tool == "claude" {
+        let probe_st = st.clone();
+        let probe_tool = tool.clone();
+        let probe_pid = session.pid;
+        input_ready = tokio::task::spawn_blocking(move || {
+            matches!(
+                crate::inject::confirm::poll_turn_stopped(
+                    crate::inject::timing::poll_rounds(
+                        crate::inject::timing::TURN_STOP_POLL_TOTAL_MS,
+                    ),
+                    || (probe_st.screen_probe)(&probe_tool, probe_pid),
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::timing::POLL_STEP_MS,
+                        ));
+                    },
+                ),
+                crate::inject::confirm::TurnStopPoll::Stopped { .. },
+            )
+        })
+        .await
+        .unwrap_or_else(|e| {
+            log::warn!("session-send 屏读兜底任务异常: {e}");
+            false
+        });
+        if input_ready {
+            log::info!(
+                "session-send 屏读兜底：状态 {:?} 非可输入但屏上回合已停（忙锚连续缺席）→ 直发（pid={probe_pid}）",
+                session.status
+            );
+        }
+    }
+    if !queue_only && input_ready {
         let flush_st = st.clone();
         let flush_sid = sid.clone();
         let outcome = tokio::task::spawn_blocking(move || {
@@ -1006,7 +1135,13 @@ pub async fn session_send(
                     audit_action_for(&req.text, "send"),
                     "ok",
                 );
-                json_no_store(StatusCode::OK, serde_json::json!({ "status": "delivered" }))
+                // C7：成功回执附配对提示（恒在场 true/false；未命中 = false = 无提示）。
+                // 只挂 delivered 臂——queued/submitted/failed 均非「成功投递」回执，
+                // 字段形态保持不变（自裁决登记）。
+                json_no_store(
+                    StatusCode::OK,
+                    serde_json::json!({ "status": "delivered", "pairingHint": pairing_hint }),
+                )
             }
             // D7/T3 中性回执（验收问题 #5）：注入 Ok + 戳未中 + 屏读无滞留草稿 =
             // 消息已被 TUI 收进内部队列（已投递未确认）——不冒充 delivered（未确认
@@ -1626,6 +1761,19 @@ fn approve_dialog_keys(tool: &str) -> ApproveDialogKeys {
     }
 }
 
+/// 投递后**验证计划**（2026-10-04 从 `digit_verify: Option<u32>` 扩展）：
+/// 主键序发出后的屏读验证段与回退路径。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApproveVerifyPlan {
+    /// 不验证（导航确认恒定档 kimi 等——既有行为）
+    None,
+    /// 主键 = 数字（E2①）：验证窗内对话框未消失 → 导航回退
+    DigitFirst(u32),
+    /// 主键 = 导航（2026-10-04 计划批准框，用户要求方向键优先）：验证窗内对话框
+    /// 未消失 → 数字回退（CL-3：数字在计划框直接选中，渲染等待消除假阴性）
+    NavFirst(u32),
+}
+
 /// 审批选项扫描产物（映射存在时的载荷；available=false 时 options 恒空）
 struct ApproveScanHit {
     available: bool,
@@ -1651,6 +1799,12 @@ struct ApproveScanHit {
     /// 二元/空选项组）——codex 的 `Implement this plan?` 不落状态、不落标记，这是它
     /// 唯一的入口。
     plan_pending: bool,
+    /// 2026-10-04 计划批准卡：屏上选项簇带账本 FEEDBACK_OPTION 锚 → **计划批准
+    /// 对话框**（前端据此渲染「计划批准」标题与反馈入口）。
+    plan_dialog: bool,
+    /// 反馈选项的屏上编号（Some(n) → 前端把 `dialog:n` 渲染为「告诉 Claude 要改
+    /// 什么」入口而非直发按键；None = 非计划批准框或未读到反馈选项）。
+    feedback_number: Option<u32>,
 }
 
 /// R1-3 降级警示文案（前端 `degrade-hint` 脚注原文；中文，与既有 reason 提示同风格）
@@ -2019,6 +2173,29 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             }
         }
     }
+    // ===== 2026-10-04 审批卡不出修复：claude 计划预期态（第三信号）=====
+    //
+    // 实况取证（用户会话 bb92857b，Windows 真机）：计划批准等待时——
+    // ① 钩子标记 0 行（`approval_wait_marks` / `question_wait_marks` 实测均空，
+    //    claude 的 Notification/Permission 钩子不为 ExitPlanMode 落审批标记）；
+    // ② 「Claude has written up a plan…」是终端**原生 UI 文案**，不落会话文件，
+    //    detect（对 last_message 文本匹配 marker）恒 miss——last_message 是中文
+    //    计划 prose，与 marker 无交集；
+    // ③ plan_pending 此前被 [`plan_dialog_family`] 排除 claude（丁T2 的依据
+    //    「claude 走既有 Waiting + detect 门就够」——该前提对计划批准不成立）。
+    // 三信号全灭 → 扫描器从未走到屏读 → available=false → 审批卡自隐（手机上
+    // 没有任何批准入口）。
+    //
+    // 修法：状态层（`monitor::status::is_waiting_for_user_input` 增 ExitPlanMode）
+    // 已让该形态落 Waiting 过门；此处从**已取到的** tail_page（claude 本就因
+    // plan 聚合读页，零额外 IO）补算 claude 的尾部计划挂起——与
+    // [`plan_pending_tail_index`] 同一份判据，claude 不并入 [`plan_dialog_family`]
+    // （那是「门前提早读页」的族：并入会让所有非 Waiting 的 claude 会话在门后
+    // 白付一次读页；claude 靠状态层保证过门，门后消费已读页即可）。
+    let claude_plan_pending = tool == "claude"
+        && tail_page
+            .as_ref()
+            .is_some_and(|p| plan_pending_tail_index(&p.messages).is_some());
     // 严格档（M9R Task 10 裁决：未取证不出键）：probe-pending 映射即使 Waiting+detect
     // 命中也压为不可批——选项不下发，只给降级原因（前端提示条）；drift 判定照常
     // （probe-pending 恒判漂移，提示条与 drift 提示并存不冲突）。
@@ -2046,6 +2223,8 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             // 影响面：仅「KV 定制把映射改成 probe-pending ∧ codex/kimi 有计划提案」
             // 这一组合——此时用户看到的是键位未取证提示，而不是计划待确认条。
             plan_pending: false,
+            plan_dialog: false,
+            feedback_number: None,
         });
     }
     // T4：标记路径跳过 marker detect（钩子是一等信号，提示文本不落会话文件的
@@ -2056,9 +2235,11 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     // 等这个计划确认」，跳过 detect（codex 计划提案的最后一轮消息是计划本体，审批
     // 框标题文本根本不落会话文件，detect 对它恒 miss——这与 macOS 上标记的必要性
     // 同构）。kimi 的计划框同理：wire 落 `interaction.request`，屏上标题
-    // "Ready to build with this plan?" 不落任何文件。
+    // "Ready to build with this plan?" 不落任何文件。claude 的计划批准框同病同源
+    // （原生 UI 文案不落 JSONL），由上方 `claude_plan_pending` 补位。
     let hit = marked
         || plan_pending
+        || claude_plan_pending
         || session
             .last_message
             .as_deref()
@@ -2114,6 +2295,8 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
             degraded_hint: None,
             // 无预期态的降级路径（上面条件已排除 plan_pending）
             plan_pending: false,
+            plan_dialog: false,
+            feedback_number: None,
         });
     }
     // ===== R1-3：降级态必须**明确警示**（终审 Important）=====
@@ -2129,16 +2312,29 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     // 形态前端**零按钮**（没有可点错的二元键），警示文案「二元键可能错位」在那里是
     // 无的放矢；该形态自己的降级表达是「点检查未命中 → 脚注提示」（前端
     // `approve-plan-check-miss`）。两处提示不重复。
-    let plan_pending_without_keys = plan_pending && dialog_options.is_none();
+    // plan_pending_effective = 家族预期态（codex/kimi，门前的 early_page 判据）
+    // ∨ claude 计划预期态（2026-10-04 补位，门后消费已读页）——两处消费（本行与
+    // 载荷 planPending 字段）必须同用合成值，防「hit 算了、载荷漏发」的口径漂移。
+    let plan_pending_effective = plan_pending || claude_plan_pending;
+    let plan_pending_without_keys = plan_pending_effective && dialog_options.is_none();
     let degraded = hit && dialog_options.is_none() && !plan_pending_without_keys;
+    // ===== 2026-10-04 计划批准卡：反馈选项识别 =====
+    // 屏上选项带账本 FEEDBACK_OPTION 锚（"tell claude what to change/differently"）
+    // → 本对话框是 claude 计划批准框 → 下发 planDialog + feedbackOption 供前端把
+    // 该选项渲染为「告诉 Claude 要改什么」反馈入口（POST 侧同判据走导航优先键序）。
+    // 在 `match dialog_options`（值移动）之前算好。
+    let feedback_number = dialog_options
+        .as_ref()
+        .and_then(|opts| crate::inject::dialog::plan_feedback_option_number(opts));
     // 选项序列化只取 id+label（key 是投递层机密，不进任何 UI 载荷）；未命中 → options 空
     // （契约：available=false 一律不给选项，移动端据此不渲染审批卡）
     //
     // 丁T2 第三档：**计划预期态 ∧ 无对话框选项 ∧ kimi** 已在上面短路掉；剩下
     // 「计划预期态 ∧ 无对话框选项 ∧ codex」→ 映射表的 y/esc 是**补丁审批**键位
     // （M8R 0.154.0 实证），对计划框未取证 → 也不能拿它顶（见 [`plan_dialog_family`]）。
-    // 该形态下发 available=true + 空 options + `planPending=true`：前端渲染「计划待确认」
-    // 条 +「检查终端对话框」按钮（不是二元键）。
+    // claude 的计划批准（2026-10-04 补位）同落本形态：二元「允许='1'」对计划框是
+    // 无效键（R1 实证），宁可零按钮也不给可能错位的键 → available=true + 空 options
+    // + `planPending=true`：前端渲染「计划待确认」条 +「检查终端对话框」按钮。
     let (options, dialog) = match dialog_options {
         Some(opts) => (
             opts.iter()
@@ -2196,7 +2392,9 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
         } else {
             None
         },
-        plan_pending,
+        plan_pending: plan_pending_effective,
+        plan_dialog: feedback_number.is_some(),
+        feedback_number,
     })
 }
 
@@ -2292,6 +2490,8 @@ pub async fn session_approve_options(
         plan_body,
         degraded_hint,
         plan_pending,
+        plan_dialog,
+        feedback_number,
     ) = match scan {
         Some(hit) => (
             hit.available,
@@ -2303,6 +2503,8 @@ pub async fn session_approve_options(
             hit.plan_body,
             hit.degraded_hint,
             hit.plan_pending,
+            hit.plan_dialog,
+            hit.feedback_number,
         ),
         // 不可批三态（无会话 / 非 Waiting / 无映射）同形：available=false，版本字段空，
         // 无 reason（前端按卡自隐处理，与严格档 reason 提示条区分）
@@ -2316,6 +2518,8 @@ pub async fn session_approve_options(
             None,
             None,
             false,
+            false,
+            None,
         ),
     };
     // CLI 版本探测（仅映射存在时；进程级缓存，首调一次 spawn）：5s 超时保护
@@ -2381,6 +2585,12 @@ pub async fn session_approve_options(
             // 对话框」按钮（`available=true` 且此字段 true 且 `dialog=false` → 空 options
             // 不是错误，是「还没读到选项，点检查重试」）。
             "planPending": plan_pending,
+            // 2026-10-04 计划批准卡：屏上选项带 FEEDBACK_OPTION 锚 → claude 计划批准框
+            // （前端渲染「计划批准」标题与反馈入口）
+            "planDialog": plan_dialog,
+            // 反馈选项的屏上编号（如 "dialog:3"；null = 非计划批准框）——前端把该
+            // 选项渲染为反馈入口，点击走 /session-plan-feedback 的 start 动作
+            "feedbackOption": feedback_number.map(|n| serde_json::json!(format!("dialog:{n}"))),
         }),
     )
 }
@@ -2539,8 +2749,6 @@ pub async fn session_approve(
                 approve_dialog_keys(&tool),
                 ApproveDialogKeys::DigitFirstWithVerify
             );
-            // E2① 验证信号：数字档 → Some(n)（投递后屏读验证 + 导航回退）；其余档 None
-            let digit_verify = if digit_first { Some(n) } else { None };
             let opts = if digit_first {
                 read_dialog_options_render_wait(&probe_st, &session)
             } else {
@@ -2550,19 +2758,43 @@ pub async fn session_approve(
             if !opts.iter().any(|o| o.number == n) {
                 return Err("no_mapping");
             }
-            // R1-1/R1-2：按对话框模型选键序档——claude/kimi 的计划批准类对话框
-            // 数字键无效或不可依赖（可能误批准）→ 走导航确认；codex 数字有效 → 直选
-            let keys = match approve_dialog_keys(&tool) {
-                ApproveDialogKeys::DigitDirect => vec![n.to_string()],
-                // E2① 数字优先：首段发数字（生效与否由投递段屏读验证 + 导航回退）
-                ApproveDialogKeys::DigitFirstWithVerify => vec![n.to_string()],
-                ApproveDialogKeys::NavigateConfirm => {
-                    crate::inject::dialog::navigation_sequence(&opts, n).map_err(|e| {
-                        log::debug!("R1 导航序列构造失败（{tool}）: {e}");
-                        "no_mapping"
-                    })?
-                }
-            };
+            // ===== 2026-10-04 计划批准卡：计划批准框 → **导航优先** =====
+            // 用户明确要求「方向键切过去再选」；R1 实证 ↓×k+Enter 在计划框三样本
+            // 全效。判据 = 屏上选项带账本 FEEDBACK_OPTION 锚
+            // （[`crate::inject::dialog::plan_feedback_option_number`] 单点）。
+            // 构造失败（无唯一高亮——不猜起点）→ 保守回落数字直选（E2① CL-3：
+            // 数字在计划框直接选中，渲染等待已消除「数字无效」假阴性）。
+            // 非计划框维持 R1-2/E2① 键序档，一字不动。
+            let (keys, verify_plan) =
+                if crate::inject::dialog::plan_feedback_option_number(&opts).is_some() {
+                    match crate::inject::dialog::navigation_sequence(&opts, n) {
+                        Ok(seq) => (seq, ApproveVerifyPlan::NavFirst(n)),
+                        Err(e) => {
+                            log::debug!("计划批准框导航构造失败（{e}）→ 回落数字直选（CL-3）");
+                            (vec![n.to_string()], ApproveVerifyPlan::DigitFirst(n))
+                        }
+                    }
+                } else {
+                    // R1-1/R1-2：按对话框模型选键序档——kimi 的计划批准框数字不可依赖
+                    // （可能误批准）→ 走导航确认；codex 数字有效 → 直选
+                    let keys = match approve_dialog_keys(&tool) {
+                        ApproveDialogKeys::DigitDirect => vec![n.to_string()],
+                        // E2① 数字优先：首段发数字（生效与否由投递段屏读验证 + 导航回退）
+                        ApproveDialogKeys::DigitFirstWithVerify => vec![n.to_string()],
+                        ApproveDialogKeys::NavigateConfirm => {
+                            crate::inject::dialog::navigation_sequence(&opts, n).map_err(|e| {
+                                log::debug!("R1 导航序列构造失败（{tool}）: {e}");
+                                "no_mapping"
+                            })?
+                        }
+                    };
+                    let verify_plan = if digit_first {
+                        ApproveVerifyPlan::DigitFirst(n)
+                    } else {
+                        ApproveVerifyPlan::None
+                    };
+                    (keys, verify_plan)
+                };
             return Ok((
                 session,
                 tool,
@@ -2574,7 +2806,7 @@ pub async fn session_approve(
                     key: keys.join(","),
                 },
                 keys,
-                digit_verify,
+                verify_plan,
             ));
         }
         let Some(option) =
@@ -2607,7 +2839,7 @@ pub async fn session_approve(
             return Err("no_mapping");
         }
         let keys = vec![option.key.clone()];
-        Ok((session, tool, option, keys, None))
+        Ok((session, tool, option, keys, ApproveVerifyPlan::None))
     })
     .await
     {
@@ -2620,7 +2852,7 @@ pub async fn session_approve(
             );
         }
     };
-    let (session, tool, option, keys, digit_verify) = match lookup {
+    let (session, tool, option, keys, verify_plan) = match lookup {
         Ok(v) => v,
         Err(code) => {
             let status = if code == "not_waiting" {
@@ -2639,9 +2871,8 @@ pub async fn session_approve(
     let injector = st.injector.clone();
     let pid = session.pid;
     let approve_sid = sid.clone();
-    // E2①：数字优先验证信号（Some(n) = claude 数字档——发数字后屏读验证，未生效
-    // 导航回退；来源=lookup 的 dialog 分支，非数字档恒 None）
-    let digit_verify: Option<u32> = digit_verify;
+    // 投递后验证计划（E2① 数字档 / 2026-10-04 计划框导航档；来源=lookup 的 dialog
+    // 分支，非对话框路径恒 None）——变量已在上方解携带出
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 flush 循环事件臂同款，F1
     // 断连双投修复）：handler 断连（弱网/隧道掐断慢投递）不再提前释放守卫——detached
     // 投递全程占位，新触发取不到名额即让位。忙 → None 哨兵：让位不投递亦不落审计
@@ -2662,49 +2893,99 @@ pub async fn session_approve(
                 crate::inject::families::SUBMIT_DELAY_MS,
             ));
         }
-        // ===== E2① 屏读验证 + 导航回退（仅 claude 数字档，且首段投递成功）=====
-        if let (Some(n), true) = (digit_verify, result.is_ok()) {
-            let (fallback_keys, send_err) = verify_digit_then_fallback(
-                n,
-                || crate::inject::dialog::probe_screen_dialog(pid),
-                |key| injector.locate_and_send_key_spec(pid, key, &spec),
-                || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::timing::POLL_STEP_MS,
-                    ));
-                },
-                || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                },
-                crate::inject::timing::poll_rounds(
-                    crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
-                ),
-            );
-            match (fallback_keys, send_err) {
-                (DigitVerifyOutcome::FellBack { keys }, Some(e)) => {
-                    result = Err(e);
-                    log::warn!(
-                        "E2 导航回退中途发送失败（已发 {keys:?}）——请人工核对终端（pid={pid}）"
-                    );
-                }
-                (DigitVerifyOutcome::Confirmed, None) => {
-                    log::debug!("E2 数字直选生效（对话框已消失，pid={pid}）")
-                }
-                (DigitVerifyOutcome::FellBack { keys }, None) => {
-                    log::info!("E2 数字直选未生效（对话框仍在），导航回退 {keys:?}（pid={pid}）")
-                }
-                (DigitVerifyOutcome::NavigationRefused(why), None) => {
-                    log::warn!("E2 导航回退未出手（{why}）——请人工核对终端（pid={pid}）")
-                }
-                // 不可达组合（Confirmed/NavigationRefused 不发回退键→无 send_err）
-                // ——穷尽性防御臂，出现即说明内核被误改
-                (outcome, Some(e)) => {
-                    log::warn!("E2 验证结论异常（{outcome:?}，{e}）——请人工核对终端（pid={pid}）");
-                    result = Err(e);
+        // ===== 投递后屏读验证（E2① 数字档 / 2026-10-04 计划框导航档；仅首段投递
+        // 成功才验证——半途失败已置 Err，前端按 failed 提示核对终端）=====
+        match verify_plan {
+            ApproveVerifyPlan::None => {}
+            ApproveVerifyPlan::DigitFirst(n) if result.is_ok() => {
+                let (fallback_keys, send_err) = verify_digit_then_fallback(
+                    n,
+                    || crate::inject::dialog::probe_screen_dialog(pid),
+                    |key| injector.locate_and_send_key_spec(pid, key, &spec),
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::timing::POLL_STEP_MS,
+                        ));
+                    },
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    },
+                    crate::inject::timing::poll_rounds(
+                        crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                    ),
+                );
+                match (fallback_keys, send_err) {
+                    (DigitVerifyOutcome::FellBack { keys }, Some(e)) => {
+                        result = Err(e);
+                        log::warn!(
+                            "E2 导航回退中途发送失败（已发 {keys:?}）——请人工核对终端（pid={pid}）"
+                        );
+                    }
+                    (DigitVerifyOutcome::Confirmed, None) => {
+                        log::debug!("E2 数字直选生效（对话框已消失，pid={pid}）")
+                    }
+                    (DigitVerifyOutcome::FellBack { keys }, None) => {
+                        log::info!("E2 数字直选未生效（对话框仍在），导航回退 {keys:?}（pid={pid}）")
+                    }
+                    (DigitVerifyOutcome::NavigationRefused(why), None) => {
+                        log::warn!("E2 导航回退未出手（{why}）——请人工核对终端（pid={pid}）")
+                    }
+                    // 不可达组合（Confirmed/NavigationRefused 不发回退键→无 send_err）
+                    // ——穷尽性防御臂，出现即说明内核被误改
+                    (outcome, Some(e)) => {
+                        log::warn!("E2 验证结论异常（{outcome:?}，{e}）——请人工核对终端（pid={pid}）");
+                        result = Err(e);
+                    }
                 }
             }
+            ApproveVerifyPlan::NavFirst(n) if result.is_ok() => {
+                // 计划批准框（2026-10-04）：主键 = 导航（↓×k+Enter，从现场高亮位算步进）
+                // → 验证窗内对话框未消失 → **数字回退**（CL-3：数字在计划框直接选中）。
+                // 验证骨架与数字档同源（verify_primary_then_fallback 泛化形）。
+                let (fallback_keys, send_err) = verify_primary_then_fallback(
+                    || crate::inject::dialog::probe_screen_dialog(pid),
+                    |key| injector.locate_and_send_key_spec(pid, key, &spec),
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::timing::POLL_STEP_MS,
+                        ));
+                    },
+                    || {
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            crate::inject::families::SUBMIT_DELAY_MS,
+                        ));
+                    },
+                    crate::inject::timing::poll_rounds(
+                        crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                    ),
+                    move |_opts| Ok(vec![n.to_string()]),
+                );
+                match (fallback_keys, send_err) {
+                    (DigitVerifyOutcome::FellBack { keys }, Some(e)) => {
+                        result = Err(e);
+                        log::warn!(
+                            "计划框数字回退中途发送失败（已发 {keys:?}）——请人工核对终端（pid={pid}）"
+                        );
+                    }
+                    (DigitVerifyOutcome::Confirmed, None) => {
+                        log::debug!("计划框导航生效（对话框已消失，pid={pid}）")
+                    }
+                    (DigitVerifyOutcome::FellBack { keys }, None) => {
+                        log::info!("计划框导航未生效（对话框仍在），数字回退 {keys:?}（pid={pid}）")
+                    }
+                    (DigitVerifyOutcome::NavigationRefused(why), None) => {
+                        log::warn!("计划框数字回退未出手（{why}）——请人工核对终端（pid={pid}）")
+                    }
+                    (outcome, Some(e)) => {
+                        log::warn!("计划框验证结论异常（{outcome:?}，{e}）——请人工核对终端（pid={pid}）");
+                        result = Err(e);
+                    }
+                }
+            }
+            // 首段投递已失败：不验证（前端按 failed 提示核对终端）
+            _ => {}
         }
         Some(result)
     })
@@ -2774,6 +3055,328 @@ pub async fn session_approve(
                 serde_json::json!({ "status": "failed", "error": e }),
             )
         }
+    }
+}
+
+// ==== 2026-10-04 计划批准卡：计划反馈通道（claude 计划批准框选项 3）====
+
+/// POST /m/api/v1/session-plan-feedback 请求体（camelCase；字段全 default）
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPlanFeedbackReq {
+    #[serde(default)]
+    pub session_id: String,
+    /// 动作：`type`（清空[有内容时]→打字→[submit]回车提交）| `clear`（退格清空）
+    #[serde(default)]
+    pub action: String,
+    #[serde(default)]
+    pub text: String,
+    /// type 动作是否尾随回车提交（true=Claude 留在计划模式开新一轮修改）
+    #[serde(default)]
+    pub submit: bool,
+}
+
+/// 计划反馈 composer 行的**内容长度**（纯函数；探测定案 2026-10-04 §S3/S4）：
+/// 实屏形态 = composer 行夹在**最后两条**全分隔线（≥6 个 `─`）之间——
+/// `[sep][❯ content][sep][footer]`。内容 = 首行剥提示符（`❯`/`›`/`>`）后的文本
+/// + 区域内后续折行整行；末条分隔线之后无闭合线时回落取「最后一条分隔线之后」
+///   的区域。返回总字符数（**封顶 500**——超长内容清空不保证，如实登记）。
+///   找不到分隔线/提示符行 → `None`（形态不符，调用方拒发）。
+fn composer_content_len(lines: &[String]) -> Option<usize> {
+    const MAX_COMPOSER_CHARS: usize = 500;
+    let is_sep = |l: &str| l.chars().count() >= 6 && l.chars().all(|c| c == '─');
+    let prompt_at = |l: &str| {
+        let t = l.trim_start();
+        t.starts_with('❯') || t.starts_with('›') || t.starts_with('>')
+    };
+    let last_sep = lines.iter().rposition(|l| is_sep(l))?;
+    // 区域起点：优先「倒数第二条分隔线之后」（content 夹在两线之间——实屏主形态）；
+    // 倒数第二条不存在（屏上只有一条分隔线）→ 回落「最后一条分隔线之后」
+    let region_start = lines[..last_sep]
+        .iter()
+        .rposition(|l| is_sep(l))
+        .map(|prev| prev + 1)
+        .unwrap_or(last_sep + 1);
+    let read_region = |region: &[String]| -> Option<usize> {
+        let first = region.first()?;
+        if !prompt_at(first) {
+            return None;
+        }
+        // 剥提示符字符 + 其后的**单个**分隔空格（composer 渲染恒为 `❯ 内容`——
+        // 内容自带的额外前导空格保留，属退格计量范围）
+        let stripped = first.trim_start().chars().skip(1).collect::<String>();
+        let stripped = stripped.strip_prefix(' ').unwrap_or(&stripped);
+        let mut total = stripped.chars().count();
+        for l in &region[1..] {
+            if is_sep(l) {
+                break;
+            }
+            total += l.chars().count();
+        }
+        Some(total.min(MAX_COMPOSER_CHARS))
+    };
+    if region_start >= last_sep {
+        // 回落形态：末分隔线之后没有闭合线——内容区到屏底为止
+        return read_region(&lines[region_start..]);
+    }
+    read_region(&lines[region_start..last_sep])
+}
+
+/// 计划反馈终端缝（[`run_plan_feedback_stages`] 的可注入内核面）：读屏 / 批量退格 /
+/// 文本通道（**不带提交回车**）/ 单发回车 / 步进等待。
+pub(crate) trait PlanFeedbackTerminal {
+    fn read(&mut self) -> Option<Vec<String>>;
+    /// 批量退格 `count` 个字符（批量原语经 Injector trait 缝送达：Windows
+    /// ConPTY 覆写 [`crate::inject::engine::Injector::locate_and_send_backspaces_spec`]，
+    /// 其余平台默认报错——跨平台可编译，生产消费面仅 Windows）
+    fn clear_chars(&mut self, count: usize) -> Result<(), String>;
+    fn send_text(&mut self, text: &str) -> Result<(), String>;
+    fn send_enter(&mut self) -> Result<(), String>;
+    fn settle(&mut self);
+}
+
+/// 计划反馈编排内核（闭包注入可测，`verify_digit_then_fallback` 同款抽取理由）。
+/// 序列（探测定案 2026-10-04）：
+/// 1. **定位段**：屏读找 composer 行（3 拍轮询防重绘瞬间）——找不到 → **中止零按键**
+///    （形态不符不出手，与问答阶段机同纪律）；
+/// 2. **清空段**（内容非空时）：批量退格 ×内容长度；
+/// 3. **文本段**（type 且 text 非空）：字符通道打字（草稿口径，不带回车）；
+/// 4. **提交段**（type 且 submit）：回车提交——Claude 留在计划模式开新一轮
+///    （探测定案 §S5 实锤）。
+pub(crate) fn run_plan_feedback_stages<T: PlanFeedbackTerminal>(
+    op: &PlanFeedbackOp,
+    t: &mut T,
+) -> Result<(), String> {
+    let mut content_len: Option<usize> = None;
+    for _ in 0..3 {
+        if let Some(lines) = t.read() {
+            content_len =
+                Some(composer_content_len(&lines).ok_or_else(|| {
+                    "未识别到终端输入行（形态不符）——已中止，未发任何键".to_string()
+                })?);
+            break;
+        }
+        t.settle();
+    }
+    let len = content_len.ok_or_else(|| "读不到终端屏——已中止，未发任何键".to_string())?;
+    match op {
+        PlanFeedbackOp::Clear => {
+            if len > 0 {
+                t.clear_chars(len)?;
+                t.settle();
+            }
+            Ok(())
+        }
+        PlanFeedbackOp::Type { text, submit } => {
+            // 打字前清空只在**有新文本**时做——空文本 + submit = 提交终端里已有的
+            // 暂存内容（先清空就把它毁了，语义即错）
+            if !text.is_empty() {
+                if len > 0 {
+                    t.clear_chars(len)?;
+                    t.settle();
+                }
+                t.send_text(text)?;
+                t.settle();
+            }
+            if *submit {
+                if text.is_empty() && len == 0 {
+                    return Err("没有可提交的内容（输入为空且终端行无暂存）".to_string());
+                }
+                t.send_enter()?;
+                t.settle();
+            }
+            Ok(())
+        }
+    }
+}
+
+/// 计划反馈动作（端点层解析产物）
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PlanFeedbackOp {
+    Clear,
+    Type { text: String, submit: bool },
+}
+
+/// POST /m/api/v1/session-plan-feedback（2026-10-04 计划批准卡 T4c）：
+/// claude 计划批准框选「Tell Claude what to change」后的打字/清空通道。前置 =
+/// 审批卡反馈入口 start（即 `session-approve {optionId:"dialog:3"}`，探测定案
+/// §S3：选 3 = 计划被拒回**空 composer**，plan 模式保持——本端点操作对象就是它）。
+///
+/// - 会话不存在 → 404 `no_session`；工具非 claude → 404 `no_mapping`（composer 行
+///   形态与反馈锚均为 claude 专属）；
+/// - 屏读不可用 / composer 形态不符 → 200 failed（**零按键**中止，带中文原因）；
+/// - in-flight 守卫忙 → 200 failed 提示重试（同 session-approve 口径）；
+/// - 审计：action="approve"，content=`plan-feedback:{动作}`（**正文不落审计**——
+///   用户反馈内容与问答自由作答同纪律，只记字符数占位）。
+pub async fn session_plan_feedback(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionPlanFeedbackReq>,
+) -> Response {
+    let sid = req.session_id.trim().to_string();
+    let action = req.action.trim().to_string();
+    if sid.is_empty() || action.is_empty() {
+        return bad_request();
+    }
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // 动作解析（端点层判参，内核吃枚举）
+    let op = match action.as_str() {
+        "clear" => PlanFeedbackOp::Clear,
+        "type" => PlanFeedbackOp::Type {
+            text: req.text.clone(),
+            submit: req.submit,
+        },
+        _ => return bad_request(),
+    };
+    if matches!(&op, PlanFeedbackOp::Type { text, submit: false } if text.trim().is_empty()) {
+        return bad_request(); // 覆盖写入空文本无意义（前端已禁用，防御）
+    }
+    // 会话查找（同 session_approve 的复合键契约：快照按 id 找第一个匹配）
+    let probe_st = st.clone();
+    let probe_sid = sid.clone();
+    let lookup = match tokio::task::spawn_blocking(move || {
+        let Some(session) = (probe_st.session_source)()
+            .sessions
+            .into_iter()
+            .find(|s| s.id == probe_sid)
+        else {
+            return Err("no_session");
+        };
+        let tool = session.agent_type.tool_id().to_string();
+        if tool != "claude" {
+            return Err("no_mapping");
+        }
+        Ok(session)
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::error!("session-plan-feedback 会话扫描任务异常: {e}");
+            return json_no_store(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "internal" }),
+            );
+        }
+    };
+    let session = match lookup {
+        Ok(v) => v,
+        Err(code) => {
+            let status = StatusCode::NOT_FOUND;
+            return json_no_store(status, serde_json::json!({ "error": code }));
+        }
+    };
+    let tool = session.agent_type.tool_id().to_string();
+    let spec = crate::inject::families::family_for(&tool)
+        .unwrap_or(crate::inject::families::FALLBACK_SPEC);
+    let injector = st.injector.clone();
+    let pid = session.pid;
+    let fb_sid = sid.clone();
+    // 审计段与闭包共用 op/st/tool——克隆拆分（闭包内 move，外层留审计用）
+    let op_for_audit = op.clone();
+    let closure_st = st.clone();
+    let closure_tool = tool.clone();
+    let attempt = tokio::task::spawn_blocking(move || -> Option<Result<(), String>> {
+        // 守卫忙 → None 哨兵：让位不投递（同 session-approve）
+        let _guard = crate::inject::queue::try_acquire_inflight(&fb_sid)?;
+        let mut terminal = PlanFeedbackClosures {
+            pid,
+            spec: &spec,
+            injector: &*injector,
+            screen_probe: &closure_st.screen_probe,
+            tool: &closure_tool,
+        };
+        Some(run_plan_feedback_stages(&op, &mut terminal))
+    })
+    .await;
+    let sent = match attempt {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return json_no_store(
+                StatusCode::OK,
+                serde_json::json!({
+                    "status": "failed",
+                    "error": "投递进行中，请稍后重试"
+                }),
+            );
+        }
+        Err(e) => {
+            log::error!("session-plan-feedback 投递任务异常: {e}");
+            Err("内部任务异常".to_string())
+        }
+    };
+    let audit_content = match &op_for_audit {
+        PlanFeedbackOp::Clear => "plan-feedback:clear".to_string(),
+        PlanFeedbackOp::Type { text, .. } => {
+            format!("plan-feedback:type <text:{} chars>", text.chars().count())
+        }
+    };
+    match sent {
+        Ok(()) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &audit_content,
+                "approve",
+                "ok",
+            );
+            json_no_store(StatusCode::OK, serde_json::json!({ "status": "done" }))
+        }
+        Err(e) => {
+            endpoint_audit(
+                &st,
+                &device_id,
+                &device_name,
+                &tool,
+                &sid,
+                &audit_content,
+                "approve",
+                &format!("failed:{e}"),
+            );
+            json_no_store(
+                StatusCode::OK,
+                serde_json::json!({ "status": "failed", "error": e }),
+            )
+        }
+    }
+}
+
+/// [`PlanFeedbackTerminal`] 的生产实现（闭包三件套 + 注入器 + 屏读缝装配）。
+struct PlanFeedbackClosures<'a> {
+    pid: u32,
+    spec: &'a crate::inject::families::FamilySpec,
+    injector: &'a dyn crate::inject::engine::Injector,
+    screen_probe: &'a std::sync::Arc<crate::remote::server::ScreenProbeFn>,
+    tool: &'a str,
+}
+
+impl PlanFeedbackTerminal for PlanFeedbackClosures<'_> {
+    fn read(&mut self) -> Option<Vec<String>> {
+        (self.screen_probe)(self.tool, self.pid)
+    }
+    fn clear_chars(&mut self, count: usize) -> Result<(), String> {
+        self.injector
+            .locate_and_send_backspaces_spec(self.pid, count, self.spec)
+    }
+    fn send_text(&mut self, text: &str) -> Result<(), String> {
+        // 草稿口径（不带提交回车——回车只在 submit 段显式发）
+        self.injector
+            .locate_and_inject_spec(self.pid, text, self.spec)?;
+        Ok(())
+    }
+    fn send_enter(&mut self) -> Result<(), String> {
+        self.injector
+            .locate_and_send_key_spec(self.pid, "enter", self.spec)
+    }
+    fn settle(&mut self) {
+        std::thread::sleep(std::time::Duration::from_millis(
+            crate::inject::families::SUBMIT_DELAY_MS,
+        ));
     }
 }
 
@@ -3398,7 +4001,8 @@ pub async fn session_question(
     // 推进行 `Next` + 回车 + 读屏分类，阶段机 run_advance_stages）。kimi/codex 的
     // 多题切页键未验 → 旗标 false，前端对这两家的多选题渲染「请到终端切题」引导。
     // 单题卡无页可切，恒 false。
-    let advance = matches!(tool_id.as_str(), "opencode" | "claude") && questions.len() > 1;
+    // kimi 加入（2026-10-06，2.1.1 活体定案 `→`/`←` 切题 + Review 返回修改）
+    let advance = matches!(tool_id.as_str(), "opencode" | "claude" | "kimi") && questions.len() > 1;
     // **←/→ 双向导航 + 多选自由作答**（2026-10-02/03，用户裁决 ←/→ 通用对应上一题/
     // 下一题）：仅 claude 的 ←/→ 键序已活体取证（含 Review 导航环）。opencode 的切页
     // 是 tab **前向**（会回绕），prev 语义不成立——前端据本旗标分流：navBoth=true
@@ -3407,69 +4011,179 @@ pub async fn session_question(
     let nav_both = tool_id == "claude";
     // **屏读快照**（2026-10-03 卡面状态权威源）：终端当前停在题屏 → 回传勾选态/
     // 自由作答/题干（前端对位到载荷题并纠偏 mqIndex/状态）；停在 Review 确认屏 →
-    // {review:true}（前端直接进确认卡）。claude-only（屏读 Windows 能力 + 解析器
-    // 形态族）；屏读失败/非题屏 → null（前端维持本地状态）。
+    // {review:true}（前端直接进确认卡）。工具面（2026-10-05 推广批 F3/F6）：按
+    // **取证状态**开放——claude（全链标杆）/ opencode（题页锚 `enter toggle` 方言
+    // 解析）必有；kimi/codex 未取证不给（「未取证不出手」）。屏读失败/非题屏 →
+    // null（前端维持本地状态）。
     let screen_snapshot = match session_pid {
-        Some(pid) if tool_id == "claude" && !questions.is_empty() => {
-            let st2 = st.clone();
-            let tool2 = tool_id.clone();
-            tokio::task::spawn_blocking(move || {
-                (st2.screen_probe)(&tool2, pid).and_then(|lines| {
-                    if let Some(snap) = crate::inject::question::question_screen_snapshot(&lines) {
-                        return Some(snapshot_to_json(&snap));
-                    }
-                    matches!(
-                        crate::inject::question::probe_review_screen(&lines),
-                        crate::inject::question::ScreenStep::Ready(_)
-                    )
-                    .then(|| serde_json::json!({ "review": true }))
+        Some(pid) if !questions.is_empty() => {
+            let snapshot_supported = matches!(tool_id.as_str(), "claude" | "opencode" | "kimi");
+            if !snapshot_supported {
+                None
+            } else {
+                let st2 = st.clone();
+                let tool2 = tool_id.clone();
+                tokio::task::spawn_blocking(move || {
+                    (st2.screen_probe)(&tool2, pid).and_then(|lines| {
+                        // opencode 方言解析（题页锚 `enter toggle`；Confirm 页 → review）
+                        if tool2 == "opencode" {
+                            // **闸门 2「证据自带失败」**（2026-10-06）：单选页同步断链
+                            // 排障——GET 屏读链路每一步自报结果（读不行/解析不行/
+                            // 解析命中），未知形态第一次出现就自带证据，不再靠猜。
+                            // GET 只在挂载/跃迁触发，INFO 量级安全。
+                            if crate::inject::question::opencode_confirm_present(&lines) {
+                                log::info!(
+                                    "[question-screen] GET pid={pid} rows={} → Review 页",
+                                    lines.len()
+                                );
+                                return Some(serde_json::json!({ "review": true }));
+                            }
+                            let snap = crate::inject::question_screen_oc::
+                                opencode_question_screen_snapshot(&lines);
+                            match &snap {
+                                Some(s) => log::info!(
+                                    "[question-screen] GET pid={pid} rows={} → 快照命中: \
+                                     heading={}字 checked={}项 free_text={}",
+                                    lines.len(),
+                                    s.heading.chars().count(),
+                                    s.checked.len(),
+                                    match &s.free_text {
+                                        Some(t) =>
+                                            format!("{}字", t.chars().count()),
+                                        None => "无".to_string(),
+                                    }
+                                ),
+                                None => {
+                                    let head = lines
+                                        .iter()
+                                        .find(|l| !l.trim().is_empty())
+                                        .map(|l| l.chars().take(40).collect::<String>())
+                                        .unwrap_or_default();
+                                    let tail = lines
+                                        .iter()
+                                        .rev()
+                                        .find(|l| !l.trim().is_empty())
+                                        .map(|l| l.chars().take(40).collect::<String>())
+                                        .unwrap_or_default();
+                                    log::info!(
+                                        "[question-screen] GET pid={pid} rows={} → 解析失败\
+                                         （多选锚/单选结构判据均未命中）head={head:?} tail={tail:?}",
+                                        lines.len()
+                                    );
+                                }
+                            }
+                            return snap.map(|s| snapshot_to_json(&s));
+                        }
+                        // kimi 多选页（探测批 K 形态：勾选标记 + Other 行 + footer
+                        // `tab switch`）——快照同步勾选态与 Other 残留（2026-10-05
+                        // 屏读标准补齐批 4）；单选页形态未取证 → 解析 None 保守降级
+                        if tool2 == "kimi" {
+                            // **Review/Submit 汇总页优先判定**（2026-10-07 用户实录：
+                            // 全部答完 TUI 停在 Review 页——无 `? ` 题干行/勾选框，
+                            // 快照解析退化 → 前端刷新永远回第 1 题）。命中回
+                            // `{"review": true}`（与 opencode Confirm 页同形态，
+                            // 前端已消费该字段切确认卡）
+                            if crate::inject::question::kimi_review_present(&lines) {
+                                // **逐题摘要**（2026-10-07 确认卡权威源切换）：
+                                // Q/→ 行解析，摘要以终端 Review 页为准
+                                let summary = crate::inject::question_screen_oc::
+                                    kimi_review_summary(&lines);
+                                log::info!(
+                                    "[question-screen] GET pid={pid} rows={} → kimi Review 页（{} 题）",
+                                    lines.len(),
+                                    summary.as_ref().map(|v| v.len()).unwrap_or(0)
+                                );
+                                let summary_json: Vec<serde_json::Value> = summary
+                                    .unwrap_or_default()
+                                    .into_iter()
+                                    .map(|(q, a)| serde_json::json!({ "q": q, "a": a }))
+                                    .collect();
+                                return Some(serde_json::json!({
+                                    "review": true,
+                                    "summary": summary_json,
+                                }));
+                            }
+                            return crate::inject::question_screen_oc::kimi_question_screen_snapshot(
+                                &lines,
+                            )
+                            .map(|snap| snapshot_to_json(&snap));
+                        }
+                        if let Some(snap) = crate::inject::question::question_screen_snapshot(&lines) {
+                            return Some(snapshot_to_json(&snap));
+                        }
+                        matches!(
+                            crate::inject::question::probe_review_screen(&lines),
+                            crate::inject::question::ScreenStep::Ready(_)
+                        )
+                        .then(|| serde_json::json!({ "review": true }))
+                    })
                 })
-            })
-            .await
-            .ok() // JoinError
-            .and_then(|inner| inner) // 屏读/解析失败 → None（前端维持本地状态）
+                .await
+                .ok() // JoinError
+                .and_then(|inner| inner) // 屏读/解析失败 → None（前端维持本地状态）
+            }
         }
         _ => None,
     };
     json_no_store(
         StatusCode::OK,
         serde_json::json!({
-            "available": !questions.is_empty(),
-            "answerable": answerable,
-            // 前端契约：`freeText` 缺省按 false 处理（旧后端不识别则走降级文案）
-            "freeText": free_text_supported,
-            // E4-E6：多题交互旗标（缺省按 false → 只读卡）
-            "multiQuestion": multi_question,
-            // 切换题目能力旗标（缺省按 false → 不渲染切换钮，旧后端前向兼容）
-            "advance": advance,
-            // ←/→ 双向导航旗标（2026-10-02；缺省 false → 前端维持旧单钮，旧后端前向兼容）
-            "navBoth": nav_both,
-            // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
-            // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
-            "screen": screen_snapshot,
-            "questions": questions
-                .iter()
-                .map(|q| serde_json::json!({
-                    "header": q.header,
-                    "question": q.question,
-                    "multiSelect": q.multi_select,
-                    "options": q
-                        .options
-                        .iter()
-                        .map(|o| serde_json::json!({
-                            "label": o.label,
-                            "description": o.description,
-                        }))
-                        .collect::<Vec<_>>(),
-                }))
-                .collect::<Vec<_>>(),
-            // 识别通道（诊断用；不可用时 null）
-            "source": if source.is_empty() {
-                serde_json::Value::Null
-            } else {
-                serde_json::json!(source)
-            },
-        }),
+                "available": !questions.is_empty(),
+                "answerable": answerable,
+                // 前端契约：`freeText` 缺省按 false 处理（旧后端不识别则走降级文案）
+                "freeText": free_text_supported,
+                // E4-E6：多题交互旗标（缺省按 false → 只读卡）
+                "multiQuestion": multi_question,
+                // 切换题目能力旗标（缺省按 false → 不渲染切换钮，旧后端前向兼容）
+                "advance": advance,
+                // ←/→ 双向导航旗标（2026-10-02；缺省 false → 前端维持旧单钮，旧后端前向兼容）
+                "navBoth": nav_both,
+                // **多选卡自由作答**旗标（缺省 false → 旧后端前向兼容）。claude 此前经
+                // navBoth 间接点亮，本旗标为显式能力位（前端判 `navBoth ∨ multiFreeText`，
+                // 两旗任一即可）。2026-10-05 codex 实测点亮（Space 选中 + Tab notes 在
+                // 多选题全链实证——探测批 C）；**2026-10-06 kimi 点亮**（用户指令：多题
+                // 卡要有文字填写行——Other 输入格 + 发送 + 覆盖写入/清空按钮组。键序
+                // 走 KimiFreeText 阶段机：Other 行编号**按屏自适应**——单选子题 Other
+                // 有编号 → 全链通；多选 Other 无编号 → 第 1 段如实中止引导终端，
+                // 「未验不出手」由阶段机本身把守而非旗标一刀切）
+                "multiFreeText": matches!(tool_id.as_str(), "claude" | "opencode" | "codex" | "kimi"),
+                // **覆盖写入/清空能力位**（2026-10-05 深夜）：这两个按钮的键序语义须逐
+                // 工具实机取证才可出手——opencode 已取证（enter 探针走位 + 退格清空闭环，
+                // 本机自建会话活体验证）；codex 的 notes 覆盖语义未取证、kimi 多选自由
+                // 作答未接入 → false（前端对这两家**不渲染**覆盖写入/清空按钮——「未取证
+                // 不出手」）。缺省 false（旧后端前向兼容）
+                // 覆盖写入/清空能力位（2026-10-06 扩 codex）：opencode=多选回删语义
+                // （1754 行）；codex=Tab 清空备注（footer 活体明文「tab or esc to
+                // clear note」）。kimi 多选 Other 未点亮（multiFreeText=false 无面）
+                // kimi 加入（2026-10-06，2.1.1 定案 K7 重进带旧文本 + 退格可清；清空面
+        // 因「空回车 no-op」定案如实前置拒——前端收到失败回执引导终端操作）
+                "freeTextOverwrite": matches!(tool_id.as_str(), "opencode" | "codex" | "kimi"),
+                // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
+                // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
+                "screen": screen_snapshot,
+                "questions": questions
+                    .iter()
+                    .map(|q| serde_json::json!({
+                        "header": q.header,
+                        "question": q.question,
+                        "multiSelect": q.multi_select,
+                        "options": q
+                            .options
+                            .iter()
+                            .map(|o| serde_json::json!({
+                                "label": o.label,
+                                "description": o.description,
+                            }))
+                            .collect::<Vec<_>>(),
+                    }))
+                    .collect::<Vec<_>>(),
+                // 识别通道（诊断用；不可用时 null）
+                "source": if source.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!(source)
+                },
+            }),
     )
 }
 
@@ -3667,6 +4381,20 @@ pub async fn session_question_answer(
         if q_idx >= hit.questions.len() {
             return Err("bad_index");
         }
+        // **保存后预期落点**（载荷 question 全集 + 预期题序）——单选保存后 sheet
+        // 落点校验/导航的基准（01:48 header≠question 判据错位修复）。
+        // **按题形态分流**（2026-10-07 03:03 事故修复）：多选 Other 保存后**留在
+        // 原题**（切题靠手动），预期 = 原页自身；单选保存后自动推进，预期 = 下一题
+        let is_multi_select_q = hit.questions[q_idx].multi_select;
+        let expected_idx = if is_multi_select_q {
+            Some(q_idx)
+        } else {
+            Some(q_idx + 1).filter(|i| *i < hit.questions.len())
+        };
+        // 载荷 question 全集（保存后 sheet 落点校验的基准）
+        let payload_questions: Vec<String> =
+            hit.questions.iter().map(|q| q.question.clone()).collect();
+        let pages = hit.questions.len() + 1; // 题目数 + Submit 页（opencode prev 用）
         let q = hit.questions.into_iter().nth(q_idx).unwrap_or_else(|| {
             // unreachable（上面已判界内），防御性占位——序列构造会因选项越界拒绝
             crate::inject::question::Question {
@@ -3719,6 +4447,12 @@ pub async fn session_question_answer(
             | crate::inject::question::AnswerAction::FreeText => Vec::new(),
             crate::inject::question::AnswerAction::Toggle if tool_id == "claude" => Vec::new(),
             crate::inject::question::AnswerAction::Advance if tool_id == "claude" => Vec::new(),
+            // **kimi advance 免静态序列**（2026-10-06 用户实录 bug：门
+            // `action_supported` 已放行 kimi 切题，但此处缺分支 → 落兜底
+            // `answer_key_sequence_for` → TwoPhaseSelect 的 Advance arm 如实拒绝
+            // → 映射成 bad_index 400——「选项序号无效」红字，KimiAdvance 臂从未
+            // 执行到。方向键在臂内参数化，序列留空同 claude）
+            crate::inject::question::AnswerAction::Advance if tool_id == "kimi" => Vec::new(),
             crate::inject::question::AnswerAction::Select
                 if tool_id == "kimi" && multi_question =>
             {
@@ -3737,7 +4471,17 @@ pub async fn session_question_answer(
                 }
             })?,
         };
-        Ok((session, seq, q, tool_id, multi_question))
+        Ok((
+            session,
+            seq,
+            q,
+            tool_id,
+            multi_question,
+            pages,
+            payload_questions,
+            expected_idx,
+            q_idx,
+        ))
     })
     .await
     {
@@ -3750,7 +4494,17 @@ pub async fn session_question_answer(
             );
         }
     };
-    let (session, sequence, q_for_plan, q_tool, multi_flow) = match lookup {
+    let (
+        session,
+        sequence,
+        q_for_plan,
+        q_tool,
+        multi_flow,
+        pages,
+        payload_questions,
+        expected_idx,
+        q_idx,
+    ) = match lookup {
         Ok(v) => v,
         Err(code) => {
             // 校验失败零注入零审计（approve guards 同口径）：
@@ -3786,6 +4540,7 @@ pub async fn session_question_answer(
         multi_flow,
         &q_for_plan,
         q_tool,
+        pages,
     );
     let probe_st2 = st.clone();
     // `tool` 进闭包（分派器要按工具取规格与日志），审计用的副本另留一份
@@ -3793,8 +4548,13 @@ pub async fn session_question_answer(
     // 切勾目标身份核验的题干（评审 I1）：多题卡当前题的 question 文本，随计划
     // 传给分派器（run_toggle_stages 第 1 段与屏面题干比对，不一致=已手动切题→中止）
     let expected_question = q_for_plan.question.clone();
+    let payload_questions_for_dispatch = payload_questions.clone();
+    let q_idx_for_dispatch = q_idx;
+    let expected_idx_for_dispatch = expected_idx;
     // 守卫与投递同生命周期于 spawn_blocking 闭包内（fff9c29 同款）：忙 → None 哨兵
     // 让位，不投递亦不落审计（无投递发生，approve/retract/jump 忙让位同口径）
+    // 闭包外回执 JSON 也要用（StageDone 的 text 字段）——闭包 move 前克隆一份
+    let free_text_for_json = free_text.clone();
     let attempt = tokio::task::spawn_blocking(move || {
         let _guard = crate::inject::queue::try_acquire_inflight(&answer_sid)?;
         Some(dispatch_question_action(
@@ -3807,6 +4567,9 @@ pub async fn session_question_answer(
             free_text.as_deref(),
             &stage_plan,
             &expected_question,
+            expected_idx_for_dispatch,
+            payload_questions_for_dispatch,
+            q_idx_for_dispatch,
         ))
     })
     .await;
@@ -3861,6 +4624,8 @@ pub async fn session_question_answer(
         QuestionDispatch::StageDone {
             stage,
             receipt_seen,
+            review_reached,
+            advanced,
         } => {
             // 阶段机走完整条闭环：status 仍是 key_sent（旧前端语义不变），但带上
             // done/stage/verified——`verified` 的三态见端点文档（**不谎报完成**）
@@ -3886,6 +4651,9 @@ pub async fn session_question_answer(
                     "done": true,
                     "stage": stage,
                     "verified": receipt_seen,
+                    "review": review_reached,
+                    "advanced": advanced,
+                    "text": free_text_for_json.as_deref(),
                 }),
             )
         }
@@ -3922,6 +4690,8 @@ pub async fn session_question_answer(
                     "checked": checked,
                     "verified": verified,
                     "screen": screen_json,
+                    // Review 落点判定（末次切勾直达 Review 时前端切确认卡）
+                    "review": screen.as_ref().map(|snap| snap.heading.is_empty() && snap.checked.is_empty()).unwrap_or(false),
                 }),
             )
         }
@@ -3998,12 +4768,20 @@ pub async fn session_question_answer(
                 "ok",
             );
             let screen_json = screen.as_ref().map(snapshot_to_json);
+            // **Review 落点判定**（2026-10-07 13:22 缺口补齐）：单选选中后 TUI 自动
+            // 推进，末题/全部已答时直达 Review——回执带 review 供前端切确认卡
+            let review = screen
+                .as_ref()
+                .map(|snap| snap.heading.is_empty() && snap.checked.is_empty())
+                .unwrap_or(false);
             json_no_store(
                 StatusCode::OK,
                 serde_json::json!({
                     "status": "key_sent",
+                    "done": true,
                     "stage": "select",
                     "screen": screen_json,
+                    "review": review,
                 }),
             )
         }
@@ -4062,6 +4840,40 @@ pub async fn session_question_answer(
 enum StagePlan {
     /// 单键动作（select/toggle/cancel）：一次投递一个键，无后续阶段
     SingleKey,
+    /// **kimi 切题**（2026-10-06，2.1.1 活体定案）：`→`（Next）/`←`（Prev，Review
+    /// 页 = 返回修改）单键 + 屏读到达验证（poll_screen_changed：变化即停/窗尽
+    /// 未生效如实 Failed）→ AdvanceDone 带到达后 kimi 快照
+    KimiAdvance {
+        direction: crate::inject::question::NavDirection,
+    },
+    /// **opencode 切题**（2026-10-05 ◀/▶ 双向）：tab×tabs 前向循环（next=1 /
+    /// prev=pages-1 等效回退；逐键 settle）+ 前后读屏到达验证（屏相同 = tab 未
+    /// 生效 → Failed 可重试），回执 AdvanceDone 带到达后快照
+    OpencodeAdvance {
+        tabs: usize,
+        direction: crate::inject::question::NavDirection,
+    },
+    /// **kimi 多选 toggle 标记验证**（2026-10-05 屏读标准补齐）：数字发出前后
+    /// 各读一屏（kimi 多选页快照，K2 标记 `[ ]`/`[?]`）→ 目标选项标记翻转 =
+    /// verified；Other 行内容变化（数字被打进 Other 编辑态）→ 退格 + `↑` 重试
+    KimiToggle { index: usize },
+    /// **codex 多选 toggle 高亮定位**（2026-10-05 屏读标准补齐）：`? ` 前缀
+    /// （C7 定案唯一可读高亮）定位当前行 → ↓/↑ 逐步走位（每步重读验证）→
+    /// 到达目标行 → Space（C2：选中不前进）。notes 编辑态在场 → 拒绝
+    CodexToggle { target: usize },
+    /// **焦点守卫版单键**（2026-10-05，opencode 专属）：own 行（编辑中或已保存）
+    /// 持焦时数字被吃进该行——先确认焦点移出（opencode_ensure_focus_off_edit_row）
+    /// 再逐键投递。`own_pos` = own 行的屏上编号（选项数 + 1）。
+    /// `verify_flip`（2026-10-05 屏读标准补齐）= Toggle 专属：数字后读屏核对目标
+    /// 行勾选翻转，回执 `ToggleDone { checked, verified, screen }`（对齐 claude）；
+    /// Select 单选即答无翻转语义，保持 KeySent。`index` = 目标选项下标（0 起）。
+    DigitKey {
+        own_pos: usize,
+        index: Option<usize>,
+        verify_flip: bool,
+        /// Select 单选即答（成功 = own 行消失/页面推进；否则 Toggle 翻转语义）
+        advance_success: bool,
+    },
     /// 多选提交阶段机；`max_down_steps` = 走位上限（选项数 + 2）
     Submit { max_down_steps: usize },
     /// 自由作答阶段机（单题形态）
@@ -4074,14 +4886,27 @@ enum StagePlan {
     /// Review 汇总屏 → 屏上编号确认 → 终态
     KimiSubmit,
     /// **kimi Other 自由作答阶段机**（批次戊 E4）：Other 行数字 → 打字 → 回车保存
-    /// → Review 汇总屏 → 确认
-    KimiFreeText,
+    /// → Review 汇总屏 → 确认。`overwrite` = 进编辑器后先退格删净旧文再打新文
+    /// （2026-10-06，2.1.1 定案 K7 重进带旧文本；空文本+overwrite 前置拒——空回车
+    /// no-op 定案，置空语义不存在）
+    KimiFreeText {
+        overwrite: bool,
+        /// 多题流：保存后**不代发确认键**（单题 E-B8 语义在多题流会把未答题一并提交）
+        multi_question: bool,
+        /// 题形态：补发回车只对多选生效（单选推进漂移，停用——用户裁决）
+        multi_select: bool,
+    },
     /// **codex Tab 备注阶段机**（批次戊 E5）：弹窗 footer 锚判读 → Tab → 打字 →
-    /// Enter 提交（当前高亮项+备注）→ 终态
-    CodexNotes,
+    /// Enter 提交（当前高亮项+备注）→ 终态。`overwrite` = 已在备注态时**再按
+    /// Tab 清空旧备注**（footer 活体明文「tab or esc to clear note」）→ 重打
+    /// 全文；text 空 = 纯清空（清空路径不发 Enter——codex Enter=提交整卷，
+    /// 空备注提交未取证，提交走卡面提交按钮）
+    CodexNotes { overwrite: bool },
     /// **opencode own answer 阶段机**（批次戊 E6）：行序定位 → enter 开行 →
     /// 裸打字守卫（屏读确认占位行）→ 打字 → enter 提交
-    OpencodeOwnAnswer,
+    /// opencode own answer（2026-10-04 toggle 双段语义重写）：overwrite = 已存内容时
+    // 先退格清空再打字（用户实测光标在末尾）
+    OpencodeOwnAnswer { overwrite: bool },
     /// **opencode 多选提交阶段机**（批次戊 E6，2026-09-23 接线）：首段屏读
     /// 「Confirm 已在场则跳过 tab」→（不在场才 tab）→ Confirm 页 → enter 提交
     OpencodeSubmit,
@@ -4107,6 +4932,7 @@ impl StagePlan {
     /// TUI 追加的 `Type something` 行（第 n+1 行）→ `Submit` 行（第 n+2 行）。
     /// 从第 1 行最多需要 n+1 次 ↓ 到 Submit 行；再加 1 次容错（重绘竞态下一次按键
     /// 未生效的情形不会白跑——上限只是**死循环兜底**，正常路径在每步复核里提前停手）。
+    #[allow(clippy::too_many_arguments)] // 方向/覆盖/单选旗标/页数均为独立语义位
     fn for_action(
         action: crate::inject::question::AnswerAction,
         index: Option<usize>,
@@ -4115,6 +4941,7 @@ impl StagePlan {
         multi_flow: bool,
         q: &crate::inject::question::Question,
         tool: &str,
+        pages: usize,
     ) -> Self {
         use crate::inject::question::AnswerAction as A;
         match (action, tool) {
@@ -4127,12 +4954,20 @@ impl StagePlan {
             (A::Advance, "claude") => Self::ClaudeAdvance { direction },
             // E4：kimi 的两条阶段机（键序依赖屏读，由编排产生）
             (A::Submit, "kimi") => Self::KimiSubmit,
+            // **kimi 切题**（2026-10-06，2.1.1 活体定案）：`→`/`←` 单键 + 屏读
+            // 到达验证（Review 页 `←` = 返回修改；首题 `←` TUI 不动 → 窗尽如实
+            // Failed「未生效」）
+            (A::Advance, "kimi") => Self::KimiAdvance { direction },
             // E6：opencode 多选提交阶段机（2026-09-23 接线——此前 opencode 的 Submit
             // 误落下面的 claude Submit 行走位形态，屏读判据在 opencode 屏上必失败）
             (A::Submit, "opencode") => Self::OpencodeSubmit,
-            (A::FreeText, "kimi") => Self::KimiFreeText,
-            (A::FreeText, "codex") => Self::CodexNotes,
-            (A::FreeText, "opencode") => Self::OpencodeOwnAnswer,
+            (A::FreeText, "kimi") => Self::KimiFreeText {
+                overwrite,
+                multi_question: multi_flow,
+                multi_select: q.multi_select,
+            },
+            (A::FreeText, "codex") => Self::CodexNotes { overwrite },
+            (A::FreeText, "opencode") => Self::OpencodeOwnAnswer { overwrite },
             // 2026-10-02/03：claude 自由作答路由——**多题流子题（含单选）与单题多选**
             // 走勾选框行内联编辑编排（数字定位在多题/多选屏无效；单选子题勾选兜底
             // 自动跳过——无勾选框形态）；**单题单选**维持既有数字定位编排（K4-K7 定案）
@@ -4149,6 +4984,42 @@ impl StagePlan {
             },
             (A::FreeText, _) => Self::FreeText,
             // Advance 是单键纯导航（tab），与 select/toggle/cancel 同通道
+            // **kimi 多选 toggle**（2026-10-05 屏读标准补齐）：数字直选行 toggle
+            // （K3 定案，与高亮无关）+ 标记验证（K2：[?] 已选标记可读）
+            (A::Toggle, "kimi") => Self::KimiToggle {
+                index: index.unwrap_or(0),
+            },
+            // **codex 多选 toggle**（2026-10-05 屏读标准补齐）：`? ` 高亮定位 +
+            // Space（C2/C7 定案）
+            (A::Toggle, "codex") => Self::CodexToggle {
+                target: index.unwrap_or(0) + 1,
+            },
+            // **opencode 数字动作走焦点守卫版单键**（2026-10-05 用户实机语义：
+            // 光标停在 own answer 行时数字被吃进该行——发键前先移出）。
+            // Toggle 额外带**后置翻转校验**（2026-10-05 屏读标准补齐：数字直发
+            // 后读屏核对目标行勾选翻转，对齐 claude toggle 契约）
+            (A::Select | A::Toggle, "opencode") => {
+                Self::DigitKey {
+                    own_pos: q.options.len() + 1,
+                    index,
+                    verify_flip: action == A::Toggle,
+                    // 单选 Select = 选即提交（成功判据为推进而非翻转）
+                    advance_success: action == A::Select && !q.multi_select,
+                }
+            }
+            // **opencode 切题 = tab 前向循环**（2026-10-05 用户需求 ◀/▶ 双向 +
+            // 屏读标准补齐：next=tab×1；prev=tab×(pages-1) 前向循环等效回退——
+            // opencode 实测只有 tab 前向键、shift+tab 无效；页序固定
+            // 题目…→Submit→回绕，任意页前向 pages-1 步必达前页）。两向统一走
+            // OpencodeAdvance 臂做**前后读屏到达验证**。
+            (A::Advance, "opencode") => Self::OpencodeAdvance {
+                tabs: if direction == crate::inject::question::NavDirection::Prev {
+                    pages.saturating_sub(1).max(1)
+                } else {
+                    1
+                },
+                direction,
+            },
             (A::Advance | A::Select | A::Toggle | A::Cancel, _) => Self::SingleKey,
         }
     }
@@ -4163,6 +5034,10 @@ enum QuestionDispatch {
     StageDone {
         stage: &'static str,
         receipt_seen: Option<bool>,
+        /// 保存后已直达 Review/Submit 汇总屏（末题/全部已答自动汇总）
+        review_reached: bool,
+        /// TUI 已自动推进下一题（kimi 单选 Other 保存后自动推进形态）
+        advanced: bool,
     },
     /// **claude 多选切勾闭环**的结论（2026-09-24）：`checked` = 屏读核验到的目标行
     /// 新勾选态（`None` = 键已发出但读不到屏无法核验——不谎报也不误报失败）；
@@ -4233,10 +5108,10 @@ enum DigitVerifyOutcome {
 #[allow(clippy::too_many_arguments)]
 fn verify_digit_then_fallback<Rd, Snd, PollSettle, KeySettle>(
     target: u32,
-    mut read: Rd,
-    mut send_key: Snd,
-    mut poll_settle: PollSettle,
-    mut key_settle: KeySettle,
+    read: Rd,
+    send_key: Snd,
+    poll_settle: PollSettle,
+    key_settle: KeySettle,
     poll_rounds: u32,
 ) -> (DigitVerifyOutcome, Option<String>)
 where
@@ -4245,17 +5120,51 @@ where
     PollSettle: FnMut(),
     KeySettle: FnMut(),
 {
+    // 数字档特化：主键 = 数字已发；回退 = 导航序列（从最后一份选项表算步进，
+    // 不猜起点）。2026-10-04 泛化出 [`verify_primary_then_fallback`]——计划批准框
+    // 的导航优先档（回退 = 数字）共用同一验证骨架。
+    verify_primary_then_fallback(
+        read,
+        send_key,
+        poll_settle,
+        key_settle,
+        poll_rounds,
+        move |opts| crate::inject::dialog::navigation_sequence(opts, target),
+    )
+}
+
+/// 验证内核的**通用形**（2026-10-04 计划批准卡批从 [`verify_digit_then_fallback`]
+/// 泛化）：主键序（数字或导航）已发出 → 验证窗内屏读「对话框消失」= 生效；
+/// 窗尽仍在场 → `fallback(last_opts)` 构造回退键序并逐键发出（回退后不再二次验证，
+/// 首键失败即停）。`fallback` 构造失败（如导航档无高亮/目标越界）→
+/// [`DigitVerifyOutcome::NavigationRefused`]（不猜、不盲发）。
+#[allow(clippy::too_many_arguments)]
+fn verify_primary_then_fallback<Rd, Snd, PollSettle, KeySettle, Fb>(
+    mut read: Rd,
+    mut send_key: Snd,
+    mut poll_settle: PollSettle,
+    mut key_settle: KeySettle,
+    poll_rounds: u32,
+    fallback: Fb,
+) -> (DigitVerifyOutcome, Option<String>)
+where
+    Rd: FnMut() -> Option<Vec<crate::inject::dialog::DialogOption>>,
+    Snd: FnMut(&str) -> Result<(), String>,
+    PollSettle: FnMut(),
+    KeySettle: FnMut(),
+    Fb: FnOnce(&[crate::inject::dialog::DialogOption]) -> Result<Vec<String>, String>,
+{
     let rounds = poll_rounds.max(1);
     let mut last_opts: Option<Vec<crate::inject::dialog::DialogOption>> = None;
     for _ in 0..rounds {
         poll_settle();
         match read() {
-            // 对话框已消失 = 数字已生效（提交完成）
+            // 对话框已消失 = 主键序已生效（提交完成）
             None => return (DigitVerifyOutcome::Confirmed, None),
             Some(opts) => last_opts = Some(opts),
         }
     }
-    // 窗尽仍在场 → 导航回退
+    // 窗尽仍在场 → 回退
     let Some(opts) = last_opts else {
         // 全窗屏读不可用：无回退起点（不猜位置）——调用方按「无法回退」如实记 warn
         return (
@@ -4263,7 +5172,7 @@ where
             None,
         );
     };
-    match crate::inject::dialog::navigation_sequence(&opts, target) {
+    match fallback(&opts) {
         Ok(seq) => {
             let mut sent = Vec::new();
             for key in &seq {
@@ -4309,6 +5218,50 @@ fn question_probe<'a>(
     }
 }
 
+/// 发键后屏面变化的有界轮询产物（D20 形状：命中即停、窗尽如实、读不到不谎报）。
+enum ScreenChange {
+    /// 屏面已变化（携带最后一拍原文）
+    Changed(Vec<String>),
+    /// 窗尽屏面仍与基准原样（= 按键未生效的如实证据）
+    Unchanged,
+    /// 途中读不到屏（无法验证——调用方保持既有「读不到不误报」口径）
+    Unreadable,
+}
+
+/// **发键后的屏面变化轮询**（2026-10-06，用户实机 bug 修复的共用内核）：
+/// 旧形态是「发键后立即读一拍与基准比对」——TUI 未及重绘时前后两屏原样，误报
+/// 「按键未生效」（用户重试反而翻转已生效的勾选）。本助手逐拍读屏直到屏面
+/// **变化**（D20(a) 命中即停）；窗尽原样 → [`ScreenChange::Unchanged`]；任一拍
+/// 读不到屏 → [`ScreenChange::Unreadable`]（不谎报）。
+fn poll_screen_changed(
+    probe: &impl Fn(&'static str) -> Option<Vec<String>>,
+    stage: &'static str,
+    baseline: &[String],
+    rounds: u32,
+    step_ms: u64,
+) -> ScreenChange {
+    let mut last: Option<Vec<String>> = None;
+    for i in 0..rounds.max(1) {
+        match probe(stage) {
+            Some(lines) => {
+                if lines != baseline {
+                    return ScreenChange::Changed(lines);
+                }
+                last = Some(lines);
+            }
+            None => {
+                log::debug!("屏面变化轮询：{stage} 第 {}/{} 拍读不到屏", i + 1, rounds);
+                return ScreenChange::Unreadable;
+            }
+        }
+        if i + 1 < rounds.max(1) {
+            std::thread::sleep(std::time::Duration::from_millis(step_ms));
+        }
+    }
+    let _ = last;
+    ScreenChange::Unchanged
+}
+
 /// 阶段机臂共用的**终端缝**构造（发键后固定 `SUBMIT_DELAY_MS` 等重绘）。
 #[allow(clippy::type_complexity)] // Closures 三泛型是 mode::Closures 的固有形态
 fn question_terminal<'a>(
@@ -4338,6 +5291,49 @@ fn question_terminal<'a>(
     }
 }
 
+/// free-text 阶段机臂共用的**终端缝**构造（与 [`question_terminal`] 同一模式，
+/// 多一个文本通道）：发键/发文本成功后固定 `SUBMIT_DELAY_MS` 等重绘；**文本走
+/// 字符通道**（`locate_and_inject_spec`——用户文本绝不进键通道，也不带 `[mobile]`
+/// 签名：签名是「一条新消息」的语义，作答文本不是消息；文本归一已在 handler
+/// 做过，这里原样投递）。
+#[allow(clippy::type_complexity)] // 四泛型是 FreeTextClosures 的固有形态
+fn free_text_terminal<'a>(
+    read: impl FnMut() -> Option<Vec<String>> + 'a,
+    injector: &'a dyn crate::inject::engine::Injector,
+    pid: u32,
+    spec: &'a crate::inject::families::FamilySpec,
+) -> crate::inject::question::FreeTextClosures<
+    impl FnMut() -> Option<Vec<String>> + 'a,
+    impl FnMut(&str) -> Result<(), String> + 'a,
+    impl FnMut(&str) -> Result<(), String> + 'a,
+    impl FnMut() + 'a,
+> {
+    crate::inject::question::FreeTextClosures {
+        read,
+        send: move |key: &str| {
+            let r = injector.locate_and_send_key_spec(pid, key, spec);
+            if r.is_ok() {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ));
+            }
+            r
+        },
+        send_text: move |t: &str| {
+            injector.locate_and_inject_spec(pid, t, spec)?;
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ));
+            Ok(())
+        },
+        settle: || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::families::SUBMIT_DELAY_MS,
+            ))
+        },
+    }
+}
+
 #[allow(clippy::too_many_arguments)] // 阶段机臂的缝参数（评审前已 9 个；multi_flow 为本批新增的有语义参数）
 fn dispatch_question_action(
     st: &Arc<RemoteState>,
@@ -4349,6 +5345,9 @@ fn dispatch_question_action(
     free_text: Option<&str>,
     plan: &StagePlan,
     expected_question: &str,
+    expected_idx: Option<usize>,
+    payload_questions: Vec<String>,
+    q_idx: usize,
 ) -> QuestionDispatch {
     match plan {
         StagePlan::ClaudeSelect { index } => {
@@ -4371,12 +5370,473 @@ fn dispatch_question_action(
                 Err(e) => dispatch_abort(e),
             }
         }
+        StagePlan::DigitKey {
+            own_pos,
+            index,
+            verify_flip,
+            advance_success,
+        } => {
+            // **反应式切换**（2026-10-05 用户设计：动作键即探针——删除前置焦点
+            // 守卫，其探针回车是「每次点选项闪烁两次/点击次数不对」回归的根因）。
+            //
+            // 常态（焦点在列表行）：数字按**编号**精准切换目标行，一次直达、
+            // 零闪烁（opencode 2.0.22 实测：数字与高亮无关）。
+            // 异常态（焦点在 own 行）：数字被吃进文字行 → 前后差分检出 →
+            // 退格清掉 → 退出键按字段余量分派（空→enter / 有残留→↑，
+            // 2026-10-06 用户实测细化；无条件 ↑ 会让空字段永不退出=写入/
+            // 删除死循环）→ 重试（有界 own_pos+2，含回绕全覆盖）。
+            // 走满 → Toggle: checked=None/verified=false；Select: Failed（诚实）。
+            let probe = question_probe(st, tool, pid);
+            let target_row = index.unwrap_or(0) + 1;
+            let d = match crate::inject::dialect::own_answer_dialect("opencode") {
+                Some(d) => d,
+                None => {
+                    return QuestionDispatch::Failed("方言表缺 opencode 条目".to_string());
+                }
+            };
+            // 污染处置的**等待拍长**（2026-10-06 用户实机定位：SUBMIT_DELAY_MS=150ms
+            // 后屏读仍见旧态——删除/退出后 150ms 读屏 = 读旧屏，污染判据与退出键
+            // 分派全部失真 → 「写入2删除2」循环。删完/退出后各等 250ms 再读再发）
+            const POLLUTION_SETTLE_MS: u64 = 250;
+            for _round in 0..=(own_pos + 2) {
+                let before = probe("base");
+                let before_target = before.as_ref().and_then(|l| {
+                    crate::inject::question::opencode_option_checked_at(l, target_row, &d)
+                });
+                let before_own = before.as_ref().and_then(|l| {
+                    crate::inject::question::opencode_single_own_row_content_at(l, *own_pos)
+                });
+                let _ = &before_own;
+                for key in sequence {
+                    if let Err(e) = injector.locate_and_send_key_spec(pid, key, spec) {
+                        return QuestionDispatch::Failed(e);
+                    }
+                    // **逐键 settle**（2026-10-05 用户实机定位：无等待读屏=读旧屏
+                    // ——翻转/污染全检不出，重试分支永不触发）
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                }
+                // 读屏前最后 settle（TUI 重绘竞态窗口）
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ));
+                let after = probe("post");
+                let Some(after_lines) = after else {
+                    break; // 读不到屏：键已发出，无法核验 → 走诚实回执
+                };
+                let after_target = crate::inject::question::opencode_option_checked_at(
+                    &after_lines,
+                    target_row,
+                    &d,
+                );
+                // **翻页成功判定**（2026-10-06 18:27 事故定案，必须在污染判定
+                // 之前）：单选 select **即交推进**——数字命中后终端停在下一题/
+                // Review，before/after 题干不同 = 数字已生效。跨页后 before_own/
+                // after_own 属于**不同题**，污染比较全是噪声（18:27 round0 误报
+                // 污染 → 退位键落在新题页 → 下一轮数字误选新题 = 「只选第一题
+                // 第二题也被选」）。
+                let before_head = before
+                    .as_ref()
+                    .and_then(|l| {
+                        crate::inject::question_screen_oc::opencode_question_screen_snapshot(l)
+                    })
+                    .map(|s| s.heading);
+                let after_snap =
+                    crate::inject::question_screen_oc::opencode_question_screen_snapshot(
+                        &after_lines,
+                    );
+                let after_head = after_snap.as_ref().map(|s| s.heading.clone());
+                let page_changed =
+                    matches!((&before_head, &after_head), (Some(b), Some(a)) if b != a);
+                if *advance_success && page_changed {
+                    return QuestionDispatch::SelectDone { screen: after_snap };
+                }
+                // Toggle 翻转判定（目标行勾选态前后变化）
+                if matches!((before_target, after_target), (Some(b), Some(a)) if b != a) {
+                    let screen =
+                        crate::inject::question_screen_oc::opencode_question_screen_snapshot(
+                            &after_lines,
+                        );
+                    if *verify_flip {
+                        return QuestionDispatch::ToggleDone {
+                            checked: after_target,
+                            verified: true,
+                            screen,
+                        };
+                    }
+                    if *advance_success {
+                        return QuestionDispatch::SelectDone { screen };
+                    }
+                    return QuestionDispatch::KeySent { stage: None };
+                }
+                // **Select 单选推进判定**：own 行消失（选即提交，弹窗关闭/翻页）
+                if *advance_success {
+                    let own_before = before
+                        .as_ref()
+                        .and_then(|l| crate::inject::question::opencode_single_own_row(l))
+                        .is_some();
+                    let own_after =
+                        crate::inject::question::opencode_single_own_row(&after_lines).is_some();
+                    if own_before && !own_after {
+                        let screen =
+                            crate::inject::question_screen_oc::opencode_question_screen_snapshot(
+                                &after_lines,
+                            );
+                        return QuestionDispatch::SelectDone { screen };
+                    }
+                }
+                // **翻页但未按成功收兵**（toggle/未分类）——跨页续发键序全是
+                // 噪声，诚实收兵不再发键：toggle=未验证，其他=已发键
+                if page_changed {
+                    if *verify_flip {
+                        return QuestionDispatch::ToggleDone {
+                            checked: None,
+                            verified: false,
+                            screen: None,
+                        };
+                    }
+                    return QuestionDispatch::KeySent { stage: None };
+                }
+                // **own 行污染判定**：own 行内容变化（数字被吃进文字行）→ 退格清掉
+                let after_own = crate::inject::question::opencode_single_own_row_content_at(
+                    &after_lines,
+                    *own_pos,
+                );
+                let before_own = before.as_ref().and_then(|l| {
+                    crate::inject::question::opencode_single_own_row_content_at(l, *own_pos)
+                });
+                let mut polluted = false;
+                if let (Some(b), Some(a)) = (&before_own, &after_own) {
+                    if b != a {
+                        polluted = true;
+                        let added = a.chars().count().saturating_sub(b.chars().count()).max(1);
+                        for _ in 0..added {
+                            if let Err(e) =
+                                injector.locate_and_send_key_spec(pid, "backspace", spec)
+                            {
+                                return QuestionDispatch::Failed(e);
+                            }
+                        }
+                        // 删完等一拍再退（250ms；150ms 实机读旧屏——见上等待拍长注）
+                        std::thread::sleep(std::time::Duration::from_millis(POLLUTION_SETTLE_MS));
+                    }
+                }
+                // 退出/换位键按**字段余量分派**（2026-10-06 用户实测细化——
+                // 「写入2删除2循环」根因：退格后字段已空，单纯 ↑ 不保存不退出
+                // → 下一轮数字再被吃 → 原无条件 ↑ 重试永不收敛）：
+                // 污染且退格后字段**空**（打前是占位/空）→ **enter** 提交空=
+                // 退出文字行（空字段 enter 无内容即交连锁）；字段有**残留**
+                // （打前已有内容，退格只清了新增）→ **↑** 保存+退出（残留
+                // 原样保留）。无污染（数字未进字段）→ ↑ 维持换位语义。
+                let exit_key = if polluted {
+                    match &before_own {
+                        Some(b) if !b.to_lowercase().contains(d.label) => "up",
+                        _ => "enter",
+                    }
+                } else {
+                    "up"
+                };
+                // **逐轮自报**（闸门 2）：own 行整串 + 污染判定 + 退出键——
+                // 「写入2删除2」类循环的每一轮直接可读，不再盲猜
+                log::info!(
+                    "[digit-guard] own={own_pos} target={target_row} polluted={polluted} \
+                     exit={exit_key} before_own={before:?} after_own={after:?}",
+                    before = before_own.as_deref().unwrap_or("(无行)"),
+                    after = after_own.as_deref().unwrap_or("(无行)"),
+                );
+                if let Err(e) = injector.locate_and_send_key_spec(pid, exit_key, spec) {
+                    return QuestionDispatch::Failed(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(POLLUTION_SETTLE_MS));
+            }
+            if *verify_flip {
+                // 键已发出但未能核验翻转——不谎报（同 claude toggle 读屏失败语义）
+                return QuestionDispatch::ToggleDone {
+                    checked: None,
+                    verified: false,
+                    screen: None,
+                };
+            }
+            if *advance_success {
+                return QuestionDispatch::SelectDone { screen: None };
+            }
+            QuestionDispatch::KeySent { stage: None }
+        }
+
+        StagePlan::KimiToggle { index } => {
+            // **kimi 多选 toggle 标记验证**（2026-10-05 屏读标准补齐，K2/K3 定案）：
+            // 数字直选行 toggle（与高亮无关）→ 前后各读一屏（kimi 多选页快照，
+            // K2 标记 `[ ]`/`[?]`）→ 目标选项标记翻转 = verified。
+            // **Other 编辑态污染防护**（K4：Other 编辑态下数字会打进文本）：
+            // Other 行内容变化（free_text 出现/变化）→ 退格清掉 → `↑` 移出 → 重试
+            // （有界 4 轮 = Other 编辑行上下可达范围）；走满 → 不谎报。
+            let probe = question_probe(st, tool, pid);
+            let digit = format!("{}", index + 1);
+            // 一次屏读双份消费：原始行作轮询基准，快照作翻转/污染判定
+            let before_lines = probe("pre");
+            let before = before_lines
+                .as_ref()
+                .and_then(|l| crate::inject::question_screen_oc::kimi_question_screen_snapshot(l));
+            for _round in 0..=4 {
+                // 发数字（kimi 数字直选 = 编号行 toggle，与高亮无关）
+                if let Err(e) = injector.locate_and_send_key_spec(pid, &digit, spec) {
+                    return QuestionDispatch::Failed(e);
+                }
+                // **有界轮询等屏面变化**（2026-10-06 升级：旧形态发键后固定睡 150ms
+                // 读一拍——重绘慢时读到旧屏误走 ↓ 重试，把已勾上的项翻回去；机理与
+                // SingleKey 臂误报同源）。变化判据 = 整屏与基准不同（快照级翻转/污染
+                // 判定在下方消费拿到的那一拍屏）；读不到屏 → 走不谎报回执。
+                let after_lines = match &before_lines {
+                    Some(b) => {
+                        let rounds = crate::inject::timing::poll_rounds(
+                            crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                        );
+                        match poll_screen_changed(
+                            &probe,
+                            "post",
+                            b,
+                            rounds,
+                            crate::inject::timing::POLL_STEP_MS,
+                        ) {
+                            ScreenChange::Changed(lines) => Some(lines),
+                            other => {
+                                if matches!(other, ScreenChange::Unchanged) {
+                                    // 窗尽原样：本拍数字确实未生效 → ↓ 换位重试（外层有界）
+                                    if let Err(e) =
+                                        injector.locate_and_send_key_spec(pid, "down", spec)
+                                    {
+                                        return QuestionDispatch::Failed(e);
+                                    }
+                                    continue;
+                                }
+                                None // Unreadable → 快照不可读 → 走不谎报回执
+                            }
+                        }
+                    }
+                    None => None,
+                };
+                let after = after_lines.and_then(|l| {
+                    crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l)
+                });
+                // Other 行污染（K4：Other 编辑态下数字会打进文本）：free_text 出现/变化 → 退格清掉
+                if let (Some(b), Some(a)) = (&before, &after) {
+                    if b.free_text != a.free_text {
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "backspace", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "up", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                        continue;
+                    }
+                }
+                // 目标选项标记翻转 → 完成
+                if let (Some(b), Some(a)) = (&before, &after) {
+                    let bt = b.checked.get(*index);
+                    let at = a.checked.get(*index);
+                    if bt == at && bt != Some(&Some(true)) {
+                        // 未翻转且非刚勾上 → ↓ 换位重试（有界）
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "down", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                        continue;
+                    }
+                    let screen = after.as_ref().map(|_| ());
+                    let _ = screen;
+                    return QuestionDispatch::ToggleDone {
+                        checked: at.copied().flatten(),
+                        verified: bt != at,
+                        screen: None, // kimi 多选页快照经 ToggleDone.screen 契约回传（QuestionScreenSnapshot 类型另批统一）
+                    };
+                }
+                break; // 快照不可读 → 走不谎报回执
+            }
+            QuestionDispatch::ToggleDone {
+                checked: None,
+                verified: false,
+                screen: None,
+            }
+        }
+        StagePlan::CodexToggle { target } => {
+            // **codex 多选 toggle 高亮定位 + Space**（2026-10-05 屏读标准补齐，
+            // C7：`? ` 前缀 = 唯一可读高亮；C2：Space = 选中不前进）：
+            // 读当前高亮行 → ↓/↑ 逐步走位（每步重读验证到位）→ 到达目标行 →
+            // Space。notes 编辑态在场 → 拒绝（会污染备注）。
+            let probe = question_probe(st, tool, pid);
+            if let Some(lines) = probe("pre") {
+                let lower: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+                if lower
+                    .iter()
+                    .any(|l| l.contains(crate::inject::question::CODEX_NOTES_OPENED_FOOTER))
+                {
+                    return QuestionDispatch::Failed(
+                        "备注编辑器仍开启（footer「tab or esc to clear notes」在场）——请先在终端完成（enter 提交）或清除（esc）备注后再作答选项".to_string(),
+                    );
+                }
+            }
+            for _round in 0..=20 {
+                let cur =
+                    probe("hl").and_then(|l| crate::inject::question::codex_highlight_row(&l));
+                match cur {
+                    Some(hl) if hl == *target => {
+                        // 到达目标行 → Space 选中
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "space", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                        return QuestionDispatch::KeySent { stage: None };
+                    }
+                    Some(hl) if hl < *target => {
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "down", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                    }
+                    Some(_) => {
+                        if let Err(e) = injector.locate_and_send_key_spec(pid, "up", spec) {
+                            return QuestionDispatch::Failed(e);
+                        }
+                    }
+                    None => {
+                        return QuestionDispatch::Failed(
+                            "读不到高亮行（`? ` 前缀缺席）——已中止；请人工核对终端".to_string(),
+                        );
+                    }
+                }
+            }
+            QuestionDispatch::Failed(
+                "高亮定位走满预算仍未到达目标选项——已中止；请人工核对终端".to_string(),
+            )
+        }
+        StagePlan::OpencodeAdvance { tabs, direction } => {
+            // **切题到达验证**（2026-10-05 屏读标准补齐）：tab 前后各读一屏——
+            // 完全相同 = tab 未生效（键被吞/焦点异常）→ Failed 可重试；有变化 =
+            // 到达 → AdvanceDone 带到达后快照（确认卡摘要同步终端真相的通道）。
+            // 读不到屏 → 保持既有盲发行为（不误报）。
+            let probe = question_probe(st, tool, pid);
+            let before = probe("adv-pre");
+            for _ in 0..*tabs {
+                if let Err(e) = injector.locate_and_send_key_spec(pid, "tab", spec) {
+                    return QuestionDispatch::Failed(e);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(
+                    crate::inject::families::SUBMIT_DELAY_MS,
+                ));
+            }
+            let after = probe("adv-post");
+            if let (Some(b), Some(a)) = (&before, &after) {
+                if b == a {
+                    return QuestionDispatch::Failed(
+                        "tab 未生效（屏面未变化）——请人工核对终端后重试".to_string(),
+                    );
+                }
+            }
+            let snapshot = after.as_ref().and_then(|l| {
+                crate::inject::question_screen_oc::opencode_question_screen_snapshot(l)
+            });
+            QuestionDispatch::AdvanceDone {
+                advanced: true,
+                direction: *direction,
+                snapshot,
+            }
+        }
         StagePlan::SingleKey => {
+            // **codex 备注编辑器守卫**（2026-10-05）：codex 的 SingleKey 只剩单选
+            // select（数字直选即交）——备注编辑器开启时数字会写进备注，检出即拒。
+            if tool == "codex" {
+                let probe = question_probe(st, tool, pid);
+                if let Err(e) = crate::inject::question::codex_ensure_notes_closed(probe("guard")) {
+                    return dispatch_abort(e);
+                }
+            }
+            // **后置屏读到达验证**（2026-10-05 屏读标准补齐——kimi/codex select）：
+            // kimi 数字+enter 后终端推进到 Review 汇总屏；codex 数字即答后弹窗
+            // 推进。**2026-10-06 升级为有界轮询**（用户实机 bug：单拍比对发键后
+            // 立即读屏，TUI 未及重绘 → 前后两屏原样 → 误报「按键未生效」，用户
+            // 重试反把勾选翻回去；D20 同款机理）。发键 → 等待+逐拍读屏比对，
+            // 屏面变化即停；窗尽原样 → Failed 可重试。读不到屏 → 保持既有盲发
+            // 行为（不误报）。
+            let pre_select = if tool == "kimi" || tool == "codex" {
+                let probe = question_probe(st, tool, pid);
+                probe("pre-select")
+            } else {
+                None
+            };
             // 逐键投递；首错即停（半途失败不可盲目重试全序列——已发键已生效，
             // 前端按 failed{error} 提示用户核对终端状态后重试）
             for key in sequence {
                 if let Err(e) = injector.locate_and_send_key_spec(pid, key, spec) {
                     return QuestionDispatch::Failed(e);
+                }
+            }
+            if tool == "kimi" {
+                log::info!("kimi-SingleKey 路径标记：sequence={sequence:?}");
+            }
+            if (tool == "kimi" || tool == "codex") && !sequence.is_empty() {
+                if let Some(pre) = &pre_select {
+                    let probe = question_probe(st, tool, pid);
+                    let rounds = crate::inject::timing::poll_rounds(
+                        crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                    );
+                    if let ScreenChange::Unchanged = poll_screen_changed(
+                        &probe,
+                        "post-select",
+                        pre,
+                        rounds,
+                        crate::inject::timing::POLL_STEP_MS,
+                    ) {
+                        return QuestionDispatch::Failed(
+                            "按键未生效（屏面未变化）——请人工核对终端后重试".to_string(),
+                        );
+                    }
+                }
+            }
+            // **kimi 单选 select 落点校验 + 回拉**（2026-10-07 用户定案）：单选数字
+            // = 选中 + 自动推进，TUI 可能**跳过已答题**——落点不定（下一题/更后/
+            // Review）。校验落点 == 预期（q_idx+1）；不符 → ← 逐格拉回（有界）；
+            // Review 在场（全答完）= 合法终点。多选留原页不适用本段。
+            if tool == "kimi" && payload_questions.len() > 1 && expected_idx.is_some() {
+                let probe = question_probe(st, tool, pid);
+                let mut navs = 0u32;
+                let rounds = crate::inject::timing::poll_rounds(
+                    crate::inject::timing::QUESTION_STAGE_POLL_TOTAL_MS,
+                );
+                for round in 0..rounds.max(1) {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    let lines = match probe("select-landing") {
+                        Some(l) => l,
+                        None => break,
+                    };
+                    if crate::inject::question::kimi_review_present(&lines) {
+                        log::info!("kimi 单选落点：全答完直达 Review → 合法终点");
+                        break;
+                    }
+                    let cur_idx = crate::inject::question::kimi_sheet_question_idx(
+                        &lines,
+                        &payload_questions,
+                    );
+                    match cur_idx {
+                        Some(i) if i == q_idx + 1 => {
+                            log::info!("kimi 单选落点：第 {round} 拍落在预期题 {} ✓", q_idx + 1);
+                            break;
+                        }
+                        _ => {
+                            if navs < 8 {
+                                navs += 1;
+                                log::info!(
+                                    "kimi 单选落点第 {round} 拍：cur={cur_idx:?} exp={} → ← 拉回",
+                                    q_idx + 1
+                                );
+                                if let Err(e) = injector.locate_and_send_key_spec(pid, "left", spec)
+                                {
+                                    return QuestionDispatch::Failed(e);
+                                }
+                                continue;
+                            }
+                            break;
+                        }
+                    }
                 }
             }
             QuestionDispatch::KeySent { stage: None }
@@ -4397,6 +5857,8 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_RECEIPT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 // **中止分类**（复评 F6-2）：屏读形态不符 → Aborted（带段名）；
                 // 投递失败 → Failed（**不带** aborted——语义等同批次丙的投递失败，
@@ -4552,31 +6014,7 @@ fn dispatch_question_action(
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                // 文本走字符通道（同单题自由作答的安全面：用户文本绝不进键通道）
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_multi_select_free_text_stages(
                 text,
                 *overwrite,
@@ -4619,33 +6057,7 @@ fn dispatch_question_action(
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                // **文本走字符通道**（`locate_and_inject_spec`）——裁3 的安全面：
-                // 用户文本绝不进键通道。注意本调用**不带** `[mobile]` 签名（签名是
-                // 「一条新消息」的语义，作答文本不是消息；归一已在 handler 做过）。
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_free_text_stages(
                 text,
                 || poll_question_stage(|| probe("free-row"), QUESTION_STAGE_POLL_TOTAL_MS),
@@ -4656,11 +6068,74 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_FREE_TEXT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 Err(e) => dispatch_abort(e),
             }
         }
         // ===== 批次戊 E4：kimi 多选/多题提交阶段机 =====
+        StagePlan::KimiAdvance { direction } => {
+            // **kimi 切题**（2026-10-06，2.1.1 活体定案）：题页 `→`/tab = 进
+            // Review/下一题，`←` = 上一题/Review 返回修改（→ 已选行保留高亮、
+            // (✓) 撤销）。单键投递 + **屏读到达验证**（poll_screen_changed：键
+            // 生效必带来页切换/高亮移动 → 屏面变化；首题 `←` TUI 不动 → 窗尽
+            // Unchanged → 如实 Failed 可重试）；到达后快照随回执回传（卡面
+            // heading/checked 对位，快照解析不出 = None 如实）。
+            // **前置：编辑态检查**（2026-10-07 用户指令，通用逻辑）：光标停在
+            // Other 编辑行时 ←/→ 被编辑器吞掉（切题无效）→ 先发 ↑ 离开编辑行
+            // （回到选项区）→ 屏读确认非编辑态 → 才发切题键。
+            let probe = question_probe(st, tool, pid);
+            if let Some(pre) = probe("adv-pre-edit") {
+                if crate::inject::question::kimi_editor_mode(&pre) {
+                    if let Err(e) = injector.locate_and_send_key_spec(pid, "up", spec) {
+                        return QuestionDispatch::Failed(e);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        crate::inject::families::SUBMIT_DELAY_MS,
+                    ));
+                    if let Some(post) = probe("adv-post-edit") {
+                        if crate::inject::question::kimi_editor_mode(&post) {
+                            return QuestionDispatch::Failed(
+                                "当前在文字编辑行且 ↑ 未退出编辑态——切题无效，请人工核对终端"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
+            let key = match direction {
+                crate::inject::question::NavDirection::Next => "right",
+                crate::inject::question::NavDirection::Prev => "left",
+            };
+            let before = probe("adv-pre");
+            if let Err(e) = injector.locate_and_send_key_spec(pid, key, spec) {
+                return QuestionDispatch::Failed(e);
+            }
+            if let Some(b) = &before {
+                let rounds = crate::inject::timing::poll_rounds(
+                    crate::inject::timing::DIGIT_VERIFY_POLL_TOTAL_MS,
+                );
+                if let ScreenChange::Unchanged = poll_screen_changed(
+                    &probe,
+                    "adv-post",
+                    b,
+                    rounds,
+                    crate::inject::timing::POLL_STEP_MS,
+                ) {
+                    return QuestionDispatch::Failed(format!(
+                        "按键 {key} 未生效（屏面未变化——可能已在边界页）——请人工核对终端后重试"
+                    ));
+                }
+            }
+            let snapshot = probe("adv-snapshot")
+                .and_then(|l| crate::inject::question_screen_oc::kimi_question_screen_snapshot(&l));
+            QuestionDispatch::AdvanceDone {
+                advanced: true,
+                direction: *direction,
+                snapshot,
+            }
+        }
         StagePlan::KimiSubmit => {
             let probe = question_probe(st, tool, pid);
             let mut terminal = crate::inject::mode::Closures {
@@ -4686,47 +6161,43 @@ fn dispatch_question_action(
                 || poll_receipt_stage(|| probe("kimi-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
             );
+            log::info!(
+                "kimi-freeText 键序列={:?} receipt_seen={:?}",
+                out.as_ref().ok().map(|o| o.sent_keys.clone()),
+                out.as_ref().ok().map(|o| o.receipt_seen)
+            );
             match out {
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_RECEIPT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 Err(e) => dispatch_abort(e),
             }
         }
         // ===== 批次戊 E4：kimi Other 自由作答阶段机 =====
-        StagePlan::KimiFreeText => {
+        StagePlan::KimiFreeText {
+            overwrite,
+            multi_question,
+            multi_select,
+        } => {
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
+            log::info!(
+                "kimi-freeText 路径标记：overwrite={overwrite} multi_question={multi_question} multi_select={multi_select} text_len={}",
+                text.chars().count()
+            );
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                // 文本走字符通道（同 claude 自由作答：用户文本绝不进键通道、不带签名）
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_kimi_free_text_stages(
                 text,
+                *overwrite,
+                *multi_question,
+                payload_questions,
+                expected_idx,
+                *multi_select,
                 || probe("kimi-other"),
                 || poll_question_stage(|| probe("kimi-review"), QUESTION_STAGE_POLL_TOTAL_MS),
                 || poll_receipt_stage(|| probe("kimi-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
@@ -4736,42 +6207,22 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_FREE_TEXT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: o.review_reached,
+                    advanced: o.advanced,
                 },
                 Err(e) => dispatch_abort(e),
             }
         }
         // ===== 批次戊 E5：codex Tab 备注阶段机 =====
-        StagePlan::CodexNotes => {
+        StagePlan::CodexNotes { overwrite } => {
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_codex_notes_stages(
                 text,
+                *overwrite,
                 || probe("codex-notes"),
                 || poll_receipt_stage(|| probe("codex-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
@@ -4780,49 +6231,31 @@ fn dispatch_question_action(
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_FREE_TEXT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 Err(e) => dispatch_abort(e),
             }
         }
         // ===== 批次戊 E6：opencode own answer 阶段机 =====
-        StagePlan::OpencodeOwnAnswer => {
+        StagePlan::OpencodeOwnAnswer { overwrite } => {
             let Some(text) = free_text else {
                 return QuestionDispatch::Failed("自由作答缺少文本".to_string());
             };
             let probe = question_probe(st, tool, pid);
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || probe("read"),
-                send: |key: &str| {
-                    let r = injector.locate_and_send_key_spec(pid, key, spec);
-                    if r.is_ok() {
-                        std::thread::sleep(std::time::Duration::from_millis(
-                            crate::inject::families::SUBMIT_DELAY_MS,
-                        ));
-                    }
-                    r
-                },
-                send_text: |t: &str| {
-                    injector.locate_and_inject_spec(pid, t, spec)?;
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ));
-                    Ok(())
-                },
-                settle: || {
-                    std::thread::sleep(std::time::Duration::from_millis(
-                        crate::inject::families::SUBMIT_DELAY_MS,
-                    ))
-                },
-            };
+            let mut terminal = free_text_terminal(|| probe("read"), injector, pid, spec);
             let out = crate::inject::question::run_opencode_own_answer_stages(
                 text,
+                *overwrite,
                 || poll_receipt_stage(|| probe("oc-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
             );
             match out {
-                Ok(o) => QuestionDispatch::StageDone {
-                    stage: QUESTION_STAGE_FREE_TEXT,
-                    receipt_seen: o.receipt_seen,
+                // 2026-10-05 F3：回执带**屏读真值**（该行屏上文本+勾选态——卡面权威
+                // 源=屏读，与 claude 多选自由作答同形；前端零改动消费）
+                Ok(o) => QuestionDispatch::MultiFreeTextDone {
+                    text: o.screen_text,
+                    checked: o.screen_checked,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -4854,10 +6287,17 @@ fn dispatch_question_action(
                 || poll_receipt_stage(|| probe("oc-receipt"), QUESTION_STAGE_POLL_TOTAL_MS),
                 &mut terminal,
             );
+            log::info!(
+                "kimi-freeText 键序列={:?} receipt_seen={:?}",
+                out.as_ref().ok().map(|o| o.sent_keys.clone()),
+                out.as_ref().ok().map(|o| o.receipt_seen)
+            );
             match out {
                 Ok(o) => QuestionDispatch::StageDone {
                     stage: QUESTION_STAGE_RECEIPT,
                     receipt_seen: o.receipt_seen,
+                    review_reached: false,
+                    advanced: false,
                 },
                 Err(e) => dispatch_abort(e),
             }
@@ -4896,6 +6336,25 @@ fn stage_from_abort(err: &str) -> &'static str {
     // 切题路径（2026-09-24，先于其余路径匹配——切题的走位/分类文案须归 advance 段）
     if err.contains("切题") || err.contains("下一题") {
         return QUESTION_STAGE_ADVANCE;
+    }
+    // opencode own answer 编辑态守卫中止（2026-10-05：先于切勾臂匹配——中止文案含
+    // 「勾选翻转」字样会被下方 toggle 关键词误收成「定位选项行并切勾」；本中止发生
+    // 在 enter 开编辑之后、打字之前，归 free-row 段）
+    if err.contains("编辑态未开启")
+        || err.contains("输入行未开启")
+        || err.contains("编辑态似乎已开启")
+    {
+        return QUESTION_STAGE_FREE_ROW;
+    }
+    // 单选作答「终端不在题目页」中止（2026-10-05）：盲走/打字发生在 Submit 总结
+    // 页在场时——引导返回题目页，归 free-row 段（先于守卫臂与兜底）
+    if err.contains("终端不在题目页") {
+        return QUESTION_STAGE_FREE_ROW;
+    }
+    // 发数字前置焦点守卫中止（2026-10-05）：守卫服务 select/toggle 的数字路径，
+    // 归 select 段（先于切勾臂——守卫文案含「勾选/翻转」字样会被误收）
+    if err.contains("焦点守卫") {
+        return "select";
     }
     // 切勾路径（2026-09-24，先于提交路径匹配——「仍未把焦点移到目标选项行」会被
     // 下方 Submit 行臂误收，切勾的走位目标是选项行不是推进行）
@@ -5251,6 +6710,8 @@ struct ModeScanHit {
     kind: crate::inject::mode::ModeSwitchKind,
     /// 模式栏结构（裁5：二维两组 / 单轴一组 / 无）
     structure: crate::inject::mode::ModeStructure,
+    /// 会话快照（权限轴屏读复用：kimi 权限组 GET 当前档 = 底栏屏读优先）
+    session: crate::session::Session,
 }
 
 /// 模式扫描（同步，spawn_blocking 内调用）：会话查找 → 结构表 → 屏读（一次）解析
@@ -5274,6 +6735,7 @@ fn mode_scan_sync(st: &Arc<RemoteState>, session_id: &str) -> Option<ModeScanHit
         readback,
         kind,
         structure,
+        session,
     })
 }
 
@@ -5294,13 +6756,36 @@ fn read_mode_from_screen(
     tool: &str,
     readback: bool,
 ) -> Option<crate::inject::mode::MamMode> {
+    read_axis_from_screen(
+        st,
+        session,
+        tool,
+        readback,
+        crate::inject::mode::ModeGroupId::Mode,
+    )
+}
+
+/// 按组版屏读（权限轴消费：kimi 权限组 2.1.1 起底栏有权限标签——GET 当前档与
+/// 注入前快照共用这一入口；模式轴包装 = [`read_mode_from_screen`]）。
+fn read_axis_from_screen(
+    st: &Arc<RemoteState>,
+    session: &crate::session::Session,
+    tool: &str,
+    readback: bool,
+    group: crate::inject::mode::ModeGroupId,
+) -> Option<crate::inject::mode::MamMode> {
     if !readback {
         return None;
     }
     match (st.screen_probe)(session.id.as_str(), session.pid) {
         Some(lines) => {
-            let m = crate::inject::mode::parse_mode_from_screen(tool, &lines);
-            log::debug!("模式屏读（{tool} pid={}）→ {:?}", session.pid, m);
+            let m = crate::inject::mode::parse_axis_from_screen(tool, group, &lines);
+            log::debug!(
+                "模式屏读（{tool}/{} pid={}）→ {:?}",
+                group.wire(),
+                session.pid,
+                m
+            );
             m
         }
         None => {
@@ -5410,8 +6895,11 @@ pub async fn session_mode(
         crate::inject::mode::ModeSwitchKind::SlashCommand => "slashCommand",
         crate::inject::mode::ModeSwitchKind::Unsupported => "unsupported",
     };
-    // 组载荷：模式组带屏读到的当前档；权限组从「上次切换」记忆回放
-    // （无被动回读源——verified 切换写入 [`PERMISSION_TIER_MEMORY`]，无记录 = null）
+    // 组载荷：模式组带屏读到的当前档；权限组 = **kimi 底栏屏读优先**（2.1.1 起底栏
+    // 含权限标签——卡面权威源=屏读的同一架构），屏读不可用回落「上次切换」记忆
+    // （codex 无底栏回读源，维持记忆回放；屏读与记忆都无 = null）
+    let hit_session = hit.session.clone();
+    let hit_tool = hit.tool.clone();
     let groups: Vec<serde_json::Value> = hit
         .structure
         .groups()
@@ -5420,7 +6908,8 @@ pub async fn session_mode(
             let current = if g.id == crate::inject::mode::ModeGroupId::Mode {
                 hit.current
             } else {
-                recall_permission_tier(&st.store, &sid)
+                read_axis_from_screen(&st, &hit_session, &hit_tool, g.readback, g.id)
+                    .or_else(|| recall_permission_tier(&st.store, &sid))
             };
             serde_json::json!({
                 "id": g.id.wire(),
@@ -5542,9 +7031,10 @@ pub use crate::inject::timing::RECEIPT_POLL_TOTAL_MS;
 ///
 /// - **步进组**（claude/opencode）：注入 **shift+tab 单键**（一次切一档，目标档不
 ///   参与按键构造）；切完**回读**，与环序推算的应到档比对；
-/// - **直达文本**（codex 模式组 `/plan`；kimi 模式组 `/plan on|off`；kimi 权限组
-///   `/yolo`、`/auto`）：文本注入 + 回车提交；
-/// - **菜单两段式/三段式**（codex 权限组 `/permissions`；kimi 权限组「总是询问」）：
+/// - **直达文本**（codex 模式组 `/plan`；kimi 模式组 `/plan on|off`）：文本注入 + 回车
+///   提交；
+/// - **菜单两段式/三段式**（codex 权限组 `/permissions`；kimi 权限组三档全部——
+///   `/permission`、`/yolo`、`/auto` 各自开菜单并预选，屏读确认高亮后才回车）：
 ///   见下节；
 /// - **无机制**（含 codex「退出计划模式」、退役档）：409 `no_mechanism` + `reason`.
 ///
@@ -6411,16 +7901,21 @@ pub async fn session_mode_switch(
                         &injector,
                     )
                 } else {
-                    // kimi 等：第一段先开菜单（命令 + 回车），再进闭环编排
-                    let opened = injector
+                    // kimi（2026-10-06 探针会话 2.1.1 定案）：第一段 = **文本 + 提交
+                    // 回车①**——2.1.1 实测：键入斜杠文本只出现**行内自动补全**（完整
+                    // 权限菜单不出现），回车①执行命令后**完整菜单才打开并停留**
+                    // （❯ 预选目标档、← current 恒标当前档），回车②（闭环导航发出）
+                    // 确认生效。曾短暂改为「纯文本不回车」（5744e45）——探针证实纯
+                    // 文本态菜单永不出现、轮询必然扑空，已回退。菜单轮询窗 3s（见
+                    // timing::MENU_POLL_TOTAL_MS 的实测依据）。
+                    match injector
                         .locate_and_inject_spec(pid, open, &spec)
                         .and_then(|()| {
                             std::thread::sleep(std::time::Duration::from_millis(
                                 crate::inject::families::SUBMIT_DELAY_MS,
                             ));
                             injector.locate_and_send_key_spec(pid, "enter", &spec)
-                        });
-                    match opened {
+                        }) {
                         Ok(()) => menu_stages(
                             &tool_for_inject,
                             group_for_inject,
@@ -6517,6 +8012,7 @@ pub async fn session_mode_switch(
             let outcome = match tokio::task::spawn_blocking(move || {
                 crate::inject::mode::poll_mode_readback(
                     verify_tool.as_str(),
+                    group,
                     expected,
                     rounds,
                     || {
@@ -6752,6 +8248,18 @@ fn menu_stages(
                 crate::inject::families::SUBMIT_DELAY_MS,
             ))
         };
+        // 每步落定后的**硬性 ≥500ms**（2026-10-06 用户指令：kimi 每步间隔要长一点、
+        // 不要连续操作——对齐 codex 数字直达「轮询+硬控并存取最大」先例）：闭环导航
+        // 每键后 settle 再重读屏，多出的等待就是给 TUI 重绘的观察窗
+        let settle = || {
+            log::info!(
+                "kimi 权限菜单：步骤间硬性等待 {}ms",
+                crate::inject::timing::MODE_STEP_MIN_GAP_MS
+            );
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::timing::MODE_STEP_MIN_GAP_MS,
+            ));
+        };
         // **段编排在内核**（`mode::run_menu_stages`）——「第三段只对 codex×Full Access
         // 走」「确认框缺席不算失败」「回执核验」这些控制流是判据的一部分，写在
         // `#[cfg(windows)]` 里就只剩实机能覆盖。此处只提供**生产侧的能力**：
@@ -6769,7 +8277,7 @@ fn menu_stages(
                 }
                 r
             },
-            settle: key_delay,
+            settle,
         };
         let outcome = crate::inject::mode::run_menu_stages(
             tool,
@@ -7083,10 +8591,803 @@ fn mode_verify_receipt(
     }
 }
 
+// ============================================================
+// C6 远程新建会话（spec §3/§5）：POST /session-create（异步任务起窗 + 弹窗处置
+// + 首句注入 + 物化确认）+ GET /session-create/status + GET /create-projects。
+// 任务簿（RemoteState.create_hub.tasks）内存态不持久化——MAM 重启丢任务，status
+// 404 引导重试。审计三类行：create（任务终态）/ dialog（弹窗处置留痕）/ send（首句）。
+// ============================================================
+
+/// POST /m/api/v1/session-create 请求体（camelCase；缺参不触发提取器 422）
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionCreateReq {
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub project_path: String,
+    /// 首句（缺省/空白 → 默认探针 `hi`——spec §2：四家空回车不物化，探针是物化
+    /// 必要条件）
+    #[serde(default)]
+    pub first_message: Option<String>,
+}
+
+/// 默认探针首句（spec §2：空回车不物化）
+const CREATE_DEFAULT_FIRST_MESSAGE: &str = "hi";
+
+/// 400 bad_request + reasonCode（校验链机器可判失败码：tool_unavailable / 路径码 /
+/// mkdir_failed）
+fn bad_request_reason(reason: &str) -> Response {
+    json_no_store(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({ "error": "bad_request", "reasonCode": reason }),
+    )
+}
+
+/// 400 bad_request + reasonCode + reason（校验链**带定位详情**的失败——黑名单命中
+/// 段与所属表等。修复批 I1：定位信息必须可达消费方（响应体 + 服务端日志双通道），
+/// 不能只存在于单元测试；`reason` 与 403 not_injectable 的 {reason, reasonCode}
+/// 配对形态同族）
+fn bad_request_reason_detail(reason: &str, detail: &str) -> Response {
+    json_no_store(
+        StatusCode::BAD_REQUEST,
+        serde_json::json!({ "error": "bad_request", "reasonCode": reason, "reason": detail }),
+    )
+}
+
+/// 工具门第二道：enabledTools 同源判定（host_source 载荷的 enabledTools 数组——
+/// P8d 数据源，与 /host 端点/移动端 chips 同一份）
+fn tool_enabled(st: &Arc<RemoteState>, tool: &str) -> bool {
+    (st.host_source)()
+        .get("enabledTools")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().any(|t| t.as_str() == Some(tool)))
+        .unwrap_or(false)
+}
+
+/// 目标目录的活跃会话信号（黄字数据源，spec §3「不拦截」）：session_source 快照
+/// 中同工具 + 同目录（monitor::cwd 归一域，与 find_tui_pid 的 cwd 判据同款）≥1 条。
+/// spawn_blocking 内调用（session_source 是同步阻塞扫描）。
+fn has_active_session_for(st: &Arc<RemoteState>, tool: &str, dir: &str) -> bool {
+    let want = crate::monitor::cwd::normalize_cwd_for_match(dir);
+    if want.is_empty() {
+        return false;
+    }
+    (st.session_source)().sessions.iter().any(|s| {
+        s.agent_type.tool_id() == tool
+            && crate::monitor::cwd::normalize_cwd_for_match(&s.project_path) == want
+    })
+}
+
+/// P1-2：mkdir 后 canonicalize 真值复核（仅 Windows，调用点见 session_create ③）。
+/// `\\?\` 前缀剥离（Windows canonicalize 的 NT 路径形态）后交完整校验链——剥离
+/// 后以 `\\` 开头 = 网络卷真身（映射盘/subst），validate 的 not_local_volume 拦。
+/// canonicalize 自身失败 → 拒绝（fail-closed）：安全复核的存在前提是能取到真值，
+/// 取不到（mkdir 刚成功却读不到真值 = 异常态）时放行等于跳过整道复核。
+/// 返回**校验通过的 canonical 串**（评审二轮 P2-2）：调用方以同一串贯穿后续
+/// spawn current_dir / find_tui_pid 匹配 / 审计——校验 canonical 而 spawn 原始
+/// 串存在 TOCTOU 残余，且 8.3/junction 形态原始串会让 cwd 匹配假阴性（假超时）。
+#[cfg(windows)]
+fn revalidate_canonical_dir(dir: &str) -> Result<String, crate::inject::create_path::PathReject> {
+    let canon = std::fs::canonicalize(dir).map_err(|e| crate::inject::create_path::PathReject {
+        code: "mkdir_failed",
+        message: format!("路径真值解析失败（{dir}）：{e}"),
+    })?;
+    let canon = canon
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    crate::inject::create_path::validate(&canon, std::env::consts::OS)?;
+    Ok(canon)
+}
+
+/// POST /m/api/v1/session-create：新建会话任务（spec §3）。
+/// - 校验链（同步 400 带 reasonCode）：工具门（白名单 ∧ enabledTools ∧ 安装探测）
+///   → `create_path::validate`（trim 契约：判定与 create_dir_all 与起窗 cwd 全用
+///   同一 trim 后串，评审 I1）→ `create_dir_all`（mkdir_failed）；
+/// - 首句超 [`MAX_SEND_CHARS`] → 400（与常规发送同一入参封顶标尺，C6 自裁登记）；
+///   路径超长同标尺 → 400 reasonCode="path_too_long"（评审修复⑥，移动端可辨）；
+/// - 全局单飞：存在任一非终态任务 → 409 {error:"conflict"}（终态任务不占额度）；
+/// - 黄字信号：响应附 hasActiveSession（同项目同工具已有活跃会话——**不拦截**）；
+/// - 200 {taskId, hasActiveSession}：任务占单飞后立即返回；管线在 detached
+///   spawn_blocking 中逐段推进 phase（不依赖手机持续在线——spec §4.5）。
+pub async fn session_create(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<SessionCreateReq>,
+) -> Response {
+    // ① 设备身份（防御 403 + 花名；管线全程持有——不依赖手机持续在线）
+    let Some((device_id, device_name)) = device_identity(&st, &headers) else {
+        return forbidden_defense();
+    };
+    // ② 工具门（三道：白名单 ∧ enabledTools ∧ 安装探测）
+    let tool = req.tool.trim().to_lowercase();
+    let hub = st.create_hub.clone();
+    if !crate::inject::create::CREATE_TOOLS.contains(&tool.as_str())
+        || !tool_enabled(&st, &tool)
+        || !(hub.tool_probe)(&tool)
+    {
+        return bad_request_reason("tool_unavailable");
+    }
+    // ③ 路径校验链（trim 契约：同一 trim 后串贯穿 validate / create_dir_all / 起窗 cwd）
+    let dir = req.project_path.trim().to_string();
+    if dir.chars().count() > MAX_SEND_CHARS {
+        // 评审修复⑥：超长路径回 reasonCode（移动端分診可辨），与首句封顶同标尺
+        return bad_request_reason("path_too_long");
+    }
+    // 首句入参封顶（C6 评审 I1）：与 /session-send 同标尺（10k），防无界注入文本
+    if let Some(m) = &req.first_message {
+        if m.trim().chars().count() > MAX_SEND_CHARS {
+            return bad_request();
+        }
+    }
+    if let Err(rej) = crate::inject::create_path::validate(&dir, std::env::consts::OS) {
+        // 修复批 I1：定位详情双通道（响应体 reason + 服务端日志），排障主张成立
+        log::warn!("session-create 路径拒绝（{dir}）: {}", rej.message);
+        return bad_request_reason_detail(rej.code, &rej.message);
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log::warn!("session-create mkdir 失败（{dir}）: {e}");
+        return bad_request_reason("mkdir_failed");
+    }
+    // P1-2 安全复核（评审 2026-10-03）：文本段黑名单挡不住文件系统层变形——
+    // 8.3 短名（C:\PROGRA~1）、尾点段、junction/符号链接都能以「无害段名」通过
+    // validate，真实落点却在系统/凭据目录。mkdir 后 canonicalize 取**真值路径**
+    // 再过一遍完整校验链（黑名单 + 本地卷 + ASCII：junction 目标任一不达标同拒），
+    // 并以**同一 canonical 串**贯穿后续全链（评审二轮 P2-2：spawn current_dir /
+    // find_tui_pid 匹配 / 审计不得回用原始变形串——校验与使用的 TOCTOU 残余 +
+    // 8.3/junction 原始串的 cwd 匹配假阴性一并消除）。仅 Windows：变形向量
+    // （8.3/junction）是 Windows 形态；非 Windows 跳过还避开 macOS /tmp→/private
+    // 符号链接把合法临时目录误判进 CREATE_SYSTEM_DIRS_MAC。
+    #[cfg(windows)]
+    let dir = match revalidate_canonical_dir(&dir) {
+        Ok(canon) => canon,
+        Err(rej) => {
+            log::warn!(
+                "session-create canonicalize 复核拒绝（{dir}）: {}",
+                rej.message
+            );
+            return bad_request_reason_detail(rej.code, &rej.message);
+        }
+    };
+    // ④ 黄字信号（探测性扫描不占单飞判定——先取数，后原子占位）
+    let probe_st = st.clone();
+    let probe_dir = dir.clone();
+    let probe_tool = tool.clone();
+    let has_active = tokio::task::spawn_blocking(move || {
+        has_active_session_for(&probe_st, &probe_tool, &probe_dir)
+    })
+    .await
+    .unwrap_or_else(|e| {
+        log::error!("session-create 活跃信号扫描任务异常: {e}");
+        false
+    });
+    // ⑤ 全局单飞（占位与检查同锁原子）：在飞 → 409
+    let Some(task_id) = hub.reserve() else {
+        return json_no_store(
+            StatusCode::CONFLICT,
+            serde_json::json!({ "error": "conflict" }),
+        );
+    };
+    // ⑥ 组装首句（既有 compose 单点复用——签名/斜杠裸注入分流与常规投递同词表，
+    // 勿手写第二份 `[mobile …]` 构造）并启动 detached 管线
+    let text = req
+        .first_message
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| CREATE_DEFAULT_FIRST_MESSAGE.to_string());
+    let signature_on = st
+        .store
+        .with(crate::inject::normalize::message_signature_enabled_conn);
+    let composed =
+        crate::inject::normalize::compose_injection_flagged(&device_name, &text, signature_on);
+    let run = CreateRun {
+        task_id,
+        tool,
+        dir,
+        composed,
+        device_id,
+        device_name,
+    };
+    // 管线 detached 跑 + panic 兜底（C6 评审 M4）：spawn_blocking panic 会留下
+    // 非终态任务 → 单飞额度被永久占用（后续 create 恒 409）。监视 JoinHandle，
+    // panic（JoinError）时把任务置 failed——正常路径已自置终态，此处只兜异常中止。
+    let pipeline_st = st.clone();
+    let handle = tokio::task::spawn_blocking(move || run_create_pipeline(pipeline_st, run));
+    let watch_st = st.clone();
+    tokio::spawn(async move {
+        if handle.await.is_err() {
+            watch_st.create_hub.update(task_id, |t| {
+                if t.phase != "done" && t.phase != "failed" {
+                    t.phase = "failed".to_string();
+                    t.detail = Some("创建管线异常中止——单飞额度已释放，请重试".to_string());
+                }
+            });
+        }
+    });
+    // ⑦ 立即回执（任务在飞；黄字信号随行）
+    json_no_store(
+        StatusCode::OK,
+        serde_json::json!({ "taskId": task_id, "hasActiveSession": has_active }),
+    )
+}
+
+/// 管线一次运行的封闭上下文（spawn_blocking 全程持有；设备身份来自 POST 闸门
+/// 上下文，管线内审计/组装均取自此——spec §4.5）
+struct CreateRun {
+    task_id: u64,
+    tool: String,
+    /// trim 后目标目录（validate / create_dir_all / 起窗 cwd 同一串）
+    dir: String,
+    /// 实际注入的首句（compose 产物，带移动端签名）
+    composed: String,
+    device_id: String,
+    device_name: String,
+}
+
+/// create 审计行的 content 摘要（目标目录+tool；**不写首句原文**——首句走 send 行）
+fn create_audit_summary(run: &CreateRun) -> String {
+    format!("create {} @ {}", run.tool, run.dir)
+}
+
+/// 任务置 failed（detail = 中文现场；`window_kept` = 终端窗口在场，追加
+/// 「保留供查看现场」减压指引——失败不自动清场）并落 create 审计行。
+/// `evidence`（§4.4 补实现）：unrecognized_screen 失败的证据快照路径——追加到
+/// detail（用户可见排障入口）与审计 result（`failed:<code> evidence=<path>`，
+/// spec「审计行附路径」的落点）
+fn fail_create_task(
+    st: &Arc<RemoteState>,
+    run: &CreateRun,
+    code: &str,
+    detail: String,
+    window_kept: bool,
+    evidence: Option<&str>,
+) {
+    let detail = if window_kept {
+        format!("{detail}（终端窗口保留供查看现场）")
+    } else {
+        detail
+    };
+    let detail = match evidence {
+        Some(p) => format!("{detail}（现场快照：{p}）"),
+        None => detail,
+    };
+    st.create_hub.update(run.task_id, |t| {
+        t.phase = "failed".to_string();
+        t.detail = Some(detail);
+    });
+    let result = match evidence {
+        Some(p) => format!("failed:{code} evidence={p}"),
+        None => format!("failed:{code}"),
+    };
+    endpoint_audit(
+        st,
+        &run.device_id,
+        &run.device_name,
+        &run.tool,
+        "",
+        &create_audit_summary(run),
+        "create",
+        &result,
+    );
+}
+
+/// §4.4 证据落档（2026-10-03 用户裁决补实现）：`unrecognized_screen` 失败时把
+/// **末次屏读快照**（文本逐行——spec 原文「截图」，落档形态取文本快照：管线
+/// 内已有逐行屏读，文本可 grep 可 diff，PNG 需另起 PrintWindow 通道，排障价值
+/// 不抵增量）写入 `<base>/create-<taskId>-<时间戳>.txt`，返回完整路径。base =
+/// None（测试缝禁用）或建目录/写文件失败 → None：证据落档是尽力而为的辅助
+/// 通道，失败不阻塞失败回执主流程。
+fn write_create_evidence(
+    base: Option<&std::path::Path>,
+    task_id: u64,
+    tool: &str,
+    dir: &str,
+    screen: &[String],
+) -> Option<String> {
+    let base = base?;
+    std::fs::create_dir_all(base).ok()?;
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let path = base.join(format!("create-{task_id}-{ts}.txt"));
+    let mut body = format!(
+        "MAM 新建会话未识别屏现场快照\n任务 {task_id} · 工具 {tool} · 目录 {dir}\n\
+         采集 {ts}（末次屏读逐行原文）\n----\n"
+    );
+    for line in screen {
+        body.push_str(line);
+        body.push('\n');
+    }
+    std::fs::write(&path, body).ok()?;
+    Some(path.to_string_lossy().to_string())
+}
+
+/// 新建会话管线（C6，spec §4 第 3–5 步；detached spawn_blocking 全程）：
+/// 1. opening_terminal：起窗（resume_spawner 缝）→ **立即** pid 锚定（不得插入耗时
+///    步骤——C5 not_before 松量 +1s 的硬约束）；
+/// 2. dialog_handling：`run_pipeline` 缝装配（屏读步距 / 键间隔 / 物化轮询步距的
+///    真实睡眠全部经 create_hub.pacer 缝——内核与管线逻辑零真实睡眠）；
+/// 3. waiting_materialize：物化轮询（[`MATERIALIZE_MAX_ROUNDS`] 轮 × 2s 步距预算）
+///    → discover 缝逐候选 → confirm_probe 戳命中 → done；
+/// 4. 超时 → failed（materialize_timeout）。失败一律不自动清场。
+fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
+    let hub = st.create_hub.clone();
+    let task_id = run.task_id;
+    // since 在管线起点采样（信任处置即建 rollout 的工具——codex——其落盘早于首句
+    // 注入；since 晚于落盘会整轮 miss。confirm 戳是最终判据，since 取宽不假阳）
+    let since = std::time::SystemTime::now();
+    // ---- 1. opening_terminal ----
+    hub.update(task_id, |t| t.phase = "opening_terminal".to_string());
+    let spec = crate::inject::resume::build_create_spawn_spec(
+        crate::inject::resume::windows_terminal_path().as_deref(),
+        &run.dir,
+        &run.tool,
+    );
+    if let Err(e) = (st.resume_spawner)(&spec) {
+        fail_create_task(
+            &st,
+            &run,
+            "spawn_failed",
+            format!("终端启动失败：{e}"),
+            false,
+            None,
+        );
+        return;
+    }
+    let pid = match (hub.pid_finder)(&run.tool, std::path::Path::new(&run.dir)) {
+        Ok(p) => p,
+        Err(e) => {
+            fail_create_task(&st, &run, "tui_not_found", e, true, None);
+            return;
+        }
+    };
+    hub.update(task_id, |t| t.spawned_pid = Some(pid));
+    // ---- 2. dialog_handling（run_pipeline 缝装配）----
+    hub.update(task_id, |t| t.phase = "dialog_handling".to_string());
+    // 族规格：None → FALLBACK_SPEC + 登记一条 log（families 单点，勿自造规格）
+    let fam = crate::inject::families::family_for(&run.tool).unwrap_or_else(|| {
+        log::warn!(
+            "create: 工具 {} 无族规格，按 FALLBACK_SPEC 快消费者口径注入（登记）",
+            run.tool
+        );
+        crate::inject::families::FALLBACK_SPEC
+    });
+    let st_screen = st.clone();
+    // 末次屏读快照（§4.4 证据落档）：screen 缝每次回读顺手留存——unrecognized
+    // 失败时这就是「现场」；Arc<Mutex> 穿 move 闭包
+    let last_screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let screen_sink = last_screen.clone();
+    let screen = move |_p: u32| -> Option<Vec<String>> {
+        // 步距睡眠在真缝闭包内（SCREEN_POLL_STEP_MS 消费契约；处置→idle 沉降由本
+        // 步距近似覆盖——探测口径内，C6 报告登记）
+        (st_screen.create_hub.pacer)(crate::inject::create::SCREEN_POLL_STEP_MS);
+        let s = (st_screen.screen_probe)("", pid);
+        if let Some(lines) = &s {
+            *screen_sink.lock().unwrap_or_else(|e| e.into_inner()) = lines.clone();
+        }
+        s
+    };
+    let st_key = st.clone();
+    let send_key = move |_p: u32, k: &str| -> Result<(), String> {
+        (st_key.create_hub.pacer)(crate::inject::create::KEY_GAP_MS);
+        st_key.injector.locate_and_send_key_spec(pid, k, &fam)
+    };
+    let st_text = st.clone();
+    let hub_text = hub.clone();
+    let send_text = move |_p: u32, text: &str| -> Result<(), String> {
+        // injecting_first 是真实可观察相变——在闭包内置 phase
+        hub_text.update(task_id, |t| t.phase = "injecting_first".to_string());
+        st_text.injector.locate_and_inject_spec(pid, text, &fam)
+    };
+    let deps = crate::inject::create::CreateDeps {
+        screen: &screen,
+        send_key: &send_key,
+        send_text: &send_text,
+    };
+    let params = crate::inject::create::Params {
+        tool: run.tool.clone(),
+        dir: std::path::PathBuf::from(&run.dir),
+        first_message: String::new(),
+        // codex hooks 审查框核验式信任（C8 用户在场裁决）：读本机 ~/.codex/hooks.json
+        // 全条目我方核验（monitor::hooks 同判据）——混杂/失败 false → 管线 esc 跳过
+        hooks_trust_ok: dirs::home_dir()
+            .map(|h| crate::monitor::hooks::codex_hooks_all_ours(&h))
+            .unwrap_or(false),
+        composed: run.composed.clone(),
+    };
+    let outcome = crate::inject::create::run_pipeline(&deps, &params);
+    // dialog 行（场景+键序摘要，如 `create_trust: down,enter`——计划权威示例形态；
+    // 物化前 session_id=""）
+    for (scenario, keys) in &outcome.dialog_log {
+        let summary = if keys.is_empty() {
+            scenario.clone()
+        } else {
+            format!("{scenario}: {}", keys.join(","))
+        };
+        endpoint_audit(
+            &st,
+            &run.device_id,
+            &run.device_name,
+            &run.tool,
+            "",
+            &summary,
+            "dialog",
+            "ok",
+        );
+    }
+    match outcome.status {
+        crate::inject::create::CreateStatus::WaitingMaterialize => {
+            // send 行：首句（与常规投递同词表 content=composed 原文；物化前 sid=""）
+            endpoint_audit(
+                &st,
+                &run.device_id,
+                &run.device_name,
+                &run.tool,
+                "",
+                &run.composed,
+                "send",
+                "ok",
+            );
+        }
+        crate::inject::create::CreateStatus::Failed { code, message, .. } => {
+            // §4.4 证据落档（用户裁决补实现）：未识别屏失败留末屏快照（其他失败码
+            // 无屏读现场或已有结构化原因码，不落档）
+            let evidence = if code == "unrecognized_screen" {
+                let screen = last_screen
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                write_create_evidence(
+                    (hub.evidence_dir)().as_deref(),
+                    task_id,
+                    &run.tool,
+                    &run.dir,
+                    &screen,
+                )
+            } else {
+                None
+            };
+            fail_create_task(&st, &run, &code, message, true, evidence.as_deref());
+            return;
+        }
+        // 内核只产出 WaitingMaterialize / Failed 两态（create.rs 模块文档）；防御臂
+        // 按「未知现场」失败收口，不静默吞（同落末屏快照）
+        _ => {
+            let screen = last_screen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            let evidence = write_create_evidence(
+                (hub.evidence_dir)().as_deref(),
+                task_id,
+                &run.tool,
+                &run.dir,
+                &screen,
+            );
+            fail_create_task(
+                &st,
+                &run,
+                "unrecognized_screen",
+                "状态机返回了非预期的终态".to_string(),
+                true,
+                evidence.as_deref(),
+            );
+            return;
+        }
+    }
+    // ---- 3. waiting_materialize（物化轮询；候选 confirm 戳终判）----
+    hub.update(task_id, |t| t.phase = "waiting_materialize".to_string());
+    let stamp = crate::inject::confirm::stamp_of(&run.composed).to_string();
+    for _ in 0..crate::inject::create::MATERIALIZE_MAX_ROUNDS {
+        (hub.pacer)(crate::inject::create::SCREEN_POLL_STEP_MS);
+        let candidates = (hub.discoverer)(&run.tool, since, &run.dir);
+        for sid in candidates {
+            if (st.confirm_probe)(&run.tool, &sid, &stamp) {
+                hub.update(task_id, |t| {
+                    t.phase = "done".to_string();
+                    t.session_id = Some(sid.clone());
+                });
+                // codex hooks 信任提示（Done 附带）：T5 信号健康度同源 KV 一行判定
+                //（hooks_registered_{tool}；经 DeviceStore 连接读——测试内存库同语义，
+                // 零真实 ~/.mam 接触），不新建机制
+                if run.tool == "codex" {
+                    let registered = st.store.with(|c| {
+                        crate::database::dao::settings::get_setting_conn(
+                            c,
+                            "hooks_registered_codex",
+                        )
+                    });
+                    if registered.as_deref() != Some("true") {
+                        hub.update(task_id, |t| {
+                            t.detail = Some(
+                                "codex 需在 TUI 内 /hooks 审阅并信任 MAM 钩子一次，事件才会触发（trust 后 hash 落用户层 config）"
+                                    .to_string(),
+                            );
+                        });
+                    }
+                }
+                endpoint_audit(
+                    &st,
+                    &run.device_id,
+                    &run.device_name,
+                    &run.tool,
+                    &sid,
+                    &create_audit_summary(&run),
+                    "create",
+                    "ok",
+                );
+                return;
+            }
+        }
+    }
+    // ---- 4. 物化超时 ----
+    fail_create_task(
+        &st,
+        &run,
+        "materialize_timeout",
+        format!(
+            "首句已注入但 {} 物化超时（{}s 预算）——请检查终端现场",
+            run.tool,
+            crate::inject::create::MATERIALIZE_MAX_ROUNDS
+                * crate::inject::create::SCREEN_POLL_STEP_MS as usize
+                / 1000
+        ),
+        true,
+        None,
+    );
+}
+
+/// GET /m/api/v1/session-create/status?taskId=：任务快照（内存态读口）。
+/// 未知 taskId → 404（MAM 重启丢任务亦此形态——引导移动端重新发起）。
+pub async fn session_create_status(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let Some(id) = params.get("taskId").and_then(|s| s.parse::<u64>().ok()) else {
+        return json_no_store(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "no_task" }),
+        );
+    };
+    let Some(t) = st.create_hub.snapshot(id) else {
+        return json_no_store(
+            StatusCode::NOT_FOUND,
+            serde_json::json!({ "error": "no_task" }),
+        );
+    };
+    json_no_store(
+        StatusCode::OK,
+        serde_json::json!({
+            "phase": t.phase,
+            "detail": t.detail,
+            "sessionId": t.session_id,
+            "spawnedPid": t.spawned_pid,
+        }),
+    )
+}
+
+/// GET /create-projects 响应项（camelCase）
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateProjectDto {
+    path: String,
+    last_active_at: String,
+    tools: Vec<String>,
+    active_tools: Vec<String>,
+}
+
+/// 聚合桶（按归一目录名合并；path 保留快照优先的首见原形态）
+#[derive(Default)]
+struct CreateProjectBucket {
+    path: String,
+    last_active: chrono::DateTime<chrono::Utc>,
+    tools: std::collections::BTreeSet<String>,
+    active_tools: std::collections::BTreeSet<String>,
+}
+
+/// RFC3339 → UTC（畸形 None）
+fn parse_rfc3339_utc(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// GET /m/api/v1/create-projects?days=N（默认 7）：新建会话的目标目录候选列表。
+/// 数据 = session_source 快照 ∪ archive_source（last_seen RFC3339 UTC 过 N 天窗，
+/// parse 后比较——不裸串比较，sessions_archived 同规）；v1 路径规同款**非 ASCII
+/// 过滤**（入参校验会拒，列表不再给不能用的候选）；project_path 归一去重
+/// （monitor::cwd 归一域，与活跃信号/进程匹配同域）；lastActiveAt 降序。
+pub async fn create_projects(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let days = params
+        .get("days")
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(7)
+        .clamp(1, 365);
+    let st2 = st.clone();
+    let resp = tokio::task::spawn_blocking(move || {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
+        let mut buckets: std::collections::HashMap<String, CreateProjectBucket> =
+            std::collections::HashMap::new();
+        // 合并核（局部闭包非 fn：活/归档两源共用一段去重/窗口逻辑，单一实现）。
+        // v1 同规：非 ASCII / 空白路径不入候选（create_path::validate 会拒）。
+        let merge =
+            |path: &str,
+             tool: &str,
+             seen: chrono::DateTime<chrono::Utc>,
+             active: bool,
+             buckets: &mut std::collections::HashMap<String, CreateProjectBucket>| {
+                // 展示形态统一剥尾部分隔符（快照可能带尾斜杠，归一键同域不影响去重）
+                let p = path.trim().trim_end_matches(['/', '\\']);
+                if p.is_empty() || !p.is_ascii() {
+                    return;
+                }
+                // 「不给不能用的候选」（C6 评审 M1）：黑名单/UNC 等命中 create_path
+                // 拒绝码的路径不入列——点选后必 400 的候选没有价值
+                if crate::inject::create_path::validate(p, std::env::consts::OS).is_err() {
+                    return;
+                }
+                let key = crate::monitor::cwd::normalize_cwd_for_match(p);
+                if key.is_empty() {
+                    return;
+                }
+                let b = buckets.entry(key).or_insert_with(|| CreateProjectBucket {
+                    path: p.to_string(),
+                    last_active: seen,
+                    tools: std::collections::BTreeSet::new(),
+                    active_tools: std::collections::BTreeSet::new(),
+                });
+                if seen > b.last_active {
+                    b.last_active = seen;
+                }
+                b.tools.insert(tool.to_string());
+                if active {
+                    b.active_tools.insert(tool.to_string());
+                }
+            };
+        // 快照优先（活跃 + 展示形态优先）；畸形时间按当前时间兜底（sessions_archived
+        // 软归档合成条目同款——活会话不该因时间串畸形而消失）
+        for s in (st2.session_source)().sessions {
+            let seen = parse_rfc3339_utc(&s.last_activity_at).unwrap_or_else(chrono::Utc::now);
+            merge(
+                &s.project_path,
+                s.agent_type.tool_id(),
+                seen,
+                true,
+                &mut buckets,
+            );
+        }
+        // 归档行：过 N 天窗（畸形时间行防御性排除，sessions_archived 同规）
+        for row in (st2.archive_source)() {
+            let Some(seen) = parse_rfc3339_utc(&row.last_seen) else {
+                continue;
+            };
+            if seen < cutoff {
+                continue;
+            }
+            merge(
+                &row.project_path,
+                &row.agent_type,
+                seen,
+                false,
+                &mut buckets,
+            );
+        }
+        let mut items: Vec<CreateProjectBucket> = buckets.into_values().collect();
+        items.sort_by_key(|b| std::cmp::Reverse(b.last_active));
+        items
+            .into_iter()
+            .map(|b| CreateProjectDto {
+                path: b.path,
+                last_active_at: b
+                    .last_active
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                tools: b.tools.into_iter().collect(),
+                active_tools: b.active_tools.into_iter().collect(),
+            })
+            .collect::<Vec<_>>()
+    })
+    .await;
+    match resp {
+        Ok(projects) => json_no_store(StatusCode::OK, serde_json::json!({ "projects": projects })),
+        Err(e) => {
+            log::error!("create-projects 聚合任务异常: {e}");
+            json_no_store(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "internal" }),
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::remote::content::SessionMessage;
+
+    /// **poll_screen_changed 三态**（2026-10-06 SingleKey/KimiToggle 轮询升级的
+    /// 回归锁）：变化即停（不带多余等待）；窗尽原样 → Unchanged（= 如实 Failed
+    /// 的依据）；途中读不到屏 → Unreadable（不谎报）。
+    #[test]
+    fn poll_screen_changed_three_outcomes() {
+        let base = vec!["a".to_string(), "b".to_string()];
+        // ① 第 2 拍变化 → Changed 且只读 2 拍
+        let seq = std::cell::RefCell::new(vec![
+            Some(base.clone()),
+            Some(vec!["a".to_string(), "b2".to_string()]),
+        ]);
+        let n = std::cell::Cell::new(0u32);
+        let out = poll_screen_changed(
+            &|_| {
+                let i = n.get() as usize;
+                n.set(n.get() + 1);
+                seq.borrow_mut().get(i).cloned().flatten()
+            },
+            "t",
+            &base,
+            15,
+            0,
+        );
+        assert!(matches!(out, ScreenChange::Changed(_)));
+        assert_eq!(n.get(), 2, "命中即停");
+        // ② 窗尽原样 → Unchanged（读满窗）
+        let n2 = std::cell::Cell::new(0u32);
+        let out2 = poll_screen_changed(
+            &|_| {
+                n2.set(n2.get() + 1);
+                Some(base.clone())
+            },
+            "t",
+            &base,
+            5,
+            0,
+        );
+        assert!(matches!(out2, ScreenChange::Unchanged));
+        assert_eq!(n2.get(), 5, "窗尽读满");
+        // ③ 第 1 拍读不到屏 → Unreadable（不轮到第 2 拍）
+        let n3 = std::cell::Cell::new(0u32);
+        let out3 = poll_screen_changed(
+            &|_| {
+                n3.set(n3.get() + 1);
+                None
+            },
+            "t",
+            &base,
+            5,
+            0,
+        );
+        assert!(matches!(out3, ScreenChange::Unreadable));
+        assert_eq!(n3.get(), 1);
+    }
+
+    /// §4.4 证据落档（2026-10-03 用户裁决补实现）：tempdir 基座下快照文件落盘、
+    /// 内容带现场头与逐行原文；base=None（测试缝禁用形态）不落档返回 None
+    #[test]
+    fn write_create_evidence_writes_snapshot_and_honors_disabled_base() {
+        let td = tempfile::tempdir().unwrap();
+        let path = write_create_evidence(
+            Some(td.path()),
+            7,
+            "claude",
+            r"E:\proj\demo",
+            &["line 1".to_string(), "".to_string(), "❯ Yes".to_string()],
+        )
+        .expect("tempdir 基座必须落档");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("任务 7"), "头部带任务号：{body}");
+        assert!(body.contains(r"E:\proj\demo"), "头部带目标目录");
+        assert!(
+            body.contains("line 1") && body.contains("❯ Yes"),
+            "屏读逐行原文"
+        );
+        assert!(path.contains("create-7-"), "文件名带任务号（定位）：{path}");
+        // 禁用形态：None 基座（stub 缝）→ 不落档不报错
+        assert_eq!(
+            write_create_evidence(None, 8, "kimi", "/tmp/x", &["a".to_string()]),
+            None
+        );
+    }
 
     /// **E2① 键序档锁**（用户终裁 CL-3 + kimi 数字禁令）：
     /// claude=数字优先+验证回退（渲染等待消除假阴性）；codex=数字直选；
@@ -7131,7 +9432,8 @@ mod tests {
                 false,
                 false,
                 &q,
-                "opencode"
+                "opencode",
+                4,
             ),
             StagePlan::OpencodeSubmit,
             "opencode 多选 submit 走 OpencodeSubmit 阶段机"
@@ -7144,7 +9446,8 @@ mod tests {
                 false,
                 false,
                 &q,
-                "claude"
+                "claude",
+                4,
             ),
             StagePlan::Submit { max_down_steps: 4 },
             "claude 多选 submit 维持 Submit 行走位形态（选项 2 + 2）"
@@ -7157,7 +9460,8 @@ mod tests {
                 false,
                 false,
                 &q,
-                "claude"
+                "claude",
+                4,
             ),
             StagePlan::ClaudeToggle { target: 1 },
             "claude 多选 toggle 走闭环切勾阶段机（2026-09-24 数字路径废止）"
@@ -7170,10 +9474,33 @@ mod tests {
                 false,
                 false,
                 &q,
-                "opencode"
+                "opencode",
+                4,
             ),
-            StagePlan::SingleKey,
-            "opencode toggle 维持单键（enter 切勾，戊探A 定案）"
+            StagePlan::DigitKey {
+                own_pos: 3,
+                index: Some(0),
+                verify_flip: true,
+                advance_success: false,
+            },
+            "opencode toggle 走焦点守卫版单键（2026-10-05：编辑行持焦时数字被吃进该行）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Advance,
+                None,
+                crate::inject::question::NavDirection::Prev,
+                false,
+                false,
+                &q,
+                "opencode",
+                4,
+            ),
+            StagePlan::OpencodeAdvance {
+                tabs: 3,
+                direction: crate::inject::question::NavDirection::Prev,
+            },
+            "opencode 上一题 = tab×(总页数-1) 前向循环等效回退（2026-10-05 用户需求）"
         );
         assert_eq!(
             StagePlan::for_action(
@@ -7183,10 +9510,47 @@ mod tests {
                 false,
                 false,
                 &q,
-                "opencode"
+                "opencode",
+                4,
             ),
-            StagePlan::SingleKey,
-            "advance 是单键纯导航（tab），与 select/toggle/cancel 同通道"
+            StagePlan::OpencodeAdvance {
+                tabs: 1,
+                direction: crate::inject::question::NavDirection::Next,
+            },
+            "opencode 下一题 = tab×1（前后读屏到达验证在 OpencodeAdvance 臂）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Advance,
+                None,
+                crate::inject::question::NavDirection::Next,
+                false,
+                false,
+                &q,
+                "opencode",
+                4,
+            ),
+            StagePlan::OpencodeAdvance {
+                tabs: 1,
+                direction: crate::inject::question::NavDirection::Next,
+            },
+            "opencode advance 走切题臂（前后读屏到达验证，2026-10-05 屏读标准补齐）"
+        );
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::Advance,
+                None,
+                crate::inject::question::NavDirection::Prev,
+                false,
+                false,
+                &q,
+                "kimi",
+                4,
+            ),
+            StagePlan::KimiAdvance {
+                direction: crate::inject::question::NavDirection::Prev,
+            },
+            "kimi 切题走 KimiAdvance 臂（2026-10-06，2.1.1 ←/→ 活体定案：← = 上一题/Review 返回修改）"
         );
     }
 
@@ -7282,6 +9646,68 @@ mod tests {
             ["down", "down", "enter"],
             "回退键真实发出（经 send_key 闭包）"
         );
+    }
+
+    /// **②-b 计划框导航档的验证**（2026-10-04）：主键 = 导航（已发出）→ 验证窗内
+    /// 对话框仍在场 → **数字回退**（CL-3：数字在计划框直接选中）——回退键 = 单个数字，
+    /// 不再依赖高亮（导航构造时已消费过一次高亮位）。
+    #[test]
+    fn e2_plan_nav_verify_falls_back_to_digit_when_still_present() {
+        let sent: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = sent.clone();
+        let (outcome, send_err) = verify_primary_then_fallback(
+            || Some(three_options_highlight_first()), // 恒在场
+            |k: &str| {
+                captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(k.to_string());
+                Ok(())
+            },
+            || {},
+            || {},
+            2,
+            // 计划框导航档的回退 = 单个数字（导航已发 2 → 回退 '2'……本例目标 3）
+            move |_opts| Ok(vec!["3".to_string()]),
+        );
+        assert_eq!(send_err, None);
+        match outcome {
+            DigitVerifyOutcome::FellBack { keys } => {
+                assert_eq!(keys, vec!["3"], "回退键序 = 单个数字")
+            }
+            other => panic!("窗尽仍在场必须转数字回退：{other:?}"),
+        }
+        assert_eq!(
+            sent.lock().unwrap_or_else(|e| e.into_inner()).as_slice(),
+            ["3"],
+            "回退数字真实发出"
+        );
+    }
+
+    /// **②-c 计划框导航档验证：对话框消失 = 生效**（零回退键）。
+    #[test]
+    fn e2_plan_nav_verify_confirmed_when_dialog_gone() {
+        let sent: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = sent.clone();
+        let (outcome, send_err) = verify_primary_then_fallback(
+            || None, // 对话框已消失
+            |k: &str| {
+                captured
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(k.to_string());
+                Ok(())
+            },
+            || {},
+            || {},
+            3,
+            move |_opts| Ok(vec!["3".to_string()]),
+        );
+        assert_eq!(outcome, DigitVerifyOutcome::Confirmed);
+        assert_eq!(send_err, None);
+        assert!(sent.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
     }
 
     /// **③ 未渲染不注入**：渲染等待窗内 probe 恒 `None`（选项簇未画出）→ 返回
@@ -7602,7 +10028,8 @@ mod tests {
             "两档分叉面（孤立 plan-file）必须恰有一例（防分叉逻辑被静默删掉）"
         );
 
-        // 工具族收窄：非 codex/kimi 一律不参与（两侧同名单）
+        // 工具族收窄：非计划族一律不参与（两侧同名单；claude 2026-10-04 起有专属
+        // 补位路径 claude_plan_pending，已出列本名单）
         let tools = root
             .get("non_plan_tools")
             .and_then(|t| t.as_array())
@@ -8321,5 +10748,179 @@ mod t4_live_probe_tests {
             crate::inject::approve::cached_cli_version("kimi"),
             crate::inject::approve::cached_cli_version("opencode"),
         );
+    }
+}
+
+// ==== 2026-10-04 计划批准卡：计划反馈内核测试（探测定案 2026-10-04 驱动）====
+#[cfg(test)]
+mod plan_feedback_tests {
+    use super::*;
+
+    /// 探测实屏形态（evidence/plan-feedback/probe-scr-pf-20261004-165110.log t7 段）：
+    /// composer 行夹在两条全分隔线之间，`❯ ` 前缀，内容 "fb-probe-1657: make it
+    /// shorter"（29 字符）。
+    fn probe_like_lines(content: &str) -> Vec<String> {
+        let sep = "─".repeat(100);
+        vec![
+            " ✻ Cogitated for 10s ·done 16:55".to_string(),
+            sep.clone(),
+            format!("❯ {content}"),
+            sep,
+            "  ⏸ plan mode on (shift+tab to cycle) · ← for agents".to_string(),
+        ]
+    }
+
+    #[test]
+    fn composer_len_reads_probe_screen_shape() {
+        let lines = probe_like_lines("fb-probe-1657: make it shorter");
+        assert_eq!(
+            composer_content_len(&lines),
+            Some(30),
+            "分隔线之间 ❯ 行的内容长度（fb-probe-1657: make it shorter = 30 字符）"
+        );
+        // 空 composer（裸 ❯）→ 0
+        assert_eq!(composer_content_len(&probe_like_lines("")), Some(0));
+    }
+
+    #[test]
+    fn composer_len_rejects_unknown_shapes() {
+        // 无分隔线 → None（形态不符，调用方拒发）
+        assert_eq!(composer_content_len(&["❯ hi".to_string()]), None);
+        // 分隔线之后不是提示符行（异常形态，如对话框还在场）→ None
+        let sep = "─".repeat(50);
+        let lines = vec![sep.clone(), "Claude has written up a plan".to_string(), sep];
+        assert_eq!(composer_content_len(&lines), None);
+        // 空屏 → None
+        assert_eq!(composer_content_len(&[]), None);
+    }
+
+    /// 终端假体：记录 clear_chars / send_text / send_enter 的调用序列
+    struct FakeFbTerminal {
+        lines: Option<Vec<String>>,
+        clears: Vec<usize>,
+        texts: Vec<String>,
+        enters: usize,
+    }
+    impl PlanFeedbackTerminal for FakeFbTerminal {
+        fn read(&mut self) -> Option<Vec<String>> {
+            self.lines.clone()
+        }
+        fn clear_chars(&mut self, count: usize) -> Result<(), String> {
+            self.clears.push(count);
+            Ok(())
+        }
+        fn send_text(&mut self, text: &str) -> Result<(), String> {
+            self.texts.push(text.to_string());
+            Ok(())
+        }
+        fn send_enter(&mut self) -> Result<(), String> {
+            self.enters += 1;
+            Ok(())
+        }
+        fn settle(&mut self) {}
+    }
+
+    #[test]
+    fn type_with_content_clears_types_then_enters() {
+        let mut t = FakeFbTerminal {
+            lines: Some(probe_like_lines("旧内容")),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        run_plan_feedback_stages(
+            &PlanFeedbackOp::Type {
+                text: "新反馈".to_string(),
+                submit: true,
+            },
+            &mut t,
+        )
+        .expect("type 全链必须成功");
+        assert_eq!(t.clears, vec![3], "先退格清空旧内容（3 字）");
+        assert_eq!(t.texts, vec!["新反馈"]);
+        assert_eq!(t.enters, 1, "submit=true → 尾随回车提交");
+    }
+
+    #[test]
+    fn overwrite_without_submit_never_enters() {
+        let mut t = FakeFbTerminal {
+            lines: Some(probe_like_lines("")),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        run_plan_feedback_stages(
+            &PlanFeedbackOp::Type {
+                text: "暂存".to_string(),
+                submit: false,
+            },
+            &mut t,
+        )
+        .expect("覆盖写入必须成功");
+        assert!(t.clears.is_empty(), "空 composer 无需清空");
+        assert_eq!(t.texts, vec!["暂存"]);
+        assert_eq!(t.enters, 0, "submit=false 绝不回车");
+    }
+
+    #[test]
+    fn clear_on_empty_screen_line_is_noop_and_submit_empty_staged_enters_only() {
+        // 清空：composer 本来就空 → 零按键
+        let mut t = FakeFbTerminal {
+            lines: Some(probe_like_lines("")),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        run_plan_feedback_stages(&PlanFeedbackOp::Clear, &mut t).expect("清空必须成功");
+        assert!(t.clears.is_empty() && t.texts.is_empty() && t.enters == 0);
+        // 提交暂存（text 空 + 终端有暂存）：只发回车（不清空！——清了就白暂存）
+        let mut t2 = FakeFbTerminal {
+            lines: Some(probe_like_lines("用户手打的暂存内容")),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        run_plan_feedback_stages(
+            &PlanFeedbackOp::Type {
+                text: String::new(),
+                submit: true,
+            },
+            &mut t2,
+        )
+        .expect("提交暂存必须成功");
+        assert!(t2.clears.is_empty(), "暂存提交绝不先清空");
+        assert!(t2.texts.is_empty());
+        assert_eq!(t2.enters, 1);
+    }
+
+    #[test]
+    fn unparseable_screen_aborts_with_zero_keys() {
+        let mut t = FakeFbTerminal {
+            lines: Some(vec!["❯ 没有分隔线的裸屏".to_string()]),
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        let r = run_plan_feedback_stages(
+            &PlanFeedbackOp::Type {
+                text: "x".to_string(),
+                submit: true,
+            },
+            &mut t,
+        );
+        assert!(r.is_err(), "形态不符必须中止");
+        assert!(
+            t.clears.is_empty() && t.texts.is_empty() && t.enters == 0,
+            "中止 = 零按键（不出手纪律）"
+        );
+        // 屏读恒不可用 → 同样零按键
+        let mut t2 = FakeFbTerminal {
+            lines: None,
+            clears: Vec::new(),
+            texts: Vec::new(),
+            enters: 0,
+        };
+        assert!(run_plan_feedback_stages(&PlanFeedbackOp::Clear, &mut t2).is_err());
+        assert!(t2.clears.is_empty());
     }
 }

