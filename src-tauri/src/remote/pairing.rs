@@ -12,16 +12,31 @@ pub struct NewDevice {
     pub id: String,
     pub name: String,
     pub ua: String,
+    /// **展示列**来源地址（`gate::display_origin` 的产物）：可证的公网来源 → 该通道
+    /// 权威头的值（§G5：来源记录要能区分公网来源）；不可证 → 真实 TCP 对端地址。
+    /// **绝不是限速分桶键**——后者可能是内部哨兵 `pin::GLOBAL_BUCKET`（含 NUL，不是来源
+    /// 地址，评审 A-M3 起两者分离）。
+    /// ⚠️ **本字段只进 `origin_ip` 列，不是指纹输入**（评审 B 追加项起）：指纹输入由
+    /// [`persist_device_with_fingerprint`] 的 `fingerprint_origin` 形参显式给定（生产 =
+    /// 原始 TCP 对端，稳定、不可伪造）。两者**必须分开**：混用会让「同一浏览器换网络重配」
+    /// 各建一行、占满设备上限。仅当调用方确知两者同源（局域网来源 / 测试）才用
+    /// [`persist_device`] 便捷入口
     pub origin_ip: String,
-    /// 接入通道：ASCII 枚举 `"local" | "lan" | "quick" | "named"`（花名册徽标数据源，
-    /// 前端 Task A6 再映射中文）。运行时判定（回环 + Host 快照）属 Task A3——
-    /// 在其接入前调用方暂传空串占位（与列 DEFAULT 一致，表示"尚未判定"）
+    /// 接入通道：ASCII 枚举 `"lan" | "quick" | "named" | "tailscale"`（花名册徽标数据源，
+    /// 前端 Task A6 再映射中文）。**纯装饰、读请求 Host 推断、可被伪造、允许不准确**——
+    /// **不得用于任何安全判定**（不变量 G1 推论③：展示字段与鉴权彻底解耦），限速分桶
+    /// 也不得消费它（那是 `gate::RateBucketChannel` 声明表的职责，评审 A-I2）。
+    /// 运行时判定 = Host 命中哪条通道的域名（`gate::classify_via` 四值）；历史上的
+    /// `"local"` 服务端**已不再产生**（本机不是通道，2026-10-06 §G3）——历史行里已存的
+    /// `local` 前端仍可渲染，不做数据迁移
     pub via: String,
     pub paired_at: i64,
 }
 
-/// 设备指纹（纯函数）：sha256(`ua` + "|" + `origin_ip`) 的 hex 小写。
-/// 收口在 DAO 内部调用——调用方只传 ua/origin_ip，拼接格式由本函数唯一锁定
+/// 设备指纹（纯函数）：sha256(`ua` + "|" + `fingerprint_origin`) 的 hex 小写。
+/// `fingerprint_origin` 是**归一化来源**（生产 = 原始 TCP 对端 IP），**不是**展示列
+/// `origin_ip`（真实公网出口 IP）——两个职责的分离见 [`persist_device_with_fingerprint`]。
+/// 拼接格式由本函数唯一锁定
 /// （固定向量测试 `fingerprint_for_is_deterministic_and_concatenation_locked` 防漂移）
 pub fn fingerprint_for(ua: &str, origin_ip: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -43,7 +58,30 @@ pub fn fingerprint_for(ua: &str, origin_ip: &str) -> String {
 ///   返回原行 id（调用方下发 cookie 必须用它，否则命中路径的 cookie 指向不存在的行）。
 /// - 未命中，或命中行已吊销 → 新建行（**吊销行不复活**），name 取设备自报，返回新 id。
 pub fn persist_device(conn: &rusqlite::Connection, d: &NewDevice) -> Result<String, String> {
-    let fp = fingerprint_for(&d.ua, &d.origin_ip);
+    // 便捷入口：指纹输入 = 展示值（**只在两者确知同源时使用**——局域网来源即如此；
+    // 生产配对路径（/pair/pin，含隧道来源）必须用 persist_device_with_fingerprint）
+    persist_device_with_fingerprint(conn, d, &d.origin_ip)
+}
+
+/// 持久化设备（**指纹输入与展示列显式分离**——评审 B 追加项）：
+/// - `fingerprint_origin` = **归一化来源**（生产 = 原始 TCP 对端的 IP 字符串）：稳定、
+///   不可伪造，且与 §G5 改造前一致（隧道流量恒为 `127.0.0.1`）——同一浏览器换网络重配
+///   时指纹不变 → 覆盖原行、不新增、不占名额；
+/// - `d.origin_ip` = **展示列**（`gate::display_origin` 的产物，可证时是权威头里的真实
+///   公网出口 IP）——只进 `origin_ip` 列，花名册/审计仍看得到真实来源。
+///
+/// 为什么不能混用一个值（本函数存在的唯一理由）：`origin_ip` 一旦同时参与指纹，同一部
+/// 手机在家 WiFi / 蜂窝 / 换地方各配一次就是 3 行，来回几次就把默认的 10 个名额占满，
+/// 之后连笔记本都配不上（正是本功能的目标场景：户外连接）。
+///
+/// 命中/新建语义与 [`persist_device`] 完全一致（覆盖 ua/origin_ip/last_seen_at/via，
+/// 保留原 id 与原 name、first_paired_at；命中已吊销行不复活）
+pub fn persist_device_with_fingerprint(
+    conn: &rusqlite::Connection,
+    d: &NewDevice,
+    fingerprint_origin: &str,
+) -> Result<String, String> {
+    let fp = fingerprint_for(&d.ua, fingerprint_origin);
     // 只匹配未吊销行；LIMIT 1 + 按最近活跃排序保 determinism（不变量上每指纹至多一行未吊销）
     let existing: Option<String> = conn
         .query_row(
@@ -301,6 +339,59 @@ mod tests {
             via: "lan".into(),
             paired_at,
         }
+    }
+
+    /// 评审 B 追加项**变异锚点**：指纹输入（归一化来源）与展示列（真实来源）分离。
+    /// 同一 UA + 同一归一化来源 + **不同真实来源** → 覆盖原行、不新增，且 origin_ip 更新为
+    /// 最新真实来源。旧实现指纹 = ua|origin_ip（真实公网出口 IP）→ 同一部手机在家 WiFi /
+    /// 蜂窝 / 换地方各建一行，默认上限 3 直接占满（正是本功能的目标场景：户外连接）。
+    /// 变异自证：persist_device_with_fingerprint 的指纹改回 `&d.origin_ip` → 本测试必红。
+    #[test]
+    fn persist_device_separates_fingerprint_input_from_display_origin() {
+        let conn = memory_conn();
+        // 第一次：本机对端（归一化）+ 家 WiFi 真实出口
+        let id1 = persist_device_with_fingerprint(
+            &conn,
+            &dev("dev-1", "UA-X", "198.51.100.44", 1000),
+            "127.0.0.1",
+        )
+        .unwrap();
+        // 第二次：同一浏览器换网络（真实出口变了，归一化来源不变）→ 覆盖原行
+        let id2 = persist_device_with_fingerprint(
+            &conn,
+            &dev("dev-2", "UA-X", "203.0.113.7", 2000),
+            "127.0.0.1",
+        )
+        .unwrap();
+        assert_eq!(id1, id2, "同 UA + 同归一化来源必须命中原行（返回原 id）");
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1, "换网络重配不得新增设备行");
+        let (_, _, origin_ip, _, first, last, _) = row(&conn, &id1);
+        assert_eq!(origin_ip, "203.0.113.7", "展示列更新为最新真实来源（§G5）");
+        assert_eq!(first, 1000, "first_paired_at 保留首次配对");
+        assert_eq!(last, 2000, "last_seen_at 刷新为本次配对");
+    }
+
+    /// 同追加项：**非隧道来源（局域网）行为不变**——指纹输入与展示值本来就同源
+    /// （原始 TCP 对端 = 展示来源），`persist_device` 便捷入口保持既有语义
+    #[test]
+    fn persist_device_legacy_entry_keeps_same_source_semantics() {
+        let conn = memory_conn();
+        assert_eq!(
+            persist_device(&conn, &dev("lan-1", "UA-L", "192.168.1.7", 10)).unwrap(),
+            "lan-1"
+        );
+        // 同一来源再配 → 覆盖不新增（同浏览器同一网络重绑覆盖，DAO 文档口径不变）
+        assert_eq!(
+            persist_device(&conn, &dev("lan-2", "UA-L", "192.168.1.7", 20)).unwrap(),
+            "lan-1"
+        );
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM remote_devices", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     /// 读整行（name, ua, origin_ip, via, first_paired_at, last_seen_at, revoked）

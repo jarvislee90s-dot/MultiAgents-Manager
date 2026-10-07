@@ -214,3 +214,48 @@ export function formatRelativeTime(lastActivityAt: string, now: number): string 
   if (hours < 24) return `${hours} 小时前`;
   return `${Math.floor(hours / 24)} 天前`;
 }
+
+// ==== 文件传输进度（Task 10 §C5）：上行/下行进度 UI 共用的纯函数 ====
+
+/** 进度样本（一次进度回调的字节累计与墙钟时刻；atMs 由调用方在回调里取，
+ *  不在渲染期调 Date.now——react-hooks/purity 同 FilePanel 纪律） */
+export interface TransferSample {
+  loaded: number;
+  atMs: number;
+}
+
+/** 字节数人性化（B/KB/MB/GB；≥100 主单位取整，否则一位小数）：进度条文案共用 */
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0 B";
+  if (n < 1024) return `${Math.round(n)} B`;
+  const units = ["KB", "MB", "GB"];
+  let v = n;
+  let i = -1;
+  do {
+    v /= 1024;
+    i += 1;
+  } while (v >= 1024 && i < units.length - 1);
+  return `${v >= 100 ? String(Math.round(v)) : v.toFixed(1)} ${units[i]}`;
+}
+
+/** 由首末两个进度样本估算瞬时速率（字节/秒）：跨度不足 250ms（抖动太大）或
+ *  字节不前进 → null（如实不估，不给假速率——与「不显示假百分比」同纪律） */
+export function transferRateBps(first: TransferSample, last: TransferSample): number | null {
+  const dt = (last.atMs - first.atMs) / 1000;
+  const db = last.loaded - first.loaded;
+  if (dt < 0.25 || db <= 0) return null;
+  return db / dt;
+}
+
+/** 预估剩余时间文案：total 或速率未知 → null（UI 不显示数字，只显示已传字节）；
+ *  <90 秒按秒、否则按分钟（与线稿「~66 秒」口径一致） */
+export function etaRemainingText(
+  loaded: number,
+  total: number | null,
+  rateBps: number | null
+): string | null {
+  if (total === null || rateBps === null || rateBps <= 0 || loaded >= total) return null;
+  const s = (total - loaded) / rateBps;
+  if (s < 90) return `预计剩余 ~${Math.max(1, Math.round(s))} 秒`;
+  return `预计剩余 ~${Math.round(s / 60)} 分钟`;
+}

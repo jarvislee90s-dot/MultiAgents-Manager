@@ -18,6 +18,8 @@ import {
   remoteRevokeDevice,
   remoteStatus,
   remoteToggle,
+  remoteTsProbe,
+  remoteTsRunStep,
   renameDevice,
   resetDevices,
   setPin,
@@ -39,6 +41,14 @@ describe("remote api wrappers", () => {
         lan: { enabled: true, running: true, addresses: ["http://192.168.1.5:9420/m"] },
         quick: { enabled: false, running: false, address: null, error: null },
         named: { enabled: false, running: false, address: null, error: null },
+        // §C1/§C3（Task 5/7）：tailscale 段随四通道载荷透出，reach 随段
+        tailscale: {
+          enabled: false,
+          running: false,
+          address: null,
+          error: null,
+          reach: { state: "unverified" },
+        },
       },
       pin: "4827",
     };
@@ -67,6 +77,12 @@ describe("remote api wrappers", () => {
     await toggleChannel("named", true);
     expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", {
       channel: "named",
+      on: true,
+    });
+    // §C1：tailscale 是第四条可开关通道（Funnel 起停，与隧道互斥触达由后端保证）
+    await toggleChannel("tailscale", true);
+    expect(invokeMock).toHaveBeenCalledWith("remote_toggle_channel", {
+      channel: "tailscale",
       on: true,
     });
   });
@@ -101,5 +117,15 @@ describe("remote api wrappers", () => {
     expect(invokeMock).toHaveBeenCalledWith("remote_revoke_device", { id: "d1" });
     await remoteRevokeAllDevices();
     expect(invokeMock).toHaveBeenCalledWith("remote_revoke_all_devices");
+  });
+
+  it("向导双命令锁形（§C2/§C3）：remote_ts_probe 无参；remote_ts_run_step 以 { step } 传参", async () => {
+    await remoteTsProbe();
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("remote_ts_probe");
+    const stepResult = { ok: true, approvalUrl: "https://login.tailscale.com/a/xyz" };
+    invokeMock.mockResolvedValueOnce(stepResult);
+    expect(await remoteTsRunStep("funnel")).toEqual(stepResult);
+    expect(invokeMock).toHaveBeenCalledWith("remote_ts_run_step", { step: "funnel" });
   });
 });

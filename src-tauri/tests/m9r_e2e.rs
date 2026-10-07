@@ -1058,11 +1058,24 @@ async fn e2e_http_full_chain() {
         sse_registry: Arc::new(SseRegistry::default()),
         max_devices_source: Box::new(|| 3),
         pin_limiter: std::sync::Mutex::new(PinRateLimiter::new()),
+        // 全局 PIN 限速桶（#119 的 remote-gate-zero-exemption 新增；取值照抄其余各处惯例）
+        global_pin_limiter: std::sync::Mutex::new(PinRateLimiter::global()),
         pin_source: Box::new(|| Some("1234".to_string())),
         now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-        tunnel_hosts_source: Box::new(|| Some(Vec::new())),
+        // 配对限速的「通道来源」缝（#119 取代了旧的 `tunnel_hosts_source`）。
+        // **类型形状与旧字段不同，不是纯改名**：旧的 `Fn() -> Option<Vec<String>>`，
+        // 新的 `Fn() -> Vec<RateBucketChannel>`（**没有 Option**、元素类型也不同）。
+        // 空表 = 无任何已声明通道 ⇒ 取权威头一律 fail-closed；取值写法照抄其余各处惯例。
+        rate_bucket_channels_source: Box::new(Vec::new),
         via_hosts_source: Box::new(|| None),
         home_source: Box::new(|| None),
+        // ⚠️ **改 `RemoteState` 的字段必须同步本文件**：本文件首行是 `#![cfg(windows)]`，
+        // 在 Linux 上整个文件编译成**空测试二进制** —— 本机 `cargo test` 与 CI 的所有
+        // Linux 步骤**都碰不到它**，唯一会编译它的是 CI 的 **Windows 交叉门禁**
+        // （`cargo check/clippy --target x86_64-pc-windows-gnu --all-targets`）。
+        // 2026-10-07 就是在这里栽的：`tunnel_hosts_source` 退役 + `global_pin_limiter`
+        // 新增，本文件没跟着改，而该门禁对 #119 **从未执行过** ⇒ 静默潜伏到 Windows
+        // 交叉门禁第一次真跑（E0560）。改字段时请连同本文件一起 grep。
         // 丁T3：对话框在场探针——实机 E2E 装配**生产同源实现**（真屏读，非假体）；
         // 本用例不触控制类注入守卫，此处只为构造完整性
         dialog_probe: Arc::new(|_sid: &str, pid: u32| {

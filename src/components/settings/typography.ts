@@ -35,6 +35,16 @@
 //
 // 这层豁免由 `tests/settings/settingsTypography.test.ts` **逐条钉住**（谁把密集网格的字号
 // 顺手「规范」了，或用内联 `text-lg font-semibold` 新写一个标题，都会红）。
+//
+// ## 线稿硬契约档（**不属上面的层级表**：按 UI 唯一契约原样落地，不得按「凑成整档」改数）
+//  * `SETTINGS_REMOTE_BADGE`（`text-[10.5px]`）：远程接入分区的徽标档。出处 =
+//    `docs/superpowers/wireframes/2026-09-17-remote-settings-redesign.html` 的
+//    `.badge { font-size: 10.5px; border-radius: 999px; padding: 2px 8px; flex: none; }`
+//    ——该线稿是 UI 唯一契约（「实现与线稿不一致即缺陷」），且**全部徽标色**（green /
+//    blue / gray / violet / amber）共用这一处字号定义。
+//    **为什么是 10.5 而不是 10**：10 是设置页角标档 `SETTINGS_BADGE` 的值（用在
+//    `settings.tsx` 的角标上，**不在本线稿覆盖范围内**）；远程分区徽标以线稿为准取 10.5。
+//    两档**不得互相替代**——把远程徽标压到 10 就是"实现与线稿不一致"。
 
 /** 一级标题（页面级）：**每页唯一**，当前功能块的标题 */
 export const SETTINGS_PAGE_TITLE = "text-lg font-semibold";
@@ -54,5 +64,17 @@ export const SETTINGS_HINT = "text-xs text-muted-foreground";
 /** 注释（脚注级）：口径、边界、细则 */
 export const SETTINGS_NOTE = "text-[11px] text-muted-foreground";
 
-/** 徽标 / 角标（**豁免档**：靠小区别于正文，与层级无关） */
+/** 徽标 / 角标（**豁免档**：靠小区别于正文，与层级无关）。用于 `settings.tsx` 的角标 */
 export const SETTINGS_BADGE = "text-[10px]";
+
+/**
+ * 远程接入分区的徽标档（**线稿硬契约**，非层级档）。
+ *
+ * 出处：`docs/superpowers/wireframes/2026-09-17-remote-settings-redesign.html` 的
+ * `.badge { font-size: 10.5px; border-radius: 999px; padding: 2px 8px; flex: none; }`
+ * ——线稿是 UI 唯一契约，且全部徽标色（green / blue / gray / violet / amber）共用它。
+ *
+ * **不是 `SETTINGS_BADGE`**：后者 10px 服务于 `settings.tsx` 的角标，不在本线稿范围内。
+ * 远程徽标一律用本档，压到 10px 即"实现与线稿不一致"。
+ */
+export const SETTINGS_REMOTE_BADGE = "text-[10.5px]";

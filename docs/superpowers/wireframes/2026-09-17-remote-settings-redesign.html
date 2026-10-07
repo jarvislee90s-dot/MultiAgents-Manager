@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>MAM 远程接入 · 设置重排线稿 v3（2026-09-17 对齐稿）</title>
+<title>MAM 远程接入 · 设置重排线稿 v6（2026-09-17 对齐稿）</title>
 <style>
   :root {
     --bg: #f8fafc; --card: #ffffff; --border: #e2e8f0; --muted: #64748b;
@@ -59,7 +59,7 @@
   .btn.dark { background: var(--accent); color: #fff; border-color: var(--accent); }
   .btn.ghost-danger { color: var(--rose); }
 
-  /* v3：四个小卡片摆一排；卡片只承载 名称+一句话+开关；点击卡片选中展开 */
+  /* v6：四张对外通道卡片摆一排；卡片只承载 名称+一句话+开关；点击卡片选中展开 */
   .modes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 12px 0 0; }
   .mode { border: 1.5px solid var(--border); border-radius: 10px; padding: 9px 11px;
           background: #fff; cursor: pointer; transition: .12s; }
@@ -79,6 +79,9 @@
   .b-blue { background: var(--blue-bg); color: var(--blue); }
   .b-gray { background: #f1f5f9; color: var(--muted); }
   .b-violet { background: var(--violet-bg); color: var(--violet); }
+  /* 六次回写（W-B/W-A）：恢复中/发布中的琥珀档——**既不是故障（rose）也不是正常完成（green）**，
+     是"正在进行、无需操作"的中间态（与既有 ts-pending 弱提示同一色系） */
+  .b-amber { background: var(--amber-bg); color: var(--amber); }
   code.url { font-family: Consolas, monospace; font-size: 12.5px; background: #f1f5f9;
              border-radius: 6px; padding: 3px 8px; word-break: break-all; }
   .warn { color: var(--amber); font-size: 12px; background: var(--amber-bg);
@@ -87,7 +90,34 @@
         display: grid; place-items: center; color: var(--muted); font-size: 10.5px; text-align: center;
         background: repeating-conic-gradient(#e2e8f0 0 25%, #fff 0 50%) 0 0/16px 16px; }
 
-  /* 命名隧道：点击展开的教程信息框（可保持展开，边看边操作） */
+  /* 外部域名四态：未安装 / 配置中 / 已配置（运行中）/ 已配置·未运行（线稿同屏陈列示意）。
+     2026-10-07 四次回写（I-1）：原注释写「三态」，而 p-ext 块里本就画了第四块
+     「状态四 · 通道未运行」——线稿与实现都不许把这第四态当摆设：通道没在跑时用户
+     必须看到**成因**（三档），而不是被一句「配置中」+ 向导列表把成因吞掉。
+     2026-10-07 六次回写（W-A，真机重启实测）：再加**状态五 · 开机恢复中**——重启后
+     tailscaled 有 1–2 分钟的恢复窗口（T+58s 服务已 Running 但 `BackendState=NoState`、
+     `funnel status --json` 短暂为 `{}`；T+73s 配置逐字段自恢复；T+89s 公网仍 TLS 失败；
+     T+2.5min 两个入口 200）。这窗口内既不是故障、也不是"域名生效中"，实现必须给
+     独立的「恢复中」相位（不得落进状态四的「未运行」当故障，更不得据此判"配置丢失"
+     去重开 Funnel）。 */
+  .tri { border-top: 1px dashed var(--border); padding: 10px 0; }
+  .tri:first-child { border-top: none; padding-top: 0; }
+  .tri-label { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .tri-label .side { color: var(--muted); font-size: 11.5px; }
+  .step { font-size: 12.5px; color: var(--muted); padding: 3px 0; }
+  .step.done { color: var(--green); }
+  .step.cur { color: var(--ink); font-weight: 600; }
+
+  /* 文件区：带宽受限提示 + 上传/下载进度条 */
+  .bw-note { background: var(--amber-bg); color: var(--amber); font-size: 12px; line-height: 1.6;
+             border-radius: 8px; padding: 7px 10px; margin: 8px 12px; }
+  .upl { padding: 8px 12px; font-size: 12px; }
+  .upl .upl-head { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 5px; flex-wrap: wrap; }
+  .upl .upl-meta { color: var(--muted); font-size: 11px; margin-top: 5px; }
+  .pbar { height: 8px; border-radius: 999px; background: #e2e8f0; overflow: hidden; }
+  .pbar i { display: block; height: 100%; border-radius: 999px; background: var(--blue); }
+
+  /* 自有域名：点击展开的教程信息框（可保持展开，边看边操作） */
   .help { color: var(--blue); cursor: pointer;
           font-size: 12px; border-bottom: 1px dotted var(--blue); user-select: none; }
   .help .pop { display: none; position: absolute; z-index: 30; top: 22px; left: -40px; width: 420px;
@@ -149,7 +179,7 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>MAM 远程接入 · 设置重排线稿 v5（定稿候选）</h1>
+  <h1>MAM 远程接入 · 设置重排线稿 v6（定稿候选）</h1>
   <div class="sub">2026-09-17。本稿为实施基准：文件来源三池（我上传的 / 工具读取 / 工具读写）+ 此前全部裁决。UI 将严格按本稿实现。</div>
 
   <h2>一、桌面端「远程接入」设置 <span class="tag">窗口默认 880×640</span></h2>
@@ -180,15 +210,10 @@
 
         <div class="group-label">② 通道（开关各自独立，可同时开启；点卡片在下方展开详情）</div>
         <div class="modes">
-          <div class="mode on sel" data-p="p-local" onclick="pick(this)">
-            <div class="head"><span class="name"><span class="live"></span>本机</span>
-              <span class="switch on locked" onclick="event.stopPropagation()" title="随「开启远程接入」常驻"></span></div>
-            <div class="desc">随远程接入常驻，无需密码</div>
-          </div>
-          <div class="mode on" data-p="p-lan" onclick="pick(this)">
-            <div class="head"><span class="name"><span class="live"></span>局域网</span>
+          <div class="mode on sel" data-p="p-lan" onclick="pick(this)">
+            <div class="head"><span class="name"><span class="live"></span>局域网连接</span>
               <span class="switch on" onclick="event.stopPropagation(); tg(this)"></span></div>
-            <div class="desc">同一 WiFi / 网线的设备直接访问，需访问密码</div>
+            <div class="desc">同一 WiFi / 网线接入；本机访问也走这张</div>
           </div>
           <div class="mode on" data-p="p-quick" onclick="pick(this)">
             <div class="head"><span class="name"><span class="live"></span>临时隧道</span>
@@ -196,22 +221,46 @@
             <div class="desc">公网免注册，地址每次开启会变</div>
           </div>
           <div class="mode" data-p="p-named" onclick="pick(this)">
-            <div class="head"><span class="name"><span class="live"></span>命名隧道</span>
+            <div class="head"><span class="name"><span class="live"></span>自有域名</span>
               <span class="switch" onclick="event.stopPropagation(); tg(this)"></span></div>
-            <div class="desc">公网固定地址，需 Cloudflare 账号</div>
+            <div class="desc">永久地址，需你自己的域名</div>
+          </div>
+          <div class="mode" data-p="p-ext" onclick="pick(this)">
+            <div class="head"><span class="name"><span class="live"></span>外部域名（免域名）</span>
+              <span class="switch" onclick="event.stopPropagation(); tg(this)"></span></div>
+            <div class="desc">永久地址，不需要域名</div>
           </div>
         </div>
 
         <!-- 唯一展开区 -->
-        <div class="expand" id="p-local">
-          <div class="addr"><span class="badge b-gray">仅本机</span><code class="url">http://127.0.0.1:9420/m</code><button class="btn">复制链接</button></div>
-          <div class="hint" style="color:var(--muted);font-size:12px">本机回环访问，无需访问密码；也是隧道流量的转发终点。</div>
-        </div>
-        <div class="expand" id="p-lan" style="display:none">
-          <div class="addr"><span class="badge b-gray">WLAN</span><span class="badge b-green">推荐</span><code class="url">http://192.168.66.202:9420/m</code><button class="btn">复制</button></div>
+        <div class="expand" id="p-lan">
+          <div class="addr"><span class="badge b-green">推荐</span><code class="url">http://192.168.66.202:9420/m</code><button class="btn">复制</button></div>
+          <div class="hint" style="color:var(--muted);font-size:12px;margin-bottom:2px">本机访问也走这个地址——前提是此开关已打开（服务仅在回环监听时，本地址不可达）。</div>
           <div class="flex" style="align-items:flex-start; margin-top:6px">
             <div class="qr">二维码<br>链接已含密码<br>扫码直接进入</div>
             <div style="flex:1; font-size:12px; color:var(--muted)">换网络后地址会变；扫码或打开地址后密码自动填入。</div>
+          </div>
+          <!-- 2026-10-07 回写（Task 9 实现先行，零豁免 §C4）：本块原只画了「开」的形态，
+               补上开关关闭态那一笔——关闭时地址行与二维码整块不渲染（无地址可给），
+               但「未开启」徽标 + 原因必须可见：本机（浏览器）与同一网络下的设备都进不去。
+               文案与 src/components/settings 的 chanOffBadge / lanOffHint 一致。
+               2026-10-07 二次回写（评审 C-I1）：展示态判据由 enabled‖running 收敛为 running，
+               enabled 只驱动开关本体。原线稿只画了「总开关开着 ∧ 通道开关关」这一种 !running
+               成因，漏了「总开关关闭而通道开关仍开着」——stop_server(false) 只停监听/隧道、
+               不改通道 KV，故这是一键可达的默认路径：载荷 enabled=true / running=false /
+               addresses=[真实局域网地址]，照旧渲染就是绿色推荐徽标 + 地址 + 复制 + 二维码
+               （全是死链）＋一行「前提是此开关已打开」（而它确实开着）。故补状态三。 -->
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-gray">状态二 · 通道开关关闭</span><span class="side">地址与二维码此时不渲染；原因要可见，不能只给空白</span></div>
+            <div class="step"><span class="badge b-gray">未开启</span> 开关未打开——局域网与本机浏览器都进不去；打开开关后此处显示地址。</div>
+            <div class="step">重新打开开关即恢复（地址不变）；卡片行的状态点同时转灰（状态点只看 running，开关本体只看 enabled——两者刻意可以不同）。</div>
+          </div>
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-gray">状态三 · 服务未运行（总开关关闭）</span><span class="side">一键可达：关「开启远程接入」只停监听，不改通道开关</span></div>
+            <div class="step"><span class="badge b-gray">未运行</span> 「开启远程接入」总开关已关闭——服务没有在监听，任何地址都不可用；先打开上方总开关。</div>
+            <div class="step">此时卡片开关本身仍是 ON（开关亮、状态点灰）——这正是「本机也进不去」最常见的成因，必须说清。</div>
+            <div class="step">地址与二维码同样不渲染——服务没在监听，给了也是死链。</div>
+            <div class="step"><span class="badge b-gray">未运行</span> 两开关都开着却仍未监听（启动中/启动失败）时用同一枚徽标，但文案不谎报成因：服务尚未在监听——地址暂不可达；稍候会自动恢复，若仍不可用可重新开关一次本通道。</div>
           </div>
         </div>
         <div class="expand" id="p-quick" style="display:none">
@@ -221,6 +270,14 @@
           <div class="flex" style="align-items:flex-start; margin-top:8px">
             <div class="qr">二维码<br>链接已含密码</div>
             <div style="flex:1; font-size:12px; color:var(--muted)">手机蜂窝网络也能访问（走 Cloudflare 网络）。</div>
+          </div>
+          <!-- 2026-10-07 二次回写（评审 C-I1）：临时隧道同缺陷——enabled 但未运行时旧版只剩
+               一个「公网」徽标、无地址无说明，用户看不出为什么进不去。成因分档与局域网卡同一套。 -->
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-gray">状态二 · 未开启 / 未运行</span><span class="side">地址与二维码不渲染（公网地址不存在或服务没在监听）；成因要可见</span></div>
+            <div class="step"><span class="badge b-gray">未开启</span> 开关未打开——公网地址尚不存在；打开开关后会生成新地址。</div>
+            <div class="step"><span class="badge b-gray">未运行</span> 「开启远程接入」总开关已关闭——服务没有在监听，任何地址都不可用；先打开上方总开关。</div>
+            <div class="step">两开关都开着却仍未监听（cloudflared 启动/重试窗口）时同一枚「未运行」徽标 + 服务尚未在监听——地址暂不可达；稍候会自动恢复，若仍不可用可重新开关一次本通道。</div>
           </div>
         </div>
         <div class="expand" id="p-named" style="display:none">
@@ -244,13 +301,133 @@
             </div>
             <div class="flex" style="max-width:300px"><input type="password" value="eyJh****"><button class="btn dark">保存</button></div>
           </div>
+          <!-- 2026-10-07 三次回写（B3：同族残留收口，评审 C-I1 的同一套口径）：
+               named 卡此前只有「公网」徽标 + 地址 + 复制 + 二维码，**没有任何运行态指示**
+               ——通道没在跑时用户看到的仍是一张可用的卡（地址可复制、二维码可扫），
+               全是死链。判据原则（B3）：**机器生成的临时地址（lan/quick）未运行时不渲染；
+               用户自己的/永久的地址（named/tailscale）保留显示，但必须带运行态徽标、
+               绝不宣称可用**。故本卡：地址与复制**保留**（永久地址，用户要能存书签），
+               新增运行态行；**二维码与地址同门**（未运行不渲染——扫码即用是"可用"承诺）。
+               文案与 src/components/settings 的 offBadge/offHint 一致（成因三档）。 -->
           <div class="addr"><span class="badge b-blue">公网</span><code class="url">https://mam.jarvis.example.com/m</code><button class="btn">复制</button></div>
+          <div class="flex" style="margin-top:6px"><span class="badge b-green">运行中</span><span style="font-size:12px;color:var(--muted)">隧道已连接；地址永久有效</span></div>
           <div class="qr" style="margin-left:0">二维码<br>链接已含密码</div>
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-gray">状态二 · 未开启 / 未运行</span><span class="side">永久地址保留显示（可复制存书签），但必须带运行态徽标；二维码不渲染</span></div>
+            <div class="step"><span class="badge b-gray">未开启</span> 开关未打开——公网地址暂不可达；打开开关后恢复（地址不变，无需重配）。</div>
+            <div class="step"><span class="badge b-gray">未运行</span> 「开启远程接入」总开关已关闭——服务没有在监听，任何地址都不可用；先打开上方总开关。</div>
+            <div class="step">两开关都开着却仍未监听（cloudflared 启动/重试窗口）时同一枚「未运行」徽标 + 成因不谎报：服务尚未在监听——地址暂不可达；稍候会自动恢复，若仍不可用可重新开关一次本通道。</div>
+          </div>
+        </div>
+        <div class="expand" id="p-ext" style="display:none">
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-gray">状态一 · 未安装</span><span class="side">本机未检测到 Tailscale 时的默认态</span></div>
+            <div style="font-size:12.5px">永久公网地址，<b>不需要你拥有域名</b>——由 MAM 通过 Tailscale 一条龙开通；你的动作只有「输一次系统密码 + 点三次允许」，全程不碰命令行。</div>
+            <div class="flex" style="margin-top:8px"><button class="btn dark">一键配置</button><span style="font-size:12px;color:var(--muted)">进入首次配置向导：检测 → 下载（官方源校验）→ 安装 → 登录 → 开通 → 可达性校验</span></div>
+          </div>
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-violet">状态二 · 配置中</span><span class="side">每一步都能看出进展与卡点</span></div>
+            <div class="step done">✓ 检测与下载（官方源 + sha256 校验通过）</div>
+            <div class="step done">✓ 安装 Tailscale（已获管理员确认）</div>
+            <div class="step cur">⏳ 登录 Tailscale —— <button class="btn">打开登录页</button> 等待你在浏览器完成登录…</div>
+            <!-- 2026-10-07 三次回写（A1 实测）：Windows 11 家庭版 / Tailscale 1.102.4 MSI
+                 实测 `funnel --bg` 退出码 0、0.1 秒返回、**零批准链接、零人工点击**；而
+                 macOS 实测首开确有一次批准。两平台各执一端 ⇒ 批准是**可能不出现的分支**，
+                 线稿不得画成"等你在浏览器点批准"。 -->
+            <div class="step">○ 开启 Funnel（<b>首次可能</b>需在浏览器点一次「批准」——本平台/本尾网也可能无需批准）</div>
+            <div class="step">○ 验证可达性并显示固定地址</div>
+            <!-- 2026-10-07 三次回写（A2 实测）：开通后公网 DNS 记录约 5–6 分钟才发布，
+                 这期间本机检查全绿、用户唯一感受是"连不上"——必须告知预期时长，
+                 否则用户会以为是故障。文案与 i18n tsPendingHint 一致。 -->
+            <!-- 2026-10-07 六次回写（W-B，真机重启实测）：A2 那句「域名生效中，通常需要
+                 5 分钟左右」是**首次开通**的实测值，被当成万能口径用了——`reset` 后重开实测
+                 只需 **30–49 秒**、重启后更是**不用等 DNS**（记录不撤销，只需等后端重连
+                 1–2 分钟，成因压根不是"域名发布"）。固定一句就把"重启后 1–2 分钟"误报成
+                 5 分钟、且把成因指错。故本行拆**三档**（判据必须可证，不得编造）：
+                 ① 开机恢复 = 后端重连中（可证：`BackendState` 非 Running，或本进程内见过
+                    后端初始化窗口后 3 分钟内的"解析得到但连不通"）；
+                 ② 重新开通 = 本进程内 MAM 自己执行过 `funnel reset`（可证：reset 调用点唯一）
+                    而记录尚未发布；
+                 ③ 其余（默认）= 记录尚未发布，**首次开通实测 5–6 分钟**；若此前开通过则
+                    通常 1 分钟内——两界都给出，因为"是不是首次"在外部落实（MAM 关着时被人
+                    手动 reset）时无法证实，宁可给区间也不编判据。 -->
+            <div class="step"><span class="badge b-amber">恢复中</span> Tailscale 后端正在重连中——开机后通常 1–2 分钟自动恢复；配置与地址都不会变，无需任何操作。<span class="side">（成因 = 后端重连，不是域名发布；此时不给地址）</span></div>
+            <div class="step"><span class="badge b-amber">发布中</span> Funnel 刚重新开通，公网 DNS 记录正在重新发布——通常 30 秒～1 分钟；地址不会变。<span class="side">（本进程内 MAM 执行过 funnel reset 时才给这一档）</span></div>
+            <div class="step">公网 DNS 记录尚未发布——首次开通实测约需 5–6 分钟；若本机此前开通过，恢复通常快得多（1 分钟内）。地址要等记录发布后才从外网可达。<span class="side">（此时不给地址，见状态三说明）</span></div>
+          </div>
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-green">状态三 · 已配置</span><span class="side">地址只有<b>可达性校验通过</b>才上墙（§C3：不许把打不开的地址当可用呈现）</span></div>
+            <div class="addr"><span class="badge b-blue">公网</span><code class="url">https://mam.tail1234.ts.net/m</code><button class="btn">复制</button></div>
+            <div class="flex"><span class="badge b-green">运行中</span><span style="font-size:12px;color:var(--muted)">开机自动恢复；地址永久不变</span></div>
+            <div class="qr" style="margin-left:0">二维码<br>链接已含密码</div>
+            <!-- 2026-10-07 四次回写（I-1）：本态 = **通道在运行**（后端 verify 步判据本身就
+                 要求 Verified ∧ running）。通道没在跑时落到下面状态四，不得停在本态里
+                 "运行中"与成因并存。 -->
+          </div>
+          <!-- 2026-10-07 三次回写（B3）：本卡原有的「未运行」分支只写了一句 tsOffHint
+               （「开关已关：地址暂停使用」）——它把三种成因混成一种，用户看不出到底该打开
+               哪个开关。收口为与 lan/quick 同一套 offCause 三档口径（总开关 / 本通道开关 /
+               服务没在监听）。**地址不在此处渲染**：§C3 的三门要求 address 仅在
+               running ∧ error 空 ∧ 校验通过时才由后端宣称（永久地址的"保留显示"以
+               「拿得到地址」为前提；拿不到就不猜——不显示比显示一个未验证地址更诚实）。 -->
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-gray">状态四 · 通道未运行</span><span class="side">成因三档，绝不谎报（与 lan/quick 同一套口径）</span></div>
+            <!-- 2026-10-07 四次回写（I-1：评审 Important）：本态的**判据**（实现 = 相位机
+                 configuredIdle）＝「已装好并登录过（除 funnel/verify 这两个依赖 Funnel 的
+                 步骤外都已完成）∧ 通道当前没在运行」。为什么不按「本通道开关是否开着」
+                 门控：开关关掉时同样是「未运行」，而本块第一行正是那一档成因。
+                 ⚠️ 旧实现把这三档成因行**长在状态三里面**，而状态三要求 reach=Verified
+                 ∧ 全步完成（含 verify，而 verify 的判据在后端要求快照 running）——
+                 于是 running=false 与状态三**在稳态互斥**，这三行永远渲染不出来，
+                 用户看到的是「配置中」+ 向导列表：成因被吞掉，恰是本块要防的事。 -->
+            <div class="step"><span class="badge b-gray">未开启</span> 本通道开关未打开——Funnel 未开通，固定地址不可达；打开开关后重新开通（地址永久不变）。</div>
+            <div class="step"><span class="badge b-gray">未运行</span> 「开启远程接入」总开关已关闭——服务没有在监听，任何地址都不可用；先打开上方总开关。</div>
+            <div class="step">两开关都开着却仍未监听（tailscaled 忙 / 开通失败）时同一枚「未运行」徽标 + 成因不谎报：服务尚未在监听——地址暂不可达；稍候会自动恢复，若仍不可用可重新开关一次本通道。</div>
+            <div class="step">校验失败的成因（拦截页 / 连不通 / 解析服务不可用）在向导的「看板可达性校验」行点名 + 给出重试；地址在被判可用之前不渲染。</div>
+            <!-- 2026-10-07 七次回写（评审修复 M1/M3/M4 的形态同步）：
+                 ① **M1**：上一行的「在向导点名成因 + 给出重试」此前在本态**不可达**——
+                    本态不挂向导本体（实现只在 notInstalled / configuring / unknown 挂）。
+                    故本态补一条**向导重试入口**（仅当载荷带 error 时出现；纯「未运行」不给，
+                    免得把正常停机渲染成故障待修）：i18n `tsRetryEntry`，点开挂出向导本体
+                    （verify 行的「重试」在内）。同时把「恢复中」从**无界承诺**收口为**有界**：
+                    后端 `BACKEND_INIT_GRACE`（3 分钟）内是「恢复中（通常 1–2 分钟）」，超窗
+                    降级为「Tailscale 后端持续未就绪（NoState，已 X 分钟）」如实点名并指向上面的
+                    向导重试——正是状态五第 2 行「宽限窗过后如实点名成因」的兑现。
+                 ② **M4**：向导里恢复窗口的卡点（funnel / shields_up）走**琥珀档**（后端载荷
+                    `blockedTone=amber`，与状态二/状态五同档），不再经通用行涂成红色「卡住」。
+                 ③ **M3**：向导的「恢复中 / 发布中」两行补琥珀 badge（与状态二 354-355 行同形）。 -->
+            <!-- 2026-10-07 五次回写（M-5，用户裁决「只加文案，不改逻辑」）：本态**不渲染
+                 地址**（§C3 三门：running ∧ error 空 ∧ 校验通过才由后端宣称），于是通道一停
+                 地址就从卡面消失——而本功能的核心承诺正是「获得一个固定的链接」，用户会怀疑
+                 「这链接到底是不是固定的、下次开还是不是这个」。故本块补一句安抚文案（恒在，
+                 与成因档位无关）：地址固定不变、通道恢复运行后自动回来。**只加文案**：不改
+                 地址宣称判据、不动 §C3 三门、不改后端载荷；自有域名卡（无校验能力，故以
+                 「保留地址 + 运行态徽标」承担诚实性）与本卡的分工不变。i18n =
+                 `settings.remote.tsAddrPermanentHint`。 -->
+            <div class="step">地址是固定的，不会变——通道恢复运行后会自动回来。</div>
+          </div>
+          <!-- 2026-10-07 六次回写（W-A，真机重启逐秒取证）：新增本态。判据（两段都可证）：
+               ① `BackendState` 不是 Running 且是**初始化中**的取值（实测 `NoState`；
+                  上游语义里 `Starting` 同族）——服务已 Running 也不代表后端可用：
+                  T+58s 实测 `BackendState=NoState`、`funnel status --json` 短暂为 `{}`；
+               ② 后端刚 Running 后的 3 分钟宽限窗内，"地址解析得到但连不通"（T+89s 实测
+                  TLS 失败、curl (35)）——成因是公网路径还没起来，不是故障也不是域名发布。
+               **本态下 MAM 不得判「Funnel 配置丢失」、不得重开**（`funnel --bg`）：T+73s
+               实测 tailscaled 自己就把 307 字节配置逐字段恢复了；判"丢失"就会误重开、
+               甚至在 `NoState` 下先发出 `set --shields-up=false` 并因回读失败报假故障。
+               与状态四的分工：状态四 = 真没在跑（成因而非正在恢复）；本态 = 正在自己恢复，
+               用户唯一该做的是等。地址与二维码都不渲染（§C3 三门），安抚句恒在。 -->
+          <div class="tri">
+            <div class="tri-label"><span class="badge b-amber">状态五 · 开机恢复中</span><span class="side">不是故障、也不是「域名生效中」——成因是后端重连（实测 1–2 分钟）</span></div>
+            <div class="step"><span class="badge b-amber">恢复中</span> Tailscale 后端正在重连中——开机后通常 1–2 分钟自动恢复；配置与地址都不会变，无需任何操作。<span class="side">（i18n `tsRecoveringHint`；后端载荷同口径 = `tailscale::RECOVERING_HINT`，reach.state = `recovering`）</span></div>
+            <div class="step">宽限窗过后若仍连不通 → 回到状态四，由向导的「看板可达性校验」行如实点名成因（拦截页 / 连不通 / 解析服务不可用）+ 给出重试。<span class="side">（恢复中不得变成掩盖真故障的挡箭牌：窗口有界）</span></div>
+            <div class="step">地址是固定的，不会变——通道恢复运行后会自动回来。</div>
+          </div>
         </div>
 
         <div class="group-label">③ 访问与安全</div>
         <div class="row">
-          <div><div class="lbl">访问密码</div><div class="hint">仅对 局域网 / 临时隧道 / 命名隧道 生效（本机无需）。输入后点「保存」生效；新设备输入一次，180 天免输入；修改后所有设备需重新输入</div></div>
+          <div><div class="lbl">访问密码</div><div class="hint">对全部对外通道生效：局域网连接 / 临时隧道 / 自有域名 / 外部域名；本机访问也需输入一次（走局域网连接地址）。输入后点「保存」生效；新设备输入一次，180 天免输入；修改后所有设备需重新输入</div></div>
           <div class="pin-box">
             <input class="pin-input" inputmode="numeric" maxlength="4" placeholder="0000" value="4827">
             <button class="btn" onclick="randPin()">随机</button>
@@ -267,7 +444,7 @@
                 <button class="btn" onclick="renameDev(this)">重命名</button><button class="btn kick">踢下线</button></div>
               <div class="dev"><span class="st off"></span>
                 <input type="text" value="matebook16s · Edge" style="max-width:180px; padding:3px 8px; font-size:12px">
-                <span class="badge b-gray">局域网</span><span class="meta">2 小时前</span>
+                <span class="badge b-gray">局域网连接</span><span class="meta">2 小时前</span>
                 <button class="btn dark" onclick="alert('线稿示意：保存名称')">保存</button><button class="btn kick">踢下线</button></div>
             </div>
           </div>
@@ -292,14 +469,14 @@
     </div></div>
     <ul class="design-notes" style="list-style:none;padding:0;margin:0">
       <li><span class="n">1</span><b>登录状态常驻</b>：绑定后 180 天滑动有效；切换通道开关 / 改设置 / 重启 MAM 都不掉线。只有显性关闭「开启远程接入」或重置密码才需重新绑定。同一浏览器同一网络重复绑定只覆盖原设备记录，不再 1 刷新 = 1 新设备。</li>
-      <li><span class="n">2</span><b>密码规则</b>：仅允许 4 位数字，可自填或随机生成；连续输错 5 次锁 10 分钟。本机访问不设密码。</li>
-      <li><span class="n">3</span><b>三通道二维码</b>：二维码 = 通道地址 + 密码参数，扫码自动填入直接进入。</li>
+      <li><span class="n">2</span><b>密码规则</b>：仅允许 4 位数字，可自填或随机生成；连续输错 5 次锁 10 分钟。本机访问同样需输入一次访问密码（走局域网连接地址）。</li>
+      <li><span class="n">3</span><b>四通道二维码</b>：二维码 = 通道地址 + 密码参数，扫码自动填入直接进入。</li>
     </ul>
   </div>
 
   <h2>三、隧道生命周期 <span class="tag">开关即卡关</span></h2>
   <div class="note" style="max-width:880px">
-    每个通道独立开关 = 唯一启停入口。开 = 常驻运行（断线自动重连；切设置页 / 开关其它通道 / 改本机名一律不影响）；关 = 显性停止。<b>临时隧道每次开关都会换新地址</b>（Cloudflare quick tunnel 机制，卡片已明示）；命名隧道地址固定。「开启远程接入」总开关关闭时全部通道联动停止，重新打开时按各卡开关状态自动恢复。
+    每个通道独立开关 = 唯一启停入口。开 = 常驻运行（断线自动重连；切设置页 / 开关其它通道 / 改本机名一律不影响）；关 = 显性停止。<b>临时隧道每次开关都会换新地址</b>（Cloudflare quick tunnel 机制，卡片已明示）；自有域名 / 外部域名地址固定。「开启远程接入」总开关关闭时全部通道联动停止，重新打开时按各卡开关状态自动恢复。
   </div>
 
   <h2>四、文件预览增强 <span class="tag">来源筛选 + 文件名搜索 + 点进文件后的源码/渲染切换</span></h2>
@@ -321,6 +498,20 @@
       <div class="frow"><span>💻</span><span class="fname">retrace_labels.py</span><span class="from write">工具读写</span><span class="time">1 小时前</span></div>
       <div class="frow"><span>🖼</span><span class="fname">shot12_map.png</span><span class="from read">工具读取</span><span class="time">1 小时前</span></div>
     </div>
+    <!-- 2026-10-07 回写（Task 10 复评，两处漂移按实现落点对齐；实现先行且已过评审，
+         计划 Task 10 Step 6 亦明确落点为「文件面板底部」，故改线稿而非改实现）：
+         ① 位置：.bw-note 由「文件列表上方」回写为「列表下方（面板底部）」——与
+            FilePanel.tsx 的 panel-bw-note 落点一致；
+         ② 「→ 升级指引」原画的 .help 可点元素回写为内联整句指引（实现即内联文案：
+            内容自足、少一次点击；线稿 .help/.pop 弹层仍归自有域名教程使用）；
+         ③ 文案同步为实现的逐字口径（实测速率入文 + 下载/上传顺序）。
+         「附件区也要出同一横幅」见下方设计说明 5。 -->
+    <div class="bw-note"><b>当前通道带宽受限</b>（实测下行 ~1.8 Mbps / 上行 ~0.8 Mbps——这是通道限制，不是故障）：20 MB 附件下载约需 1.5 分钟、上传约需 3.3 分钟。 手机装上 Tailscale 并加入尾网后可直连本机，带宽可提升 1–2 个数量级（满速）。</div>
+    <div class="upl">
+      <div class="upl-head"><span>⬆ 上传附件：体检报告.pdf</span><span><b>6.4 MB / 10 MB · 64%</b> · 预计剩余 ~66 秒</span></div>
+      <div class="pbar"><i style="width:64%"></i></div>
+      <div class="upl-meta">受限通道按本通道实测速率预估剩余时间；速率未知时只显示已传字节，不显示假百分比。</div>
+    </div>
   </div>
   <div style="font-size:12px;color:var(--muted);margin:8px 0 4px">↓ 点进具体文件后的预览页（「源码 / 渲染」切换在这里，仅 .md 与 .html 出现；其余文件原样展示，图片直接显示图片）</div>
   <div class="preview-mock">
@@ -331,6 +522,10 @@
         <span onclick="pv(this,'render')">渲染</span>
       </div>
     </div>
+    <div class="upl">
+      <div class="upl-head"><span>⬇ 加载图片预览：shot12_map.png（5 MB）</span><span><b>2.1 MB / 5 MB · 42%</b> · 预计剩余 ~13 秒</span></div>
+      <div class="pbar"><i style="width:42%"></i></div>
+    </div>
     <div class="pv-body" id="pvbody">&lt;!DOCTYPE html&gt;
 &lt;html&gt;&lt;head&gt;&lt;title&gt;中东 2026 行程&lt;/title&gt;&lt;/head&gt;
 &lt;body&gt;&lt;h1&gt;中东 2026 行程&lt;/h1&gt;&lt;p&gt;Day 1 迪拜…&lt;/p&gt;&lt;/body&gt;&lt;/html&gt;</div>
@@ -340,7 +535,8 @@
     <li><span class="n">2</span><b>文件名搜索</b>：搜索框按文件名模糊匹配，<b>点「搜索」按钮（或回车）才执行</b>，与追溯范围、来源筛选叠加生效。</li>
     <li><span class="n">3</span><b>源码/渲染切换在文件预览页内</b>：仅 .md 与 .html 出现——.md 渲染态即现有 markdown 排版（本次把切换器显式化），.html 渲染态为沙箱 iframe（可跑脚本，与看板数据隔离）；其余类型原样展示。</li>
     <li><span class="n">4</span><b>上传入池按工具逐步支持</b>：需逐工具调研附件在会话文件中的存放位置，先做你常用的 kimi / zcode。</li>
-    <li><span class="n">5</span><b>已确认项 ✓</b>：本机卡常驻锁死 / 密码 4 位数字 + 连错 5 次锁 10 分钟 / 设备指纹去重 / 密码点「保存」生效 / 设备默认名 + 可重命名 / 教程点击展开。</li>
+    <li><span class="n">5</span><b>带宽如实告知 + 进度可见</b>：走受限通道（隧道 ≈1–2 Mbps）时，<b>文件面板（列表下方）与会话附件区（输入框上方的附件 chips 容器之下）都就地提示</b>「是通道限制、不是故障」，并按<b>本通道实测速率</b>预估耗时——两处共用同一份判据与文案；横幅只在受限通道且上下行速率实测有效（有限正数）时出现，速率未测得 / 畸形载荷一律不提示，不给「Infinity 分钟」这类假数字。上传与下载都有进度条——已传字节 + 百分比 + 预计剩余时间，速率未知时只显示已传字节、不显示假百分比（上传的进度条与口径说明行同属本稿 .upl 画块，落点在附件区 chips 之下；文件面板只承载列表与带宽横幅）。就地提供 Tailscale 满速升级指引（升级路径不占通道卡片位，§C4 仍 4 卡；指引为内联整句，不做可点弹层——见上文回写注记）。</li>
+    <li><span class="n">6</span><b>已确认项 ✓</b>：对外通道恰 4 卡（本机不占卡位、不显示地址，本机访问走局域网连接地址）/ 密码 4 位数字 + 连错 5 次锁 10 分钟 / 设备指纹去重 / 密码点「保存」生效 / 设备默认名 + 可重命名 / 教程点击展开。卡面判据（评审 C-I1）：<b>状态点只看 running（服务真值），开关本体只看 enabled（用户意图）</b>——两者刻意可以不同，「总开关关闭 ∧ 通道开关开着」即开关 ON + 点灰，成因见 lan / quick 展开区的状态二、状态三；地址、复制与二维码一律只在 running 时渲染。</li>
   </ul>
 </div>
 
@@ -348,10 +544,14 @@
   function pick(card) {
     document.querySelectorAll(".mode").forEach(m => m.classList.remove("sel"));
     card.classList.add("sel");
-    ["p-local", "p-lan", "p-quick", "p-named"].forEach(id => {
+    ["p-lan", "p-quick", "p-named", "p-ext"].forEach(id => {
       document.getElementById(id).style.display = id === card.dataset.p ? "block" : "none";
     });
   }
+  // 通道卡开关（评审 C-I1 注记）：本静态稿把状态点与开关一起翻——这在「通道开关关」
+  // （状态二：running 随之为 false）下与实现一致；但实现里状态点只看 running、开关只看
+  // enabled，故「总开关关闭 ∧ 通道开关开着」时开关 ON 而点灰（状态三，本稿的静态层不做
+  // 服务起停模拟，只在该状态块里画出）。改判据不得让此处的耦合被读成契约。
   function tg(el) {
     el.classList.toggle("on");
     const live = el.closest(".mode").querySelector(".live");

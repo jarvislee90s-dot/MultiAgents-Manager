@@ -69,13 +69,20 @@ interface Routes {
   attachError?: string;
   /** 附件上传挂起不响应（上传中禁发测试） */
   attachHang?: boolean;
+  /** 上传进度事件（Task 10 §C5）：FakeXHR 在 send 时先发一发 onprogress（loaded,total） */
+  attachProgress?: [number, number];
+  /** 通道能力装饰载荷（GET /m/api/v1/channel，§C5 带宽提示）：缺省 lan 直连不限速
+   *  = 不出横幅，既有用例不受影响 */
+  channel?: { via: string; limited: boolean; est_mbps_down: number; est_mbps_up: number };
+  /** 原始响应体（畸形载荷用：JSON.stringify(Infinity) 会变 null，测不到 1e999 解析） */
+  channelRaw?: string;
 }
 
 let routes: Routes;
 let fetchMock: ReturnType<typeof vi.fn>;
 /** sendHang 挂起请求的放行器（测试中手动 resolve 模拟响应到达） */
 let releaseSend: ((r: Response) => void) | null = null;
-/** attachHang 挂起请求的放行器（上传中禁发测试用） */
+/** attachHang 挂起请求的放行器（上传中禁发测试用；XHR 后改为对挂起 FakeXHR respond） */
 let releaseAttach: ((r: Response) => void) | null = null;
 /** queueHang 挂起请求的放行器（在途 tick 快照时序窗测试用） */
 let releaseQueue: ((r: Response) => void) | null = null;
@@ -96,6 +103,17 @@ afterEach(() => {
 function installFetch() {
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
+    // §C5 带宽提示（装饰）：缺省 = 局域网直连不限速（不出横幅）；403/网络异常
+    // 由 fetchChannel 内部静默降级为 null
+    if (url.includes("/m/api/v1/channel")) {
+      if (routes.channelRaw !== undefined) return new Response(routes.channelRaw, { status: 200 });
+      return new Response(
+        JSON.stringify(
+          routes.channel ?? { via: "lan", limited: false, est_mbps_down: 0, est_mbps_up: 0 }
+        ),
+        { status: 200 }
+      );
+    }
     if (url.includes("/session-send-info")) {
       if (routes.infoStatus) return new Response("no", { status: routes.infoStatus });
       return new Response(JSON.stringify(routes.info ?? sendInfo()), { status: 200 });
@@ -164,22 +182,6 @@ function installFetch() {
       }
       return new Response(JSON.stringify(routes.send ?? { status: "delivered" }), { status: 200 });
     }
-    if (url.includes("/session-attachment")) {
-      if (routes.attachHang) {
-        return new Promise<Response>((resolve) => {
-          releaseAttach = resolve;
-        });
-      }
-      if (routes.attachStatus) {
-        return new Response(JSON.stringify({ error: routes.attachError ?? "too_large" }), {
-          status: routes.attachStatus,
-        });
-      }
-      return new Response(
-        JSON.stringify(routes.attach ?? { path: "E:/proj/.mam-attachments/s-1/1-a.png", size: 5 }),
-        { status: 200 }
-      );
-    }
     if (url.includes("/session-queue")) {
       if (routes.queueHang) {
         return new Promise<Response>((resolve) => {
@@ -192,6 +194,63 @@ function installFetch() {
     throw new Error(`unexpected fetch: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
+  // attachHang 放行器：对挂起中的 FakeXHR respond（Response → status+text 异步提取）
+  releaseAttach = (r: Response) => {
+    const xhr = pendingAttachXhr;
+    pendingAttachXhr = null;
+    if (!xhr) return;
+    void r.text().then((body) => xhr.respond(r.status, body));
+  };
+  // 上行不再走 fetch（Task 10 §C5：uploadAttachment 换 XHR——fetch 规范无上传进度
+  // 事件），/session-attachment 的路由改由上面的 FakeXHR 承接（同一 routes 语义）
+  vi.stubGlobal("XMLHttpRequest", FakeXHR as unknown as typeof XMLHttpRequest);
+}
+
+// ==== FakeXHR：uploadAttachment 的 XHR 假体（路由语义与原 fetch 分支逐字对应）====
+/** 已 open 的上传 URL（原 fetch 分支经 fetchMock.mock.calls 断言，XHR 后改经此） */
+const attachOpens: string[] = [];
+/** attachHang 挂起中的 XHR 实例（releaseAttach 放行时对其 respond） */
+let pendingAttachXhr: FakeXHR | null = null;
+
+class FakeXHR {
+  upload = { onprogress: null as ((e: ProgressEvent) => void) | null };
+  onload: ((e: ProgressEvent) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onabort: (() => void) | null = null;
+  status = 0;
+  responseText = "";
+  open(_method: string, url: string) {
+    attachOpens.push(url);
+  }
+  setRequestHeader() {}
+  send() {
+    // 上传进度事件（§C5）：可指定 loaded/total（缺省不发——既有用例不受影响）
+    if (routes.attachProgress) {
+      const [loaded, total] = routes.attachProgress;
+      this.upload.onprogress?.(new ProgressEvent("progress", { loaded, total }));
+    }
+    if (routes.attachHang) {
+      pendingAttachXhr = this;
+      return;
+    }
+    this.respond(
+      routes.attachStatus ?? 200,
+      JSON.stringify(
+        routes.attachStatus
+          ? { error: routes.attachError ?? "too_large" }
+          : (routes.attach ?? { path: "E:/proj/.mam-attachments/s-1/1-a.bin", size: 0 })
+      )
+    );
+  }
+  abort() {
+    this.onabort?.();
+  }
+  /** 测试放行器：置 status/responseText 后触发 onload（模拟响应到达） */
+  respond(status: number, body: string) {
+    this.status = status;
+    this.responseText = body;
+    this.onload?.(new ProgressEvent("load"));
+  }
 }
 
 /** POST /session-send 的调用（URL 精确到 /session-send 结尾，排除 -info 前缀） */
@@ -903,11 +962,8 @@ describe("移动端附件上传（2026-09-20）", () => {
     expect(sent).toContain('<image path="E:/proj/.mam-attachments/s-1/1-shot.png">');
     // 发送成功 → chips 清空
     expect(screen.queryByTestId(/^attach-chip-/)).toBeNull();
-    // 上传端点被调用（query 含 session_id 与文件名）
-    const attachCall = fetchMock.mock.calls.find((c: unknown[]) =>
-      String(c[0]).includes("/session-attachment")
-    );
-    expect(String(attachCall![0])).toContain("name=shot.png");
+    // 上传端点被调用（XHR open URL 含 session_id 与文件名；上行已换 XHR，§C5）
+    expect(attachOpens.some((u) => u.includes("name=shot.png"))).toBe(true);
   });
 
   it("文档附件（非图片）发送拼 <file path> 标记行", async () => {
@@ -975,6 +1031,198 @@ describe("移动端附件上传（2026-09-20）", () => {
     await waitFor(() => screen.queryByTestId("attach-chips") === null);
     fireEvent.click(screen.getByTestId("composer-send"));
     await screen.findByTestId("send-receipt-delivered");
+  });
+
+  it("上传进度落 chip（§C5）：已传字节 + 百分比（有 total 才有）+ 预估剩余", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attachHang = true;
+    routes.attachProgress = [3, 10]; // send 时先发一发 onprogress（30%）
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "边传边看" } });
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile("prog.png")] },
+    });
+    // 进度细节 chip：已传 3 B / 10 B · 30%（「上传中：prog.png」仍是独立文本节点）
+    await screen.findByTestId("attachment-chips");
+    // 负向先行断言排除进度条（Task 10 复评 I-2 起 total 已知时同屏还有
+    // `attach-progress-bar-<id>`；本用例只要文字进度那个节点，否则命中多个）
+    const progress = await screen.findByTestId(/^attach-progress-(?!bar-)/);
+    expect(progress.textContent).toContain("已传 3 B");
+    expect(progress.textContent).toContain("10 B");
+    expect(progress.textContent).toContain("30%");
+  });
+
+  // ==== Task 10 §C5 复评 I-2（2026-10-07 用户裁决以线稿为准）：上传也要进度条 ====
+  // 线稿 .upl 画块 = upl-head（文字进度）+ .pbar（进度条）+ .upl-meta（口径说明），
+  // 三者缺一即与线稿不一致。类串照抄下行 FilePreview.tsx:389-399 的写法。
+  it("§C5/I-2：上传中渲染进度条（total 已知 → 宽度 = 百分比，类串同下行）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attachHang = true;
+    routes.attachProgress = [3, 10]; // 30%
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "边传边看条" } });
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile("bar.png")] },
+    });
+    await screen.findByTestId("attachment-chips");
+    const bar = (await screen.findByTestId(/^attach-progress-bar-/)) as HTMLElement;
+    // 内层填充 = 百分比宽（与下行 preview-progress-bar 同款「填充带 testid」写法）
+    expect(bar.style.width).toBe("30%");
+    expect(bar.className).toContain("bg-[var(--btnp)]");
+    // 轨道 = 线稿 .pbar（h-1.5 圆角 + 底色）
+    expect(bar.parentElement?.className).toContain("h-1.5");
+    expect(bar.parentElement?.className).toContain("bg-[var(--cb)]");
+    // 进度条与文字进度同处 chip 区（不是挤在 chip 里：进度条是 chip 的兄弟节点）
+    expect(screen.getByTestId("attachment-chips").contains(bar)).toBe(true);
+  });
+
+  it("§C5/I-2：total 未知（事件报 0）→ 不渲染进度条，只显示已传字节（不编假百分比）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attachHang = true;
+    routes.attachProgress = [3, 0]; // total=0 = 未知（隧道不透传 content-length）
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "不知道多大" } });
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile("nototal.png")] },
+    });
+    await screen.findByTestId("attachment-chips");
+    const progress = await screen.findByTestId(/^attach-progress-/);
+    expect(progress.textContent).toContain("已传 3 B");
+    // 不编假百分比：既无「%」字样，也无进度条元素
+    expect(progress.textContent).not.toContain("%");
+    expect(screen.queryByTestId(/^attach-progress-bar-/)).toBeNull();
+  });
+
+  it("§C5/I-2：上传中显示线稿 .upl-meta 口径说明行（上传结束即收起）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.send = { status: "delivered" };
+    routes.attachHang = true;
+    routes.attachProgress = [3, 10];
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(input, { target: { value: "口径说明" } });
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile("meta.png")] },
+    });
+    await screen.findByTestId("attachment-chips");
+    const meta = await screen.findByTestId("attach-upl-meta");
+    // 线稿 :364 逐字（upl-meta）——锁定口径，防回退成「只在 chip 里加一行字」
+    expect(meta.textContent).toBe(
+      "受限通道按本通道实测速率预估剩余时间；速率未知时只显示已传字节，不显示假百分比。"
+    );
+    // 不在 chip 内（简报：别挤在 chip 里）
+    expect(screen.getByTestId(/^attach-chip-/).contains(meta)).toBe(false);
+    // 上传完成（ready）→ 「上传中」态结束 → 口径行收起
+    releaseAttach!(new Response(JSON.stringify({ path: "E:/p", size: 3 }), { status: 200 }));
+    await waitFor(() => expect(screen.queryByTestId("attach-upl-meta")).toBeNull());
+  });
+
+  // ==== Task 10 §C5 复评 I-2 后半：附件区也要出带宽横幅 ====
+  // 设计说明书 §C5 原文「在文件面板与附件区显示提示」——只上传、不浏览文件的用户
+  // 也要看得到「这是通道限制，不是故障」。判据与文案与 FilePanel 逐字同源（共用
+  // ChannelBwNote 组件），同样带有限正数守卫。落点：附件 chips 容器下方（「附件区」
+  // = 用户已进入附件流程时才就地出现，纯问答会话不常驻噪音——与 attach-hint 的
+  // 「看过即收、不平铺常驻」同一取向）。
+
+  /** 挂载 + 选一个附件（ready chip）→ 附件区成立 */
+  async function renderComposerWithAttachment(name = "big.pdf") {
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile(name)] },
+    });
+    await screen.findByTestId("attachment-chips");
+    return input;
+  }
+
+  it("§C5/I-2：受限通道（est 有效）→ 附件区出横幅，文案与 FilePanel 同源（含耗时预估）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.channel = { via: "quick", limited: true, est_mbps_down: 1.8, est_mbps_up: 0.8 };
+    render(<MessageComposer session={{ id: "sess-1" }} />);
+    const input = await screen.findByTestId("composer-input");
+    // 未进入附件流程：附件区尚未成立 → 不常驻（判据之一，防「每个会话都挂一条」）。
+    // 先等通道载荷真的到过（否则「没横幅」可能只是还没拉到，断言不算数）
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some((c) => String(c[0]).includes("/m/api/v1/channel"))).toBe(
+        true
+      )
+    );
+    expect(screen.queryByTestId("composer-bw-note")).toBeNull();
+    fireEvent.change(screen.getByTestId("attach-file-input"), {
+      target: { files: [pngFile("体检报告.pdf")] },
+    });
+    await screen.findByTestId("attachment-chips");
+    const note = await screen.findByTestId("composer-bw-note");
+    // 与 FilePanel 同口径：是通道限制不是故障 + 满速升级指引 + 实测速率耗时
+    expect(note.textContent).toContain("通道限制");
+    expect(note.textContent).toContain("不是故障");
+    expect(note.textContent).toContain("Tailscale");
+    expect(note.textContent).toContain("1.8");
+    expect(note.textContent).toContain("0.8");
+    // 20 MB 参考：下行 20*8/1.8/60≈1.5 分钟 / 上行 ≈3.3 分钟
+    expect(note.textContent).toContain("1.5");
+    expect(note.textContent).toContain("3.3");
+    // 落点：chips 容器下方（附件区），且不在 chip 里
+    expect(screen.getByTestId(/^attach-chip-/).contains(note)).toBe(false);
+    expect(input).toBeTruthy();
+  });
+
+  it("§C5/I-2：limited=false（局域网直连）→ 附件区不出横幅", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.channel = { via: "lan", limited: false, est_mbps_down: 0, est_mbps_up: 0 };
+    await renderComposerWithAttachment();
+    expect(screen.queryByTestId("composer-bw-note")).toBeNull();
+  });
+
+  it("§C5/I-2：畸形载荷（limited=true 但 est=0）→ 不出横幅（不渲染 Infinity 分钟）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    routes.channel = { via: "quick", limited: true, est_mbps_down: 0, est_mbps_up: 0 };
+    await renderComposerWithAttachment();
+    expect(screen.queryByTestId("composer-bw-note")).toBeNull();
+    expect(screen.queryByText(/Infinity/)).toBeNull();
+  });
+
+  it("§C5/I-2：est 非有限正数（JSON 1e999 → Infinity）→ 不出横幅（有限正数守卫）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    // 原生文本：JSON.stringify(Infinity) 会写成 null，测不到 1e999 被解析为 Infinity
+    routes.channelRaw = '{"via":"quick","limited":true,"est_mbps_down":1e999,"est_mbps_up":0.8}';
+    await renderComposerWithAttachment();
+    expect(screen.queryByTestId("composer-bw-note")).toBeNull();
+    expect(screen.queryByText(/Infinity/)).toBeNull();
+  });
+
+  it("§C5/I-2：通道端点失败（403/网络异常）→ 静默不出横幅（装饰能力不阻塞输入区）", async () => {
+    installFetch();
+    routes.info = sendInfo();
+    fetchMock.mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/m/api/v1/channel")) throw new TypeError("channel 网络断开");
+      if (url.includes("/session-send-info")) {
+        return new Response(JSON.stringify(sendInfo()), { status: 200 });
+      }
+      if (url.includes("/session-approve-options")) {
+        return new Response(JSON.stringify({ available: false, options: [] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ available: false, questions: [] }), { status: 200 });
+    });
+    await renderComposerWithAttachment("offline.pdf");
+    expect(screen.queryByTestId("composer-bw-note")).toBeNull();
+    // 输入区照常可用（不因装饰失败而禁用）
+    expect((screen.getByTestId("composer-input") as HTMLTextAreaElement).disabled).toBe(false);
   });
 
   it("404 no_cwd：chip 标失败 + 「+」钮禁用（与 resume 禁用口径同源）", async () => {

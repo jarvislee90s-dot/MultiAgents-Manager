@@ -5,7 +5,6 @@ pub mod api;
 #[cfg(test)]
 pub mod attachment_fixtures;
 pub mod attachments;
-pub mod conn_owner;
 pub mod content;
 pub mod events;
 pub mod files;
@@ -14,6 +13,7 @@ pub mod pairing;
 pub mod pin;
 pub mod power;
 pub mod server;
+pub mod tailscale;
 pub mod tunnel;
 pub mod watcher;
 
@@ -35,11 +35,13 @@ pub const KEY_CHANNEL: &str = "remote.channel";
 pub const KEY_CHAN_LAN: &str = "remote.chan_lan";
 pub const KEY_CHAN_QUICK: &str = "remote.chan_quick";
 pub const KEY_CHAN_NAMED: &str = "remote.chan_named";
-/// 命名隧道 Tunnel Token（M4 T1b；明文本地存储与设备表同库）
+/// Tailscale 通道开关（§C1）：值口径沿用 "1"/"0"
+pub const KEY_CHAN_TAILSCALE: &str = "remote.chan_tailscale";
+/// 自有域名 Tunnel Token（M4 T1b；明文本地存储与设备表同库）
 pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";
 /// 设备上限键（spec T2c：默认 10 台可配——M5 A5 用户裁决 3 → 10）
 pub const KEY_MAX_DEVICES: &str = "remote.max_devices";
-/// M5 P2-c：命名隧道地址记忆——last = 最近一次 stderr 解析成功的完整地址
+/// M5 P2-c：自有域名地址记忆——last = 最近一次 stderr 解析成功的完整地址
 /// （tunnel.rs 摄取点自动写入）；manual = 用户手填的固定地址（设置页，兜底
 /// 「域名解析不到」场景）。两者都进豁免/with 的域名名单与状态展示
 pub const KEY_NAMED_ADDR_LAST: &str = "remote.named_addr_last";
@@ -60,34 +62,41 @@ fn max_devices_from_kv() -> usize {
 }
 
 // ============================================================
-// 三通道独立开关（M5 A5）：KV + 惰性迁移 + bind 派生
+// 通道独立开关（M5 A5；§C1 追加 tailscale）：KV + 惰性迁移 + bind 派生
 // ============================================================
 
-/// 三通道开关集合：lan = 局域网监听（0.0.0.0，天然包含回环）；quick/named =
-/// cloudflared 隧道。本机通道常驻锁死无开关（前端 A6 只渲染）
+/// 通道开关集合：lan = 局域网监听（0.0.0.0，天然包含回环）；quick/named =
+/// cloudflared 隧道；tailscale = Funnel 固定网址（§C1）。
+/// **「本机」不是通道**（零豁免 §C4）：本机访问走局域网卡地址，故这里没有 `local` 开关，
+/// `ChannelKind` 也没有 `Local` 变体——别再把它加回来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChannelFlags {
     pub lan: bool,
     pub quick: bool,
     pub named: bool,
+    pub tailscale: bool,
 }
 
-/// 通道种类（remote_toggle_channel 的参数值域）；本机常驻无命令
+/// 通道种类（remote_toggle_channel 的参数值域）；「本机」不是通道，故无对应变体
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChannelKind {
     Lan,
     Quick,
     Named,
+    Tailscale,
 }
 
 impl ChannelKind {
-    /// 解析（纯函数）：仅认三字面量，其余 Err（错误文案回显原值）
+    /// 解析（纯函数）：仅认四字面量，其余 Err（错误文案回显原值）
     fn parse(v: &str) -> Result<Self, String> {
         match v {
             "lan" => Ok(Self::Lan),
             "quick" => Ok(Self::Quick),
             "named" => Ok(Self::Named),
-            other => Err(format!("通道值非法: {other}（仅 lan/quick/named）")),
+            "tailscale" => Ok(Self::Tailscale),
+            other => Err(format!(
+                "通道值非法: {other}（仅 lan/quick/named/tailscale）"
+            )),
         }
     }
 
@@ -96,6 +105,7 @@ impl ChannelKind {
             Self::Lan => "lan",
             Self::Quick => "quick",
             Self::Named => "named",
+            Self::Tailscale => "tailscale",
         }
     }
 
@@ -104,6 +114,7 @@ impl ChannelKind {
             Self::Lan => f.lan,
             Self::Quick => f.quick,
             Self::Named => f.named,
+            Self::Tailscale => f.tailscale,
         }
     }
 }
@@ -117,12 +128,14 @@ fn channel_flag_from(v: Option<String>) -> bool {
 /// 迁移映射纯函数（M5 A5 一次性、幂等）：旧键值组合 → 三开关。
 /// 映射口径（用户裁决）：`remote.bind` 仅 "0.0.0.0" → lan 开（127.0.0.1/缺失/乱串
 /// → 关）；`remote.channel` quick/named → 对应开关开，off/缺失/乱串（parse_channel
-/// 返回 None）→ 双关。旧 channel 是单值三选一，双开组合不可能由迁移产生
+/// 返回 None）→ 双关。旧 channel 是单值三选一，双开组合不可能由迁移产生。
+/// tailscale 无旧键（§C1 后加）→ 恒 false——迁移只翻译既有语义，不新开通道
 fn migrate_channels_from_legacy(bind: Option<&str>, channel: Option<&str>) -> ChannelFlags {
     ChannelFlags {
         lan: bind == Some("0.0.0.0"),
         quick: tunnel::parse_channel(channel) == Some(tunnel::KEY_CHANNEL_VALUE_QUICK),
         named: tunnel::parse_channel(channel) == Some(tunnel::KEY_CHANNEL_VALUE_NAMED),
+        tailscale: false,
     }
 }
 
@@ -130,7 +143,7 @@ fn migrate_channels_from_legacy(bind: Option<&str>, channel: Option<&str>) -> Ch
 /// **迁移落库点选型：惰性迁移（本函数）而非 database/migration.rs**——schema 迁移层
 /// 不应反向依赖 remote 的 KV 语义；惰性迁移把「判定 + 映射 + 落库」收口在唯一读取点，
 /// 首次 status / toggle / 启动恢复触达即完成，且天然幂等。
-/// 已迁移判定 = 三新键至少其一存在（迁移恒三键全写含 "0"，不留半迁移态）；
+/// 已迁移判定 = 各新键至少其一存在（迁移恒全键写含 "0"，不留半迁移态）；
 /// 旧键（KEY_BIND / KEY_CHANNEL）在全代码库仅剩本函数这一处读取，读后**废弃不删**
 /// （用户回滚旧版本仍可读得其语义）
 fn read_channels() -> ChannelFlags {
@@ -138,11 +151,13 @@ fn read_channels() -> ChannelFlags {
     let lan = settings::get_setting(KEY_CHAN_LAN);
     let quick = settings::get_setting(KEY_CHAN_QUICK);
     let named = settings::get_setting(KEY_CHAN_NAMED);
-    if lan.is_some() || quick.is_some() || named.is_some() {
+    let tailscale = settings::get_setting(KEY_CHAN_TAILSCALE);
+    if lan.is_some() || quick.is_some() || named.is_some() || tailscale.is_some() {
         return ChannelFlags {
             lan: channel_flag_from(lan),
             quick: channel_flag_from(quick),
             named: channel_flag_from(named),
+            tailscale: channel_flag_from(tailscale),
         };
     }
     let flags = migrate_channels_from_legacy(
@@ -153,20 +168,35 @@ fn read_channels() -> ChannelFlags {
         (KEY_CHAN_LAN, flags.lan),
         (KEY_CHAN_QUICK, flags.quick),
         (KEY_CHAN_NAMED, flags.named),
+        (KEY_CHAN_TAILSCALE, flags.tailscale),
     ] {
         settings::set_setting(key, if on { "1" } else { "0" });
     }
     flags
 }
 
-/// 三通道 KV 写入（生产注入；值口径恒 "1"/"0" 显式两值）
+/// 通道 KV 写入（生产注入；值口径恒 "1"/"0" 显式两值）
 fn write_chan_flag(kind: ChannelKind, on: bool) {
     let key = match kind {
         ChannelKind::Lan => KEY_CHAN_LAN,
         ChannelKind::Quick => KEY_CHAN_QUICK,
         ChannelKind::Named => KEY_CHAN_NAMED,
+        ChannelKind::Tailscale => KEY_CHAN_TAILSCALE,
     };
     crate::database::dao::settings::set_setting(key, if on { "1" } else { "0" });
+}
+
+/// Tailscale 通道开关位落关（**通道 KV 单写入者纪律不变**：写口仍只有 [`write_chan_flag`]
+/// 一处，本函数只是给 tailscale 子模块开的**窄出口**）。
+///
+/// **为什么需要它（C-1，Critical）**：撤销 tailscale 有两条入口——① 开关命令
+/// `remote_toggle_channel`（写 KV 是它的既有职责）；② 向导步 `disable` / `disable_force`
+/// （前端撤销确认框路径走这条，**不经**①）。只撤配置不落位的后果见
+/// `tailscale::wizard::disable_step_with` 的文档（开关保持 ON / 成因谎报 / **重启恢复
+/// 自动重新 `funnel --bg` 把用户刚撤销的公网暴露打开**）。
+/// tailscale 子模块够不着私有的 `ChannelKind`，故收口在这一个窄函数里。
+pub(crate) fn clear_tailscale_chan_flag() {
+    write_chan_flag(ChannelKind::Tailscale, false);
 }
 
 /// bind 派生（纯函数，M5 A5）：chan_lan 开 → "0.0.0.0"（对外监听，P7 门随
@@ -296,6 +326,8 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         max_devices_source: Box::new(max_devices_from_kv),
         // M5 A3：/pair/pin 认证端点接线
         pin_limiter: Mutex::new(pin::PinRateLimiter::new()),
+        // §G5：全局桶（只拦多来源齐爆，阈值远宽于分来源桶）
+        global_pin_limiter: Mutex::new(pin::PinRateLimiter::global()),
         pin_source: Box::new(pin::get_pin),
         // APP 软归档缝（2026-09-20 体验批二）：看板隐藏集合读写同源直调 DAO
         board_hidden_ids: Box::new(crate::database::board_hidden_ids),
@@ -307,9 +339,13 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // CLI 会话硬杀缝（/session-close 与桌面 kill_session 同内核）
         session_close: std::sync::Arc::new(crate::commands::session::kill_pid),
         now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
-        // gate 回环豁免 / via 判定的隧道域名源（生产 = 双通道快照聚合抽取；M5 A5）
-        tunnel_hosts_source: Box::new(tunnel_hosts_from_snapshot),
+        // via 判定的隧道域名源（生产 = 三通道快照分拣；M5 A5）。零豁免后 gate 不再
+        // 消费隧道域名（豁免判定已随 2026-10-06 §G2 退役），本缝**仅供 via 装饰标注**
         via_hosts_source: Box::new(via_hosts_from_snapshot),
+        // §G5 / 评审 A-I2：**限速专用**的信任声明源——与展示侧的 via_hosts_source
+        // 彻底分开。只登记 Cloudflare 系两路（权威头 CF-Connecting-IP，实测背书）；
+        // 未声明的通道（如 tailscale Funnel）结构性回落全局桶（见 gate::rate_bucket_key）
+        rate_bucket_channels_source: Box::new(rate_bucket_channels_from_snapshot),
         // M5 P2-a 追记：敏感黑名单的主目录基准（真实 home；取不到时 read_file_safe
         // 走全段保守匹配分支）
         home_source: Box::new(real_home_dir),
@@ -327,7 +363,8 @@ fn host_of_board_url(url: &str) -> Option<String> {
 }
 
 /// 单通道域名归集（纯函数）：错误通道不宣称（error ⇒ 无存活 cloudflared，快照里的
-/// 旧地址不可信）；url → host_of_board_url 归一。via 分通道与豁免并集共用
+/// 旧地址不可信）；url → host_of_board_url 归一。via 分通道标注与限速信任声明共用
+/// （原"豁免并集"语义已随 2026-10-06 §G2 退役）
 fn channel_hosts(c: &tunnel::ChannelStatus) -> Vec<String> {
     if c.error.is_some() {
         return Vec::new();
@@ -337,46 +374,6 @@ fn channel_hosts(c: &tunnel::ChannelStatus) -> Vec<String> {
         .and_then(host_of_board_url)
         .into_iter()
         .collect()
-}
-
-/// 豁免名单内核（纯函数，2026-09-17 穿透修复）：
-/// - 任一通道快照**错误终态** → None（既有哨兵，A3 评审 Important 1：错误通道域名
-///   不可信，整体 None 让 gate 完全跳过本机豁免，绝不可当空名单处理——那会让 Host
-///   条件恒满足 → 回环流量全豁免 fail-open。代价仅错误态下本机也需配对一次。
-///   依赖说明：tunnel.rs 现状 error ⇒ 无存活 cloudflared，但豁免判定不押注该不变量）；
-/// - 任一通道**在运行而域名缺失** → None（本次新增的 fail-closed，同样关键）：
-///   token 模式命名隧道的域名可能解析不到（cloudflared 不打印 https:// 横幅时），
-///   空名单会让「Host 不在名单」恒真——cloudflared 从回环转发的**全部**公网流量
-///   免密直进（实测穿透：第二台电脑无 cookie 直登）。原则：**豁免永不依赖
-///   「名单恰好非空」**，域名未知时收口豁免（本机访问也需配对一次）。
-///   变异锚点：删掉 running-without-url 分支 → mod 测试
-///   `tunnel_hosts_fail_closed_when_running_without_url` 必红
-fn tunnel_hosts_from_status(
-    s: &tunnel::TunnelStatus,
-    extra_named: &[String],
-) -> Option<Vec<String>> {
-    if s.quick.error.is_some() || s.named.error.is_some() {
-        return None;
-    }
-    let missing_url_while_running = |c: &tunnel::ChannelStatus| c.running && c.url.is_none();
-    if missing_url_while_running(&s.quick) {
-        return None;
-    }
-    // named 域名未知时：无手填/记忆兜底 → 收口（安全侧）；有 → 视为域名已知
-    if missing_url_while_running(&s.named) && extra_named.is_empty() {
-        return None;
-    }
-    Some(
-        channel_hosts(&s.quick)
-            .into_iter()
-            .chain(channel_hosts(&s.named))
-            .chain(extra_named.iter().cloned())
-            .collect(),
-    )
-}
-
-fn tunnel_hosts_from_snapshot() -> Option<Vec<String>> {
-    tunnel_hosts_from_status(&tunnel::snapshot(), &named_extra_hosts())
 }
 
 /// 敏感黑名单主目录基准的生产源（提取为具名函数以便接线探针测试）：
@@ -393,7 +390,7 @@ fn named_last_addr() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// 手填/记忆地址的 host 归集（host_of_board_url 归一 + 去重；供豁免与 via 名单）
+/// 手填/记忆地址的 host 归集（host_of_board_url 归一 + 去重；供 via 名单与限速声明）
 fn named_extra_hosts() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for u in [named_last_addr()].into_iter().flatten() {
@@ -406,21 +403,80 @@ fn named_extra_hosts() -> Vec<String> {
     out
 }
 
-/// via 判定的分通道域名（生产源）：双通道各自归集（错误通道不宣称——错误通道的
-/// 旧域名不得再给新配对设备打通道标签）。**None 哨兵与豁免同源**：名单不可信
-/// （错误终态 / 运行中而域名缺失）时返回 None——via 判定侧收到 None 保守标
-/// 「局域网」，绝不判「本机」（2026-09-18 实测：名单为空曾把隧道设备标成本机）
-fn via_hosts_from_snapshot() -> Option<(Vec<String>, Vec<String>)> {
-    via_hosts_from_status(&tunnel::snapshot(), &named_extra_hosts())
+/// via 判定的分通道域名（生产源）：三通道各自归集（错误通道不宣称——错误通道的
+/// 旧域名不得再给新配对设备打通道标签）。**None 哨兵**：名单不可信（错误终态 /
+/// 运行中而域名缺失）时返回 None——via 判定侧收到 None 保守标「局域网」，绝不判
+/// 「本机」（2026-09-18 实测：名单为空曾把隧道设备标成本机）。零豁免后（2026-10-06
+/// §G2）该哨兵不再服务任何安全判定，仅维持 via 装饰的保守回落。
+/// tailscale 快照独立于隧道快照（无子进程、CLI 轮询现算），错误态由 channel_hosts
+/// 的「错误通道不宣称」自行收空——只丢 tailscale 自己的 via 标注，不牵连隧道两路
+fn via_hosts_from_snapshot() -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
+    let ts = tailscale::ts_snapshot();
+    via_hosts_from_status(&tunnel::snapshot(), &named_extra_hosts(), &ts)
 }
 
-/// via 判定内核（纯函数，extras 注入）：与豁免名单同判据（哨兵 None → via 保守）
+/// via 判定内核（纯函数，extras/ts 注入；原豁免名单内核的哨兵判据随 2026-10-06 §G2
+/// 内联归并于此，豁免并集语义一并退役，仅 via 保守语义存续）：
+/// - 任一隧道通道快照**错误终态** → None（错误通道域名不可信，整体收 None）；
+/// - 任一隧道通道**在运行而域名缺失** → None：token 模式自有域名的域名可能解析不到
+///   （cloudflared 不打印 https:// 横幅时），名单不可信按保守回落处理；
+/// - named 域名未知时：有手填/记忆兜底 → 视为域名已知；
+/// - 正常态 → 三通道各自归集（channel_hosts：错误通道不宣称——tailscale 错误只收空
+///   自己那一路，不得牵连隧道两路的 via 标注）。
+///
+/// **extras（记忆/手填地址）只作「域名已知」判据、不并入返回名单**（自 cf9a369 起；
+/// 修复轮 2 顺带项②复核后**维持不变**）。后果如实登记：named 运行中缺 url 但有记忆
+/// 地址时，该域名本身仍标 `lan`（保守标注）。为什么不并入：
+/// ① 返回值同时喂**限速信任表**（[`rate_bucket_channels_from_snapshot`] →
+///    `gate::cloudflare_rate_channels`），并入等于把「用户记忆里的域名」升格为
+///    「可信通道域名」——限速信任边界不得寄生于展示字段（与评审 A-I2 的分表纪律同向）；
+/// ② 记忆值不是任何**现役**证据（隧道可能正服务别的名字，或压根没在伺服），把它标成
+///    `named` 是把猜测当事实，与本项目的「不猜纪律」相反；
+/// ③ `running && url.is_none()` 本身是异常态，正解是修那条路，不是改标签。
+/// 若将来确实要把 extras 并入展示，必须先把展示名单与信任名单**拆成两个函数**再改
+///（`rate_bucket_channels_never_declare_remembered_hosts` 锁定当前边界）
 fn via_hosts_from_status(
     s: &tunnel::TunnelStatus,
     extra_named: &[String],
-) -> Option<(Vec<String>, Vec<String>)> {
-    tunnel_hosts_from_status(s, extra_named)
-        .map(|_| (channel_hosts(&s.quick), channel_hosts(&s.named)))
+    ts: &tunnel::ChannelStatus,
+) -> Option<(Vec<String>, Vec<String>, Vec<String>)> {
+    if s.quick.error.is_some() || s.named.error.is_some() {
+        return None;
+    }
+    let missing_url_while_running = |c: &tunnel::ChannelStatus| c.running && c.url.is_none();
+    if missing_url_while_running(&s.quick) {
+        return None;
+    }
+    if missing_url_while_running(&s.named) && extra_named.is_empty() {
+        return None;
+    }
+    Some((
+        channel_hosts(&s.quick),
+        channel_hosts(&s.named),
+        channel_hosts(ts),
+    ))
+}
+
+/// 限速信任通道声明（**生产源**，§G5；评审 A-I2）：**限速专用、与展示无关**——
+/// 只登记 Cloudflare 系两路（`gate::cloudflare_rate_channels` 把权威头钉死为实测
+/// 背书的 `CF-Connecting-IP`）。两条纪律写死在结构里：
+/// - **tailscale 第三路刻意不进表**（`Some((_, _, _ts))` 直接丢弃第四值）：Funnel 没有
+///   Cloudflare 边缘，同名头在其上可被任意伪造——旧实现靠 api.rs 的特例注释排除它，
+///   现在"未声明 ⇒ 回落全局桶"由 [`gate::rate_bucket_key`] 结构性保证；
+/// - 名单不可信（via 内核的 None 哨兵 = 错误终态 / 运行中缺 url）→ **零声明**：
+///   回环来源一律回落全局桶（fail-closed，比误信一个过时域名更安全）。
+///
+/// 展示侧 [`via_hosts_from_snapshot`] 与本函数互不影响：新增展示通道不会自动获得
+/// 限速信任，必须显式改声明表并附实测证据。
+fn rate_bucket_channels_from_snapshot() -> Vec<gate::RateBucketChannel> {
+    match via_hosts_from_status(
+        &tunnel::snapshot(),
+        &named_extra_hosts(),
+        &tailscale::ts_snapshot(),
+    ) {
+        None => Vec::new(),
+        Some((quick, named, _ts)) => gate::cloudflare_rate_channels(quick, named),
+    }
 }
 
 /// 读取绑定地址与端口（薄壳：DB 读取在此外置，解析内核抽为纯函数便于单测）。
@@ -553,9 +609,11 @@ fn start_server() -> Result<(), String> {
                 restore_enabled_tunnels(port);
                 if let Err(e) = server::serve(&bind, port, STATE.clone()).await {
                     log::error!("远程服务器退出: {e}");
-                    // serve 失败退出任务时隧道留着无意义（代理目标已无人监听），
-                    // 双通道一并停掉
+                    // serve 失败退出任务时对外通道留着无意义（代理目标已无人监听）：
+                    // 隧道双通道停 + tailscale Funnel 停（修复轮 1 Finding 2③——
+                    // Funnel 不停则 DESIRED 残留，轮询继续写 running=true，卡面撒谎）
                     tunnel::stop_all();
+                    tailscale::stop_all();
                 }
             })
         },
@@ -569,21 +627,23 @@ fn start_server() -> Result<(), String> {
 }
 
 /// 停止内核（可测核心，外部依赖全部注入）：abort 服务器任务 → SSE 全断连 →
-/// [仅 revoke] 全吊销设备 → [注入的]隧道停法 → 释放电源锁。
-/// **M5 A4 吊销收窄矩阵（调用点 → revoke / 隧道停法取值，全量清单，专测锁定语义）**：
+/// [仅 revoke] 全吊销设备 → [注入的]对外通道停法 → 释放电源锁。
+/// **M5 A4 吊销收窄矩阵（调用点 → revoke / 通道停法取值，全量清单，专测锁定语义）**：
 ///   - `remote_toggle(false)`（显性关闭远程）→ revoke=`false`（`stop_server_explicit_close`）
-///     + 隧道 `stop_all`（全停，重开按各卡状态恢复）。
+///     + 对外通道全停（tunnel::stop_all + tailscale::stop_all——修复轮 1 Finding 2①：
+///       Funnel 不停则 DESIRED 残留、轮询继续写 running=true 卡面撒谎；重开按各卡状态恢复）。
 ///
 ///     **2026-09-18 用户裁决修订**：显性关闭 = 停止对外服务，不再吊销设备——吊销
 ///     仅剩「重置设备」与「修改访问密码」两个入口（凭当前 PIN 重配对即恢复，
 ///     设备名保留）；
 ///   - 热重启（`restart_listener` → `stop_server_hot_restart`，M5 A4 遗留命名化）→
-///     revoke=`false` + **隧道不动**（隧道句柄独立于监听进程，随通道开关与总开关启停；
-///     监听热重启弹掉隧道会让 lan 开关把 quick 临时隧道换址）；
+///     revoke=`false` + **对外通道全不动**（隧道句柄独立于监听进程，随通道开关与
+///     总开关启停；监听热重启弹掉隧道会让 lan 开关把 quick 临时隧道换址）；
 ///   - 重置密码（`remote_set_pin` 改值）/ 重置设备（`remote_reset_devices`）→ 不经停机，
 ///     走 `revoke_all_and_disconnect`（服务器不停）；
-///   - MAM 应用退出/重启（lib.rs `RunEvent::Exit`）→ 本就不调 stop_server（只停隧道
-///     `stop_all` + 放电源锁），维持「重启不吊销」现状。
+///   - MAM 应用退出/重启（lib.rs `RunEvent::Exit`）→ 本就不调 stop_server（只停对外
+///     通道 stop_all + 放电源锁，修复轮 1 Finding 2② 追加 tailscale——Funnel 无子进程
+///     可 kill_on_drop，进程退出必须显式撤），维持「重启不吊销」现状。
 ///
 /// `revoke=false` = 只停监听，设备记录与 cookie 全部保留——热重启后 cookie 仍过闸。
 fn stop_server_core(
@@ -591,7 +651,7 @@ fn stop_server_core(
     revoke: bool,
     disconnect_all: impl FnOnce(),
     revoke_all: impl FnOnce(),
-    stop_tunnel: impl FnOnce(),
+    stop_channels: impl FnOnce(),
     release_power: impl FnOnce(),
 ) {
     if let Some(h) = handle {
@@ -611,7 +671,7 @@ fn stop_server_core(
     if revoke {
         revoke_all(); // 显性关闭 = 全吊销（收窄后仅此停机分支吊销）
     }
-    stop_tunnel();
+    stop_channels();
     release_power();
 }
 
@@ -621,7 +681,7 @@ fn stop_server_core(
 /// 锁纪律：**两把锁从不嵌套持有，各自独立短临界区**——SERVER_HANDLE 短锁取走句柄
 /// 即释放；store/registry 经 Arc 克隆在锁外的闭包里触达（M5 A5 修正表述：
 /// 原注释「registry 永远最后进最先出」与实际顺序不符）
-fn stop_server_with(revoke: bool, stop_tunnels: impl FnOnce()) {
+fn stop_server_with(revoke: bool, stop_channels: impl FnOnce()) {
     let handle = SERVER_HANDLE.lock().unwrap().take();
     let st_reg = STATE.clone();
     let st_store = STATE.clone();
@@ -634,15 +694,19 @@ fn stop_server_with(revoke: bool, stop_tunnels: impl FnOnce()) {
         move || {
             let _ = st_store.store.with(pairing::revoke_all); // 吊销失败仅忽略，不阻断停机
         },
-        stop_tunnels,
+        stop_channels,
         // M4 T3：电源锁随远程关闭释放（caffeinate kill / 执行状态清除 + 磁盘代设还原）
         power::release,
     );
 }
 
-/// 停止远程服务（通用停机）：revoke 按调用方语义 + 隧道全停（M5 A5 双通道 stop_all）
+/// 停止远程服务（通用停机）：revoke 按调用方语义 + 对外通道全停（M5 A5 双隧道
+/// stop_all + §C1 tailscale::stop_all——修复轮 1 Finding 2①）
 fn stop_server(revoke: bool) {
-    stop_server_with(revoke, tunnel::stop_all);
+    stop_server_with(revoke, || {
+        tunnel::stop_all();
+        tailscale::stop_all();
+    });
 }
 
 /// 显性关闭远程的停止路径（remote_toggle(false) 专用）：停止监听 + 隧道全停 +
@@ -697,8 +761,8 @@ pub fn restart_listener() -> Result<(), String> {
     restart_listener_core(live, stop_server_hot_restart, start_server)
 }
 
-/// 逐通道恢复内核（可测核心，M5 A5）：只对开着的隧道通道 ensure（lan 的监听恢复由
-/// start_server 承担不在此列；本机通道常驻无动作）
+/// 逐通道恢复内核（可测核心，M5 A5；§C1 追加 tailscale）：只对开着的对外通道 ensure
+/// （lan 的监听恢复由 start_server 承担，不在此列；「本机」不是通道，无动作可言）
 fn restore_tunnels_core(flags: ChannelFlags, mut ensure: impl FnMut(ChannelKind)) {
     if flags.quick {
         ensure(ChannelKind::Quick);
@@ -706,14 +770,50 @@ fn restore_tunnels_core(flags: ChannelFlags, mut ensure: impl FnMut(ChannelKind)
     if flags.named {
         ensure(ChannelKind::Named);
     }
+    if flags.tailscale {
+        ensure(ChannelKind::Tailscale);
+    }
 }
 
-/// 恢复开着的隧道通道（总开关 spawn 路径 / remote_toggle(true) 的单点；通道开关
-/// remote_toggle_channel 不经此——它直连 tunnel::start_channel 单通道）。
-/// 读三通道 KV（含惰性迁移），逐通道 ensure（幂等：已存活句柄短路）
+/// 恢复开着的对外通道（总开关 spawn 路径 / remote_toggle(true) 的单点；通道开关
+/// remote_toggle_channel 不经此——它直连各通道单点启停）。
+/// 读通道 KV（含惰性迁移），逐通道 ensure（隧道幂等：已存活句柄短路；tailscale
+/// 由 DESIRED 期望态 + CLI 幂等开通保证重入无害）
 fn restore_enabled_tunnels(port: u16) {
     let flags = read_channels();
-    restore_tunnels_core(flags, |k| tunnel::start_channel(k.as_str(), port));
+    restore_tunnels_core(flags, |k| {
+        restore_one_channel(k, port, tailscale::start_channel)
+    });
+}
+
+/// 恢复单通道（可测内核，B-M2）：隧道两路直连既有单点（失败语义由 tunnel.rs 自管），
+/// **tailscale 失败必须写快照**——旧实现 `let _ = tailscale::start_channel(port)` 把守卫
+/// 拒绝 / CLI 失败吞掉：开机后卡面只显示「尚未生效」，用户看不出是外来配置占用还是没装
+/// CLI，与开关路径（[`remote_toggle_channel`] 的 ts 臂）口径不一致
+fn restore_one_channel(
+    k: ChannelKind,
+    port: u16,
+    ts_start: impl FnOnce(u16) -> Result<(), String>,
+) {
+    match k {
+        ChannelKind::Tailscale => {
+            if let Err(e) = ts_start(port) {
+                record_ts_failure(e);
+            }
+        }
+        _ => tunnel::start_channel(k.as_str(), port),
+    }
+}
+
+/// tailscale 启停失败写快照（**开关路径与启动恢复的唯一实现**，B-M2）：running 撤下 +
+/// error 上墙，卡面据此显示「外来配置占用」/「CLI 失败」等真实原因，而不是笼统的
+/// 「尚未生效」。本地宣称的收口由 tailscale::stop_inner / start 入口负责，这里只补错误
+fn record_ts_failure(e: String) {
+    log::warn!("tailscale 通道启停失败: {e}");
+    tailscale::set_ts_snapshot(|c| {
+        c.running = false;
+        c.error = Some(e);
+    });
 }
 
 /// 开关内核（可测核心，SSOT 写入与启停以闭包注入）：写 enabled SSOT → 启/停服务器。
@@ -818,12 +918,22 @@ pub fn remote_status() -> serde_json::Value {
     st["enabled"] = serde_json::json!(enabled);
     // 设备上限（线稿「已接入设备 N / 上限」徽标；KV 可改，未设置默认 10——决策 #17）
     st["maxDevices"] = serde_json::json!(max_devices_from_kv());
-    // M5 A5：三通道开关（read_channels 含惰性迁移）+ 双通道隧道快照
+    // M5 A5：通道开关（read_channels 含惰性迁移）+ 隧道双通道快照 + tailscale 快照
     let chans = read_channels();
     let tun = tunnel::snapshot();
-    // M5 A5：四通道状态（形状契约见 channels_payload 注释）+ 当前访问密码
+    let ts = tailscale::ts_snapshot();
+    // M5 A5：通道状态（形状契约见 channels_payload 注释）+ 当前访问密码
     // （gate 已保证本载荷只被本机/已过闸前端读到——pin 展示给设置页与看板持有者）
-    let mut ch = channels_payload(enabled, chans, port, lan, &tun);
+    // Task 7 §C3：第 7 参 = tailscale 校验态（地址三门的第三道门数据源）
+    let mut ch = channels_payload(
+        enabled,
+        chans,
+        port,
+        lan,
+        &tun,
+        &ts,
+        tailscale::reachability(),
+    );
     // M5 P2-c：命名地址记忆/手填透出（named 卡片显示优先级：解析地址 > 手填 > 上次）
     ch["named"]["lastAddr"] = serde_json::json!(named_last_addr());
     st["channels"] = ch;
@@ -842,28 +952,46 @@ fn first_available_tunnel_url(tun: &tunnel::TunnelStatus) -> Option<String> {
         .or_else(|| tun.named.url.clone().filter(|_| tun.named.error.is_none()))
 }
 
-/// 四通道状态载荷内核（纯函数，M5 A5；A6 设置页卡片与 A7 移动端消费**同一形状**——
-/// 本注释即契约）：
+/// 通道状态载荷内核（纯函数，M5 A5；§C1 追加 tailscale 段。A6 设置页卡片与 A7 移动端
+/// 消费**同一形状**——本注释即契约）：
 /// ```json
 /// {
 ///   "local": { "running": bool, "address": "http://127.0.0.1:{port}/m" },
 ///   "lan":   { "enabled": bool, "running": bool, "addresses": ["http://{ip}:{port}/m", ...] },
 ///   "quick": { "enabled": bool, "running": bool, "address": str|null, "error": str|null },
-///   "named": { "enabled": bool, "running": bool, "address": str|null, "error": str|null }
+///   "named": { "enabled": bool, "running": bool, "address": str|null, "error": str|null },
+///   "tailscale": { "enabled": bool, "running": bool, "address": str|null, "error": str|null,
+///                  "reach": { "state": "unverified"|"verifying"|"verified"
+///                                    |"record_pending"（另带 republish: bool）
+///                                    |"recovering"|"failed"（另带 reason: str） } }
 /// }
 /// ```
-/// enabled = 三通道 KV 开关；running = 运行态（local/lan 随监听存活，隧道随句柄存活）；
-/// 隧道 address = 看板完整地址（**错误态或已停不宣称 → null**；已停门 = 评审 Minor 3
-/// 收口：stderr 在途行可落在 stop_channel 快照复位之后，留下 url=Some/running=false
-/// 的毫秒级陈旧快照，payload 侧以 running 为门保证已停通道绝不宣称地址——窗口取舍
-/// 见 tunnel.rs stderr 摄取点注释）；error = 该通道终态错误。
-/// lan.addresses 沿 lan_urls_for 口径（仅 0.0.0.0 非空，完整可直达 URL）
+/// enabled = 通道 KV 开关；running = 运行态（local/lan 随监听存活，隧道随句柄存活，
+/// tailscale 随轮询现算）；通道 address = 看板完整地址（**错误态或已停不宣称 → null**；
+/// 已停门 = 评审 Minor 3 收口：stderr 在途行可落在 stop_channel 快照复位之后，留下
+/// url=Some/running=false 的毫秒级陈旧快照，payload 侧以 running 为门保证已停通道绝不
+/// 宣称地址——窗口取舍见 tunnel.rs stderr 摄取点注释）；error = 该通道终态错误。
+/// lan.addresses 沿 lan_urls_for 口径（仅 0.0.0.0 非空，完整可直达 URL）。
+/// （Task 7 §C3）tailscale 段追加 `reach`（可达性态序列化，共**六个**变体：
+/// `unverified` / `verifying` / `verified` / `record_pending`{republish} / `recovering` /
+/// `failed`{reason}——不再写死数字，避免与枚举漂移），且地址门从双门扩为
+/// **三门**：`running && error.is_none() && reach == Verified` 才宣称地址；未验证/在验时
+/// 快照本身干净**且本通道已启用**（M-3：未启用/从未配置不得对外宣称"正在生效"）则
+/// error = 带预期时长的「记录尚未发布」口径（W-B 分档：首开 5–6 分钟 / 重开 30 秒～1 分钟 /
+/// 开机恢复另有「后端重连 1–2 分钟」口径）
+/// （[`tailscale::RECORD_PENDING_HINT`]，实测记录发布要 5–6 分钟），Failed 的 reason
+/// 直接透出。**I3（2026-10-07 评审）**：`reach` 本身也过 `enabled` 门——未启用一律
+/// `{"state":"unverified"}`（否则竞态窗口能把 `recovering` 写进一个刚被关掉的通道，
+/// 前端相位机只看 `reach.state` ⇒ 卡面落「恢复中……无需任何操作」）。
+/// 其余通道不收校验态——**通道无关（宪法原则 2）**
 fn channels_payload(
     listener_alive: bool,
     flags: ChannelFlags,
     port: u16,
     lan_addresses: Vec<String>,
     tun: &tunnel::TunnelStatus,
+    ts: &tunnel::ChannelStatus,
+    reach: tailscale::Reachability,
 ) -> serde_json::Value {
     let chan = |c: &tunnel::ChannelStatus, enabled: bool| {
         serde_json::json!({
@@ -873,6 +1001,67 @@ fn channels_payload(
             "address": c.url.clone().filter(|_| c.error.is_none() && c.running),
             "error": c.error.clone(),
         })
+    };
+    // tailscale 地址第三道门（§C3）：校验态 Verified 才算可用；未验证/在验/恢复中/
+    // 校验失败一律撤下地址，快照本身干净时**如实报成因**（绝不谎报可用）：
+    // - 未验证 / 在验 = 「记录尚未发布」这一**正常现象**的窗口（实测首开 5–6 分钟）→
+    //   用带预期时长的口径（RECORD_PENDING_HINT），用户才知道"连不上"是正常的；
+    // - Recovering = **开机恢复窗口**（W-A 实测：后端重连 1–2 分钟，DNS 记录不撤销、
+    //   成因不是域名发布）→ 单独口径（RECOVERING_HINT）——既不能报成故障，
+    //   也不能说是"域名生效中"（那句会把 1–2 分钟误报成 5 分钟、还指错成因）；
+    // - Failed = 具体故障（拦截页 / 连不通 / DoH 全不可用）→ 直接透出 reason，
+    //   一句笼统的「尚未生效」会把可排查的原因抹掉。
+    let mut ts_val = chan(ts, flags.tailscale);
+    match &reach {
+        tailscale::Reachability::Verified => {}
+        tailscale::Reachability::Failed { reason } => {
+            ts_val["address"] = serde_json::Value::Null;
+            if ts_val["error"].is_null() {
+                ts_val["error"] = serde_json::json!(reason);
+            }
+        }
+        tailscale::Reachability::Recovering => {
+            ts_val["address"] = serde_json::Value::Null;
+            // M-3 同款门：只有**开着本通道**时才对外宣称"正在恢复"（未启用/从未配置
+            // 不该出现"后端重连中"这种话）
+            if flags.tailscale && ts_val["error"].is_null() {
+                ts_val["error"] = serde_json::json!(tailscale::RECOVERING_HINT);
+            }
+        }
+        tailscale::Reachability::RecordPending { republish } => {
+            ts_val["address"] = serde_json::Value::Null;
+            // W-B 分档：重开档（本进程执行过 funnel reset）与首开档**两句话不同**
+            // （实测 30–49 秒 vs 5–6 分钟）；门同 M-3——未启用不得对外宣称"发布中"
+            if flags.tailscale && ts_val["error"].is_null() {
+                ts_val["error"] = serde_json::json!(tailscale::record_pending_hint(*republish));
+            }
+        }
+        tailscale::Reachability::Unverified | tailscale::Reachability::Verifying => {
+            ts_val["address"] = serde_json::Value::Null;
+            // M-3：只有**开着本通道**时才说「记录尚未发布…」。未启用 / 从未配置（默认态就是
+            // Unverified）写这条 error 是**对外契约载荷的谎报**——桌面 UI 恰好被相位机挡掉
+            // 看不见，但移动端等任何别的消费者会读到「正在生效（通常 5 分钟）」；
+            // 形状契约测试此前只覆盖 Verified 夹具，故这条漏网。
+            // **W-B 边界（如实登记）**：还没跑过校验（Unverified）时档位无从判定，只能给
+            // 首开档（那句自带"此前开通过 1 分钟内"的下界）；档位要等第一轮校验给出
+            // （≤1 个轮询窗，实测 5s 量级）——见 reach::record_pending_hint。
+            if flags.tailscale && ts_val["error"].is_null() {
+                ts_val["error"] = serde_json::json!(tailscale::RECORD_PENDING_HINT);
+            }
+        }
+    }
+    // **I3（2026-10-07 评审）**：`reach` 与 error **同门**——只有 `flags.tailscale`
+    // （载荷 `enabled`）为真时才透出全局校验态，未启用一律写 `unverified`。
+    // 旧实现无条件写出 `reach`，于是「用户刚关掉通道」的竞态窗口可以把 `recovering`
+    // 写进一个已关闭的通道：载荷 `enabled=false ∧ error=null ∧ reach=recovering` ⇒
+    // 前端相位机只看 `reach.state` ⇒ 卡面落「状态五·恢复中」并说「配置与地址都不会变，
+    // 无需任何操作」——**而通道是他刚关掉的**。未启用写 unverified 是默认态：
+    // 不宣称任何"正在生效/正在恢复"的语义（与上面 M-3 对 error 的门同源）。
+    ts_val["reach"] = if flags.tailscale {
+        serde_json::to_value(&reach)
+            .unwrap_or_else(|_| serde_json::json!({ "state": "unverified" }))
+    } else {
+        serde_json::json!({ "state": "unverified" })
     };
     serde_json::json!({
         "local": {
@@ -886,6 +1075,7 @@ fn channels_payload(
         },
         "quick": chan(&tun.quick, flags.quick),
         "named": chan(&tun.named, flags.named),
+        "tailscale": ts_val,
     })
 }
 
@@ -1189,26 +1379,30 @@ fn ensure_pin_auto() -> bool {
 }
 
 /// 通道开关内核的注入依赖束（clippy too_many_arguments 规避 + 语义分组）
-struct ChannelToggleDeps<P, W, R, T> {
+struct ChannelToggleDeps<P, W, R, T, S> {
     /// P7 ack 读取（生产 = KEY_PUBLIC_ACK KV；测试注入 None / Some("true")）
     public_ack: P,
-    /// 三通道 KV 写入（生产 = write_chan_flag；测试记录调用序供回滚断言）
+    /// 通道 KV 写入（生产 = write_chan_flag；测试记录调用序供回滚断言）
     write_flag: W,
     /// 监听热重启（生产 = restart_listener——不吊销不扰隧道；测试记录调用）
     restart: R,
     /// 隧道启停 (kind, on)：on = start_channel ensure / off = stop_channel
     /// （生产直连 tunnel 单点；测试记录调用）
     tunnel: T,
+    /// Tailscale 启停 (kind, on)：on = Funnel 开通 / off = 撤销（§C1）。
+    /// 生产直连 tailscale 单点；测试记录调用。**与 tunnel 闭包互斥触达**——
+    /// 切 Tailscale 绝不触碰隧道（通道独立语义，专测锁定）
+    ts: S,
 }
 
-/// 通道开关内核（可测核心，M5 A5）：幂等短路 → 写 KV → 总开关开着才联动运行态
-/// （lan = P7 门 + 热重启改绑；quick/named = 隧道启停——**隧道启停仅由本命令与
-/// 总开关驱动**）。
+/// 通道开关内核（可测核心，M5 A5；§C1 追加 tailscale）：幂等短路 → 写 KV →
+/// 总开关开着才联动运行态（lan = P7 门 + 热重启改绑；quick/named = 隧道启停；
+/// tailscale = Funnel 起停——**各通道启停仅由本命令与总开关驱动**）。
 /// **失败回滚纪律（toggle_core 同款「失败不撒谎」）**：lan on 在门失败 / 重启失败时
 /// 回滚 KV 为关再传 Err——不回滚有二患：开关显示开而监听仍 127.0.0.1（状态撒谎）；
-/// 用户确认 TLS 后重开会撞上「同向幂等短路」而永不生效。lan off / 隧道路径无失败
-/// 形态，不回滚（off 即目标态）。总开关关着时只写 KV（运行态由下次 remote_toggle(true)
-/// 按 restore_tunnels_core / 派生 bind 恢复）
+/// 用户确认 TLS 后重开会撞上「同向幂等短路」而永不生效。lan off / 隧道 / tailscale
+/// 路径无失败形态（失败写各自快照不阻断），不回滚（off 即目标态）。总开关关着时只写
+/// KV（运行态由下次 remote_toggle(true) 按 restore_tunnels_core / 派生 bind 恢复）
 fn toggle_channel_core(
     kind: ChannelKind,
     on: bool,
@@ -1219,6 +1413,7 @@ fn toggle_channel_core(
         impl FnMut(ChannelKind, bool),
         impl FnOnce() -> Result<(), String>,
         impl FnMut(ChannelKind, bool),
+        impl FnMut(ChannelKind, bool),
     >,
 ) -> Result<(), String> {
     let ChannelToggleDeps {
@@ -1226,6 +1421,7 @@ fn toggle_channel_core(
         mut write_flag,
         restart,
         mut tunnel,
+        mut ts,
     } = deps;
     if kind.flag(current) == on {
         return Ok(()); // 幂等：重复同向调用 no-op（不写 KV、不触运行态）
@@ -1249,6 +1445,12 @@ fn toggle_channel_core(
         // lan off：bind 回 127.0.0.1 需热重启；重启失败不回滚（off 即目标态，
         // 「监听已停」由 restart_listener 保持停机口径承担）
         (ChannelKind::Lan, false) => restart(),
+        // Tailscale 启停无失败形态（Funnel 起停失败写 tailscale 快照不阻断——
+        // 与隧道同口径；守卫拒绝外来配置的错误也在快照里展示）
+        (ChannelKind::Tailscale, o) => {
+            ts(kind, o);
+            Ok(())
+        }
         // 隧道启停无失败形态（隧道失败写快照不阻断——spec T1d）
         (k, o) => {
             tunnel(k, o);
@@ -1257,9 +1459,11 @@ fn toggle_channel_core(
     }
 }
 
-/// 三通道独立开关（M5 A5）：channel ∈ "lan" | "quick" | "named"（本机常驻锁死无命令，
-/// 前端 A6 只渲染）。幂等（重复同向调用 no-op）。
-/// **隧道启停唯一入口 = 本命令 + 总开关 remote_toggle**（旧 remote_set_channel 已删）。
+/// 通道独立开关（M5 A5 三通道；§C1 追加 tailscale）：channel ∈ "lan" | "quick" |
+/// "named" | "tailscale"（本机常驻锁死无命令，前端 A6 只渲染）。幂等（重复同向调用
+/// no-op）。
+/// **隧道与 Tailscale 启停唯一入口 = 本命令 + 总开关 remote_toggle**（旧
+/// remote_set_channel 已删）。
 /// lan on：P7 门（未确认 TLS → Err 特征文案，前端弹 Dialog）→ restart_listener 改绑
 /// 不吊销。通道开启且 PIN 未设置 → 自动生成（随 remote_status.pin 返回，UI 展示可改）。
 /// 失败回滚口径见 toggle_channel_core
@@ -1287,6 +1491,21 @@ pub fn remote_toggle_channel(channel: String, on: bool) -> Result<(), String> {
                     tunnel::stop_channel(k.as_str());
                 }
             },
+            // §C1：Tailscale 走自己的单点（端口与 tunnel 同源——都代理到本机监听端口）。
+            // 启停失败不阻断开关（错误写 tailscale 快照供卡片展示——与 tunnel 同口径）；
+            // off 的 Err = 守卫拒绝/CLI 失败，同样上墙（本地宣称已由 stop_inner 先收口）
+            ts: |_k: ChannelKind, o: bool| {
+                let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
+                let r = if o {
+                    tailscale::start_channel(port)
+                } else {
+                    tailscale::stop_channel()
+                };
+                if let Err(e) = r {
+                    // 与启动恢复同一实现（B-M2）：写快照的口径只有一处
+                    record_ts_failure(e);
+                }
+            },
         },
     )?;
     if on && ensure_pin_auto() {
@@ -1301,6 +1520,33 @@ pub fn remote_toggle_channel(channel: String, on: bool) -> Result<(), String> {
         &format!("channel={} on={on}", kind.as_str()),
     );
     Ok(())
+}
+
+// ============================================================
+// §C2：Tailscale 首次配置引导一条龙（向导探测 + 单步触发）
+// ============================================================
+
+/// 引导状态探测（向导数据源）：返回当前平台、步骤表、每步完成情况与**卡在哪一步**
+/// （blockedReason）。端口与通道同源（都代理到本机监听端口）。载荷形状契约见
+/// tailscale::wizard_status 注释
+#[tauri::command]
+pub fn remote_ts_probe() -> Result<serde_json::Value, String> {
+    let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
+    Ok(tailscale::wizard_status(port))
+}
+
+/// 执行一步（幂等；需要人的步骤只做「触发+回报」，**不代点**——登录只递 AuthURL、
+/// 安装只触发系统授权框、批准链接只递出去）。step 值域见 tailscale::run_step。
+/// **async + spawn_blocking（Task 7）**：verify 步自 §C3 起含网络探测（≤2×10s 超时）
+/// 与自愈退避（5s）——同步命令在 IPC 派发线程上内联执行（tauri on_message 直调），
+/// 阻塞会拖住整个 IPC； download 等其余步骤一并受益（此前是同步命令内联跑长下载）。
+/// 前端 invoke 形状不变（命令名/参数/返回值均不变）
+#[tauri::command]
+pub async fn remote_ts_run_step(step: String) -> Result<serde_json::Value, String> {
+    let (_, port) = bind_and_port().unwrap_or(("127.0.0.1".into(), DEFAULT_PORT));
+    tauri::async_runtime::spawn_blocking(move || tailscale::run_step(&step, port))
+        .await
+        .map_err(|e| format!("执行向导步骤失败: {e}"))?
 }
 
 // ============================================================
@@ -1320,6 +1566,26 @@ pub fn tray_display_from(
     (true, tunnel_url.unwrap_or(bind_url))
 }
 
+/// 托盘地址优先序（纯核，可测，B-M10）：**已验证的 tailscale 固定地址优先**——它是
+/// 永久地址（§C1 输入输出表的「托盘可复制」：重启/换网都不变），比临时隧道地址更值得
+/// 给用户复制；**只要不是 `Verified` 就绝不上托盘**——含 `Unverified` / `Verifying` /
+/// `RecordPending`（记录尚未发布）/ `Recovering`（恢复窗口）/ `Failed`，判据是
+/// `matches!(reach, Verified)`（§C3 要求 2：
+/// 不许把一个打不开的地址摆在界面上），回落既有优先序（quick → named → 调用方的绑定
+/// 口径地址）。「错误通道不宣称」的既有口径在三路一致（tailscale 侧同样要求 error 为空）
+fn tray_url_from(
+    tun: &tunnel::TunnelStatus,
+    ts: &tunnel::ChannelStatus,
+    reach: &tailscale::Reachability,
+) -> Option<String> {
+    if matches!(reach, tailscale::Reachability::Verified) && ts.running && ts.error.is_none() {
+        if let Some(url) = ts.url.clone() {
+            return Some(url);
+        }
+    }
+    first_available_tunnel_url(tun)
+}
+
 /// 托盘快照（system_tray 消费；与 remote_status 同源不复制聚合——直调各单点）
 pub fn tray_display() -> (bool, String) {
     let (bind, port) = bind_and_port().unwrap_or(("127.0.0.1".to_string(), DEFAULT_PORT));
@@ -1332,7 +1598,8 @@ pub fn tray_display() -> (bool, String) {
     let tun = tunnel::snapshot();
     tray_display_from(
         enabled,
-        first_available_tunnel_url(&tun),
+        // §C1/B-M10：已验证的固定地址优先；未验证回落既有优先序（绝不上托盘）
+        tray_url_from(&tun, &tailscale::ts_snapshot(), &tailscale::reachability()),
         display_url_for(&bind, port, local_lan_ips()),
     )
 }
@@ -1953,22 +2220,23 @@ mod tests {
         assert_eq!(host_of_board_url(""), None, "空串 → None");
     }
 
-    /// M5 A5 双通道聚合 + M5 P2-c extras 参数化：quick/named 各自归集（域名归一）；
-    /// 错误通道不宣称，豁免/via **同源 None 哨兵**（fail-closed）。走内核
-    /// via_hosts_from_status 注入 extras（空表），不读真实 KV
+    /// M5 A5 双通道聚合 + M5 P2-c extras 参数化 + §C1 tailscale 第三路：quick/named/tailscale
+    /// 各自归集（域名归一）；错误通道不宣称 + **None 哨兵**（fail-closed——零豁免后哨兵仅供
+    /// via 保守回落 lan，不再服务任何豁免判定，2026-10-06 §G2）。走内核 via_hosts_from_status
+    /// 注入 extras/ts（空表），不读真实 KV
     #[test]
     fn via_hosts_from_snapshot_aggregates_both_channels_and_fails_closed_on_error() {
         use tunnel::TunnelStatus;
         let _g = tunnel::test_sync::TUNNEL_GLOBALS
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        // 默认态（双通道皆空）：名单为空集但**可信**（无隧道运行，Some 非哨兵）
+        // 默认态（通道皆空）：名单为空集但**可信**（无通道运行，Some 非哨兵）
         tunnel::set_snapshot(|s| *s = TunnelStatus::default());
         assert_eq!(
-            via_hosts_from_status(&tunnel::snapshot(), &[]),
-            Some((Vec::new(), Vec::new()))
+            via_hosts_from_status(&tunnel::snapshot(), &[], &Default::default()),
+            Some((Vec::new(), Vec::new(), Vec::new()))
         );
-        // 双通道同开：各自归集（quick url 故意大写——归一后入表）
+        // 三通道同开：各自归集（quick url 故意大写——归一后入表）
         tunnel::set_snapshot(|s| {
             s.quick = tunnel::ChannelStatus {
                 running: true,
@@ -1981,30 +2249,20 @@ mod tests {
                 error: None,
             };
         });
+        let ts_running = tunnel::ChannelStatus {
+            running: true,
+            url: Some("https://jarvismac-mini.example-tailnet.ts.net/m".into()),
+            error: None,
+        };
         assert_eq!(
-            via_hosts_from_status(&tunnel::snapshot(), &[]),
+            via_hosts_from_status(&tunnel::snapshot(), &[], &ts_running),
             Some((
                 vec!["q-test.trycloudflare.com".to_string()],
-                vec!["mam.example.com".to_string()]
+                vec!["mam.example.com".to_string()],
+                vec!["jarvismac-mini.example-tailnet.ts.net".to_string()]
             ))
         );
-        // 豁免并集 = 双通道域名链式聚合 + 本机命名附加主机（named_extra_hosts 读真实
-        // settings，测试进程无法零接触隔离——按机器相关项做相对断言，通道聚合语义不变）
-        let mut expected_union = vec![
-            "q-test.trycloudflare.com".to_string(),
-            "mam.example.com".to_string(),
-        ];
-        let extras: Vec<String> = named_extra_hosts()
-            .into_iter()
-            .filter(|h| !expected_union.contains(&h.to_string()))
-            .collect();
-        expected_union.extend(extras);
-        assert_eq!(
-            tunnel_hosts_from_snapshot(),
-            Some(expected_union),
-            "豁免并集 = 双通道域名链式聚合"
-        );
-        // 错误通道不宣称 + **哨兵同源**：任一通道错误 → via 判定与豁免一起收 None
+        // 错误通道不宣称 + **哨兵**：任一隧道通道错误 → via 判定收 None
         // （错误/未知态绝不给 via 提供「本机」判定依据，2026-09-18 实测误标根因）
         tunnel::set_snapshot(|s| {
             s.quick.error = Some("cloudflared 启动失败".into());
@@ -2014,106 +2272,197 @@ mod tests {
             None,
             "名单不可信 → None 哨兵（via 判定侧保守标 lan，绝不判本机）"
         );
+        // 还原默认快照（用后即还，不污染其它测试）
+        tunnel::set_snapshot(|s| *s = TunnelStatus::default());
+        // tailscale 错误只收空**自己那一路**（错误通道不宣称），不牵连隧道两路的
+        // via 标注——tailscale 快照独立于隧道快照，互不构成对方「名单不可信」的证据
+        let ts_errored = tunnel::ChannelStatus {
+            running: false,
+            url: None,
+            error: Some("tailscale 待登录".into()),
+        };
         assert_eq!(
-            tunnel_hosts_from_snapshot(),
-            None,
-            "任一通道快照错误必须返回 None 哨兵（gate 据此跳过豁免，fail-closed）"
+            via_hosts_from_status(&tunnel::snapshot(), &[], &ts_errored),
+            Some((Vec::new(), Vec::new(), Vec::new()))
         );
+        let ts_active = tunnel::ChannelStatus {
+            running: true,
+            url: Some("https://x.example-tailnet.ts.net/m".into()),
+            error: None,
+        };
+        assert_eq!(
+            via_hosts_from_status(&tunnel::snapshot(), &[], &ts_active),
+            Some((
+                Vec::new(),
+                Vec::new(),
+                vec!["x.example-tailnet.ts.net".to_string()]
+            ))
+        );
+    }
+
+    /// §G5 / 评审 A-I2：**限速信任声明源**（生产接线）只登记 Cloudflare 系两路
+    /// （权威头 `CF-Connecting-IP`）——tailscale 第三路即使 running 也不进表（Funnel
+    /// 无 CF 边缘，同名头可被任意伪造）；名单不可信（via 内核的 None 哨兵）→
+    /// **零声明**（回环来源一律全局桶，fail-closed）。
+    /// 变异锚点：把 ts 并进声明表、或哨兵态仍给声明，本测试必红。
+    #[test]
+    fn rate_bucket_channels_declare_only_cloudflare_and_fail_closed_on_sentinel() {
+        use tunnel::{ChannelStatus, TunnelStatus};
+        let _g = tunnel::test_sync::TUNNEL_GLOBALS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // 哨兵态（任一隧道通道错误）→ 零声明
+        tunnel::set_snapshot(|s| {
+            s.quick.error = Some("cloudflared 启动失败".into());
+        });
+        assert_eq!(
+            rate_bucket_channels_from_snapshot(),
+            Vec::new(),
+            "名单不可信 → 零声明（fail-closed）"
+        );
+        // 正常态（quick/named 在跑）：只声明这两路，且域名归一生效
+        tunnel::set_snapshot(|s| {
+            *s = TunnelStatus::default();
+            s.quick = ChannelStatus {
+                running: true,
+                url: Some("https://Q-Test.trycloudflare.com/m".into()),
+                error: None,
+            };
+            s.named = ChannelStatus {
+                running: true,
+                url: Some("https://mam.example.com/m".into()),
+                error: None,
+            };
+        });
+        let chans = rate_bucket_channels_from_snapshot();
+        // ts 快照读真实静态（本测试不注入它）：只断言"表里绝无 ts 域名 / 非 CF 通道"，
+        // 故对测试执行顺序与真实 ts 运行态都不敏感
+        assert_eq!(chans.len(), 2, "只有 Cloudflare 两路（tailscale 不在其列）");
+        assert_eq!(chans[0].name, "quick");
+        assert_eq!(chans[0].hosts, vec!["q-test.trycloudflare.com".to_string()]);
+        assert_eq!(chans[1].name, "named");
+        assert_eq!(chans[1].hosts, vec!["mam.example.com".to_string()]);
+        for c in &chans {
+            assert_eq!(
+                c.authoritative_header,
+                gate::CF_AUTHORITATIVE_HEADER,
+                "权威头按通道静态声明（实测背书的那一个）"
+            );
+            assert!(
+                c.hosts.iter().all(|h| !h.ends_with(".ts.net")),
+                "tailscale 域名绝不进限速声明表"
+            );
+        }
         // 还原默认快照（用后即还，不污染其它测试）
         tunnel::set_snapshot(|s| *s = TunnelStatus::default());
     }
 
-    /// 穿透修复专测（2026-09-17 实测事故）：任一通道「运行中而域名缺失」→ 豁免名单
-    /// 整体 None（fail-closed）。空名单会让「Host 不在名单」恒真——cloudflared 从
-    /// 回环转发的全部公网流量免密直进（第二台电脑无 cookie 直登的根因）。
-    /// 变异锚点：删掉 tunnel_hosts_from_status 的 running-without-url 分支本测试必红
+    /// A-M7：`via_hosts_from_status` 两条随测试删除而零覆盖的分支（补覆盖）：
+    /// ① 隧道通道 **running 而 url 缺失** → None 哨兵（cloudflared 不打印横幅时域名
+    ///    解析不到 ⇒ 名单不可信，绝不保守成"空名单但可信"）；
+    /// ② **named 无 url 但有记忆/手填地址**（extras 非空）→ 名单仍可信（Some），
+    ///    其余两路的 via 标注不被牵连。
+    /// 语义如实记录：extras 在现行实现里只作"域名已知"判据、**不并入返回名单**
+    /// （channel_hosts 只从快照 url 归集）——这与重构前内核一致（cf9a369 起），
+    /// 故"记忆域名本身仍标 lan"是既有行为，不在本批范围。
+    /// 变异锚点：删掉 missing_url_while_running 判据 → ①/①b 档红；忽略 extra_named
+    /// → ② 档红。
     #[test]
-    fn tunnel_hosts_fail_closed_when_running_without_url() {
+    fn via_hosts_from_status_covers_missing_url_and_named_extras() {
         use tunnel::{ChannelStatus, TunnelStatus};
-        // named 在跑（token 模式域名解析不到）→ 名单不可信 → None
-        let s = TunnelStatus {
-            quick: ChannelStatus {
-                running: false,
-                url: None,
-                error: None,
-            },
-            named: ChannelStatus {
-                running: true,
-                url: None,
-                error: None,
-            },
+        let running_no_url = ChannelStatus {
+            running: true,
+            url: None,
+            error: None,
+        };
+        let ts_running = ChannelStatus {
+            running: true,
+            url: Some("https://x.example-tailnet.ts.net/m".into()),
+            error: None,
+        };
+        // ① quick 在跑而 url 缺失 → None
+        let quick_broken = TunnelStatus {
+            quick: running_no_url.clone(),
+            named: ChannelStatus::default(),
         };
         assert_eq!(
-            tunnel_hosts_from_status(&s, &[]),
+            via_hosts_from_status(&quick_broken, &[], &ChannelStatus::default()),
             None,
-            "运行中而域名缺失 → 豁免整体收口（不可当空名单放行）"
+            "quick 运行中而 url 缺失 → 名单不可信（None 哨兵）"
         );
-        // 反例边界：通道关着且无 url（正常关闭态）→ 名单为空集而非 None——
-        // 此时不存在隧道流量，豁免语义照旧（回环 + 非隧道 Host = 本机免密）
-        let off = TunnelStatus {
-            quick: ChannelStatus {
-                running: false,
-                url: None,
-                error: None,
-            },
-            named: ChannelStatus {
-                running: false,
-                url: None,
-                error: None,
-            },
-        };
-        assert_eq!(tunnel_hosts_from_status(&off, &[]), Some(Vec::new()));
-    }
-
-    /// P2-c 记忆地址兜底：named 运行而解析不到 url，但 KV 有记忆地址 →
-    /// 名单不收口（记忆 host 入名单），豁免 Host 判定恢复精确
-    #[test]
-    fn tunnel_hosts_remembered_addr_rescues_missing_named_url() {
-        use tunnel::{ChannelStatus, TunnelStatus};
-        let s = TunnelStatus {
-            quick: ChannelStatus {
-                running: false,
-                url: None,
-                error: None,
-            },
-            named: ChannelStatus {
-                running: true,
-                url: None,
-                error: None,
-            },
+        // ①b named 在跑而 url 缺失且**无**兜底地址 → None
+        let named_broken = TunnelStatus {
+            quick: ChannelStatus::default(),
+            named: running_no_url.clone(),
         };
         assert_eq!(
-            tunnel_hosts_from_status(&s, &[]),
+            via_hosts_from_status(&named_broken, &[], &ChannelStatus::default()),
             None,
-            "无记忆地址 → 收口（域名未知，安全侧）"
+            "named 运行中而 url 缺失且无记忆地址兜底 → None"
         );
-        assert_eq!(
-            tunnel_hosts_from_status(&s, &["mam-win.bondtoolbox.asia".to_string()]),
-            Some(vec!["mam-win.bondtoolbox.asia".to_string()]),
-            "有记忆地址 → 名单含其 host（豁免恢复精确，不再 fail-closed）"
-        );
-    }
-
-    /// 豁免名单正常态：运行且有 url → 名单含其域名（纯函数内核直测——
-    /// snapshot 的 running 现算自真实句柄槽，set_snapshot 无法伪造 running=true）
-    #[test]
-    fn tunnel_hosts_normal_state_lists_running_channel_domain() {
-        use tunnel::{ChannelStatus, TunnelStatus};
-        let s = TunnelStatus {
+        // ② 同名场景但**有**记忆/手填地址：域名视为已知 → Some，且 quick/tailscale
+        //    两路的标注不被 named 的缺 url 牵连（若整体收 None，则一切回落 lan）
+        let quick_ok = TunnelStatus {
             quick: ChannelStatus {
                 running: true,
-                url: Some("https://demo.trycloudflare.com/m".into()),
+                url: Some("https://Q-Test.trycloudflare.com/m".into()),
                 error: None,
             },
+            named: running_no_url,
+        };
+        let extras = vec!["mam.remembered.com".to_string()];
+        let (q, n, t) = via_hosts_from_status(&quick_ok, &extras, &ts_running)
+            .expect("有兜底地址 ⇒ 名单可信（Some）");
+        assert_eq!(
+            q,
+            vec!["q-test.trycloudflare.com".to_string()],
+            "quick 照常归集"
+        );
+        assert_eq!(
+            n,
+            Vec::<String>::new(),
+            "named 自身无 url ⇒ 该路无域名可宣称（extras 只作判据、不并入名单）"
+        );
+        // 边界锁定（修复轮 2 顺带项②的裁决）：限速**信任**表绝不消费记忆/手填域名——
+        // 展示侧要不要并入 extras 是产品取舍（本批裁决不并入，理由见 via_hosts_from_status
+        // 注释），但信任侧必须只认「快照里实际在跑的域名」。变异锚点：把 extras 并入
+        // 返回名单（或让信任路径传 extras）→ 下面的断言必红。
+        let declared = gate::cloudflare_rate_channels(q.clone(), n.clone());
+        assert!(
+            declared
+                .iter()
+                .all(|c| !c.hosts.contains(&"mam.remembered.com".to_string())),
+            "记忆域名绝不进限速信任表: {declared:?}"
+        );
+        assert!(
+            declared
+                .iter()
+                .any(|c| c.hosts.contains(&"q-test.trycloudflare.com".to_string())),
+            "实际在跑的域名照常声明（对照，证明断言不是空转）"
+        );
+        assert_eq!(
+            t,
+            vec!["x.example-tailnet.ts.net".to_string()],
+            "tailscale 第三路照常归集"
+        );
+        assert_eq!(
+            gate::classify_via("x.example-tailnet.ts.net", &q, &n, &t),
+            "tailscale",
+            "行为可见：extras 兜底保住了其余两路的 via 标注"
+        );
+        // ②b 非运行态（running=false + url=Some）不触发 url 缺失判据：照常归集
+        let idle_with_url = TunnelStatus {
+            quick: ChannelStatus::default(),
             named: ChannelStatus {
                 running: false,
-                url: None,
+                url: Some("https://mam.example.com/m".into()),
                 error: None,
             },
         };
         assert_eq!(
-            tunnel_hosts_from_status(&s, &[]),
-            Some(vec!["demo.trycloudflare.com".to_string()])
+            via_hosts_from_status(&idle_with_url, &[], &ChannelStatus::default()),
+            Some((Vec::new(), vec!["mam.example.com".to_string()], Vec::new())),
+            "只有 running 才谈得上「运行中缺 url」"
         );
     }
 
@@ -2156,6 +2505,94 @@ mod tests {
 
     // ==== M4 T4 托盘展示纯核 ====
 
+    /// B-M10 **变异锚点**：托盘地址优先序——**已验证的 tailscale 固定地址优先**
+    /// （它是永久地址，§C1 输入输出表的「托盘可复制」），否则回落既有优先序；
+    /// **未验证的 tailscale 地址绝不上托盘**（§C3 要求 2：不许把打不开的地址摆给用户）。
+    /// 变异自证：删掉 reach 门（只要 running+url 就给 ts 地址）→ ②③④档必红。
+    #[test]
+    fn tray_url_prefers_verified_tailscale_and_never_unverified() {
+        use tailscale::Reachability;
+        use tunnel::{ChannelStatus, TunnelStatus};
+        let ts_ready = ChannelStatus {
+            running: true,
+            url: Some("https://jarvismac-mini.example-tailnet.ts.net/m".into()),
+            error: None,
+        };
+        let quick = TunnelStatus {
+            quick: ChannelStatus {
+                running: true,
+                url: Some("https://q.trycloudflare.com/m".into()),
+                error: None,
+            },
+            named: ChannelStatus::default(),
+        };
+        // ① Verified + running + url → 固定地址优先（胜过 quick 的临时地址）
+        assert_eq!(
+            tray_url_from(&quick, &ts_ready, &Reachability::Verified).as_deref(),
+            Some("https://jarvismac-mini.example-tailnet.ts.net/m"),
+            "已验证的固定地址是永久地址，优先上托盘"
+        );
+        // ② 非 Verified（Unverified / Verifying / RecordPending / Recovering / Failed）
+        // → **绝不上托盘**，回落既有优先序。M6（2026-10-07 评审）：旧注释只列三态、
+        // 旧用例也只压三态，而判据是 `matches!(Verified)`——两个新态一并压上，
+        // 让"注释所列 = 用例所压 = 代码判据"三处同集
+        for reach in [
+            Reachability::Unverified,
+            Reachability::Verifying,
+            Reachability::RecordPending { republish: false },
+            Reachability::RecordPending { republish: true },
+            Reachability::Recovering,
+            Reachability::Failed {
+                reason: "公网解析不到该地址".into(),
+            },
+        ] {
+            assert_eq!(
+                tray_url_from(&quick, &ts_ready, &reach).as_deref(),
+                Some("https://q.trycloudflare.com/m"),
+                "未验证的固定地址不得上托盘（回落隧道地址）"
+            );
+            assert_eq!(
+                tray_url_from(&TunnelStatus::default(), &ts_ready, &reach),
+                None,
+                "未验证且无其他通道 → 不给地址（绝不谎报可用）"
+            );
+        }
+        // ③ 校验通过但快照不在运行 / 带错误 → 同样不上托盘
+        let ts_idle = ChannelStatus {
+            running: false,
+            ..ts_ready.clone()
+        };
+        assert_eq!(
+            tray_url_from(&quick, &ts_idle, &Reachability::Verified).as_deref(),
+            Some("https://q.trycloudflare.com/m"),
+            "通道没跑（快照复位）→ 校验态不作数"
+        );
+        let ts_errored = ChannelStatus {
+            running: true,
+            url: Some("https://x.example-tailnet.ts.net/m".into()),
+            error: Some("读取 Funnel 状态失败".into()),
+        };
+        assert_eq!(
+            tray_url_from(&quick, &ts_errored, &Reachability::Verified).as_deref(),
+            Some("https://q.trycloudflare.com/m"),
+            "错误通道不宣称（既有口径）"
+        );
+        // ④ Verified + running 但地址缺失 → 回落（不造空串）
+        let ts_no_url = ChannelStatus {
+            running: true,
+            url: None,
+            error: None,
+        };
+        assert_eq!(
+            tray_url_from(
+                &TunnelStatus::default(),
+                &ts_no_url,
+                &Reachability::Verified
+            ),
+            None
+        );
+    }
+
     /// 托盘展示纯核：隧道开（地址有效）→ (true, 隧道地址)；无隧道 → (true,
     /// 绑定口径地址)；enabled=false → (false, 空串)——无服务可连时不给地址
     /// （托盘地址项据此禁用并展示占位「—」）
@@ -2179,6 +2616,40 @@ mod tests {
         assert_eq!(
             tray_display_from(false, None, "http://127.0.0.1:9420/m".into()),
             (false, String::new())
+        );
+        // B-M10 组合（未验证的固定地址不得上托盘）：tray_url_from 只认 Verified，
+        // 未验证时回落既有优先序——宁可给局域网口径地址，也不给一个打不开的固定地址
+        use tailscale::Reachability;
+        use tunnel::{ChannelStatus, TunnelStatus};
+        let ts_ready = ChannelStatus {
+            running: true,
+            url: Some("https://jarvismac-mini.example-tailnet.ts.net/m".into()),
+            error: None,
+        };
+        assert_eq!(
+            tray_display_from(
+                true,
+                tray_url_from(
+                    &TunnelStatus::default(),
+                    &ts_ready,
+                    &Reachability::Unverified
+                ),
+                "http://192.168.1.5:9420/m".into()
+            ),
+            (true, "http://192.168.1.5:9420/m".into()),
+            "未验证的固定地址不得上托盘（回落绑定口径地址）"
+        );
+        assert_eq!(
+            tray_display_from(
+                true,
+                tray_url_from(&TunnelStatus::default(), &ts_ready, &Reachability::Verified),
+                "http://192.168.1.5:9420/m".into()
+            ),
+            (
+                true,
+                "https://jarvismac-mini.example-tailnet.ts.net/m".into()
+            ),
+            "已验证的固定地址优先（永久地址）"
         );
     }
 
@@ -2515,7 +2986,8 @@ mod tests {
 
     /// 迁移映射纯函数全矩阵：旧 bind/channel 值组合 → 三开关（含缺失/乱值回落）。
     /// 口径：仅 "0.0.0.0" → lan 开；仅 quick/named 字面量 → 对应隧道开；
-    /// off/缺失/乱串（parse_channel None）→ 双关
+    /// off/缺失/乱串（parse_channel None）→ 双关；tailscale 无旧键恒关（迁移只翻译
+    /// 既有语义，不新开通道）
     #[test]
     fn migrate_channels_from_legacy_full_matrix() {
         let all_off = ChannelFlags::default();
@@ -2525,7 +2997,8 @@ mod tests {
             ChannelFlags {
                 lan: true,
                 quick: false,
-                named: false
+                named: false,
+                tailscale: false
             }
         );
         for b in [
@@ -2548,7 +3021,8 @@ mod tests {
             ChannelFlags {
                 lan: false,
                 quick: true,
-                named: false
+                named: false,
+                tailscale: false
             }
         );
         assert_eq!(
@@ -2556,7 +3030,8 @@ mod tests {
             ChannelFlags {
                 lan: false,
                 quick: false,
-                named: true
+                named: true,
+                tailscale: false
             }
         );
         for c in [Some("off"), Some(""), Some("QUICK"), Some("tls"), None] {
@@ -2572,7 +3047,8 @@ mod tests {
             ChannelFlags {
                 lan: true,
                 quick: false,
-                named: true
+                named: true,
+                tailscale: false
             }
         );
     }
@@ -2610,6 +3086,21 @@ mod tests {
         }
     }
 
+    /// §C1 第四通道：Tailscale 变体三件套（parse 字面量 / as_str / flag 取位）齐备
+    #[test]
+    fn channel_kind_parses_tailscale() {
+        assert_eq!(
+            ChannelKind::parse("tailscale").unwrap(),
+            ChannelKind::Tailscale
+        );
+        assert_eq!(ChannelKind::Tailscale.as_str(), "tailscale");
+        assert!(ChannelKind::Tailscale.flag(ChannelFlags {
+            tailscale: true,
+            ..Default::default()
+        }));
+        assert!(!ChannelKind::Tailscale.flag(ChannelFlags::default()));
+    }
+
     /// 通道开关内核：重复同向调用幂等 no-op——写 KV / 重启 / 隧道启停全不触
     /// （panic 闭包证明），总开关开着也一样
     #[test]
@@ -2628,6 +3119,7 @@ mod tests {
                 write_flag: |_, _| panic!("幂等 no-op 不得写 KV"),
                 restart: || panic!("幂等 no-op 不得重启监听"),
                 tunnel: |_, _| panic!("幂等 no-op 不得触隧道"),
+                ts: |_, _| panic!("幂等 no-op 不得触 tailscale"),
             },
         );
         assert!(r.is_ok());
@@ -2642,6 +3134,7 @@ mod tests {
                 write_flag: |_, _| panic!("幂等 no-op 不得写 KV"),
                 restart: || panic!("幂等 no-op 不得重启监听"),
                 tunnel: |_, _| panic!("幂等 no-op 不得触隧道"),
+                ts: |_, _| panic!("幂等 no-op 不得触 tailscale"),
             },
         );
         assert!(r.is_ok());
@@ -2668,6 +3161,7 @@ mod tests {
                     },
                     restart: || panic!("未过 P7 门不得重启监听"),
                     tunnel: |_, _| panic!("lan 开关不得触隧道"),
+                    ts: |_, _| panic!("lan 开关不得触 tailscale"),
                 },
             );
             let err = r.unwrap_err();
@@ -2707,6 +3201,7 @@ mod tests {
                     Ok(())
                 },
                 tunnel: |_, _| panic!("lan 开关不得触隧道"),
+                ts: |_, _| panic!("lan 开关不得触 tailscale"),
             },
         );
         assert!(r.is_ok());
@@ -2726,6 +3221,7 @@ mod tests {
                 write_flag: move |k: ChannelKind, v: bool| lw.borrow_mut().push((k.as_str(), v)),
                 restart: || Err("绑定 0.0.0.0:9420 失败: 端口被占".into()),
                 tunnel: |_, _| panic!("lan 开关不得触隧道"),
+                ts: |_, _| panic!("lan 开关不得触 tailscale"),
             },
         );
         assert_eq!(r.unwrap_err(), "绑定 0.0.0.0:9420 失败: 端口被占");
@@ -2755,6 +3251,7 @@ mod tests {
                 write_flag: move |k: ChannelKind, v: bool| lw.borrow_mut().push((k.as_str(), v)),
                 restart: || Err("绑定 127.0.0.1:9420 失败: 端口被占".into()),
                 tunnel: |_, _| panic!("lan 开关不得触隧道"),
+                ts: |_, _| panic!("lan 开关不得触 tailscale"),
             },
         );
         assert!(r.is_err(), "重启失败原样上抛");
@@ -2765,8 +3262,8 @@ mod tests {
         );
     }
 
-    /// 通道开关内核：quick/named 启停只触隧道（kind, on 透传），不触重启与 ack 门；
-    /// 总开关关着时只写 KV，运行态不触（恢复交给 remote_toggle(true)）
+    /// 通道开关内核：quick/named 启停只触隧道（kind, on 透传），不触重启与 ack 门、
+    /// **不触 tailscale 缝**；总开关关着时只写 KV，运行态不触（恢复交给 remote_toggle(true)）
     #[test]
     fn toggle_channel_core_tunnel_lifecycle_gated_on_master() {
         // quick on（总开关开着）→ tunnel(Quick, true)
@@ -2784,6 +3281,7 @@ mod tests {
                 tunnel: move |k: ChannelKind, o: bool| {
                     lc.borrow_mut().push((k.as_str(), o));
                 },
+                ts: |_, _| panic!("隧道开关不得触 tailscale"),
             },
         );
         assert!(r.is_ok());
@@ -2807,12 +3305,13 @@ mod tests {
                 tunnel: move |k: ChannelKind, o: bool| {
                     lc.borrow_mut().push((k.as_str(), o));
                 },
+                ts: |_, _| panic!("隧道开关不得触 tailscale"),
             },
         );
         assert!(r.is_ok());
         assert_eq!(&*calls.borrow(), &[("named", false)]);
 
-        // 总开关关着：只写 KV，隧道/重启/ack 全不触
+        // 总开关关着：只写 KV，隧道/tailscale/重启/ack 全不触
         let writes: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
         let lw = writes.clone();
         let r = toggle_channel_core(
@@ -2825,14 +3324,102 @@ mod tests {
                 write_flag: move |k: ChannelKind, v: bool| lw.borrow_mut().push((k.as_str(), v)),
                 restart: || panic!("总开关关着不得重启监听"),
                 tunnel: |_, _| panic!("总开关关着不得触隧道"),
+                ts: |_, _| panic!("总开关关着不得触 tailscale"),
             },
         );
         assert!(r.is_ok());
         assert_eq!(&*writes.borrow(), &[("quick", true)]);
     }
 
-    /// 逐通道恢复内核：只对开着的隧道通道 ensure（lan 不进隧道恢复——监听由
-    /// start_server 按派生 bind 承担）；全关 → 不触任何 ensure
+    /// 通道开关内核（§C1）：tailscale 启停只走 **ts 缝**（kind, on 透传），**绝不触碰
+    /// tunnel 闭包**（通道互不干扰——变异锚点：match 里把 Tailscale 落回 `(k, o)` 兜底
+    /// 走 tunnel → 本测试必红）。off 同理反向。总开关关着时只写 KV，运行态不触
+    #[test]
+    fn toggle_channel_core_tailscale_lifecycle_goes_to_ts_seam_not_tunnel() {
+        // on（总开关开着）→ ts(Tailscale, true)，tunnel 缝以 panic 证明确实未触
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
+        let lc = calls.clone();
+        let r = toggle_channel_core(
+            ChannelKind::Tailscale,
+            true,
+            ChannelFlags::default(),
+            true,
+            ChannelToggleDeps {
+                public_ack: || panic!("tailscale 开关不读 ack 门"),
+                write_flag: |_, _| {},
+                restart: || panic!("tailscale 开关不得重启监听"),
+                tunnel: |_, _| panic!("切 tailscale 不得触碰隧道"),
+                ts: move |k: ChannelKind, o: bool| {
+                    lc.borrow_mut().push((k.as_str(), o));
+                },
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(&*calls.borrow(), &[("tailscale", true)]);
+
+        // off（总开关开着）→ ts(Tailscale, false)，tunnel 缝同样不得触
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<(&'static str, bool)>>> = Default::default();
+        let lc = calls.clone();
+        let r = toggle_channel_core(
+            ChannelKind::Tailscale,
+            false,
+            ChannelFlags {
+                tailscale: true,
+                ..Default::default()
+            },
+            true,
+            ChannelToggleDeps {
+                public_ack: || panic!("tailscale 开关不读 ack 门"),
+                write_flag: |_, _| {},
+                restart: || panic!("tailscale 开关不得重启监听"),
+                tunnel: |_, _| panic!("切 tailscale 不得触碰隧道"),
+                ts: move |k: ChannelKind, o: bool| {
+                    lc.borrow_mut().push((k.as_str(), o));
+                },
+            },
+        );
+        assert!(r.is_ok());
+        assert_eq!(&*calls.borrow(), &[("tailscale", false)]);
+    }
+
+    /// B-M2 **变异锚点**：启动恢复的 tailscale 失败必须**写快照**（与开关路径同口径）。
+    /// 旧实现 `let _ = tailscale::start_channel(port)` 把守卫拒绝 / CLI 失败吞掉：开机后
+    /// 卡面只显示「尚未生效」，用户看不出是「外来配置占用」还是「没装 CLI」，与开关路径
+    /// 的口径不一致。变异自证：把恢复臂改回 `let _ = ...` → 本测试必红。
+    #[test]
+    fn restore_records_tailscale_failure_into_snapshot() {
+        // TS_SNAPSHOT 是跨模块全局——按 tailscale.rs 的 TEST_LOCK 纪律串行（本测试读写它）
+        let _g = crate::remote::tailscale::test_lock();
+        crate::remote::tailscale::set_ts_snapshot(|c| {
+            c.running = false;
+            c.error = None;
+        });
+        restore_one_channel(ChannelKind::Tailscale, 9420, |_p| {
+            Err("检测到非 MAM 的 serve 配置".into())
+        });
+        let s = crate::remote::tailscale::ts_snapshot();
+        assert_eq!(
+            s.error.as_deref(),
+            Some("检测到非 MAM 的 serve 配置"),
+            "恢复失败必须把原因写进快照（否则卡面只剩「尚未生效」）"
+        );
+        assert!(!s.running, "失败不得宣称运行");
+        // 正路：恢复成功不写错误
+        crate::remote::tailscale::set_ts_snapshot(|c| {
+            c.running = false;
+            c.error = None;
+        });
+        restore_one_channel(ChannelKind::Tailscale, 9420, |_p| Ok(()));
+        assert_eq!(
+            crate::remote::tailscale::ts_snapshot().error,
+            None,
+            "恢复成功不得留下错误态"
+        );
+    }
+
+    /// 逐通道恢复内核：只对开着的对外通道 ensure（lan 不进恢复——监听由
+    /// start_server 按派生 bind 承担；quick/named/tailscale 按各自开关）；
+    /// 全关 → 不触任何 ensure
     #[test]
     fn restore_tunnels_core_only_ensures_enabled_channels() {
         let calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
@@ -2842,15 +3429,16 @@ mod tests {
                 lan: true,
                 quick: true,
                 named: false,
+                tailscale: false,
             },
             move |k| lc.borrow_mut().push(k.as_str()),
         );
         assert_eq!(
             &*calls.borrow(),
             &["quick"],
-            "lan 开不得触发隧道 ensure；named 关不得 ensure"
+            "lan 开不得触发通道 ensure；named/tailscale 关不得 ensure"
         );
-        // 双开：依序 quick → named
+        // 三开：依序 quick → named → tailscale
         let calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
         let lc = calls.clone();
         restore_tunnels_core(
@@ -2858,13 +3446,29 @@ mod tests {
                 lan: false,
                 quick: true,
                 named: true,
+                tailscale: true,
             },
             move |k| lc.borrow_mut().push(k.as_str()),
         );
-        assert_eq!(&*calls.borrow(), &["quick", "named"]);
+        assert_eq!(
+            &*calls.borrow(),
+            &["quick", "named", "tailscale"],
+            "tailscale 开机恢复与隧道同通道位（漏接 = 重启后固定网址丢失）"
+        );
+        // 只有 tailscale 开：只 ensure tailscale
+        let calls: std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> = Default::default();
+        let lc = calls.clone();
+        restore_tunnels_core(
+            ChannelFlags {
+                tailscale: true,
+                ..Default::default()
+            },
+            move |k| lc.borrow_mut().push(k.as_str()),
+        );
+        assert_eq!(&*calls.borrow(), &["tailscale"]);
         // 全关：panic 闭包证明确实不触
         restore_tunnels_core(ChannelFlags::default(), |_| {
-            panic!("全关时不得触发任何隧道 ensure")
+            panic!("全关时不得触发任何通道 ensure")
         });
     }
 
@@ -2887,8 +3491,212 @@ mod tests {
         assert!(!generated);
     }
 
-    /// 四通道状态载荷形状（A6/A7 消费契约，见 channels_payload 注释）：
-    /// 四键齐全、local 常驻地址、lan 门控地址表、隧道错误态不宣称地址只给 error
+    /// 通道状态载荷形状（A6/A7 消费契约，见 channels_payload 注释）：
+    /// 五键齐全、local 常驻地址、lan 门控地址表、隧道错误态不宣称地址只给 error、
+    /// tailscale 段与隧道通道同形（§C1）
+    ///
+    /// M-3（评审）：**未启用 / 从未配置的 tailscale 段不得写「记录尚未发布…」error**。
+    /// 默认态（KV 关 + 快照空 + 校验态 Unverified）下旧实现照样写那条带预期时长的口径，
+    /// 对外契约载荷因此**谎报**「正在生效（通常 5 分钟左右）」；桌面 UI 恰好被相位机
+    /// （tsPhase）挡掉看不见，但任何其他消费者——含移动端看板——会当真。
+    /// 形状契约测试此前只覆盖 `Verified` 夹具，故这条漏网。
+    /// 变异：去掉 `flags.tailscale` 门 → ①档必红。
+    #[test]
+    fn channels_payload_does_not_claim_record_pending_for_a_disabled_channel() {
+        use tunnel::ChannelStatus;
+        let ts = ChannelStatus::default(); // 从未配置：running=false / url=None / error=None
+                                           // ① 通道关（默认态）：不得写任何 error
+        let off = channels_payload(
+            true,
+            ChannelFlags::default(),
+            9420,
+            vec![],
+            &tunnel::TunnelStatus::default(),
+            &ts,
+            tailscale::Reachability::Unverified,
+        );
+        assert!(
+            off["tailscale"]["error"].is_null(),
+            "未启用的通道不得对外宣称「记录尚未发布」: {}",
+            off["tailscale"]
+        );
+        assert!(off["tailscale"]["address"].is_null(), "未启用不得给地址");
+        assert_eq!(off["tailscale"]["enabled"], false);
+        // **I3（2026-10-07 评审）**：`reach` 也必须过 `flags.tailscale` 门——旧实现无条件
+        // 透出全局校验态，于是「用户刚关掉通道」的那一瞬可以把 `recovering` 写给一个
+        // 已关闭的通道（前端相位机只认 reach.state，会渲染成「恢复中……无需任何操作」）。
+        assert_eq!(
+            off["tailscale"]["reach"]["state"], "unverified",
+            "未启用的通道不得对外透出 recovering/record_pending 等生效中语义: {}",
+            off["tailscale"]
+        );
+        // ② 通道开着且尚未验过 → 才给带预期时长的口径（A2 实测记录发布 5–6 分钟）
+        let on = channels_payload(
+            true,
+            ChannelFlags {
+                tailscale: true,
+                ..Default::default()
+            },
+            9420,
+            vec![],
+            &tunnel::TunnelStatus::default(),
+            &ts,
+            tailscale::Reachability::Unverified,
+        );
+        assert_eq!(
+            on["tailscale"]["error"],
+            tailscale::RECORD_PENDING_HINT,
+            "开着但未验证时才给带预期时长的口径（W-B 首开档 5–6 分钟）"
+        );
+        assert_eq!(
+            on["tailscale"]["reach"]["state"], "unverified",
+            "开着时 reach 原样透出: {}",
+            on["tailscale"]
+        );
+    }
+
+    /// **W-A 载荷契约（变异锚点）**：开机恢复窗口（`BackendState=NoState`）的对外语义——
+    /// ① `reach.state` = `recovering`（前端据此渲染「恢复中」相位，不落进故障/未运行）；
+    /// ② 地址撤下（§C3 三门不因"正在恢复"而放宽）；
+    /// ③ error = **后端重连**口径（`RECOVERING_HINT`，实测 1–2 分钟）——**不得**是
+    ///    「域名生效中 / 5 分钟」（成因完全不同：重启后 DNS 记录不撤销，不用等发布），
+    ///    也**不得**是「Tailscale 未就绪」这类故障口径；
+    /// ④ 通道关着时不得对外宣称"正在恢复"（M-3 同款门：未启用/从未配置不该出现这种话）。
+    /// 变异：把 channels_payload 的 `Recovering` 臂删掉（并回 Unverified 处理）→ ③ 必红。
+    #[test]
+    fn channels_payload_reports_boot_recovery_as_recovering_not_pending_record() {
+        use tunnel::ChannelStatus;
+        let ts = ChannelStatus::default(); // 后端未就绪：running=false / url=None / error=None
+        let p = channels_payload(
+            true,
+            ChannelFlags {
+                tailscale: true,
+                ..Default::default()
+            },
+            9420,
+            vec![],
+            &tunnel::TunnelStatus::default(),
+            &ts,
+            tailscale::Reachability::Recovering,
+        );
+        assert_eq!(
+            p["tailscale"]["reach"]["state"], "recovering",
+            "恢复窗口必须有独立的 recover 语义（否则前端只能落进故障/未运行）: {}",
+            p["tailscale"]
+        );
+        assert!(p["tailscale"]["address"].is_null(), "恢复窗口不得宣称地址");
+        assert_eq!(
+            p["tailscale"]["error"],
+            tailscale::RECOVERING_HINT,
+            "恢复窗口的成因是后端重连（不是域名发布）: {}",
+            p["tailscale"]
+        );
+        let hint = tailscale::RECOVERING_HINT;
+        assert!(
+            hint.contains("1–2 分钟") && hint.contains("重连"),
+            "必须点明成因（后端重连）与实测时长（1–2 分钟）: {hint}"
+        );
+        assert!(
+            !hint.contains("5 分钟") && !hint.contains("生效中") && !hint.contains("尚未发布"),
+            "不得把开机恢复说成「域名生效中/记录尚未发布」（重启不撤销记录，成因不同）: {hint}"
+        );
+        // ④ 通道关着：不得宣称"正在恢复"（M-3 同款门 + I3：`reach` 也必须过门）
+        let off = channels_payload(
+            true,
+            ChannelFlags::default(),
+            9420,
+            vec![],
+            &tunnel::TunnelStatus::default(),
+            &ts,
+            tailscale::Reachability::Recovering,
+        );
+        assert!(
+            off["tailscale"]["error"].is_null(),
+            "未启用的通道不得对外宣称「后端正在重连」: {}",
+            off["tailscale"]
+        );
+        assert_eq!(
+            off["tailscale"]["reach"]["state"], "unverified",
+            "**I3**：未启用时 reach 不得是 recovering（前端相位机只看 reach.state，\
+             会把刚关掉的通道渲染成「恢复中……无需任何操作」）: {}",
+            off["tailscale"]
+        );
+    }
+
+    /// **W-B 载荷分档（变异锚点）**：「公网 DNS 记录尚未发布」这一正常窗口有**两档**
+    /// 实测时长——首次开通 ≈5–6 分钟、reset 后重开 ≈30–49 秒。载荷必须把档位**带上**
+    /// （`reach.state=record_pending` + `reach.republish`，前端据此选 zh/en 文案），
+    /// 且两档文案各自点明成因与时长。
+    /// 变异：把 RecordPending 臂删掉（并回 Failed/Unverified 处理）→ ①② 必红。
+    #[test]
+    fn channels_payload_tiers_record_pending_hint_by_republish() {
+        use tunnel::ChannelStatus;
+        let mk = |republish: bool| {
+            channels_payload(
+                true,
+                ChannelFlags {
+                    tailscale: true,
+                    ..Default::default()
+                },
+                9420,
+                vec![],
+                &tunnel::TunnelStatus::default(),
+                &ChannelStatus::default(),
+                tailscale::Reachability::RecordPending { republish },
+            )
+        };
+        let first = mk(false);
+        assert_eq!(
+            first["tailscale"]["reach"]["state"], "record_pending",
+            "「记录尚未发布」不是故障（旧实现走 Failed）: {}",
+            first["tailscale"]
+        );
+        assert_eq!(first["tailscale"]["reach"]["republish"], false);
+        assert_eq!(
+            first["tailscale"]["error"],
+            tailscale::RECORD_PENDING_HINT,
+            "首次开通档 = 带 5–6 分钟预期时长的口径: {}",
+            first["tailscale"]
+        );
+        assert!(
+            first["tailscale"]["address"].is_null(),
+            "未验证不得宣称地址"
+        );
+
+        let again = mk(true);
+        assert_eq!(again["tailscale"]["reach"]["republish"], true);
+        assert_eq!(
+            again["tailscale"]["error"],
+            tailscale::RECORD_REPUBLISH_HINT,
+            "重新开通档必须是另一句（30 秒～1 分钟），不得套用 5 分钟: {}",
+            again["tailscale"]
+        );
+        // 通道关着时不得对外宣称"正在重新发布"（M-3 同款门）
+        let off = channels_payload(
+            true,
+            ChannelFlags::default(),
+            9420,
+            vec![],
+            &tunnel::TunnelStatus::default(),
+            &ChannelStatus::default(),
+            tailscale::Reachability::RecordPending { republish: true },
+        );
+        assert!(
+            off["tailscale"]["error"].is_null(),
+            "未启用的通道不得对外宣称发布中: {}",
+            off["tailscale"]
+        );
+        assert_eq!(
+            off["tailscale"]["reach"]["state"], "unverified",
+            "**I3**：未启用时 reach 不得透出 record_pending（未启用/从未配置不该出现\
+             「正在生效」这种话）: {}",
+            off["tailscale"]
+        );
+    }
+
+    /// 通道状态载荷形状（A6/A7 消费契约，见 channels_payload 注释）：
+    /// 五键齐全、local 常驻地址、lan 门控地址表、隧道错误态不宣称地址只给 error、
+    /// tailscale 段与隧道通道同形（§C1）
     #[test]
     fn channels_payload_shape_contract() {
         use tunnel::{ChannelStatus, TunnelStatus};
@@ -2904,12 +3712,18 @@ mod tests {
                 error: Some("cloudflared 启动失败".into()),
             },
         };
+        let ts = ChannelStatus {
+            running: true,
+            url: Some("https://jarvismac-mini.example-tailnet.ts.net/m".into()),
+            error: None,
+        };
         let p = channels_payload(
             true,
             ChannelFlags {
                 lan: true,
                 quick: true,
                 named: true,
+                tailscale: true,
             },
             9420,
             vec![
@@ -2917,9 +3731,12 @@ mod tests {
                 "http://10.0.0.2:9420/m".to_string(),
             ],
             &tun,
+            &ts,
+            // Task 7 §C3： tailscale 地址宣称需校验通过——本组断言地址在场，给 Verified
+            tailscale::Reachability::Verified,
         );
-        // 四键形状
-        for k in ["local", "lan", "quick", "named"] {
+        // 五键形状
+        for k in ["local", "lan", "quick", "named", "tailscale"] {
             assert!(p.get(k).is_some(), "channels 载荷缺 {k} 键");
         }
         // 本机常驻：running = 监听存活，address = 回环直达
@@ -2941,6 +3758,15 @@ mod tests {
         assert_eq!(p["named"]["address"], serde_json::Value::Null);
         assert_eq!(p["named"]["error"], "cloudflared 启动失败");
         assert_eq!(p["named"]["running"], false);
+        // tailscale（§C1）：与隧道通道同形，四件套齐备；§C3 追加 reach + state
+        assert_eq!(p["tailscale"]["enabled"], true);
+        assert_eq!(p["tailscale"]["running"], true);
+        assert_eq!(
+            p["tailscale"]["address"],
+            "https://jarvismac-mini.example-tailnet.ts.net/m"
+        );
+        assert_eq!(p["tailscale"]["error"], serde_json::Value::Null);
+        assert_eq!(p["tailscale"]["reach"]["state"], "verified");
 
         // 监听关着：local/lan running 全 false（本机/局域网随总开关停）
         let p = channels_payload(
@@ -2952,6 +3778,9 @@ mod tests {
             9420,
             vec!["http://192.168.1.5:9420/m".to_string()],
             &TunnelStatus::default(),
+            &ChannelStatus::default(),
+            // 校验态与「监听关着」场景无关（通道无关）：给 Verified 隔离变量
+            tailscale::Reachability::Verified,
         );
         assert_eq!(p["local"]["running"], false);
         assert_eq!(
@@ -2959,6 +3788,17 @@ mod tests {
             "lan.running = 监听存活 ∧ 开关，缺一不可"
         );
         assert_eq!(p["lan"]["enabled"], true, "enabled 只看开关位");
+        // tailscale 运行态只看自己的快照，不随监听存活翻假（快照由轮询现算）
+        assert_eq!(
+            p["tailscale"]["enabled"], false,
+            "enabled 只看开关位（本组开关全关）"
+        );
+        assert_eq!(p["tailscale"]["running"], false);
+        assert_eq!(
+            p["tailscale"]["address"],
+            serde_json::Value::Null,
+            "默认快照（未运行）不宣称地址"
+        );
     }
 
     /// 评审 Minor 3 专测（A6 消费契约防线）：stop_channel 的快照复位与 stderr
@@ -2986,6 +3826,8 @@ mod tests {
             9420,
             vec![],
             &tun,
+            &tunnel::ChannelStatus::default(),
+            tailscale::Reachability::Verified, // 本测试只盯双门，校验门给放行态隔离变量
         );
         assert_eq!(p["quick"]["running"], false);
         assert_eq!(
@@ -3012,11 +3854,118 @@ mod tests {
             9420,
             vec![],
             &tun,
+            &tunnel::ChannelStatus::default(),
+            tailscale::Reachability::Verified,
         );
         assert_eq!(
             p["quick"]["address"], "https://fresh.trycloudflare.com/m",
             "running=true 的活通道地址宣称不受门影响"
         );
+    }
+
+    /// §C3 核心断言（载荷级，Task 7 Step 4）：**未验证通过时，载荷里不得出现可用地址**；
+    /// 快照本身干净时 error = 带**预期时长**的「记录尚未发布」口径（W-B 分档，见 channels_payload）
+    /// （A2 实测：记录发布要 5–6 分钟，用户在这期间唯一感受是"连不上"，必须告知正常）；
+    /// Failed（60s 重验「先通后不通」）同门撤下地址，**reason 直接透出**（可排查的成因
+    /// 不得被一句笼统的「尚未生效」抹掉）。对照：Verified 才放行地址。
+    /// 注：TS_SNAPSHOT / REACHABILITY 是跨模块全局（归 tailscale.rs 的 TEST_LOCK 管，
+    /// mod.rs 测试不持该锁）——快照与校验态按本文件形状契约测试的既有先例**就地构造**
+    /// 直传参数，断言面与简报 Step 4 一致，且不给并发测试引入全局竞态
+    #[test]
+    fn channels_payload_hides_address_until_reachability_verified() {
+        use tunnel::{ChannelStatus, TunnelStatus};
+        // 快照 running + url 就绪，但可达性仍是 Unverified → address 必须为 None
+        let ts = ChannelStatus {
+            running: true,
+            url: Some("https://a.ts.net/m".into()),
+            error: None,
+        };
+        let p = channels_payload(
+            true,
+            ChannelFlags {
+                tailscale: true,
+                ..Default::default()
+            },
+            9420,
+            vec![],
+            &TunnelStatus::default(),
+            &ts,
+            tailscale::Reachability::Unverified,
+        );
+        assert!(p["tailscale"]["address"].is_null(), "未验证不得报可用地址");
+        assert_eq!(
+            p["tailscale"]["error"],
+            tailscale::RECORD_PENDING_HINT,
+            "未验证 = 「记录尚未发布」的正常窗口，文案必须带预期时长（实测约 5 分钟）"
+        );
+        assert!(
+            p["tailscale"]["error"].as_str().unwrap().contains("分钟"),
+            "预期时长必须出现在用户可见文案里"
+        );
+        assert!(
+            p["tailscale"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("5–6 分钟"),
+            "首开档必须给出实测区间（5–6 分钟；W-B 前写的是「5 分钟」）"
+        );
+        assert_eq!(p["tailscale"]["reach"]["state"], "unverified");
+
+        // 对照：Verified 才放行地址（三门放行态）
+        let p = channels_payload(
+            true,
+            ChannelFlags {
+                tailscale: true,
+                ..Default::default()
+            },
+            9420,
+            vec![],
+            &TunnelStatus::default(),
+            &ts,
+            tailscale::Reachability::Verified,
+        );
+        assert_eq!(p["tailscale"]["address"], "https://a.ts.net/m");
+        assert_eq!(p["tailscale"]["error"], serde_json::Value::Null);
+        assert_eq!(p["tailscale"]["reach"]["state"], "verified");
+
+        // 先通后不通（60s 重验转 Failed）：地址随之撤下，reason 随 reach 透出
+        let p = channels_payload(
+            true,
+            ChannelFlags {
+                tailscale: true,
+                ..Default::default()
+            },
+            9420,
+            vec![],
+            &TunnelStatus::default(),
+            &ts,
+            tailscale::Reachability::Failed {
+                reason: "公网解析不到该地址".into(),
+            },
+        );
+        assert!(
+            p["tailscale"]["address"].is_null(),
+            "转 Failed 后地址必须撤下"
+        );
+        assert_eq!(
+            p["tailscale"]["error"], "公网解析不到该地址",
+            "Failed 的成因必须直接透出（不再被笼统的「尚未生效」盖住）"
+        );
+        assert_eq!(p["tailscale"]["reach"]["state"], "failed");
+        assert_eq!(p["tailscale"]["reach"]["reason"], "公网解析不到该地址");
+    }
+
+    /// 契约守卫（§C1，与 production_state_home_source_is_wired_to_real_home 同纪律）：
+    /// 生产装配的 tailscale 快照源必须真的可调用（不是占位闭包）。
+    /// 防「端点测试自注入真值 → 掩盖生产漏接」这一类缺陷。
+    /// 零污染：ts_snapshot 只克隆静态默认值（不触 CLI、不触网络、不触 ~/.mam）
+    #[test]
+    fn production_tailscale_source_is_wired() {
+        // 只断言可调用且不 panic；不绑定真机、不触网络
+        let s = crate::remote::tailscale::ts_snapshot();
+        let _ = s.running; // 形状可用即可
+        let _ = s.url;
+        let _ = s.error;
     }
 }
 

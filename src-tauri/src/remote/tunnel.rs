@@ -99,18 +99,52 @@ fn download_candidates(official: &str) -> Vec<String> {
     out
 }
 
-/// sha256 完整性校验（纯函数）：hex 小写比对——匹配 Ok(())，不符 Err（该候选弃用）
-fn verify_sha256(bytes: &[u8], expected: &str) -> Result<(), String> {
+/// sha256 比对单点（纯函数）：hex 小写比对——匹配 Ok(())，不符 Err。
+/// 切片路径与流式路径共用它，保证两条路径**判据完全一致**（B-M6）
+fn compare_sha256(actual_hex: &str, expected: &str) -> Result<(), String> {
+    if actual_hex == expected.to_ascii_lowercase() {
+        Ok(())
+    } else {
+        Err(format!(
+            "sha256 校验不符（期望 {expected}，实际 {actual_hex}）"
+        ))
+    }
+}
+
+/// sha256 完整性校验（纯函数）：hex 小写比对——匹配 Ok(())，不符 Err（该候选弃用）。
+/// pub(crate)：tailscale 向导（§C2）的安装包校验复用本单点，**不新写第二套校验**
+pub(crate) fn verify_sha256(bytes: &[u8], expected: &str) -> Result<(), String> {
     use sha2::{Digest, Sha256};
     let hex: String = Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
-    if hex == expected.to_ascii_lowercase() {
-        Ok(())
-    } else {
-        Err(format!("sha256 校验不符（期望 {expected}，实际 {hex}）"))
+    compare_sha256(&hex, expected)
+}
+
+/// sha256 完整性校验（**流式**，B-M6）：与 [`verify_sha256`] 同一比对口径，但不把整包读进
+/// 内存——Tailscale 安装包（.pkg/.msi 数十 MB）在每次向导探测时都要校验一次，旧实现
+/// `std::fs::read` 整读一次、download 步又整读一次（白占内存与 IO）。
+/// 分块 64 KiB 读取；读取失败如实 Err（不可信，不得当成「校验通过」）
+pub(crate) fn verify_sha256_file(path: &Path, expected: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("打开文件失败: {e}"))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| format!("读取文件失败: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
     }
+    let hex: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    compare_sha256(&hex, expected)
 }
 
 /// 下载编排内核（纯编排，fetch_one 注入——生产实现才碰网络）：按候选序尝试
@@ -225,38 +259,54 @@ pub fn ensure_with(bin: &Path, dl: Downloader) -> Result<PathBuf, String> {
     }
 }
 
-/// 生产下载器（supervise 在 spawn_blocking 线程调用——同步外壳，单次 HTTP 才
-/// block_on，阻塞线程无 runtime 限制）。reqwest rustls + system-proxy（读 Windows/
-/// macOS 系统代理——此前 default-features=false 把该默认特性关掉导致直连
-/// github.com 失败的根因修复）+ connect 15s / 总 600s 超时；候选序尝试
-/// （官方 + 实测存活镜像）逐个 sha256 校验，通过才落盘 dest。
+/// 通用下载器（单 URL → 落盘 dest；§C2 tailscale 安装包等复用）：沿用生产 HTTP
+/// 客户端口径——reqwest rustls + system-proxy（读 Windows/macOS 系统代理）+
+/// connect 15s / 总 600s 超时（大文件容忍慢网、杜绝永久挂起），错误口径与原
+/// download_to 内联实现一致。**只管传输不管校验**——sha256 校验由调用方收口
+/// （cloudflared 路径见 try_download，tailscale 路径见 run_step("download")）。
 /// 仅生产路径调用，测试零网络红线不触碰本函数
+pub(crate) fn download_url_to(url: &str, dest: &Path) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(600))
+        .build()
+        .map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
+    let bytes = tauri::async_runtime::block_on(async {
+        client
+            .get(url)
+            .send()
+            .await
+            .map_err(|e| format!("下载失败: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("下载失败: {e}"))?
+            .bytes()
+            .await
+            .map_err(|e| format!("下载中断: {e}"))
+    })?;
+    if let Some(dir) = dest.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("建目录失败: {e}"))?;
+    }
+    std::fs::write(dest, &bytes).map_err(|e| format!("写文件失败: {e}"))
+}
+
+/// 生产下载器（supervise 在 spawn_blocking 线程调用——同步外壳，单次 HTTP 才
+/// block_on，阻塞线程无 runtime 限制）。官方 + 实测存活镜像的候选序尝试：
+/// 每个候选经 [`download_url_to`] 取回字节（借 scratch 落点，读回即删——不用 dest
+/// 本身，保证全部候选失败时 dest 不落半截数据）逐个 sha256 校验，通过才经
+/// try_download 落盘 dest。仅生产路径调用，测试零网络红线不触碰本函数
 pub fn download_to(dest: &Path) -> Result<(), String> {
     let official = download_url_for()?;
     let expected = expected_sha256(asset_name())?;
     let candidates = download_candidates(&official);
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(600)) // 60MB 级二进制容忍慢网、杜绝永久挂起
-        .build()
-        .map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
     try_download(
         &candidates,
         expected,
         |url| {
-            tauri::async_runtime::block_on(async {
-                let bytes = client
-                    .get(url)
-                    .send()
-                    .await
-                    .map_err(|e| format!("下载失败: {e}"))?
-                    .error_for_status()
-                    .map_err(|e| format!("下载失败: {e}"))?
-                    .bytes()
-                    .await
-                    .map_err(|e| format!("下载中断: {e}"))?;
-                Ok(bytes.to_vec())
-            })
+            let scratch = dest.with_extension("download");
+            download_url_to(url, &scratch)?;
+            let r = std::fs::read(&scratch).map_err(|e| format!("读回下载文件失败: {e}"));
+            let _ = std::fs::remove_file(&scratch);
+            r
         },
         dest,
     )
@@ -267,7 +317,7 @@ pub fn download_to(dest: &Path) -> Result<(), String> {
 // ============================================================
 
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// 单通道运行态（M5 A5 双通道化）：running 由 snapshot() 现算（句柄存活，不落全局——
@@ -320,9 +370,6 @@ fn slot_live(h: &Option<TunnelHandle>) -> bool {
 struct TunnelHandle {
     stop: Arc<AtomicBool>,
     supervisor: tauri::async_runtime::JoinHandle<()>,
-    /// 当前 cloudflared 子进程 PID（supervise 每次 spawn 后写入；0 = 未 spawn/已退出）。
-    /// M5 实锤定通道（2026-09-18）：conn_owner 反查连接归属 PID 后与此对账
-    child_pid: Arc<AtomicU32>,
 }
 
 /// 每通道双槽位（M5 A5 安全关键）：quick / named 可同开，句柄互不共享——
@@ -427,7 +474,7 @@ pub fn start_channel(mode: &str, port: u16) {
             .map(|t| t.trim().is_empty())
             .unwrap_or(true)
     {
-        set_channel_snapshot(mode, |c| c.error = Some("命名隧道缺少 Tunnel Token".into()));
+        set_channel_snapshot(mode, |c| c.error = Some("自有域名缺少 Tunnel Token".into()));
         return;
     }
     let mut slots = TUNNELS.lock().unwrap();
@@ -442,41 +489,16 @@ pub fn start_channel(mode: &str, port: u16) {
     let stop = Arc::new(AtomicBool::new(false));
     let stop2 = stop.clone();
     let m = mode.to_string();
-    let child_pid = Arc::new(AtomicU32::new(0));
-    let pid_slot = child_pid.clone();
     let supervisor = tauri::async_runtime::spawn(async move {
-        supervise(m, port, stop2, pid_slot).await;
+        supervise(m, port, stop2).await;
     });
-    *slot = Some(TunnelHandle {
-        stop,
-        supervisor,
-        child_pid,
-    });
-}
-
-/// PID 账本（M5 实锤定通道）：各通道当前 cloudflared 子进程 PID → 通道。
-/// conn_owner 反查连接归属后与此对账；0 值槽位（未 spawn/已退出）不记账
-pub(crate) fn owned_channel_pids() -> Vec<(u32, &'static str)> {
-    let owned_from_slots = |quick: &Option<TunnelHandle>, named: &Option<TunnelHandle>| {
-        let mut out: Vec<(u32, &'static str)> = Vec::new();
-        for (h, kind) in [(quick, "quick"), (named, "named")] {
-            if let Some(h) = h {
-                let pid = h.child_pid.load(Ordering::Relaxed);
-                if pid != 0 {
-                    out.push((pid, kind));
-                }
-            }
-        }
-        out
-    };
-    let slots = TUNNELS.lock().unwrap();
-    owned_from_slots(&slots.quick, &slots.named)
+    *slot = Some(TunnelHandle { stop, supervisor });
 }
 
 /// 守护主循环（每通道独立运行一份）：确保二进制 → spawn → 监听 stderr(quick 解析地址)
 /// → wait → 退避重启。quick / named 各自 spawn 互不干扰，全部快照写入经
 /// set_channel_snapshot 落到**本通道**槽位，绝不触碰另一通道
-async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>, child_pid: Arc<AtomicU32>) {
+async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
     set_channel_snapshot(&mode, |c| {
         c.url = None;
         c.error = None;
@@ -524,11 +546,7 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>, child_pid: Ar
         cmd.stderr(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null());
         let mut child = match cmd.spawn() {
-            Ok(c) => {
-                // PID 记账（M5 实锤定通道）：conn_owner 反查连接归属与此对账
-                child_pid.store(c.id().unwrap_or(0), Ordering::Relaxed);
-                c
-            }
+            Ok(c) => c,
             Err(e) => {
                 set_channel_snapshot(&mode, |c| {
                     c.error = Some(format!("cloudflared 启动失败: {e}"))
@@ -567,7 +585,7 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>, child_pid: Ar
                             // 此处不另做停止标志检查（多一份需同步的标志拷贝，两处口径
                             // 易漂移）
                             set_channel_snapshot(&mode_for_stderr, |c| c.url = Some(u.clone()));
-                            // M5 P2-c：自动记忆最近一次解析成功的命名隧道地址（KV 持久，
+                            // M5 P2-c：自动记忆最近一次解析成功的自有域名地址（KV 持久，
                             // 隧道关着/未解析时设置页与豁免名单仍可用）。仅 named 记忆
                             // （quick 地址每次必变，记忆无意义）
                             if mode_for_stderr == KEY_CHANNEL_VALUE_NAMED {
@@ -592,8 +610,6 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>, child_pid: Ar
         if stop.load(Ordering::Relaxed) {
             break; // 主动停止不算失败
         }
-        // 进程已退出 → 清 PID 记账（账本只记存活子进程）
-        child_pid.store(0, Ordering::Relaxed);
         // 稳定运行 ≥60s 后的退出视为「新失败」重置计数——否则数周内三次偶发闪断
         // 就会累计到永久放弃（backoff 给的 3 次是**连续**失败语义，spec T1b）
         if started_at.elapsed() >= std::time::Duration::from_secs(60) {
@@ -627,8 +643,8 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>, child_pid: Ar
 ///    **不打印** https:// 横幅，M4 只认①导致快照 url 恒 None（设置页无地址显示，
 ///    且在 M5 豁免语义下演化为穿透，见 mod.rs 豁免名单内核注释）。
 /// cloudflare.com / cfargotunnel.com（Registered tunnel connection 行内嵌的
-/// 隧道域）一律排除。解析不到留 None——闸门侧对「运行中而 url 缺失」fail-closed
-/// （mod.rs `tunnel_hosts_from_status`），设置页提示「地址以 Cloudflare 面板为准」
+/// 隧道域）一律排除。解析不到留 None（via 装饰标注侧自动回落 lan），设置页提示
+/// 「地址以 Cloudflare 面板为准」
 pub fn parse_named_url(line: &str) -> Option<String> {
     if let Some(pos) = line.find("https://") {
         // 只取 origin（scheme 后到第一个 `/` 为止）——**剥掉一切路径**：cloudflared
@@ -738,7 +754,6 @@ mod tests {
             TunnelHandle {
                 stop: Arc::new(AtomicBool::new(false)),
                 supervisor,
-                child_pid: Arc::new(AtomicU32::new(0)),
             },
             rx,
         )

@@ -69,6 +69,51 @@ export async function fetchHost<T = HostPayload>(): Promise<T | null> {
   return r.json() as Promise<T>;
 }
 
+// ==== Task 10 §C5：通道能力装饰（带宽如实告知）====
+
+/** 通道能力载荷（GET /m/api/v1/channel，与 Rust `channel_info` 逐字段对应）：
+ *  via ∈ quick/named/tailscale/lan（Host 推断，可被伪造）；limited = 隧道受限；
+ *  estMbpsDown/Up = 服务端实测速率（下行客户端实收 / 上行服务端实收口径）。
+ *  **纯装饰**：允许不准，永不得进任何安全判定——只喂文件面板的带宽提示文案 */
+export interface ChannelInfo {
+  via: string;
+  limited: boolean;
+  estMbpsDown: number;
+  estMbpsUp: number;
+}
+
+/** 仅接受有限正数；其余（NaN / Infinity / 字符串非数 / 缺失）一律 0，由调用方以 `>0` 判可用。 */
+function finitePositive(v: unknown): number {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** 拉取通道能力（FilePanel 挂载时一次）。任何失败（403 设备失效 / 网络 / 载荷
+ *  异常）→ null：装饰能力静默降级为「无提示」，不阻塞面板（fetchHost 同口径） */
+export async function fetchChannel(): Promise<ChannelInfo | null> {
+  try {
+    const r = await fetch("/m/api/v1/channel");
+    if (!r.ok) return null;
+    const j = (await r.json()) as {
+      via?: unknown;
+      limited?: unknown;
+      est_mbps_down?: unknown;
+      est_mbps_up?: unknown;
+    };
+    if (typeof j.via !== "string" || typeof j.limited !== "boolean") return null;
+    return {
+      via: j.via,
+      limited: j.limited,
+      // 纵深防御：除 NaN/缺失外还要挡 Infinity（JSON 字面 `1e999` 会被解析为 Infinity，
+      // 而 `Infinity > 0` 为真 → 会算出"0.0 分钟"这种看似合理的假耗时）
+      estMbpsDown: finitePositive(j.est_mbps_down),
+      estMbpsUp: finitePositive(j.est_mbps_up),
+    };
+  } catch {
+    return null;
+  }
+}
+
 import type { UiConfig } from "./theme";
 
 // ==== 2026-10-05 UI 改版：远程端外观配置（spec §6.2）====
@@ -203,8 +248,17 @@ export type FilePayload =
   { kind: "image"; url: string; mime: string } | { kind: "text"; content: string; mime: string };
 
 /** 安全读取会话项目目录内的文件（/file）。越界 / 超限 / 不存在对外一律 403
- *  （后端探测面最小化，不可区分）；session_id 不在快照 → 404；网络异常 → status=null */
-export async function fetchFile(sessionId: string, filePath: string): Promise<FilePayload> {
+ *  （后端探测面最小化，不可区分）；session_id 不在快照 → 404；网络异常 → status=null。
+ *  onProgress（Task 10 §C5 新增第 3 参）：图片走分块流式读，按累计字节回调
+ *  （loaded, total）；total 取 content-length——axum/hyper 会隐式写入该头，
+ *  但隧道（Cloudflare Funnel / Tailscale Funnel）是否原样透传**未经真机确认**
+ *  （2026-10-07 登记：无真机隧道环境，唯一外部变量，待做）——拿不到就传 null，
+ *  UI 退化为只显示已传字节、不显示假百分比。文本分支走 json()，无进度回调 */
+export async function fetchFile(
+  sessionId: string,
+  filePath: string,
+  onProgress?: (loaded: number, total: number | null) => void
+): Promise<FilePayload> {
   const q = new URLSearchParams({ session_id: sessionId, path: filePath });
   let r: Response;
   try {
@@ -225,7 +279,24 @@ export async function fetchFile(sessionId: string, filePath: string): Promise<Fi
   }
   const mime = r.headers.get("content-type")?.split(";")[0]?.trim() ?? "";
   if (mime.startsWith("image/")) {
-    const blob = await r.blob();
+    // 下行进度：分块读 + 累计字节。total 取 content-length（axum/hyper 隐式写入，
+    // 隧道是否透传待真机确认——拿不到就传 null，不编百分比，见函数注释）
+    const total = Number(r.headers.get("content-length") ?? "") || null;
+    let loaded = 0;
+    const chunks: Uint8Array[] = [];
+    if (r.body && onProgress) {
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        loaded += value.byteLength;
+        onProgress(loaded, total);
+      }
+    }
+    const blob = chunks.length
+      ? new Blob(chunks as BlobPart[], { type: r.headers.get("content-type") ?? "" })
+      : await r.blob();
     return { kind: "image", url: URL.createObjectURL(blob), mime };
   }
   const j = (await r.json()) as { content: string; mime: string };
@@ -420,38 +491,74 @@ export async function sessionSend(
 /** 上传附件（2026-09-20）：原始字节 POST 到 /session-attachment——服务端落盘到
  *  **用户项目目录** .mam-attachments/<会话>/，返回绝对路径供消息内联标记
  *  （<image|file path>，文件池既有约定）引用。
+ *  **上行走 XHR 而非 fetch（Task 10 §C5）**：fetch 规范不暴露上传进度事件
+ *  （2026-10-07 全仓核查原零 XMLHttpRequest），大文件在 1–2 Mbps 受限通道上
+ *  动辄数分钟，零进度不可接受。`xhr.upload.onprogress` 必须**先于 send() 注册**
+ *  （顺序错收不到任何事件）。onProgress 是**第 4 参**——第 3 参是既有 signal
+ *  （插错位会被当成 signal，编译期不一定报错、运行时静默失效）。
+ *  signal 语义保留：已中止 → 不发请求直接拒绝；中止事件 → xhr.abort()。
  *  错误契约：403 → null（设备失效，与 fetchSendInfo 同口径）；404 →
  *  ApiError(404, "no_session"|"no_cwd")（composer 据后者禁用上传钮）；
  *  413 → ApiError(413, "too_large")；其余非 2xx → ApiError(status) */
 export async function uploadAttachment(
   sessionId: string,
   file: File,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onProgress?: (loaded: number, total: number) => void
 ): Promise<{ path: string; size: number } | null> {
+  if (signal?.aborted) {
+    throw new ApiError(null, "session-attachment 网络异常: AbortError（上传已取消）");
+  }
   const q = new URLSearchParams({ session_id: sessionId, name: file.name });
-  let r: Response;
-  try {
-    r = await fetch(`/m/api/v1/session-attachment?${q}`, {
-      method: "POST",
-      headers: { "content-type": "application/octet-stream" },
-      body: await file.arrayBuffer(),
-      signal,
-    });
-  } catch (e) {
-    throw new ApiError(null, `session-attachment 网络异常: ${String(e)}`);
-  }
-  if (r.status === 403) return null; // 设备失效 → 回配对页（fetchSendInfo 同口径）
-  if (!r.ok) {
-    let reason = `session-attachment ${r.status}`;
-    try {
-      const j = (await r.json()) as { error?: unknown };
-      if (typeof j?.error === "string") reason = j.error;
-    } catch {
-      /* 响应体非 JSON：保留默认 reason */
-    }
-    throw new ApiError(r.status, reason);
-  }
-  return (await r.json()) as { path: string; size: number };
+  return new Promise<{ path: string; size: number } | null>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `/m/api/v1/session-attachment?${q}`);
+    xhr.setRequestHeader("content-type", "application/octet-stream");
+    const onAbort = () => xhr.abort(); // 既有取消语义：上传中移除 chip = 中断上传
+    signal?.addEventListener("abort", onAbort, { once: true });
+    // 终态收尾：摘掉 abort 监听（removeEventListener 幂等；resolve/reject 对已
+    // 结算 promise 是 no-op，晚到的 onload/onabort 无需额外旗标）
+    const finish = () => signal?.removeEventListener("abort", onAbort);
+    // 上传进度（§C5）：先于 send() 注册——顺序错收不到事件
+    xhr.upload.onprogress = (e) => {
+      onProgress?.(e.loaded, e.total);
+    };
+    xhr.onload = () => {
+      finish();
+      if (xhr.status === 403) return resolve(null); // 设备失效 → 回配对页
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try {
+          resolve(JSON.parse(xhr.responseText) as { path: string; size: number });
+        } catch {
+          reject(new ApiError(xhr.status, `session-attachment ${xhr.status}`));
+        }
+        return;
+      }
+      // 非 2xx：错误码在响应体 error 字段（no_cwd / too_large 等），对齐 fetch 版
+      let reason = `session-attachment ${xhr.status}`;
+      try {
+        const j = JSON.parse(xhr.responseText) as { error?: unknown };
+        if (typeof j?.error === "string") reason = j.error;
+      } catch {
+        /* 响应体非 JSON：保留默认 reason */
+      }
+      reject(new ApiError(xhr.status, reason));
+    };
+    xhr.onerror = () => {
+      finish();
+      reject(
+        new ApiError(
+          null,
+          `session-attachment 网络异常: ${String(xhr.statusText || "network error")}`
+        )
+      );
+    };
+    xhr.onabort = () => {
+      finish();
+      reject(new ApiError(null, "session-attachment 网络异常: AbortError（上传已取消）"));
+    };
+    xhr.send(file); // File 直传——XHR 原生跟踪 Blob 的上传字节
+  });
 }
 
 /** 排队条目视图（GET /session-queue 的 items 元素，camelCase 契约）：position =

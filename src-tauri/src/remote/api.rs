@@ -162,6 +162,23 @@ pub struct PairPinBody {
     pub name: Option<String>,
 }
 
+/// via 装饰标注（Host → 通道名）：**/pair/pin 与 /channel 两条端点共用本单点**——
+/// 「两处口径同款」由结构保证，不再靠注释纪律（与评审 A-I2 的分表纪律同向）。
+///
+/// **纯装饰、读请求头、可被伪造、允许不准**：只按域名推断，**不得用于任何安全判定**
+/// （不变量 G1 推论③）；限速分桶也不得消费它——那是声明式通道表（`gate::RateBucketChannel`）
+/// 的职责（评审 A-I2）。连接归属判据已随零豁免一并退役（2026-10-06 §G2）。
+/// 名单哨兵 None（快照错误态 / 运行中而域名缺失）→ 保守回落 "lan"，绝不判隧道通道/本机。
+/// §C1：第三路 = tailscale 机器域名（classify_via 四值：quick/named/tailscale/lan）
+fn via_from_host(st: &RemoteState, host: &str) -> &'static str {
+    match (st.via_hosts_source)() {
+        None => "lan",
+        Some((quick_hosts, named_hosts, ts_hosts)) => {
+            super::gate::classify_via(host, &quick_hosts, &named_hosts, &ts_hosts)
+        }
+    }
+}
+
 /// POST /m/api/v1/pair/pin（M5 A3）：访问密码换设备 cookie——密码制唯一配对入口。
 /// 处理序（计划 §3.1）：① 限速 check（锁内查改）→ ② PIN 源读取 → ③ 校验 →
 /// ④ record_success + 设备上限门（PIN 正确**之后**判定——先验 PIN 再谈名额，不向前者
@@ -173,6 +190,10 @@ pub struct PairPinBody {
 /// - PIN 错 / 格式非法 → 记失败 + 401 `{"error":"invalid_pin","remaining": n}`
 ///   （n = 5 - 已错次数；移动端展示「还可尝试 N 次」是计划内预言机披露）；
 /// - 正确 → 200 `{"ok":true}` + Set-Cookie（upsert 生效 id，属性同既有 cookie 契约）。
+///
+/// `ConnectInfo` 的来源地址与请求头只用于**限速分桶键**与**落库来源**（§G5），
+/// **不参与任何放行判定**——鉴权只认设备凭据（不变量 G1：来源地址/请求头/进程归属
+/// 不得影响放行）。
 pub async fn pair_pin(
     State(st): State<Arc<RemoteState>>,
     ConnectInfo(addr): ConnectInfo<std::net::SocketAddr>,
@@ -180,17 +201,59 @@ pub async fn pair_pin(
     Json(req): Json<PairPinBody>,
 ) -> Response {
     use crate::remote::pin::RateDecision;
-    let ip = addr.ip().to_string();
+    // Host 取值**一次**：既供分桶键推导，也供下方 via 装饰标注消费
+    // （评审 A-M2：原先函数内算了两遍，第二处遮蔽第一处）
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    // 限速分桶键（§G5）：信任边界来自 `rate_bucket_channels_source`（**限速专用**的
+    // 声明式通道表，评审 A-I2——不再取展示侧的 via 名单）：只有已声明通道（Cloudflare
+    // quick / named）且该通道静态声明的权威头在场才按该头分桶；未声明的通道（如
+    // tailscale Funnel：无 CF 边缘，同名头可任意伪造）与一切不可证来源一律回落全局桶
+    // （结构性事实见 gate::rate_bucket_key / cloudflare_rate_channels）。
+    // **不是**鉴权判据——只进限速与审计。
+    let channels = (st.rate_bucket_channels_source)();
+    let key = super::gate::rate_bucket_key(addr.ip(), host, &headers, &channels);
+    // 展示/指纹用来源（评审 A-M3）与分桶键**分开**推导：可证 → 权威头值（§G5 要求
+    // 来源记录能区分公网来源）；不可证 → 真实 TCP 对端地址。**绝不落库分桶键**——
+    // 它可能是内部哨兵 GLOBAL_BUCKET（含 NUL，不是来源地址）
+    let origin = super::gate::display_origin(addr.ip(), host, &headers, &channels);
+    // 指纹输入 = **归一化来源**（评审 B 追加项）：原始 TCP 对端——稳定、不可伪造，且与
+    // §G5 改造前一致（隧道流量恒为本机对端）。**不得**用 origin（真实公网出口 IP）当指纹：
+    // 同一部手机在家 WiFi / 蜂窝 / 换地方会各建一行设备记录，白占设备名额（默认上限 10）
+    let origin_fingerprint = addr.ip().to_string();
     // 限速时钟走注入缝（测试可推进）；设备时间戳走真实时钟（gate 滑动 TTL 域，见 persist）
     let now = (st.now_source)();
-    // ① 限速过闸：锁定期内即使 PIN 正确也拒（429），不泄露任何 PIN 有效性信息。
+    // ① 分来源桶过闸：锁定期内即使 PIN 正确也拒（429），不泄露任何 PIN 有效性信息。
     // decision 先绑定出锁（评审 Minor 2）：MutexGuard 临时值随 let 语句结束即释放，
     // audit 与响应构建不持限速器锁（对齐"audit 不持锁"风格）
-    let decision = st.pin_limiter.lock().unwrap().check(&ip, now);
+    let decision = st.pin_limiter.lock().unwrap().check(&key, now);
     if let RateDecision::Locked { retry_after_secs } = decision {
         super::events::audit(
             "pair_pin_locked",
-            &format!("ip={ip} retry_after={retry_after_secs}s"),
+            &format!("bucket={key} retry_after={retry_after_secs}s"),
+        );
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({ "retryAfter": retry_after_secs })),
+        )
+            .into_response();
+    }
+    // ①b 全局桶过闸：只拦"多来源一起爆破"（分布式爆破单个来源限速挡不住）。
+    // 阈值 GLOBAL_MAX_FAILURES 远宽于分来源桶，且全局桶按 **FAILURE_WINDOW_MS 滑动窗口**
+    // 记账：单个来源在其分来源桶锁定期内不再记账 → 每窗口最多贡献 MAX_FAILURES 次，
+    // 阈值是它的 10 倍——单个捣乱者填不满它，因此伤不到别人（评审 A-I1：反向的
+    // "进程生命周期单调累计"曾让单来源 10 个周期≈100 分钟锁死所有人，勿退回）。
+    let g = st
+        .global_pin_limiter
+        .lock()
+        .unwrap()
+        .check(crate::remote::pin::GLOBAL_BUCKET, now);
+    if let RateDecision::Locked { retry_after_secs } = g {
+        super::events::audit(
+            "pair_pin_locked_global",
+            &format!("bucket={key} retry_after={retry_after_secs}s"),
         );
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -213,18 +276,27 @@ pub async fn pair_pin(
         // 记失败与读剩余次数在同一锁临界区（限速器锁内查改，契约如此）
         let remaining = {
             let mut limiter = st.pin_limiter.lock().unwrap();
-            limiter.record_failure(&ip, now);
-            limiter.remaining_attempts(&ip)
+            limiter.record_failure(&key, now);
+            limiter.remaining_attempts(&key, now)
         };
-        super::events::audit("pair_pin_wrong", &format!("ip={ip} remaining={remaining}"));
+        // 全局桶同记一笔（各自阈值独立；**两桶都按滑动窗口衰减**——见
+        // pin::FAILURE_WINDOW_MS，评审 A-I1：计数必须随时间漏掉，不能只进不出）
+        st.global_pin_limiter
+            .lock()
+            .unwrap()
+            .record_failure(crate::remote::pin::GLOBAL_BUCKET, now);
+        super::events::audit(
+            "pair_pin_wrong",
+            &format!("bucket={key} remaining={remaining}"),
+        );
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "invalid_pin", "remaining": remaining })),
         )
             .into_response();
     }
-    // ④ PIN 正确：清零该 IP 计数 → 设备上限门（沿用既有直通上限语义：403 + cap_full）
-    st.pin_limiter.lock().unwrap().record_success(&ip);
+    // ④ PIN 正确：清零该分来源桶 → 设备上限门（沿用既有直通上限语义：403 + cap_full）
+    st.pin_limiter.lock().unwrap().record_success(&key);
     let max = (st.max_devices_source)();
     let cap_full = st
         .store
@@ -237,24 +309,8 @@ pub async fn pair_pin(
         )
             .into_response();
     }
-    // via 判定（配对时刻），两级：
-    // ① PID 实锤优先（2026-09-18）：来连套接字归属 MAM 账本的 cloudflared 通道
-    //    → 直接定 quick/named（不依赖域名名单，编外/未知归属走②）；
-    // ② Host 判定：Host + 来源 IP 对照隧道快照域名；**None 哨兵**（名单不可信：
-    //    错误终态 / 运行中而域名缺失）→ 保守标 lan，绝不判本机。
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let via = match super::conn_owner::tunnel_channel_for_conn(addr.port()) {
-        Some(kind) => kind,
-        None => match (st.via_hosts_source)() {
-            None => "lan",
-            Some((quick_hosts, named_hosts)) => {
-                super::gate::classify_via(addr.ip(), host, &quick_hosts, &named_hosts)
-            }
-        },
-    };
+    // via 是**纯装饰**标注（设备花名册展示用）——判据与纪律见 [`via_from_host`]
+    let via = via_from_host(&st, host);
     // 设备名：自报 trim 收敛 40 字符（与 rename_device / 审批自报名同口径），空回落默认名
     let mut name: String = req
         .name
@@ -271,36 +327,55 @@ pub async fn pair_pin(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let device_id = super::random_hex_16();
     let paired_at = chrono::Utc::now().timestamp_millis();
-    super::events::audit("pair_pin_ok", &format!("via={via} ip={ip}"));
-    persist_and_cookie(&st, &device_id, &name, &ua, &ip, via, paired_at)
+    super::events::audit("pair_pin_ok", &format!("via={via} bucket={key}"));
+    // origin 只入设备指纹（ua|origin 的 upsert 去重键）与花名册展示：它是
+    // `gate::display_origin` 的产物（真实来源地址，绝不含内部哨兵），不得用于任何安全
+    // 判定（鉴权只认 cookie 设备 id，§G1）
+    persist_and_cookie(
+        &st,
+        &name,
+        &ua,
+        &origin,
+        &origin_fingerprint,
+        via,
+        paired_at,
+    )
 }
 
-/// 配对通过的公共落库 + 下发 cookie（M5 A3 起为 /pair/pin 专用；真实 ua/ip 入指纹，
-/// via 为配对时刻的分类结果）。
+/// 配对通过的公共落库 + 下发 cookie（M5 A3 起为 /pair/pin 专用；via 为配对时刻的分类结果）。
 /// cookie 下发生效 id（M5 A1 upsert 语义：命中旧行时必须下发旧行 id——若下发新生成 id，
-/// 该 cookie 指向不存在的行，重连浏览器永久 403）；
-/// 持久化失败不阻断配对（下次 gate 校验会失败）——回退请求侧生成 id
+/// 该 cookie 指向不存在的行，重连浏览器永久 403）；持久化失败不阻断配对（下次 gate 校验
+/// 会失败）——回退本函数生成的 id。
+/// 两个来源形参**必须分开**（评审 B 追加项）：`origin_display` 进 `origin_ip` 展示列
+/// （`gate::display_origin` 的产物，可证时是权威头里的真实公网客户端 IP），
+/// `origin_fingerprint` 是**归一化来源**（原始 TCP 对端 IP，稳定、不可伪造）只作指纹输入。
+/// 混用会让同一浏览器换网络重配各建一行、占满设备上限。`origin_display`（展示列）
+/// **不是**限速分桶键（后者可能是含 NUL 的内部哨兵）。
 fn persist_and_cookie(
     st: &Arc<RemoteState>,
-    device_id: &str,
     name: &str,
     ua: &str,
-    origin_ip: &str,
+    origin_display: &str,
+    origin_fingerprint: &str,
     via: &str,
     now: i64,
 ) -> Response {
+    // 新行 id 在本函数内生成（原在 pair_pin 内生成后透传——同一时刻、同一用途，
+    // 只用于 dao 新建路径与 persist 失败时的 cookie 回落；入参因此保持 7 个以内）
+    let device_id = super::random_hex_16();
     let dev = crate::remote::pairing::NewDevice {
         id: device_id.to_string(),
         name: name.to_string(),
         ua: ua.to_string(),
-        origin_ip: origin_ip.to_string(),
+        origin_ip: origin_display.to_string(),
         via: via.to_string(),
         paired_at: now,
     };
     let effective_id = st.store.with(|c| {
-        crate::remote::pairing::persist_device(c, &dev).unwrap_or_else(|_| device_id.to_string())
+        // 显式传指纹输入（**不是** origin_ip）：两个职责在 DAO 入口处分离
+        crate::remote::pairing::persist_device_with_fingerprint(c, &dev, origin_fingerprint)
+            .unwrap_or_else(|_| device_id.to_string())
     });
     (
         [(
@@ -350,6 +425,44 @@ fn ui_config_defaults() -> serde_json::Value {
         "radius": 12,
         "accent": "edge",
     })
+}
+
+/// 受限通道的实测速率（§C5，Mbps）：2026-10-06 手机蜂窝 → Funnel → 本机实测——
+/// 下行用**客户端实收**、上行用**服务端实收**。**不要**改成「服务端发出量÷耗时」
+/// 口径：那会高估约 66%（实测教训，设计说明书 §C5；本端点数值是如实告知的依据）
+const CHANNEL_EST_MBPS_DOWN: f64 = 1.8;
+const CHANNEL_EST_MBPS_UP: f64 = 0.8;
+
+/// GET /m/api/v1/channel（§C5）：通道能力装饰端点——告诉移动端当前走哪条通道、
+/// 带宽是否受限、按实测速率的预估吞吐。
+///
+/// **纯装饰（不变量 §G1 推论③，勿退化）**：读的是请求头 Host，**可被伪造**，
+/// **允许不准**，**永不得**用于任何安全判定——gate 鉴权、限速分桶、配对、审计
+/// 判据一律不得消费本端点的输出；它唯一的消费者是移动端文件面板的带宽提示文案。
+/// via 口径与 /pair/pin 同款（共用 [`via_from_host`] 单点）。
+/// no-store：通道可达性会变化，桌面改配置后刷新必须立刻拿到新值
+pub async fn channel_info(
+    State(st): State<Arc<RemoteState>>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let via = via_from_host(&st, host);
+    // 局域网直连不受限；quick/named/tailscale 三条隧道走外部中继（Funnel/边缘），
+    // 带宽受限——这是「受限」的唯一判定依据（装饰层，不影响任何安全路径）
+    let limited = via != "lan";
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({
+            "via": via,
+            "limited": limited,
+            "est_mbps_down": CHANNEL_EST_MBPS_DOWN,
+            "est_mbps_up": CHANNEL_EST_MBPS_UP,
+        })),
+    )
+        .into_response()
 }
 
 /// GET /m/api/v1/session-files?agent_type=&session_id=（M3 Task 8）

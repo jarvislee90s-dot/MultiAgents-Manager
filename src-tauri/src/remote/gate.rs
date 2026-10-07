@@ -1,5 +1,5 @@
 // gate 中间件：/m/api/* 全量过闸（403）——放行名单仅 /pair/pin（换 cookie 的入口）
-// + 本机免密豁免（M5 A3：回环 + 本地 Host 双条件，穿透测试锁定）
+// （2026-10-06 零豁免：回环豁免已整块删除，鉴权只认设备凭据，不变量 G1）
 // cookie 解析手写（不加 cookie 依赖）：mam_device=<hex>
 //
 // 路径语义（重要，勿按直觉改）：本中间件由 `server.rs` 作为 **nest("/m/api/v1") 的内层 layer**
@@ -14,7 +14,6 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use super::server::RemoteState;
@@ -31,46 +30,193 @@ pub fn normalize_host(host: &str) -> String {
         .to_string()
 }
 
-/// 本机访问判定（纯函数，**安全关键**，一处定义两处消费：gate 豁免 + via 判定）：
-/// 来源 IP 为回环 **且** Host 非空 **且** 归一化 Host 不在隧道域名名单。
-/// 双条件缺一不可：cloudflared 在本机把公网隧道流量从回环转发进来（源 IP=回环），
-/// 仅查回环会把全部隧道流量免密放进（穿透）；Host 命中任一隧道域名即视为非本地。
-/// 空 Host 头按非本地处理（fail closed——正常 HTTP/1.1 客户端必带 Host，缺失即异常流量）。
-pub fn is_local_access(source_ip: IpAddr, host: &str, tunnel_hosts: &[String]) -> bool {
-    if host.trim().is_empty() {
-        return false; // 空 Host：fail closed
-    }
-    let normalized = normalize_host(host);
-    source_ip.is_loopback() && !tunnel_hosts.iter().any(|t| normalize_host(t) == normalized)
-}
-
-/// via 判定（配对时刻，纯函数）：回环+非隧道 Host → "local"；Host==quick 域名 → "quick"；
-/// Host==named 域名 → "named"；其余 → "lan"。
-/// local 分支复用 is_local_access——「via=="local"」与 gate 豁免是同一判据的同义，
-/// 同一请求在两条路径（花名册徽标 / 门禁放行）不会分歧
+/// 配对来源标注（**纯装饰**，不变量 G1 推论③）：按 Host 命中哪条通道的域名名单，
+/// 返回 `quick` / `named` / `tailscale`（§C1 固定网址）；未命中一律 `lan`。
+///
+/// **不得用于任何安全判定**——它读的是请求头（Host），**可被伪造**；这里只为在设备
+/// 花名册上给用户一个"从哪条通道进来的"提示，允许不准确。
+/// 2026-10-06（设计说明书 §G3）：本函数不再接受来源地址、不再返回 `local`——本机
+/// 不是一条通道。历史数据里已存的 `local` 标注前端仍可渲染，但服务端不再产生。
+/// **tailscale 分支为何必须存在**（§C1 地图点名的坑）：`.ts.net` 机器域名不在
+/// quick/named 名单里，缺这个分支会把 Tailscale 通道的连接误标成「局域网」。
 pub fn classify_via(
-    source_ip: IpAddr,
     host: &str,
     quick_hosts: &[String],
     named_hosts: &[String],
+    tailscale_hosts: &[String],
 ) -> &'static str {
-    let mut union: Vec<String> = quick_hosts.to_vec();
-    union.extend(named_hosts.iter().cloned());
-    if is_local_access(source_ip, host, &union) {
-        "local"
-    } else if quick_hosts
-        .iter()
-        .any(|t| normalize_host(t) == normalize_host(host))
-    {
+    let h = normalize_host(host);
+    if h.is_empty() {
+        return "lan";
+    }
+    if quick_hosts.iter().any(|t| normalize_host(t) == h) {
         "quick"
-    } else if named_hosts
-        .iter()
-        .any(|t| normalize_host(t) == normalize_host(host))
-    {
+    } else if named_hosts.iter().any(|t| normalize_host(t) == h) {
         "named"
+    } else if tailscale_hosts.iter().any(|t| normalize_host(t) == h) {
+        "tailscale"
     } else {
         "lan"
     }
+}
+
+/// Cloudflare 系通道的权威来源头（**实测唯一可信**，2026-10-06 经 quick tunnel 回显
+/// 全部请求头）：伪造它 → Cloudflare 边缘直接 403，整个请求被拒（比"覆盖"更强）。
+/// - `X-Forwarded-For`：真实值被**追加在后**（`伪造值,真实值`），前缀可注入 → 不可裸信；
+/// - `True-Client-IP`：**原样透传**，可伪造 → 绝不可采信；
+/// - `X-Real-IP`：被边缘丢弃。
+pub const CF_AUTHORITATIVE_HEADER: &str = "cf-connecting-ip";
+
+/// 限速信任通道的**声明项**（评审 A-I2 确立的结构性单一声明处）：一条通道 =
+/// 通道名 + 该通道**已登记域名** + 该通道**静态声明的权威来源头**。
+///
+/// 不变量：**未出现在声明表里的通道一律回落全局桶**——这是结构事实而非注释纪律：
+/// [`rate_bucket_key`] 只能取声明表里写明的头，取不到（无声明 / Host 不命中 / 头缺失）
+/// 即 fail-closed 回落。新通道接入必须显式新增声明**并附实测证据**（如"伪造该头被
+/// 边缘拒绝"），注释纪律不再承担这条。
+#[derive(Debug, PartialEq, Eq)]
+pub struct RateBucketChannel {
+    /// 通道名（审计与测试断言用；生产 = `quick` / `named`）
+    pub name: &'static str,
+    /// 该通道已登记域名（比较前经 [`normalize_host`] 归一）
+    pub hosts: Vec<String>,
+    /// 该通道的权威来源头（小写头名）
+    pub authoritative_header: &'static str,
+}
+
+impl RateBucketChannel {
+    /// Cloudflare 系通道声明（**唯一构造入口**：权威头在此钉死为实测背书的
+    /// [`CF_AUTHORITATIVE_HEADER`]，调用方无法"顺手"换成别的头）
+    pub fn cloudflare(name: &'static str, hosts: Vec<String>) -> Self {
+        Self {
+            name,
+            hosts,
+            authoritative_header: CF_AUTHORITATIVE_HEADER,
+        }
+    }
+
+    /// Host 是否命中本通道（归一后比较；空 Host 恒不命中）
+    fn matches_host(&self, normalized_host: &str) -> bool {
+        !normalized_host.is_empty()
+            && self
+                .hosts
+                .iter()
+                .any(|t| normalize_host(t) == normalized_host)
+    }
+}
+
+/// Cloudflare 两路（临时隧道 / 自有域名）的声明表（**生产唯一构造点**）：本仓库只有
+/// 这两条通道被实测背书。tailscale（§C1 第三路）**刻意不进表**——Funnel 没有
+/// Cloudflare 边缘，同名头在其上可被任意伪造（旧实现在 api.rs 用特例注释排除它，
+/// 现在由「未声明 ⇒ 回落全局桶」结构性承担，特例注释一并删除）。
+pub fn cloudflare_rate_channels(quick: Vec<String>, named: Vec<String>) -> Vec<RateBucketChannel> {
+    vec![
+        RateBucketChannel::cloudflare("quick", quick),
+        RateBucketChannel::cloudflare("named", named),
+    ]
+}
+
+/// 限速信任声明源（`RemoteState` 字段类型）：每次请求现算声明表（快照可变）；
+/// 空表 = 无任何通道被信任 → 回环来源一律全局桶（fail-closed）。
+pub type RateBucketChannelsSource = dyn Fn() -> Vec<RateBucketChannel> + Send + Sync;
+
+/// 权威来源取值（信任判定的**唯一实现点**，私有）：Host 命中**已声明**通道 **且**
+/// 该通道声明的权威头在场、可转 str、trim 后非空 → Some(值)；否则 None（fail-closed）。
+///
+/// **"Host 命中"能证明什么（如实口径，2026-10-07 修订）**——原注释写"等价于确实经它
+/// 进来"，**只对真的过了 Cloudflare 边缘的流量成立**：
+/// ① 过边缘的流量：伪造 Host 会被边缘直接 403（2026-10-06 同日实测两次），故对这种流量
+///    "Host 命中该通道已登记域名"确实等价于"确实经它进来"（那是**闭源边缘行为**，证据
+///    台账已注明"不得作为设计依赖"，本注释同样不把它当保证）；
+/// ② **同机转发不受这条保护**：同机反向代理（或任何能触达回环端口的转发）可以**同时**
+///    伪造 `Host`（填成登记域名）与 `CF-Connecting-IP`（填成任意值）⇒ 攻击者**自选限速
+///    分桶**。"Host 命中"因此**不等于**"经边缘进来"，本函数的结论只在①成立时可靠；
+/// ③ 影响**有界且只限分桶**：放行判定只看设备凭据（见本模块 [`gate`] 与不变量 §G1——
+///    任何请求头**进不了鉴权**，多一个头也改不了它）；失效的只是限速——每次失败仍记
+///    全局桶（`api::pair_pin` ③），于是单个攻击者的可用额度从「每来源 5 次 / 窗口」
+///    **退化为**「全局 50 次 / 窗口」（[`crate::remote::pin::MAX_FAILURES`] /
+///    `GLOBAL_MAX_FAILURES`，窗口同为 10 分钟）：4 位 PIN 全量 10⁴ 组合的最坏耗时从
+///    ≈2×10⁴ 分钟缩到 ≈2×10³ 分钟（同一比值：10 倍）；且单个伪造者能把全局桶填满 ⇒
+///    `/pair/pin` 对**所有人**锁 10 分钟（可按窗口循环重放）——配对入口的有界可用性
+///    代价，已配对设备的读写不经该桶、不受影响；
+/// ④ 为何**不**立刻加固成"回环来源一律不信 Host"：cloudflared / tailscaled 都是**本机
+///    进程**，隧道流量到达本地端口时 TCP 对端**恒为回环地址**（2026-10-06 实测；§G5
+///    问题陈述同源）——一刀切会让**真隧道流量也全落全局桶**，正好退回本设计要修的
+///    "隧道下所有配对尝试共用一个桶、陌生人几次输错就锁住所有人"。故这条 Host 检查
+///    本身就是该路径存在的理由；真修法需要**更强的来源证据**（例如让通道在本机侧注入
+///    一个只有它知道、别的本机转发者拿不到的共享密钥头——需先核实连接器是否提供该
+///    能力，属新的实现面与新的待验项），成本与风险须重新评估后由控制方裁决，**勿顺手改**；
+/// ⑤ 威胁模型缓和（为何可接受）：利用②**必须先能触达回环端口**（即已在机器上——那时
+///    配对 PIN 就显示在应用里），收益只是"限速分桶自选 + 有界的配对入口 DoS"。
+///
+/// 为何必须走声明表：权威头**按通道静态声明**，**不得**在运行时按请求内容推断
+/// "该信哪个头"。
+fn declared_public_source<'a>(
+    host: &str,
+    headers: &'a axum::http::HeaderMap,
+    channels: &[RateBucketChannel],
+) -> Option<&'a str> {
+    let normalized = normalize_host(host);
+    let ch = channels.iter().find(|c| c.matches_host(&normalized))?;
+    headers
+        .get(ch.authoritative_header)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+/// 配对限速的**分桶键**推导（纯函数，安全关键）：按来源「可证性」分档，
+/// **不可证即 fail-closed**（设计说明书 §G5；信任边界由**声明表**给定，评审 A-I2）。
+///
+/// 分档规则：
+/// 1. 来源**非回环** → 直接用来源地址。真实且不可伪造，覆盖局域网与一切直连来源；
+/// 2. 来源**回环**（流量经本机连接器进来）→ 只有**同时**满足「`Host` 命中声明表里某条
+///    通道的已登记域名」**且**「该通道声明的权威头在场」时，才用该头；
+/// 3. 其余一切情况（含**未声明的通道**、**直连域名 + 同机反代**、声明表为空）→
+///    **回落全局桶**。宁可更严，**绝不**回落成"每请求一个新桶"（那等于取消限速）。
+///
+/// **不得用于放行判定**——它只进限速与审计（不变量 §G1 推论③的同源纪律）。
+/// 它可能返回内部哨兵 [`crate::remote::pin::GLOBAL_BUCKET`]，故**不得**写进设备指纹 /
+/// 花名册（那是 [`display_origin`] 的职责，评审 A-M3）。
+pub fn rate_bucket_key(
+    source: std::net::IpAddr,
+    host: &str,
+    headers: &axum::http::HeaderMap,
+    channels: &[RateBucketChannel],
+) -> String {
+    // 档 1：非回环来源，真实不可伪造
+    if !source.is_loopback() {
+        return source.to_string();
+    }
+    // 档 2 / 3：回环来源需 Host 命中已声明通道 + 该通道权威头在场；否则全局桶
+    declared_public_source(host, headers, channels)
+        .map(str::to_string)
+        .unwrap_or_else(|| crate::remote::pin::GLOBAL_BUCKET.to_string())
+}
+
+/// 展示 / 指纹用的**来源**（评审 A-M3；§G5「来源记录必须能区分公网来源」）：
+/// 与 [`rate_bucket_key`] 共用同一套信任判定（单一实现点 [`declared_public_source`]），
+/// 但**不可证时回落真实 TCP 对端地址**（回环即 `127.0.0.1`）而非内部哨兵——
+/// 写进 `remote_devices.origin_ip` 的值必须是来源地址，**绝不含 NUL 哨兵**。
+///
+/// 两者**不得混用**：分桶键可以含哨兵（限速内部态），展示来源不行。
+/// **本函数值不参与设备指纹**（评审 B 追加项把两个职责分开）：它只进
+/// `remote_devices.origin_ip` 展示列（花名册/审计看得到真实来源）；指纹输入由调用方
+/// 显式给定——生产配对路径传**原始 TCP 对端**（`persist_device_with_fingerprint` 的
+/// `fingerprint_origin`），故"同一浏览器换网络重新配对"是覆盖原行、不新增、不占名额
+/// （分离理由见 `pairing::persist_device_with_fingerprint` 文档）。
+pub fn display_origin(
+    source: std::net::IpAddr,
+    host: &str,
+    headers: &axum::http::HeaderMap,
+    channels: &[RateBucketChannel],
+) -> String {
+    if !source.is_loopback() {
+        return source.to_string();
+    }
+    declared_public_source(host, headers, channels)
+        .map(str::to_string)
+        .unwrap_or_else(|| source.to_string())
 }
 
 /// 设备 cookie 名（唯一来源：此处解析与 api::pair_pin 下发都引用它，避免两处字面量漂移）
@@ -90,63 +236,33 @@ pub fn extract_device(headers: &axum::http::HeaderMap) -> Option<String> {
     (!v.is_empty()).then(|| v.to_string())
 }
 
-/// 门禁：/pair/pin 放行（PIN 即凭据）+ 本机免密豁免；其余请求必须带有效设备 cookie，
-/// 否则 403。路径为 nest 剥前缀后的相对路径（见文件头注释），放行名单是 `"/pair/pin"`
+/// 门禁：`/pair/pin` 放行（PIN 即凭据）+ 其余请求必须带有效设备凭据，否则 403。
+///
+/// **不变量 G1（2026-10-06 零豁免，勿退化）**：任何请求头、来源地址、进程归属
+/// **不得参与鉴权判定**。判据只能来自服务端自身状态——**本中间件只查设备表**
+/// （配对入口另有服务端侧的速率限制，属 `pin` 模块，不来自请求数据）。
+/// 历史上曾有一条「回环 + Host 不在隧道名单 → 免密」的本机豁免：它以**黑名单**
+/// 为判据（fail-open），且在 macOS 上没有第二道防线——任何原样透传 Host 的入站
+/// 通道都能把它打成免密全读写。该豁免已整块删除；**新增任何通道不需要在此处
+/// 新增代码、配置或名单**。
+///
+/// 路径语义（重要，勿按直觉改）：本中间件由 `server.rs` 作为 **nest("/m/api/v1")
+/// 的内层 layer** 挂载，axum 的 nest 会**剥掉前缀**——这里 `req.uri().path()` 看到的是
+/// `/pair/pin`、`/sessions`、`/nope`，而**不是** `/m/api/v1/pair/pin`。放行名单必须用
+/// 相对路径，写成绝对路径会导致 pair 被 403。
 pub async fn gate(State(state): State<Arc<RemoteState>>, req: Request, next: Next) -> Response {
-    let path = req.uri().path();
-    // M5 A3：放行名单收口为 /pair/pin **精确相等**（旧 /pair 直通与 /pair/* 审批名单随
-    // 密码制下线删除；/pair/pin/extra 等多余段不匹配，仍须过闸）
-    if path == "/pair/pin" {
+    if req.uri().path() == "/pair/pin" {
         return next.run(req).await; // PIN 即凭据的换 cookie 入口放行
-    }
-    // M5 A3 本机免密（**双条件**，穿透防线，is_local_access 一处定义）：
-    // 来源 IP 为回环 **且** Host 头非隧道域名——cloudflared 在本机把公网隧道流量从
-    // 回环转发进来（源 IP=回环），仅查回环会把全部隧道流量免密放进；Host 命中快照
-    // 隧道域名即按外部流量对待。命中 → 直接放行（本机免密访问全看板）。
-    // 源 IP 取 ConnectInfo（serve 以 into_make_service_with_connect_info 注入）；
-    // 提取不到（异常装配）按非本地处理；空 Host 头同样 fail closed（纯函数内判定）。
-    // **快照错误 = 不豁免（评审 Important 1，fail-closed）**：豁免的 Host 条件依赖
-    // 隧道域名名单，快照处于错误终态时无从判定 Host 是否隧道域名——tunnel_hosts_source
-    // 返回 None 哨兵，此处必须**完全跳过豁免**（回环 + 任意 Host 都不免费），代价仅
-    // 隧道错误态下本机也需配对一次。依赖说明：tunnel.rs 现状 error ⇒ 无存活 cloudflared
-    // （穿透面本应消失），但豁免判定**不押注**该不变量——快照错误一律收紧。
-    // 廉价前置（评审 Minor 5）：先判 `is_loopback()`，非回环流量不付快照锁 + 名单分配开销
-    if let Some(ci) = req
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-    {
-        let source_ip = ci.0.ip();
-        if source_ip.is_loopback() {
-            // PID 实锤优先（2026-09-18）：来连套接字归属 MAM 账本的 cloudflared
-            // 通道 → 必为隧道转发，**跳过豁免**落到下方设备 cookie 校验（域名名单
-            // 未知/漂移都不影响）；查不到（本机浏览器直连 / 表不可得 / macOS）→
-            // 回落域名名单判定
-            let pid_is_tunnel = super::conn_owner::tunnel_channel_for_conn(ci.0.port()).is_some();
-            if !pid_is_tunnel {
-                if let Some(tunnel_hosts) = (state.tunnel_hosts_source)() {
-                    let host = req
-                        .headers()
-                        .get(header::HOST)
-                        .and_then(|v| v.to_str().ok())
-                        .unwrap_or("");
-                    if is_local_access(source_ip, host, &tunnel_hosts) {
-                        return next.run(req).await; // 本机免密直达全看板
-                    }
-                }
-            }
-        }
     }
     let Some(device) = extract_device(req.headers()) else {
         return unauthorized();
     };
     let now = chrono::Utc::now().timestamp_millis();
-    // 有效判定与滑动续期合并进**同一个** with 闭包：`with` 持锁不可重入（嵌套必自锁），
-    // 分开两次调用不仅多付一次取锁 + SQLite 往返，两段之间还存在 revoke 插入的 TOCTOU 窗口
-    // （先判有效、后 touch 之间设备被吊销时，旧写法仍会 touch 已吊销设备）
+    // 有效判定与滑动续期合并进**同一个** with 闭包（`with` 持锁不可重入，且两段之间
+    // 存在 revoke 插入的 TOCTOU 窗口）
     let ok = state.store.with(|c| {
         let valid = crate::remote::pairing::device_valid(c, &device, now);
         if valid {
-            // 每次过闸刷新 last_seen（滑动 TTL）
             crate::remote::pairing::touch_device(c, &device, now);
         }
         valid
@@ -166,6 +282,7 @@ fn unauthorized() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
 
     /// Host 归一：小写 + 剥端口；空白 trim
     #[test]
@@ -176,60 +293,220 @@ mod tests {
         assert_eq!(normalize_host(""), "");
     }
 
-    /// 本机判定真值表（安全关键，逐分支锁定）：
-    /// 回环+本地 Host → 真；回环+隧道 Host → 假（穿透防线）；非回环 → 假；空 Host → 假
-    #[test]
-    fn is_local_access_truth_table() {
-        let tunnels = vec!["mam-test.trycloudflare.com".to_string()];
-        let lb: IpAddr = "127.0.0.1".parse().unwrap();
-        let ext: IpAddr = "10.0.0.5".parse().unwrap();
-        // 回环 + 非隧道 Host（带端口也归一匹配）
-        assert!(is_local_access(lb, "localhost:9420", &tunnels));
-        assert!(is_local_access(
-            "::1".parse().unwrap(),
-            "192.168.1.5",
-            &tunnels
-        ));
-        // 回环 + 隧道 Host → 假：cloudflared 本机回环转发的穿透防线（变异锚点：
-        // 去掉 is_local_access 的 Host 条件，本断言退化真，穿透测试必红）
-        assert!(!is_local_access(lb, "mam-test.trycloudflare.com", &tunnels));
-        // 非回环（真实局域网/公网设备）一律假，即使 Host 是本地的
-        assert!(!is_local_access(ext, "localhost:9420", &tunnels));
-        // 空 Host 头 fail closed
-        assert!(!is_local_access(lb, "", &tunnels));
-        // 隧道名单为空时回环 + 本地 Host 仍真（纯本机场景无隧道）
-        assert!(is_local_access(lb, "localhost", &[]));
-    }
-
-    /// via 四分支：回环+非隧道 → local；quick 域名 → quick；named 域名 → named；其余 → lan
+    /// via 四分支（装饰字段，§C1 起四值）：quick 命中 → quick；named 命中 → named；
+    /// tailscale 机器域名命中 → tailscale；其余（含空 Host）→ lan。
+    /// **不再有 local 分支**（本机不是通道，2026-10-06 §G3）。
     #[test]
     fn classify_via_four_branches() {
         let quick = vec!["q-test.trycloudflare.com".to_string()];
         let named = vec!["mam.example.com".to_string()];
-        let lb: IpAddr = "127.0.0.1".parse().unwrap();
-        let ext: IpAddr = "10.0.0.5".parse().unwrap();
-        assert_eq!(classify_via(lb, "localhost:9420", &quick, &named), "local");
+        let ts = vec!["JarvisMac-Mini.example-tailnet.ts.net".to_string()];
         assert_eq!(
-            classify_via(ext, "q-test.trycloudflare.com", &quick, &named),
-            "quick",
-            "Host==quick 域名 → quick（IP 是否回环不影响分支序）"
+            classify_via("q-test.trycloudflare.com", &quick, &named, &ts),
+            "quick"
         );
         assert_eq!(
-            classify_via(ext, "mam.example.com:443", &quick, &named),
+            classify_via("mam.example.com:443", &quick, &named, &ts),
             "named",
-            "Host 带端口归一后匹配 named"
+            "带端口归一后匹配"
         );
-        assert_eq!(classify_via(ext, "192.168.1.9:9420", &quick, &named), "lan");
         assert_eq!(
-            classify_via(ext, "", &quick, &named),
+            classify_via("jarvismac-mini.example-tailnet.ts.net", &quick, &named, &ts),
+            "tailscale",
+            "机器域名命中第四分支（大小写归一后匹配）"
+        );
+        assert_eq!(
+            classify_via("其他机器.example-tailnet.ts.net", &quick, &named, &ts),
+            "lan",
+            "同尾网的其他机器不在名单 → lan（只认登记过的本机名）"
+        );
+        assert_eq!(classify_via("192.168.1.9:9420", &quick, &named, &ts), "lan");
+        assert_eq!(
+            classify_via("", &quick, &named, &ts),
             "lan",
             "空 Host → lan"
         );
-        // 回环 + Host 命中 quick 名单 → quick 而非 local（穿透语义在 via 上同样成立：
-        // 名单内的隧道域名永不落 local 分支；名单外的域名对判定器而言即本地域）
         assert_eq!(
-            classify_via(lb, "q-test.trycloudflare.com:443", &quick, &named),
-            "quick"
+            classify_via("localhost:9420", &quick, &named, &ts),
+            "lan",
+            "本机形态不再是 local"
         );
+    }
+
+    /// 请求头夹具
+    fn headers(pairs: &[(&str, &str)]) -> axum::http::HeaderMap {
+        let mut h = axum::http::HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                axum::http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    /// 声明表夹具：走**生产同一构造点** `cloudflare_rate_channels`（防"测试声明的"
+    /// 与"生产声明的"漂移）
+    fn cf_channels(quick: &[&str], named: &[&str]) -> Vec<RateBucketChannel> {
+        cloudflare_rate_channels(
+            quick.iter().map(|s| s.to_string()).collect(),
+            named.iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    /// 分桶键真值表（安全关键，逐档锁定）：**声明表驱动的信任边界**（§G5，评审 A-I2）。
+    /// 实测依据（2026-10-06，经 quick tunnel 回显全部请求头）：伪造 `CF-Connecting-IP`
+    /// → 边缘 403；`X-Forwarded-For` 真实值被追加在后；`True-Client-IP` 原样透传
+    /// （可伪造）；`X-Real-IP` 被边缘丢弃。
+    #[test]
+    fn rate_bucket_key_truth_table() {
+        use crate::remote::pin::GLOBAL_BUCKET;
+        let ts_host = "jarvismac-mini.example-tailnet.ts.net";
+        let channels = cf_channels(&["mam-test.trycloudflare.com"], &["mam.example.com"]);
+        let lb: IpAddr = "127.0.0.1".parse().unwrap();
+        let lan: IpAddr = "192.168.1.9".parse().unwrap();
+        let cf = headers(&[("cf-connecting-ip", "1.2.3.4")]);
+
+        // ① 非回环 → 一律来源地址（真实不可伪造），与头、与声明表无关
+        assert_eq!(
+            rate_bucket_key(lan, "mam-test.trycloudflare.com", &cf, &channels),
+            "192.168.1.9"
+        );
+        assert_eq!(
+            rate_bucket_key(lan, "evil.example.com", &cf, &[]),
+            "192.168.1.9",
+            "非回环连空声明表都不影响（来源地址本身可证）"
+        );
+        // ② 回环 + 已声明通道 + 该通道声明的权威头 → 头值（quick / named 两路等价）
+        assert_eq!(
+            rate_bucket_key(lb, "mam-test.trycloudflare.com", &cf, &channels),
+            "1.2.3.4"
+        );
+        assert_eq!(
+            rate_bucket_key(lb, "mam.example.com:443", &cf, &channels),
+            "1.2.3.4",
+            "带端口归一后命中 named 声明"
+        );
+        // ③ **未声明的通道**（tailscale Funnel：无 CF 边缘背书，同名头可被任意伪造）
+        //    → 全局桶。变异锚点：把 tailscale 并进声明表、或改成"Host 不在名单也信头"，
+        //    本档必红（2026-10-06 实测：Funnel 上同名头可任意伪造）。
+        assert_eq!(
+            rate_bucket_key(lb, ts_host, &cf, &channels),
+            GLOBAL_BUCKET,
+            "未声明通道一律回落全局桶（结构性事实，不靠注释纪律）"
+        );
+        // ④ 声明命中但权威头缺失 / 空白 → 全局桶（fail-closed）
+        assert_eq!(
+            rate_bucket_key(lb, "mam-test.trycloudflare.com", &headers(&[]), &channels),
+            GLOBAL_BUCKET
+        );
+        assert_eq!(
+            rate_bucket_key(
+                lb,
+                "mam-test.trycloudflare.com",
+                &headers(&[("cf-connecting-ip", "   ")]),
+                &channels
+            ),
+            GLOBAL_BUCKET,
+            "空白头不采信"
+        );
+        // ⑤ 空声明表（快照不可信 / 未接线）→ 全局桶
+        assert_eq!(
+            rate_bucket_key(lb, "mam-test.trycloudflare.com", &cf, &[]),
+            GLOBAL_BUCKET
+        );
+        // ⑥ Host 不命中任何声明（含空 Host）→ 全局桶（直连域名 + 同机反代即此类）
+        assert_eq!(
+            rate_bucket_key(lb, "evil.example.com", &cf, &channels),
+            GLOBAL_BUCKET
+        );
+        assert_eq!(rate_bucket_key(lb, "", &cf, &channels), GLOBAL_BUCKET);
+        // ⑦ **绝不**采信可伪造的 True-Client-IP、**绝不**裸信 X-Forwarded-For：
+        //    声明表里没有它们 → 全局桶（勿"顺手支持一下"）
+        let bad = headers(&[
+            ("true-client-ip", "9.9.9.9"),
+            ("x-forwarded-for", "5.6.7.8"),
+        ]);
+        assert_eq!(
+            rate_bucket_key(lb, "mam-test.trycloudflare.com", &bad, &channels),
+            GLOBAL_BUCKET
+        );
+        // ⑧ 声明驱动（不是硬编码 cf-connecting-ip）：通道声明谁，才信谁——
+        //    证明"权威头按通道静态声明"这一结构真的生效
+        let custom = vec![RateBucketChannel {
+            name: "custom",
+            hosts: vec!["mam.internal".to_string()],
+            authoritative_header: "x-forwarded-for",
+        }];
+        assert_eq!(
+            rate_bucket_key(lb, "mam.internal", &bad, &custom),
+            "5.6.7.8",
+            "通道声明的权威头才被取用"
+        );
+    }
+
+    /// 生产声明表（`cloudflare_rate_channels`）恒为 quick / named 两路、权威头恒为实测
+    /// 背书的 `CF-Connecting-IP`——**这就是"通道→权威头"的唯一声明处**（评审 A-I2）：
+    /// 新通道接入必须显式改这里并附实测证据，未改即**结构性**回落全局桶。
+    #[test]
+    fn cloudflare_rate_channels_declare_only_measured_channels() {
+        let chans = cf_channels(&["q.trycloudflare.com"], &["mam.example.com"]);
+        assert_eq!(
+            chans.len(),
+            2,
+            "只有 Cloudflare 系两路进表（tailscale 不在其列）"
+        );
+        assert_eq!(chans[0].name, "quick");
+        assert_eq!(chans[0].hosts, vec!["q.trycloudflare.com".to_string()]);
+        assert_eq!(chans[1].name, "named");
+        for c in &chans {
+            assert_eq!(c.authoritative_header, CF_AUTHORITATIVE_HEADER);
+        }
+        assert_eq!(
+            CF_AUTHORITATIVE_HEADER, "cf-connecting-ip",
+            "实测唯一可信：伪造即被 Cloudflare 边缘 403"
+        );
+        // 域名清单为空也仍是两路声明（空名单 ⇒ 不命中任何 Host，fail-closed）
+        assert_eq!(cf_channels(&[], &[]).len(), 2);
+    }
+
+    /// 展示/指纹来源（评审 A-M3）：与分桶键**分开推导**——可证 → 权威头值
+    /// （§G5 要求"来源记录能区分公网来源"）；不可证 → **真实 TCP 对端地址**。
+    /// **永不含内部哨兵**（GLOBAL_BUCKET 含 NUL，写进 remote_devices.origin_ip 是内部
+    /// 状态外泄；它也不是来源地址）。
+    #[test]
+    fn display_origin_never_leaks_the_global_sentinel() {
+        use crate::remote::pin::GLOBAL_BUCKET;
+        let channels = cf_channels(&["mam-test.trycloudflare.com"], &[]);
+        let lb: IpAddr = "127.0.0.1".parse().unwrap();
+        let lan: IpAddr = "192.168.1.9".parse().unwrap();
+        let cf = headers(&[("cf-connecting-ip", "1.2.3.4")]);
+        // 可证（回环 + 已声明通道 + 权威头）→ 权威头值：来源记录恢复区分度（§G5）
+        assert_eq!(
+            display_origin(lb, "mam-test.trycloudflare.com", &cf, &channels),
+            "1.2.3.4"
+        );
+        // 非回环 → 对端地址（真实不可伪造，不看头）
+        assert_eq!(
+            display_origin(lan, "mam-test.trycloudflare.com", &cf, &channels),
+            "192.168.1.9"
+        );
+        // 不可证三形态 → 真实对端地址，且与分桶键（哨兵）**不同值**
+        for (host, hs, why) in [
+            ("mam-test.trycloudflare.com", headers(&[]), "权威头缺失"),
+            ("evil.example.com", cf.clone(), "Host 不命中声明"),
+            (
+                "jarvismac-mini.example-tailnet.ts.net",
+                cf.clone(),
+                "未声明通道",
+            ),
+        ] {
+            let bucket = rate_bucket_key(lb, host, &hs, &channels);
+            let shown = display_origin(lb, host, &hs, &channels);
+            assert_eq!(bucket, GLOBAL_BUCKET, "{why}：分桶键回落全局桶");
+            assert_eq!(shown, "127.0.0.1", "{why}：展示来源 = 真实对端地址");
+            assert_ne!(shown, GLOBAL_BUCKET, "{why}：展示来源不得是内部哨兵");
+            assert!(!shown.contains('\u{0}'), "{why}：展示来源绝不含 NUL");
+        }
     }
 }

@@ -63,6 +63,7 @@ import { CircleHelp, Plus } from "lucide-react";
 import {
   ApiError,
   fetchApproveOptions,
+  fetchChannel,
   fetchQueue,
   fetchSendInfo,
   fetchSessionQuestion,
@@ -72,9 +73,12 @@ import {
   sessionQuestionAnswer,
   sessionSend,
   uploadAttachment,
+  type ChannelInfo,
   type QueueItemView,
   type SendInfo,
 } from "./api";
+import { ChannelBwNote } from "./FilePanel";
+import { etaRemainingText, formatBytes, transferRateBps, type TransferSample } from "./board-logic";
 
 interface MessageComposerProps {
   /** 会话（本组件只消费 id；结构化类型，完整 Session 可直接传入） */
@@ -82,7 +86,9 @@ interface MessageComposerProps {
 }
 
 /** 待发附件条目（组件内态）：status=uploading → ready/failed；
- *  path = 服务端落盘后的绝对路径（仅 ready 有） */
+ *  path = 服务端落盘后的绝对路径（仅 ready 有）；
+ *  loaded/total = 上行进度（Task 10 §C5，仅 uploading 且收到过进度事件才有——
+ *  total 未知（事件未到/事件报 0）→ null，chip 只显示已传字节，不编假百分比） */
 type PendingAttachment = {
   id: string;
   name: string;
@@ -90,6 +96,10 @@ type PendingAttachment = {
   status: "uploading" | "ready" | "failed";
   path?: string;
   error?: string;
+  loaded?: number;
+  total?: number | null;
+  /** 瞬时速率估算（字节/秒；样本不足 → null——「预计剩余」文案的开关） */
+  rateBps?: number | null;
 };
 
 /** 回执条状态（与 SendResult 对应 + 网络层 ApiError 归入 failed；
@@ -226,8 +236,11 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   const [text, setText] = useState("");
   /** 输入框 ref：「修改」确认出队后把正文放回输入框时聚焦（移动端直接可改） */
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  /** 在途上传的中断器（id → controller）：上传中移除 chip 时中断 fetch */
+  /** 在途上传的中断器（id → controller）：上传中移除 chip 时中断传输（XHR abort） */
   const uploadCtrlsRef = useRef(new Map<string, AbortController>());
+  /** 上行速率估算的首样本（id → 样本）：进度回调里取样（非渲染期，purity 纪律），
+   *  供 chip「预计剩余」文案——Task 10 §C5 */
+  const uploadFirstSampleRef = useRef(new Map<string, TransferSample>());
   /** 隐式文件选择器 ref：「+」钮 click 转发 */
   const fileInputRef = useRef<HTMLInputElement>(null);
   /** 待发附件（2026-09-20）：uploading → ready（含落盘绝对路径）/ failed；
@@ -238,6 +251,20 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   const [attachHintOpen, setAttachHintOpen] = useState(false);
   /** 会话无项目目录（服务端 404 no_cwd 一次即知）：禁用上传钮（与 R5 禁用口径同源） */
   const [noCwd, setNoCwd] = useState(false);
+  // 通道能力（Task 10 §C5 带宽横幅，装饰）：挂载拉一次，任何失败静默 → 无横幅不
+  // 阻塞输入区（与 FilePanel 同一口径与端点）。纯装饰——读 Host 推断、可被伪造、
+  // 永不进任何安全判定（G1 推论③）；判据与文案由 FilePanel 导出的 ChannelBwNote
+  // 统一承担（复评 I-2：附件区也要出横幅，但绝不新造第二套文案）
+  const [channel, setChannel] = useState<ChannelInfo | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void fetchChannel().then((c) => {
+      if (alive) setChannel(c);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
   const [sending, setSending] = useState(false);
   // 插队/撤回进行中（与发送互斥，防连点）
   const [busy, setBusy] = useState(false);
@@ -744,12 +771,32 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         const ctrl = new AbortController();
         uploadCtrlsRef.current.set(id, ctrl);
         try {
-          const res = await uploadAttachment(session.id, f, ctrl.signal);
+          // §C5 上行进度：onProgress 是 uploadAttachment 的**第 4 参**（第 3 参是
+          // 既有 signal）。进度落 chip：已传字节 + 百分比（有 total 才有）+ 预估剩余
+          const res = await uploadAttachment(session.id, f, ctrl.signal, (loaded, total) => {
+            const atMs = Date.now();
+            const first = uploadFirstSampleRef.current.get(id) ?? { loaded, atMs };
+            uploadFirstSampleRef.current.set(id, first);
+            setAttachments((prev) =>
+              prev.map((a) =>
+                a.id === id
+                  ? {
+                      ...a,
+                      loaded,
+                      total: total > 0 ? total : null, // 事件报 0 = 未知，不编百分比
+                      rateBps: transferRateBps(first, { loaded, atMs }),
+                    }
+                  : a
+              )
+            );
+          });
+          uploadFirstSampleRef.current.delete(id);
           if (res === null) throw new ApiError(403, "设备已失效，请重新配对");
           setAttachments((prev) =>
             prev.map((a) => (a.id === id ? { ...a, status: "ready", path: res.path } : a))
           );
         } catch (e) {
+          uploadFirstSampleRef.current.delete(id);
           if (ctrl.signal.aborted) {
             // 用户取消：chip 已随 removeAttachment 移除，静默收尾
             setAttachments((prev) => prev.filter((a) => a.id !== id));
@@ -773,9 +820,10 @@ export default function MessageComposer({ session }: MessageComposerProps) {
   );
 
   const removeAttachment = useCallback((id: string) => {
-    // 上传中移除 = 取消：中断在途 fetch，防止白传到底（2026-09-20 用户反馈）
+    // 上传中移除 = 取消：中断在途传输（XHR abort），防止白传到底（2026-09-20 用户反馈）
     uploadCtrlsRef.current.get(id)?.abort();
     uploadCtrlsRef.current.delete(id);
+    uploadFirstSampleRef.current.delete(id);
     setAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
@@ -967,35 +1015,100 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           </p>
         </div>
       )}
-      {/* 待发附件 chips（2026-09-20）：上传中/就绪/失败三态，可单个移除 */}
+      {/* 待发附件 chips（2026-09-20）：上传中/就绪/失败三态，可单个移除。
+          上行进度（Task 10 §C5；复评 I-2 按线稿补齐进度条 + 口径说明行）：
+          线稿 .upl 画块三件套 = upl-head（文字进度）+ .pbar（进度条）+ .upl-meta
+          （口径说明），缺一即与线稿不一致（2026-10-07 用户裁决：以线稿为准）。
+          - 文字进度：收到过进度事件才追加——已传字节 + 百分比（有 total 才显示）
+            + 预估剩余（速率可估才显示）；
+          - 进度条：与百分比同条件（total 已知），类串照抄下行 FilePreview 的
+            .pbar 等价写法；**total 未知绝不渲染**（§C5 硬要求：不显示假百分比）；
+          - 口径行：只要还有附件在传就显示（线稿逐字），放在 chips 容器下方——
+            chip 是 rounded-full 胶囊，条与说明挤进去都看不清；
+          「上传中：{name}」保持独立文本节点（既有测试精确匹配 + 结构稳定），
+          进度细节在子 span；进度条是 chip 的兄弟节点（同在一个逐条包裹里） */}
       {attachments.length > 0 && (
-        <div className="mb-1 flex flex-wrap items-center gap-1.5" data-testid="attachment-chips">
-          {attachments.map((a) => (
-            <span
-              key={a.id}
-              data-testid={`attach-chip-${a.id}`}
-              className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
-                a.status === "failed"
-                  ? "bg-rose-500/10 text-rose-700 dark:bg-rose-400/10 dark:text-rose-400"
-                  : "bg-[var(--cb)] text-[var(--mut)]"
-              }`}
+        <div className="mb-1">
+          <div className="flex flex-wrap items-center gap-1.5" data-testid="attachment-chips">
+            {attachments.map((a) => {
+              const uploading = a.status === "uploading";
+              const eta = uploading
+                ? etaRemainingText(a.loaded ?? 0, a.total ?? null, a.rateBps ?? null)
+                : null;
+              // 百分比与进度条同条件：total 已知（== null = 隧道不透传 content-length
+              // 或事件报 0）→ 只显示已传字节，不编假百分比也不画条
+              const pct =
+                uploading && a.loaded !== undefined && a.total != null
+                  ? Math.min(100, Math.floor((a.loaded / a.total) * 100))
+                  : null;
+              return (
+                // 包裹层用 div（块级 flex 项）：chip 是 span、进度条是 div，
+                // 包在 span 里属非法嵌套（span 只能含短语内容）——换 div 即合法
+                <div key={a.id} className="flex flex-col gap-1">
+                  <span
+                    data-testid={`attach-chip-${a.id}`}
+                    className={`flex items-center gap-1 rounded-full px-2 py-0.5 text-xs ${
+                      a.status === "failed"
+                        ? "bg-rose-500/10 text-rose-700 dark:bg-rose-400/10 dark:text-rose-400"
+                        : "bg-[var(--cb)] text-[var(--mut)]"
+                    }`}
+                  >
+                    {uploading
+                      ? `上传中：${a.name}`
+                      : a.status === "failed"
+                        ? `失败：${a.name}（${a.error}）`
+                        : a.name}
+                    {uploading && a.loaded !== undefined && (
+                      <span
+                        data-testid={`attach-progress-${a.id}`}
+                        className="text-[var(--mut)] tabular-nums"
+                      >
+                        {`· 已传 ${formatBytes(a.loaded)}`}
+                        {a.total != null && pct !== null && ` / ${formatBytes(a.total)} · ${pct}%`}
+                        {eta && ` · ${eta}`}
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      data-testid={`attach-remove-${a.id}`}
+                      aria-label={`移除附件 ${a.name}`}
+                      onClick={() => removeAttachment(a.id)}
+                      className="text-[var(--mut)] hover:text-[var(--mut)]"
+                    >
+                      ×
+                    </button>
+                  </span>
+                  {pct !== null && (
+                    <div className="h-1.5 overflow-hidden rounded-full bg-[var(--cb)]">
+                      <div
+                        data-testid={`attach-progress-bar-${a.id}`}
+                        className="h-full rounded-full bg-[var(--btnp)]"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {/* 口径说明（线稿 :364 .upl-meta 逐字）：有附件在传 = 「上传中」态的呈现
+              之一；上传结束/失败即收起，不常驻 */}
+          {attachments.some((a) => a.status === "uploading") && (
+            <p
+              data-testid="attach-upl-meta"
+              className="mt-1 text-[11px] leading-4 text-[var(--mut)]"
             >
-              {a.status === "uploading"
-                ? `上传中：${a.name}`
-                : a.status === "failed"
-                  ? `失败：${a.name}（${a.error}）`
-                  : a.name}
-              <button
-                type="button"
-                data-testid={`attach-remove-${a.id}`}
-                aria-label={`移除附件 ${a.name}`}
-                onClick={() => removeAttachment(a.id)}
-                className="text-[var(--mut)] hover:text-[var(--mut)]"
-              >
-                ×
-              </button>
-            </span>
-          ))}
+              受限通道按本通道实测速率预估剩余时间；速率未知时只显示已传字节，不显示假百分比。
+            </p>
+          )}
+          {/* 带宽横幅（§C5 / 复评 I-2 后半）：设计说明书原文是「在**文件面板与附件区**
+              显示提示」——只在 FilePanel 出横幅，会让只上传、不浏览文件的用户永远
+              看不到「这是通道限制，不是故障」。判据与文案复用 FilePanel 导出的
+              ChannelBwNote（同一份判据 + 同一份文案，不新造口径），est 有限正数守卫
+              也在组件内统一。落点：附件区（chips 容器之下）——用户进入附件流程即
+              就地出现；纯问答/看板会话不常驻噪音（与 attach-hint「不平铺常驻」同
+              取向）。横幅不占通道卡片位（§C4 仍 4 卡） */}
+          <ChannelBwNote channel={channel} testId="composer-bw-note" className="mt-1" />
         </div>
       )}
       <div className="flex items-end gap-2">
