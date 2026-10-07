@@ -226,7 +226,21 @@
             <div class="desc">永久地址，需你自己的域名</div>
           </div>
           <div class="mode" data-p="p-ext" onclick="pick(this)">
-            <div class="head"><span class="name"><span class="live"></span>外部域名（免域名）</span>
+            <!-- 2026-10-07 八次回写（用户实测 + 用户裁决）：
+                 卡名由「外部域名（免域名）」（9 字）改为「**外部域名**」（4 字，**去掉括号**）。
+                 根因：四列卡位的标题可用宽只有约 94px（880 窗口 − 侧栏 w-40(160) − 内容区
+                 p-4(32) − grid-cols-4/gap-2(24) ⇒ 每卡 166 − 边框 3 − p-2.5(20) − 开关
+                 w-8(32) − gap-1.5(6) − 状态点 7 − gap-1(4)），`truncate` 把 9 字（≈117px）
+                 切成了「外部域名（免…」——用户实测所见即此。
+                 用户原话：「改标题反正就改吧，那个括号我感觉不用。这 4 个字就挺好的，
+                 其他注释写在下面，我觉得无所谓。」
+                 故 ① 卡名收成 4 字（i18n `chanTailscale`；en 同步去括号 = `External domain`）；
+                 ② 括号里那层「免域名」信息**不丢**，由卡面备注承载（`.desc` / i18n
+                 `chanTailscaleDesc` =「永久地址，不需要域名」）；③ 标题再挂原生 `title`
+                 tooltip 兜底（将来某语言或更窄窗口仍超宽时悬停可见全名——兜底不等于可以
+                 把标题写长）。其余三卡按同一 94px 预算核对：局域网连接 ≈65px、临时隧道 /
+                 自有域名 / 外部域名各 ≈52px，都在预算内。 -->
+            <div class="head"><span class="name"><span class="live"></span>外部域名</span>
               <span class="switch" onclick="event.stopPropagation(); tg(this)"></span></div>
             <div class="desc">永久地址，不需要域名</div>
           </div>

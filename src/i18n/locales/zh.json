@@ -221,7 +221,7 @@
       "chanQuickDesc": "公网免注册，地址每次开启会变",
       "chanNamed": "自有域名",
       "chanNamedDesc": "永久地址，需你自己的域名",
-      "chanTailscale": "外部域名（免域名）",
+      "chanTailscale": "外部域名",
       "chanTailscaleDesc": "永久地址，不需要域名",
       "badgeLocalOnly": "仅本机",
       "badgeRecommended": "推荐",
