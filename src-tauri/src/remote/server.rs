@@ -10019,15 +10019,12 @@ mod tests {
         b.body(body).unwrap()
     }
 
-    fn attach_tempdir() -> std::path::PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "mam-attach-e2e-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    /// 附件 E2E 的项目目录：唯一性来自 `test_support`（pid + 进程内原子序号），
+    /// **不再**用 `as_nanos()`——旧写法同一微秒内撞名，与同进程并行跑的
+    /// `remote::attachments` 族互相 `remove_dir_all`（存量 flake 同根因，
+    /// 见 `test_support` 模块文档）。
+    fn attach_tempdir() -> crate::test_support::TestDir {
+        let d = crate::test_support::temp_dir("mam-attach-e2e");
         std::fs::create_dir_all(d.join(".git").join("info")).unwrap();
         d
     }
@@ -10037,7 +10034,7 @@ mod tests {
         let proj = attach_tempdir();
         // 单一 state 实例：设备注册与 router 必须同源（DeviceStore::memory 每个实例独立，
         // 分开构造会让注册的设备在 app 里不存在 → 403 假阴性）
-        let state = attach_state(proj.clone(), false);
+        let state = attach_state(proj.path().to_path_buf(), false);
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
         let r = app
@@ -10085,14 +10082,13 @@ mod tests {
         let exclude =
             std::fs::read_to_string(proj.join(".git").join("info").join("exclude")).unwrap();
         assert_eq!(exclude.matches(".mam-attachments/").count(), 1, "幂等");
-        std::fs::remove_dir_all(&proj).ok();
     }
 
     #[tokio::test]
     async fn attachment_gate_and_error_contracts() {
         // 403：无设备 cookie（门禁防御）
         let proj = attach_tempdir();
-        let state = attach_state(proj.clone(), false);
+        let state = attach_state(proj.path().to_path_buf(), false);
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
         let r = app
@@ -10116,7 +10112,7 @@ mod tests {
         assert_eq!(r.status(), 404);
         assert!(body_string(r).await.contains("no_session"));
         // 404 no_cwd：会话无项目目录（与 resume 同源口径）；empty-cwd state 需另注册设备
-        let empty_state = attach_state(proj.clone(), true);
+        let empty_state = attach_state(proj.path().to_path_buf(), true);
         persist_named_device(&empty_state, "mm", "测试设备");
         let r = router(empty_state)
             .oneshot(attach_req(
@@ -10139,7 +10135,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 413);
-        std::fs::remove_dir_all(&proj).ok();
     }
 
     // ===== 丁T3 接入①：模式切换的对话框在场守卫（§2.7 裁8/9，问题 5）=====
