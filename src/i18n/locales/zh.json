@@ -58,12 +58,20 @@
     "checkFailed": "检查更新失败。",
     "upToDate": "您正在使用最新版本！",
     "updateAvailable": "发现新版本",
+    "prerelease": "预发布",
     "downloading": "正在下载更新",
     "installingVersion": "正在安装版本 {{version}}...",
-    "versionAvailable": "版本 {{version}} 可用。",
+    "versionAvailable": "新版本 {{version}} 可用 · 当前 {{currentVersion}}",
+    "publishedOn": "发布于 {{date}}",
     "releaseNotes": "更新说明：",
+    "viewOnGithub": "在 GitHub 查看",
+    "scrollHint": "完整说明可滚动查看",
     "later": "稍后",
-    "installNow": "立即安装"
+    "skipVersion": "忽略本版本",
+    "skippedToast": "已忽略 {{version}}，下一个版本发布前不再提醒",
+    "installNow": "立即升级",
+    "installFailed": "升级失败：{{message}}",
+    "badgeTooltip": "发现新版本 {{version}}，点击查看"
   },
   "settings": {
     "title": "设置",

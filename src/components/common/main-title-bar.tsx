@@ -1,4 +1,4 @@
-import { Moon, Sun, Info, Settings, ChartLine } from "lucide-react";
+import { Moon, Sun, Info, Settings, ChartLine, Download } from "lucide-react";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useTheme } from "@/components/common/theme-provider";
@@ -8,11 +8,16 @@ import { TitleBar } from "@/components/common/title-bar";
 import { LanguageToggle } from "@/components/common/language-toggle";
 import { useTranslation } from "react-i18next";
 import { loadVisible, saveVisible, subscribeConfig } from "@/components/pet/petConfig";
+import { useAvailableUpdate, useUpdaterStore } from "@/stores/updaterStore";
 import packageJson from "../../../package.json";
 
 export function MainTitleBar() {
   const { theme, setTheme } = useTheme();
   const { t } = useTranslation();
+  // 升级徽标：检查结果 available 才渲染（无更新/检查失败不出现）；被「忽略本版本」
+  // 静音时仍常显——忽略只压弹窗，不藏徽标。点击打开升级弹窗（再点「立即升级」）
+  const availableUpdate = useAvailableUpdate();
+  const openUpdaterDialog = useUpdaterStore((s) => s.openDialog);
   // 桌宠开关状态：与 petConfig 双向同步（设置页/宠物菜单/托盘改动经订阅回流）
   const [petOn, setPetOn] = useState(() => loadVisible());
   useEffect(
@@ -114,6 +119,20 @@ export function MainTitleBar() {
             {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
           <LanguageToggle />
+
+          {/* 升级徽标（prerelease 渠道）：琥珀色下载图标 + 呼吸圆点 */}
+          {availableUpdate && (
+            <button
+              onClick={openUpdaterDialog}
+              className="title-bar-btn hover:bg-amber-500/15 hover:text-amber-500 relative mr-1 text-amber-500"
+              aria-label={t("updater.badgeTooltip", { version: availableUpdate.version })}
+              title={t("updater.badgeTooltip", { version: availableUpdate.version })}
+              tabIndex={-1}
+            >
+              <Download className="h-4 w-4" />
+              <span className="bg-amber-500 animate-pulse absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full ring-2 ring-background" />
+            </button>
+          )}
 
           <button
             onClick={handleOpenSettings}

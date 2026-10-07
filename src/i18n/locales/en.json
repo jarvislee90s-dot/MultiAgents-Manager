@@ -58,12 +58,20 @@
     "checkFailed": "Failed to check for updates.",
     "upToDate": "You're using the latest version!",
     "updateAvailable": "Update Available",
+    "prerelease": "Pre-release",
     "downloading": "Downloading Update",
     "installingVersion": "Installing version {{version}}...",
-    "versionAvailable": "Version {{version}} is available.",
+    "versionAvailable": "Version {{version}} is available · current {{currentVersion}}",
+    "publishedOn": "released {{date}}",
     "releaseNotes": "Release Notes:",
+    "viewOnGithub": "View on GitHub",
+    "scrollHint": "Scroll for the full notes",
     "later": "Later",
-    "installNow": "Install Now"
+    "skipVersion": "Skip this version",
+    "skippedToast": "Skipped {{version}} — you won't be reminded until the next release",
+    "installNow": "Update Now",
+    "installFailed": "Update failed: {{message}}",
+    "badgeTooltip": "New version {{version}} — click to view"
   },
   "settings": {
     "title": "Settings",

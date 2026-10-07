@@ -688,7 +688,19 @@ if (!isTauri) {
         if (args?.key === "notifications_enabled") return Promise.resolve(true);
         if (args?.key === "notification_sound") return Promise.resolve("default");
         if (args?.key === "ui_theme") return Promise.resolve(null);
+        // 升级忽略版本（prerelease 渠道）：配合 localStorage["mam-mock-updater-skipped"] 手验忽略语义
+        if (args?.key === "updater_skipped_version") {
+          const skipped = localStorage.getItem("mam-mock-updater-skipped");
+          return Promise.resolve(skipped ?? null);
+        }
         return Promise.resolve(null);
+
+      case "set_setting":
+        // mock 无 DB：忽略版本镜像到 localStorage，get_setting 同 key 回读（手验忽略闭环）
+        if (args?.key === "updater_skipped_version") {
+          localStorage.setItem("mam-mock-updater-skipped", String(args?.value ?? ""));
+        }
+        return Promise.resolve(undefined);
 
       case "set_theme":
         return Promise.resolve(undefined);
@@ -807,8 +819,36 @@ if (!isTauri) {
       case "plugin:window|show":
         return Promise.resolve(undefined);
 
-      case "plugin:updater|check":
-        return Promise.resolve(null);
+      // —— 升级检查（prerelease 渠道）：浏览器渲染用 Rust GitHub 发现层的 mock 形状。
+      // localStorage["mam-mock-updater"] = "available" 模拟有更新（示例 note 含
+      // markdown 元素，便于目验渲染与限高滚动）；默认 up-to-date（弹窗/徽标不出现）。
+      case "check_for_github_update": {
+        if (localStorage.getItem("mam-mock-updater") === "available") {
+          return Promise.resolve({
+            status: "available",
+            currentVersion: "0.4.1",
+            update: {
+              version: "0.5.0-beta.1",
+              prerelease: true,
+              notes:
+                "## v0.5.0-beta.1 更新\n\n> 预发布：远程操控试验性开放。\n\n- **手机远程操控**：发消息/排队/撤回\n- **远程审批与问答**：屏读为准实时同步\n\n| 功能 | 状态 |\n| --- | --- |\n| 发消息 | ✅ |\n| 审批 | ✅ |\n",
+              htmlUrl: "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/tag/v0.5.0-beta.1",
+              publishedAt: "2026-09-23T15:18:19Z",
+              tag: "v0.5.0-beta.1",
+              latestJsonUrl:
+                "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0-beta.1/latest.json",
+            },
+          });
+        }
+        return Promise.resolve({
+          status: "up-to-date",
+          currentVersion: "0.5.0-beta.1",
+          latestVersion: "0.5.0-beta.1",
+        });
+      }
+      // mock 不真装：静默成功（进度事件由真实 Rust 侧才有）
+      case "install_github_update":
+        return Promise.resolve(undefined);
 
       case "plugin:notification|is_permission_granted":
         return Promise.resolve(false);
