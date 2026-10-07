@@ -96,15 +96,6 @@ export function MainTitleBar() {
           </button>
 
           <button
-            onClick={handleOpenSettings}
-            className="title-bar-btn mr-1"
-            aria-label={t("settings.button")}
-            tabIndex={-1}
-          >
-            <Settings className="h-4 w-4" />
-          </button>
-
-          <button
             onClick={handleTogglePet}
             className="title-bar-btn mr-1 text-base leading-none"
             aria-label={t("home.petToggle")}
@@ -115,23 +106,31 @@ export function MainTitleBar() {
           </button>
 
           <button
-            onClick={handleOpenAbout}
-            className="title-bar-btn mr-1"
-            aria-label={t("about.button")}
-            tabIndex={-1}
-          >
-            <Info className="h-4 w-4" />
-          </button>
-
-          <LanguageToggle />
-
-          <button
             onClick={handleToggleTheme}
             className="title-bar-btn mr-0.5"
             aria-label={t("theme.toggle")}
             tabIndex={-1}
           >
             {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </button>
+          <LanguageToggle />
+
+          <button
+            onClick={handleOpenSettings}
+            className="title-bar-btn mr-1"
+            aria-label={t("settings.button")}
+            tabIndex={-1}
+          >
+            <Settings className="h-4 w-4" />
+          </button>
+
+          <button
+            onClick={handleOpenAbout}
+            className="title-bar-btn mr-1"
+            aria-label={t("about.button")}
+            tabIndex={-1}
+          >
+            <Info className="h-4 w-4" />
           </button>
         </>
       }

@@ -69,7 +69,7 @@ const DEFAULTS: UsageSettings = {
   collectIntervalMin: 10,
   providerMapRules: "",
   exportQuote: "",
-  exportPose: "random",
+  exportPose: "waving", // 非 random ⇒ 换宠物时应触发回退（测试 9 的前提）
 };
 
 /** 假后端当前落库值（用例可中途改写，模拟「另一个 WebView 改过设置」） */
@@ -139,11 +139,14 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
     expect(screen.getByTestId("usage-minibar-tool-rows")).toBeTruthy();
     expect(screen.getByTestId("usage-detail-retention-days")).toBeTruthy();
     expect(screen.getByTestId("usage-collect-interval-min")).toBeTruthy();
-    expect(screen.getByTestId("usage-provider-map-rules")).toBeTruthy();
     // **B1（2026-10-07）**：评语已搬到看板导出条 ⇒ 本页**不得**再有它。
     // 这条是**正向锁**（不是删掉了事）：将来谁把评语搬回来，两处入口就会各写各的、必然漂移。
     expect(screen.queryByTestId("usage-export-quote")).toBeNull();
-    expect(screen.getByTestId("usage-export-pose")).toBeTruthy();
+    // **2026-10-07 两项都搬走了**（正向锁：谁搬回来就红）
+    //  * providerMapRules：用户「我都不太懂」⇒ 不再提供手工编辑（开发者口径的 JSON 不该摆给用户）；
+    //  * exportPose：与评语同理搬到看板「导出设置」弹层（不在两处保留）。
+    expect(screen.queryByTestId("usage-provider-map-rules")).toBeNull();
+    expect(screen.queryByTestId("usage-export-pose")).toBeNull();
 
     // 7 行标题（zh/en 同父同键的 7 个 label key；B1 后**不含** Share-image caption —— 它随评语搬走）
     for (const label of [
@@ -152,8 +155,6 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
       "Mini bar tool rows",
       "Detail retention (days)",
       "Fallback collect interval (minutes)",
-      "Provider mapping rules (JSON)",
-      "Share-image pose",
     ]) {
       expect(screen.getByText(label)).toBeTruthy();
     }
@@ -170,8 +171,6 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
       "usage-minibar-tool-rows",
       "usage-detail-retention-days",
       "usage-collect-interval-min",
-      "usage-provider-map-rules",
-      "usage-export-pose",
     ]) {
       expect(screen.getAllByTestId(id)).toHaveLength(1);
     }
@@ -181,7 +180,6 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
     expect(input("usage-minibar-tool-rows").value).toBe("3");
     expect(input("usage-detail-retention-days").value).toBe("90");
     expect(input("usage-collect-interval-min").value).toBe("10");
-    expect(select("usage-export-pose").value).toBe("random");
   });
 
   it("2. 开关：改动即发 patch，并用后端返回的合并对象回写本地态", async () => {
@@ -232,7 +230,7 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
     }
   });
 
-  it("5. 范围与姿态都是原生 select：范围 3 档、姿态 11 项（键序 = poseKeysFor(11)，含 look）", async () => {
+  it("5. 范围是原生 select（3 档）；姿态 select **已不在本页**（搬到看板「导出设置」）", async () => {
     renderSection();
     await screen.findByTestId("usage-minibar-range");
     const range = select("usage-minibar-range");
@@ -245,15 +243,10 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
       "Last 7 days",
     ]);
 
-    const pose = select("usage-export-pose");
-    expect(pose.tagName).toBe("SELECT");
-    // 键族唯一出处 = Task 12 的 `poseKeysFor`（不得自造第二份 POSE_KEYS）
-    expect(Array.from(pose.options).map((o) => o.value)).toEqual(poseKeysFor(11));
-    expect(pose.options).toHaveLength(11);
-    // `look` 项不得删：9 行图集上没有那一行 → 文案里写明会回落待机
-    const look = Array.from(pose.options).find((o) => o.value === "look");
-    expect(look).toBeTruthy();
-    expect(look?.textContent ?? "").toMatch(/falls back to idle/i);
+    // 姿态（含 `poseKeysFor(11)` 的 11 项、`look` 回落文案）改由
+    // `tests/pet/usage-export-settings.test.tsx` 覆盖 —— 那里才是它的新家（**不在两处保留**）。
+    // 本页只留一条负向锁：它不许在这里复活。
+    expect(screen.queryByTestId("usage-export-pose")).toBeNull();
   });
 
   it("6. 保留期提示：明示「N 天前无明细」，随值更新且夹取 1–3650", async () => {
@@ -278,58 +271,32 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
     }
   });
 
-  it("7. 规则校验与后端 merge_patch 同判据：合法 JSON 但形态不符同样提示，且 patch 照发（不阻断）", async () => {
-    renderSection();
-    await screen.findByTestId("usage-provider-map-rules");
-    const area = screen.getByTestId("usage-provider-map-rules") as HTMLTextAreaElement;
-    // 空串 = 合法（清空规则，后端 `parse_provider_rules` 早退空表）
-    expect(screen.queryByTestId("usage-provider-map-invalid")).toBeNull();
 
-    // 合法 JSON、形态不符（rules 空表）→ 同样要提示
-    fireEvent.change(area, { target: { value: '{"rules":[]}' } });
-    expect(screen.getByTestId("usage-provider-map-invalid")).toBeTruthy();
-    // 非法只提示不阻断：patch 照发（真正的裁决在后端）
-    await waitFor(() => expect(setPatches()).toEqual([{ providerMapRules: '{"rules":[]}' }]));
-
-    // 合法 JSON、缺 provider（serde 反序列化整篇失败 → 后端同判据为非法）
-    fireEvent.change(area, { target: { value: '{"rules":[{"prefix":"deepseek-"}]}' } });
-    expect(screen.getByTestId("usage-provider-map-invalid")).toBeTruthy();
-    await waitFor(() => expect(setPatches()).toHaveLength(2));
-
-    // 合法形态（非空 prefix + provider）→ 提示消失，patch 照发
-    fireEvent.change(area, {
-      target: { value: '{"rules":[{"prefix":"deepseek-","provider":"volcengine"}]}' },
-    });
-    await waitFor(() => expect(screen.queryByTestId("usage-provider-map-invalid")).toBeNull());
-    expect(setPatches()[2]).toEqual({
-      providerMapRules: '{"rules":[{"prefix":"deepseek-","provider":"volcengine"}]}',
-    });
-  });
-
-  it("8. 保存失败原因可见（usage-set-error，不静默）——B1 后改用 providerMapRules 当载体", async () => {
+  it("8. 保存失败原因可见（usage-set-error，不静默）——载体随界面变动更换", async () => {
     // ⚠️ **2026-10-07 B1：换载体、不换断言。** 本条原先拿「分享图评语」输入框当载体，而评语已搬到
     // 看板导出条（`UsageQuoteEditor`）⇒ 本页不再有该输入框。本条验的是「后端整包拒绝 ⇒ 原因可见 +
     // 用户输入保留 + 控制台留痕」这套**通用**机制，与具体字段无关；评语自己的读/写/失败路径由
     // `tests/pet/usage-quote-editor.test.tsx` 覆盖（含占位符变量提示）。
     renderSection();
-    await screen.findByTestId("usage-provider-map-rules");
-    const field = input("usage-provider-map-rules");
+    // ⚠️ **载体又换了一次**（2026-10-07）：上一次用 providerMapRules，而它这一轮已从界面撤下
+    // （用户「我都不太懂」）。本条验的是「后端整包拒绝 ⇒ 原因可见 + 用户输入保留 + 控制台留痕」
+    // 这套**通用**机制，与具体字段无关 ⇒ 改用「回退采集间隔」这个数字输入。
+    await screen.findByTestId("usage-minibar-range");
+    const field = select("usage-minibar-range");
 
     // 后端整包拒绝（形态不符 / 越界）→ 原因必须可见，不得静默吞掉
     failNext = { code: "usage-settings-invalid", detail: "浮窗分工具条数须在 1–7" };
     // 组件在失败时 console.error 留痕（与其它命令失败同惯例）→ 用例内静音，避免污染套件输出
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
-      fireEvent.change(field, {
-        target: { value: '{"rules":[{"prefix":"x-","provider":"p"}]}' },
-      });
+      fireEvent.change(field, { target: { value: "last5h" } });
       const box = await screen.findByTestId("usage-set-error");
       expect(box.textContent).toContain("Failed to save usage settings");
       // 原因走 usage.rpc.<code> 码表 + detail 通道，不打印原始错误对象
       expect(box.textContent).toContain("Invalid usage settings");
       expect(box.textContent).toContain("浮窗分工具条数须在 1–7");
       // 失败不谎报成功：输入框保留用户刚输入的值（后端没接受，错误就在旁边）
-      expect(field.value).toBe('{"rules":[{"prefix":"x-","provider":"p"}]}');
+      expect(field.value).toBe("last5h");
       expect(errSpy).toHaveBeenCalled(); // 控制台也留痕，不静默
     } finally {
       errSpy.mockRestore();
@@ -337,32 +304,31 @@ describe("设置页「用量统计」分组（计划② Task 14）", () => {
   });
 
   it("9. 换宠物：姿态非 random 时回退 random 并提示；已是 random 时幂等（不重复提交）", async () => {
+    // 2026-10-07：姿态选择器已搬到看板「导出设置」⇒ 本页不能再靠点它来把值改成非 random。
+    // 改为让**夹具本身就是非 random**（`exportPose: "waving"`），直接验回退这条真实路径 ——
+    // 这条路径本来就不依赖那个下拉框，只依赖「当前存的姿态不是 random」。
     renderSection();
-    await screen.findByTestId("usage-export-pose");
-    const pose = select("usage-export-pose");
-    expect(pose.value).toBe("random");
-
-    fireEvent.change(pose, { target: { value: "waving" } });
-    await waitFor(() => expect(setPatches()).toEqual([{ exportPose: "waving" }]));
-    expect(pose.value).toBe("waving");
-    expect(screen.queryByTestId("usage-pose-reset")).toBeNull();
+    // ⚠️ **这一步是必须的**（本次红的真正原因）：回退逻辑读的是**已加载的表单值**，表单没回来时
+    // `pose === undefined` ⇒ 命中 `if (pose === undefined || pose === "random") return` 直接早退，
+    // 于是「什么都没发生」。原来这里靠「等姿态选择器出现」来保证表单就绪，而选择器已搬走
+    // ⇒ 改等一个**还在本页**的字段。
+    await screen.findByTestId("usage-minibar-range");
+    await waitFor(() => expect(setPatches()).toEqual([])); // 挂载本身不该写任何东西
 
     // 真实切换路径：petRuntime.saveActiveId 写激活指针 + 派发同窗口事件
-    // （跨窗口那一侧由 subscribeConfig 的 storage 分支覆盖，本用例走的是同一条订阅）
     await act(async () => {
       saveActiveId("starry-dew", false, "Starry Dew");
     });
-    await waitFor(() =>
-      expect(setPatches()).toEqual([{ exportPose: "waving" }, { exportPose: "random" }])
-    );
-    await waitFor(() => expect(pose.value).toBe("random"));
+    await waitFor(() => expect(setPatches()).toEqual([{ exportPose: "random" }]));
     const notice = await screen.findByTestId("usage-pose-reset");
     expect(notice.textContent ?? "").toMatch(/fell back to Random/i);
+    // 提示里要点明「去哪儿改」——因为选择器已经不在本页了（否则用户在这页找不到它）
+    expect(notice.textContent ?? "").toMatch(/Export settings|导出设置/i);
 
     // 已回退成 random 之后再换宠物：不重复提交、也不新增提示（幂等）
     await act(async () => {
       saveActiveId("another-pet", false, "Another");
     });
-    expect(setPatches()).toHaveLength(2);
+    expect(setPatches()).toHaveLength(1);
   });
 });

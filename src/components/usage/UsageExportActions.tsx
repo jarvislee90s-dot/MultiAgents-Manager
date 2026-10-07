@@ -28,7 +28,7 @@
 //    （`useExportShare(t)` 在组件内部按需读设置，看板数据由调用方逐次传进来）。
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { UsageQuoteEditor } from "@/components/usage/UsageQuoteEditor";
+import { UsageExportSettings } from "@/components/usage/UsageExportSettings";
 import { usageErrMsg } from "@/components/usage/usageErrors";
 import { usageExportCsv } from "@/lib/api/usage";
 import { buildTextSummary, csvFilename } from "@/lib/usage/exportText";
@@ -194,9 +194,10 @@ export function UsageExportActions(props: {
         </Button>
       ))}
 
-      {/* 评语编辑器（B1：从设置页搬到导出所在处）。与三个看板口径按钮**同纪律**：记录页签下
-          在位但禁用（不是凭空消失），因为评语只作用于看板口径的两份产物（文本摘要 / 分享图）。 */}
-      <UsageQuoteEditor
+      {/* 导出设置（2026-10-07：评语 B1 + 姿态本轮，两项都从设置页整体搬来）。
+          与三个看板口径按钮**同纪律**：记录页签下在位但禁用（不是凭空消失）——
+          它们只作用于看板口径的两份产物（文本摘要 / 分享图）。 */}
+      <UsageExportSettings
         disabled={!dash || busy || tab !== "board"}
         title={tab !== "board" ? t("usage.export.boardOnly") : undefined}
       />

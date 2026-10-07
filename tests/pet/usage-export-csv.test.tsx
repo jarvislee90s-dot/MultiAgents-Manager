@@ -40,6 +40,9 @@ vi.mock("@/lib/usage/exportImage", () => ({
 vi.mock("@/lib/usage/sheet", () => ({
   activePetSheet: () => Promise.resolve(null),
   loadSheet: () => Promise.resolve(null),
+  // 「导出设置」弹层（2026-10-07）用 `poseKeysFor` 生成姿态选项：本文件只渲染导出条、
+  // **不会打开弹层**，给一个形状对的替身即可（键名与本用例无关）
+  poseKeysFor: (n: number) => Array.from({ length: n }, (_, i) => `pose-${i}`),
 }));
 
 /** 出图那一层的固定产物（字节 1,2,3 → base64 `AQID`） */
@@ -201,7 +204,7 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
       "usage-export-copy-text",
       "usage-export-image",
       "usage-export-copy-image",
-      "usage-export-quote-open",
+      "usage-export-settings-open",
     ]) {
       expect(screen.getByTestId(id)).toBeDisabled();
       expect(screen.getByTestId(id).getAttribute("title")).toBeTruthy();
@@ -215,7 +218,7 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
     expect(screen.getByTestId("usage-export-copy-text").getAttribute("title")).toBeNull();
     // 评语按钮**也随导出条一起禁用**（2026-10-07 B1）。它严格说只需要「设置」不需要看板数据，
     // 但整条导出条在数据未就绪时统一不可点更好懂（也就多禁用一瞬），故跟随 `!dash` 同纪律。
-    expect(screen.getByTestId("usage-export-quote-open")).toBeDisabled();
+    expect(screen.getByTestId("usage-export-settings-open")).toBeDisabled();
     expect(screen.getByTestId("usage-export-csv")).not.toBeDisabled();
   });
 
