@@ -474,7 +474,7 @@ pub fn start_channel(mode: &str, port: u16) {
             .map(|t| t.trim().is_empty())
             .unwrap_or(true)
     {
-        set_channel_snapshot(mode, |c| c.error = Some("命名隧道缺少 Tunnel Token".into()));
+        set_channel_snapshot(mode, |c| c.error = Some("自有域名缺少 Tunnel Token".into()));
         return;
     }
     let mut slots = TUNNELS.lock().unwrap();
@@ -585,7 +585,7 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
                             // 此处不另做停止标志检查（多一份需同步的标志拷贝，两处口径
                             // 易漂移）
                             set_channel_snapshot(&mode_for_stderr, |c| c.url = Some(u.clone()));
-                            // M5 P2-c：自动记忆最近一次解析成功的命名隧道地址（KV 持久，
+                            // M5 P2-c：自动记忆最近一次解析成功的自有域名地址（KV 持久，
                             // 隧道关着/未解析时设置页与豁免名单仍可用）。仅 named 记忆
                             // （quick 地址每次必变，记忆无意义）
                             if mode_for_stderr == KEY_CHANNEL_VALUE_NAMED {

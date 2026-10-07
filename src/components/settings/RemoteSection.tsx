@@ -68,7 +68,7 @@ type TsDisablePreview = {
 // A6：未设置时默认填系统名（remote_status.host.name），灰字占位提示删除
 const HOST_NAME_KEY = "remote.host_name";
 // 隧道 Token：与 Rust 端 remote::KEY_TUNNEL_TOKEN 对齐；A6 起保存走通用 set_setting
-//（remote_set_channel 已下线），开关由命名隧道卡片开关（remote_toggle_channel）驱动
+//（remote_set_channel 已下线），开关由自有域名卡片开关（remote_toggle_channel）驱动
 const TUNNEL_TOKEN_KEY = "remote.tunnel_token";
 // 电源保活：与 Rust 端 remote::power::KEY_KEEPALIVE 对齐；默认开，
 // 后端 should_acquire（None/乱串 → true）是唯一口径，前端仅同步展示
@@ -583,7 +583,7 @@ export function RemoteSection() {
   };
 
   // Token 保存（A6 落点：通用 set_setting）；开关由自有域名卡片开关驱动，后端
-  // start_channel 对空 Token 拒启并写快照错误（「命名隧道缺少 Tunnel Token」）
+  // start_channel 对空 Token 拒启并写快照错误（「自有域名缺少 Tunnel Token」）
   const saveToken = async () => {
     try {
       await setSetting(TUNNEL_TOKEN_KEY, token);

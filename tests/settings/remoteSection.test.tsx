@@ -449,7 +449,7 @@ describe("RemoteSection quick 换址警告与运行态（M5 A6）", () => {
   });
 });
 
-describe("RemoteSection 命名隧道：Token 保存与教程 popover（M5 A6）", () => {
+describe("RemoteSection 自有域名：Token 保存与教程 popover（M5 A6）", () => {
   it("Token 输入回填已存值，保存走 set_setting(remote.tunnel_token)", async () => {
     render(<RemoteSection />);
     fireEvent.click(card("named"));
@@ -493,7 +493,7 @@ describe("RemoteSection 命名隧道：Token 保存与教程 popover（M5 A6）"
     expect(screen.queryByText(/Prerequisite: a domain hosted on Cloudflare/i)).toBeNull();
   });
 
-  it("命名隧道详情含公网地址与二维码；错误态展示 error 原文", async () => {
+  it("自有域名详情含公网地址与二维码；错误态展示 error 原文", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
       if (cmd === "remote_status")
         return statusOf({

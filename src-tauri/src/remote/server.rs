@@ -2601,7 +2601,7 @@ mod tests {
         );
         let app = router(state);
 
-        // 三种用户域名形态：裸域名 / 带端口 / 与 tunnel.rs 夹具同形态的真实命名隧道域名
+        // 三种用户域名形态：裸域名 / 带端口 / 与 tunnel.rs 夹具同形态的真实自有域名域名
         // 先收齐全部状态再断言——失败时一次拿到三种形态的完整事实（而非首个 panic 即止）
         let mut observed: Vec<(&str, u16)> = Vec::new();
         for host in [

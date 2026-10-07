@@ -37,11 +37,11 @@ pub const KEY_CHAN_QUICK: &str = "remote.chan_quick";
 pub const KEY_CHAN_NAMED: &str = "remote.chan_named";
 /// Tailscale 通道开关（§C1）：值口径沿用 "1"/"0"
 pub const KEY_CHAN_TAILSCALE: &str = "remote.chan_tailscale";
-/// 命名隧道 Tunnel Token（M4 T1b；明文本地存储与设备表同库）
+/// 自有域名 Tunnel Token（M4 T1b；明文本地存储与设备表同库）
 pub const KEY_TUNNEL_TOKEN: &str = "remote.tunnel_token";
 /// 设备上限键（spec T2c：默认 10 台可配——M5 A5 用户裁决 3 → 10）
 pub const KEY_MAX_DEVICES: &str = "remote.max_devices";
-/// M5 P2-c：命名隧道地址记忆——last = 最近一次 stderr 解析成功的完整地址
+/// M5 P2-c：自有域名地址记忆——last = 最近一次 stderr 解析成功的完整地址
 /// （tunnel.rs 摄取点自动写入）；manual = 用户手填的固定地址（设置页，兜底
 /// 「域名解析不到」场景）。两者都进豁免/with 的域名名单与状态展示
 pub const KEY_NAMED_ADDR_LAST: &str = "remote.named_addr_last";
@@ -62,12 +62,13 @@ fn max_devices_from_kv() -> usize {
 }
 
 // ============================================================
-// 三通道独立开关（M5 A5）：KV + 惰性迁移 + bind 派生
+// 通道独立开关（M5 A5；§C1 追加 tailscale）：KV + 惰性迁移 + bind 派生
 // ============================================================
 
 /// 通道开关集合：lan = 局域网监听（0.0.0.0，天然包含回环）；quick/named =
-/// cloudflared 隧道；tailscale = Funnel 固定网址（§C1）。本机通道常驻锁死无开关
-/// （前端 A6 只渲染）
+/// cloudflared 隧道；tailscale = Funnel 固定网址（§C1）。
+/// **「本机」不是通道**（零豁免 §C4）：本机访问走局域网卡地址，故这里没有 `local` 开关，
+/// `ChannelKind` 也没有 `Local` 变体——别再把它加回来。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ChannelFlags {
     pub lan: bool,
@@ -76,7 +77,7 @@ pub struct ChannelFlags {
     pub tailscale: bool,
 }
 
-/// 通道种类（remote_toggle_channel 的参数值域）；本机常驻无命令
+/// 通道种类（remote_toggle_channel 的参数值域）；「本机」不是通道，故无对应变体
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ChannelKind {
     Lan,
@@ -417,7 +418,7 @@ fn via_hosts_from_snapshot() -> Option<(Vec<String>, Vec<String>, Vec<String>)> 
 /// via 判定内核（纯函数，extras/ts 注入；原豁免名单内核的哨兵判据随 2026-10-06 §G2
 /// 内联归并于此，豁免并集语义一并退役，仅 via 保守语义存续）：
 /// - 任一隧道通道快照**错误终态** → None（错误通道域名不可信，整体收 None）；
-/// - 任一隧道通道**在运行而域名缺失** → None：token 模式命名隧道的域名可能解析不到
+/// - 任一隧道通道**在运行而域名缺失** → None：token 模式自有域名的域名可能解析不到
 ///   （cloudflared 不打印 https:// 横幅时），名单不可信按保守回落处理；
 /// - named 域名未知时：有手填/记忆兜底 → 视为域名已知；
 /// - 正常态 → 三通道各自归集（channel_hosts：错误通道不宣称——tailscale 错误只收空
@@ -761,7 +762,7 @@ pub fn restart_listener() -> Result<(), String> {
 }
 
 /// 逐通道恢复内核（可测核心，M5 A5；§C1 追加 tailscale）：只对开着的对外通道 ensure
-/// （lan 的监听恢复由 start_server 承担不在此列；本机通道常驻无动作）
+/// （lan 的监听恢复由 start_server 承担，不在此列；「本机」不是通道，无动作可言）
 fn restore_tunnels_core(flags: ChannelFlags, mut ensure: impl FnMut(ChannelKind)) {
     if flags.quick {
         ensure(ChannelKind::Quick);
