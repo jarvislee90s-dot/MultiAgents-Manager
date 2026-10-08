@@ -16,6 +16,8 @@ pub mod settings;
 pub mod skill;
 // 用量域（计划① Task 20）：6 条查询/设置命令（按字母序排在 skill 之后）
 pub mod usage;
+// 升级检查（prerelease 渠道）：GitHub 发现层 + 动态端点安装 + 临时残留清理
+pub mod updater;
 
 pub use screenshot::capture_window_screenshot;
 pub use session::get_all_sessions;

@@ -165,6 +165,9 @@ pub fn run() {
             crate::remote::restore_on_launch();
             // 用量账本：应用启动采集一次（按需路径，绝不进 3 秒轮询）
             crate::services::usage::collect::spawn_initial_collection();
+            // 升级残留清理：Windows 升级流把安装包留在 %TEMP% 的
+            // `{app}-*-updater-*` 目录（插件装完 exit(0) 不回收），启动即扫除
+            crate::commands::updater::cleanup_updater_temp_dirs(app.handle());
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
@@ -305,17 +308,18 @@ pub fn run() {
         // 导出落盘（计划①，契约 §3 新增）：文本/二进制写导出目录（2026-10-07 A2 起 = 系统下载目录）
         commands::export::export_save_text,
         commands::export::export_save_bytes,
+        // 升级检查（prerelease 渠道）：GitHub 发现层 + 动态端点一键升级
+        commands::updater::check_for_github_update,
+        commands::updater::install_github_update,
     ]);
 
+    // 仅 release 构建注册 updater（评审 I3 修正，2026-10-08）：
+    // 原先的 TAURI_SIGNING_PRIVATE_KEY 运行时门（8dc1147）防的是「conf 里还是占位
+    // URL」时代——现在 conf 已是真实端点+公钥，且签名私钥仅构建期需要（bundler 签
+    // latest.json 用），终端用户机器运行时不存在该变量；保留 env 门会让所有用户的
+    // 应用内升级恒失败。debug 构建仍不注册（无签名产物可验，install 命令有降级提示）
     #[cfg(not(debug_assertions))]
-    let builder = {
-        // 仅在设置了签名密钥时才注册 updater，否则占位 URL 会 panic
-        if std::env::var("TAURI_SIGNING_PRIVATE_KEY").is_ok() {
-            builder.plugin(tauri_plugin_updater::Builder::new().build())
-        } else {
-            builder
-        }
-    };
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     // M4：退出钩子（spec §8 应用退出清理子进程与电源锁）——旧 `.run(ctx)` 无事件回调，
     // 改为 build + run 回调：RunEvent::Exit 时停对外通道（M5 A5 隧道双通道 stop_all +
@@ -326,11 +330,19 @@ pub fn run() {
         .expect("error while building tauri application");
     app.run(|_app, event| {
         if let tauri::RunEvent::Exit = event {
-            crate::remote::tunnel::stop_all();
-            // §C1 修复轮 1 Finding 2②：Funnel 无子进程可 kill_on_drop（守护 =
-            // 轮询线程 + tailscaled 常驻配置），进程退出必须显式撤 + 收 DESIRED
-            crate::remote::tailscale::stop_all();
-            crate::remote::power::release();
+            exit_cleanup();
         }
     });
+}
+
+/// 退出清理三件套：停对外通道（隧道 + tailscale Funnel）与放电源锁。
+/// RunEvent::Exit 与 Windows 应用内升级共用——插件安装路径内部直接
+/// `process::exit(0)`，不经过事件循环，靠 commands::updater 安装链上的
+/// `on_before_exit` 钩子调用本函数，保证不留孤儿进程、不失电源锁。
+pub(crate) fn exit_cleanup() {
+    crate::remote::tunnel::stop_all();
+    // §C1 修复轮 1 Finding 2②：Funnel 无子进程可 kill_on_drop（守护 =
+    // 轮询线程 + tailscaled 常驻配置），进程退出必须显式撤 + 收 DESIRED
+    crate::remote::tailscale::stop_all();
+    crate::remote::power::release();
 }
