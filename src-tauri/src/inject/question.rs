@@ -2962,7 +2962,9 @@ fn parse_question_row(line: &str) -> Option<(Option<u32>, Option<bool>, bool, St
 /// **锚 B（页签栏，2026-10-02 新增）**：多题流的**单选子题**没有独立推进行（活体
 /// 取证：页签栏之后直接是题干+编号选项块，`Type something` 后即分隔线）——以
 /// [`is_question_tab_bar`]（复合签名）为锚，**向下**收「编号连续递增」块，分隔线
-/// 即停。产物**不含** `Advance` 行（调用方按无推进行形态处置）。
+/// 即停。产物**不含** `Advance` 行（调用方按无推进行形态处置）。单题集的**单页签**
+/// 形态（2026-10-08 活体 claude 2.1.287：` ☐ Deploy`，无 ←/→/Submit——0.5.1
+/// 报障靶屏）由 [`is_single_question_tab_line`] 兜底进同一锚，收块逻辑共用。
 ///
 /// 解析失败（两锚皆不成立）→ 空块（调用方按形态不符中止，不猜——与
 /// [`crate::inject::dialog::navigation_anchors`] 的「不猜起点」同纪律）。
@@ -3031,8 +3033,19 @@ pub(crate) fn parse_question_rows(lines: &[String]) -> Vec<QuestionRow> {
         }
         // 锚 A 在但上方收不到块（滚回区杂锚）→ 落锚 B 再试
     }
-    // 锚 B（页签栏）：单选子题无独立推进行——自页签栏向下收「编号连续递增」块
-    let Some(tab_idx) = lines.iter().position(|l| is_question_tab_bar(l)) else {
+    // 锚 B（页签栏）：多题复合签名优先；单题集的**单页签行**（2026-10-08 活体
+    // claude 2.1.287：单问题 AskUserQuestion 页签只有 ` ☐ Deploy`，无 ←/→/Submit
+    // ——既有复合签名不命中 → 双锚皆败 → 0 行中止，0.5.1 用户报障）兜底。两形态
+    // 共用下方同一段「向下收编号连续递增块」（分隔线即停天然排除 Chat about this）。
+    let tab_idx = lines
+        .iter()
+        .position(|l| is_question_tab_bar(l))
+        // 单页签兜底取**最靠后**（rposition）：滚回区散落 ☐/☒ 起头行时首匹配会被
+        // 劫持——锚 A 的 2026-10-02 教训（「取第一处被滚回区杂锚劫持」）对新锚同款
+        // 适用；活题屏是屏上最靠下的页签行（其下只有选项/分隔线/footer）。多题复合
+        // 签名维持 position 现状（既有夹具与实测形态全屏恰一条 ←…→ 行）。
+        .or_else(|| lines.iter().rposition(|l| is_single_question_tab_line(l)));
+    let Some(tab_idx) = tab_idx else {
         return Vec::new();
     };
     let mut block: Vec<(u32, Option<bool>, bool, String)> = Vec::new();
@@ -3090,12 +3103,32 @@ fn is_question_tab_bar(line: &str) -> bool {
     t.starts_with('←') && t.ends_with('→') && t.to_lowercase().contains("submit")
 }
 
+/// 单题集的**单页签行**判定（2026-10-08 活体取证 claude 2.1.287，自建探针会话
+/// dump，证据 `%USERPROFILE%\mam-probe-m6r\evidence\screen-claude-single-tab-auq-
+/// 20261008-154900.txt`）：单问题 AskUserQuestion 的页签栏只有一行 ` ☐ Deploy`
+/// ——无 `←`/`→`、无 `Submit`，[`is_question_tab_bar`] 三特征全不命中 → 双锚皆败
+/// → 解析 0 行 →「屏上解析不出问答选项块」中止（0.5.1 用户报障的靶形态）。
+/// 判据 = 剥首空白后以 ☐(U+2610)/☒(U+2612) 起头且后随非空页签头。☒ = 已答投影
+/// （多题页签栏同字形族，2.1.278 矩阵实证 `☒/☐ 各题已答/未答`）；✔/☑ 无单题
+/// 证据不收（结论不超证据）。多题页签栏以 `←` 起头，天然不进本判据（无双匹配）。
+fn is_single_question_tab_line(line: &str) -> bool {
+    let t = line.trim_start();
+    let rest = t.strip_prefix('☐').or_else(|| t.strip_prefix('☒'));
+    let Some(rest) = rest else {
+        return false;
+    };
+    !rest.trim().is_empty()
+}
+
 /// 题屏的**题干区原文**（页签栏→首个编号行之间，去空白拼接）——切题分类的
 /// 「换页」信号（与 [`screen_question_matches`] 同一提取面；Review 屏也会给出
 /// 非空值，调用方仅在题屏语境下消费）。
 pub(crate) fn question_heading_of(lines: &[String]) -> String {
     let norm = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-    let tab_idx = lines.iter().position(|l| l.contains('←'));
+    // 单题集单页签行也算页签（2026-10-08）：题干从页签之后起算，页签头不混入题干
+    let tab_idx = lines
+        .iter()
+        .position(|l| l.contains('←') || is_single_question_tab_line(l));
     let first_option = lines
         .iter()
         .position(|l| parse_question_row(l).is_some_and(|(num, ..)| num.is_some()));
@@ -3238,7 +3271,11 @@ fn screen_question_matches(lines: &[String], expected: &str) -> bool {
     if expected.chars().count() < 4 {
         return true; // 判别力不足（超短题干）——不硬拦
     }
-    let tab_idx = lines.iter().position(|l| l.contains('←'));
+    // 单题集单页签行也算页签（2026-10-08，与 question_heading_of 同一提取面——
+    // 评审 P2-1：否则长题干折行超出 4 行回落窗 → 身份区丢题干头部 → 假阴性中止）
+    let tab_idx = lines
+        .iter()
+        .position(|l| l.contains('←') || is_single_question_tab_line(l));
     let first_option = lines
         .iter()
         .position(|l| parse_question_row(l).is_some_and(|(num, ..)| num.is_some()));
@@ -4463,6 +4500,16 @@ where
     let first = poll_screen().map_err(StageAbort::screen)?.ok_or_else(|| {
         StageAbort::screen("读不到问答屏（屏读窗尽或不可用）——已中止，未发任何键；请人工核对终端")
     })?;
+    // **Review 确认屏防线（评审 P1-1，2026-10-08）**：漂移场景（用户终端已答完、
+    // 屏停在 Review 确认屏，手机卡再点选项）下数字会打进确认屏=替用户提交。
+    // Review 是更特异判据（C1 同款前置，见 question_screen_snapshot）——Ready 即
+    // 零键中止；顺带关掉多题集自锚 B 落地以来的同类暴露（Review 屏也渲染页签栏，
+    // 确认项 1. Submit answers/2. Cancel 会被收进行块）。
+    if matches!(probe_review_screen(&first), ScreenStep::Ready(_)) {
+        return Err(StageAbort::screen(
+            "屏上是 Review 确认屏而非题屏（答案已答毕待确认）——已中止，未发任何键；请到终端人工核对",
+        ));
+    }
     let rows = parse_question_rows(&first);
     if rows.is_empty() {
         return Err(StageAbort::screen(
@@ -8254,6 +8301,143 @@ mod tests {
         );
     }
 
+    // ===== 单题集 · 单页签形态（2026-10-08 活体 2.1.287，0.5.1 报障修复）=====
+
+    /// **解析识别**：单页签屏（无推进行、无 ←/→ Submit 复合签名）必须出 4 行块
+    /// ——3 选项 + Type something（分隔线天然排除 Chat about this）；单选形态
+    /// 全行无勾选框；焦点唯一在选项 1。还原动作（变异）：撤掉
+    /// [`is_single_question_tab_line`] 锚 → 解析回 0 行、本用例先红。
+    #[test]
+    fn parses_single_question_tab_screen() {
+        let rows = parse_question_rows(&live_fixtures::q_single_tab());
+        assert_eq!(
+            rows.len(),
+            4,
+            "3 选项 + FreeText，Chat 被分隔线排除：{rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.checked.is_none()),
+            "单选形态无勾选框：{rows:?}"
+        );
+        assert!(
+            rows.iter().all(|r| r.kind != QuestionRowKind::Advance),
+            "无推进行：{rows:?}"
+        );
+        assert_eq!(rows[3].kind, QuestionRowKind::FreeText);
+        assert_eq!(rows[3].label, "Type something.");
+        assert_eq!(
+            rows.iter().filter(|r| r.focused).count(),
+            1,
+            "焦点唯一：{rows:?}"
+        );
+        assert!(rows[0].focused, "焦点在选项 1：{rows:?}");
+    }
+
+    /// **编排直答**：单页签屏上 select = 纯数字（焦点在选项行，守卫不触发）。
+    #[test]
+    fn select_on_single_tab_screen_sends_digit_only() {
+        let (r, sent) = run_select_script(2, vec![live_fixtures::q_single_tab()]);
+        let keys = r.expect("单页签屏 select 必须成功");
+        assert_eq!(keys, vec!["3".to_string()], "键序 = [数字]：{keys:?}");
+        assert_eq!(sent, vec!["3".to_string()]);
+    }
+
+    /// **快照对位**：题干提取不含页签头（单页签行视作页签栏）；自由作答行在场、
+    /// 占位态；勾选态三行全 None。
+    #[test]
+    fn single_tab_screen_snapshot_alignment() {
+        let heading = question_heading_of(&live_fixtures::q_single_tab());
+        assert!(
+            heading.contains("Whichdatabaseshouldweuse?"),
+            "题干含问句：{heading}"
+        );
+        assert!(!heading.contains("Deploy"), "页签头不混入题干：{heading}");
+        let snap = question_screen_snapshot(&live_fixtures::q_single_tab()).expect("题屏必出快照");
+        assert_eq!(snap.checked, vec![None, None, None]);
+        assert!(snap.free_text_present);
+        assert_eq!(snap.free_text, None);
+    }
+
+    /// **负回归（评审 P1-3 修正）**：**行首** ☐ 的散文行（下方无编号块）不得
+    /// 劫持解析——锚命中但块空时仍返回空（与多题页签栏同语义）。☐ 必须在行首
+    /// 才踩中 [`is_single_question_tab_line`] 谓词（行中 ☐ 由「无锚 → 空」兜住，
+    /// 不是本用例的威胁模型）。
+    #[test]
+    fn stray_ballot_prose_line_yields_empty_block() {
+        let lines: Vec<String> = vec![
+            "☐ 待办：修弹窗（散文里冒出的页签形行）".to_string(),
+            "正文继续，无任何编号行".to_string(),
+        ];
+        assert!(parse_question_rows(&lines).is_empty());
+    }
+
+    /// **滚回区劫持防御（评审 P1-2）**：滚回区散落 ☐ 起头行 + 分隔线 + 下方真
+    /// 单页签——兜底取**最靠后**（rposition），必须收出真题屏 4 行块。锚 A 的
+    /// 2026-10-02「取第一处被滚回区杂锚劫持」事故类对新锚的复刻锁（变异：改回
+    /// position → 本用例先红：杂行命中、分隔线 break、块空 0 行）。
+    #[test]
+    fn single_tab_anchor_survives_scrollback_ballot_line() {
+        let mut lines = vec![
+            "☐ 待办：某轮旧对话冒出的杂行".to_string(),
+            "正文继续".to_string(),
+            "──────────────────────────────────────────────".to_string(),
+        ];
+        lines.extend(live_fixtures::q_single_tab());
+        let rows = parse_question_rows(&lines);
+        assert_eq!(rows.len(), 4, "rposition 取真题屏页签：{rows:?}");
+        assert_eq!(rows[0].label, "Postgres", "选项来自真题屏：{rows:?}");
+    }
+
+    /// **Review 确认屏防线（评审 P1-1）**：单题集答毕后的 Review 屏（☒ 单页签 +
+    /// Submit answers/Cancel 确认项）——select 编排必须零键中止。漂移场景：终端
+    /// 已答完、手机卡再点选项，数字打进确认屏=替用户提交。形态为**派生**（单题
+    /// Review 屏未活体取证——字形族按多题 Review 夹具投影，证据缺口已申报屏读
+    /// 矩阵；防线判据 [`probe_review_screen`] 是既有实测定案，本用例锁的是防线
+    /// 在 select 路径的前置位）。
+    #[test]
+    fn select_aborts_zero_keys_on_review_screen() {
+        let review = vec![
+            " ☒ Deploy".to_string(),
+            String::new(),
+            "Review your answers".to_string(),
+            String::new(),
+            "Ready to submit your answers?".to_string(),
+            String::new(),
+            "❯ 1. Submit answers".to_string(),
+            "  2. Cancel".to_string(),
+        ];
+        let (r, sent) = run_select_script(0, vec![review]);
+        let err = r.expect_err("Review 屏必须零键中止");
+        assert!(err.message.contains("Review"), "{err}");
+        assert!(sent.is_empty(), "零按键：{sent:?}");
+    }
+
+    /// **身份闸长题干（评审 P2-1）**：单页签屏题干折行 >4 行时，tab 判据不同步
+    /// 会让身份区回落「首编号行上方 4 行」→ 题干头部丢失 → 假阴性中止。期望串
+    /// 取**首个**题干行（旧判据下恰在 4 行窗外，变异可测）。
+    #[test]
+    fn single_tab_identity_gate_handles_long_heading() {
+        let mut lines = vec![" ☐ Deploy".to_string(), String::new()];
+        lines.extend(
+            [
+                "这是一个特别长的题干第一行，用来撑爆四行回落窗口的覆盖范围",
+                "第二行继续补充题干内容确保超过四行的回看窗口",
+                "第三行还在继续写题干内容让窗口真的不够用",
+                "第四行题干内容继续加长确保回落窗口不敷使用",
+                "第五行结尾：新建会话页面最上面的标签内容用什么？",
+            ]
+            .iter()
+            .map(|s| s.to_string()),
+        );
+        lines.push(String::new());
+        lines.push("❯ 1. 选项一".to_string());
+        lines.push("  2. 选项二".to_string());
+        assert!(screen_question_matches(
+            &lines,
+            "这是一个特别长的题干第一行，用来撑爆四行回落窗口的覆盖范围"
+        ));
+    }
+
     /// **焦点不在 TS 行** → 直接数字（守卫不触发，零额外键）。
     #[test]
     fn select_no_prelift_when_focus_on_option() {
@@ -8959,6 +9143,56 @@ mod live_probe_tests {
         eprintln!("前置检查：kimi CLI 版本探测 = {cli:?}（默认表 verified_with 记为 2.0.2）");
     }
 
+    /// **claude 问答屏只读活体探针（#[ignore]，零注入——四闸门①样本门槛的标准
+    /// 工具，形见 `mode::kimi_screen_live_dump` / opencode 探针）**：对
+    /// `MAM_PROBE_PID` 指定的 claude 进程跑**生产同款** `read_screen_window` +
+    /// claude 问答解析器全产物（行块/快照/题干），逐行 dump（带行号）——单题集
+    /// 单页签形态（2026-10-08）的取证入口与本矩阵行的日常复验工具。
+    ///
+    /// 跑法：`MAM_PROBE_PID=<pid> cargo test --lib claude_question_live_probe -- --ignored --nocapture`
+    ///
+    /// 红线：本探针**只读**，不碰 CONIN$、不发任何键；pid 由调用方显式给定。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "实机只读探针：claude 问答屏活体 dump（前置=MAM_PROBE_PID=<claude pid>）"]
+    fn claude_question_live_probe() {
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（红线：只碰显式指定的进程）");
+            return;
+        };
+        let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) else {
+            eprintln!("pid={pid} 屏读失败（无控制台/权限不足）");
+            return;
+        };
+        eprintln!("==== pid={pid} 可见窗 {} 行 ====", lines.len());
+        for (i, l) in lines.iter().enumerate() {
+            eprintln!("FIXTURE|{i:02}|{l}");
+        }
+        eprintln!("---- 解析器产物 ----");
+        let rows = super::parse_question_rows(&lines);
+        eprintln!("parse_question_rows = {} 行", rows.len());
+        for r in &rows {
+            eprintln!(
+                "  kind={:?} num={:?} checked={:?} focused={} label={:?}",
+                r.kind, r.number, r.checked, r.focused, r.label
+            );
+        }
+        match super::question_screen_snapshot(&lines) {
+            Some(snap) => eprintln!(
+                "question_screen_snapshot = Some(checked={:?} free_text={:?} present={} heading={:?})",
+                snap.checked, snap.free_text, snap.free_text_present, snap.heading
+            ),
+            None => eprintln!("question_screen_snapshot = None（Review 屏或解析空）"),
+        }
+        eprintln!(
+            "question_heading_of = {:?}",
+            super::question_heading_of(&lines)
+        );
+    }
+
     /// **opencode 屏读活体探针（#[ignore]，零注入——四闸门①样本门槛的标准工具）**：
     /// 对 `MAM_PROBE_PID` 指定的 opencode TUI 进程跑**生产同款** `read_screen_window`
     /// + 全套 opencode 问答解析器，逐行 dump（带行号）+ 各解析器产物——用于「读得到屏
@@ -9539,6 +9773,46 @@ pub(crate) mod live_fixtures {
             "",
         ]));
         v
+    }
+
+    /// **单题集 · 单页签形态**（2026-10-08 活体逐字 dump，claude 2.1.287，
+    /// 自建探针会话；证据 `%USERPROFILE%\\mam-probe-m6r\\evidence\\
+    /// screen-claude-single-tab-auq-20261008-154900.txt`，run-id 同名）：
+    /// 单问题 AskUserQuestion 的页签栏只有 ` ☐ Deploy` 一行——无 `←`/`→`、
+    /// 无 `Submit`，既有双锚（推进行 ∨ 复合页签栏）全不命中 → 解析 0 行中止
+    /// （0.5.1 用户报障「屏上解析不出问答选项块」的靶屏）。27 行（索引 00–26）
+    /// 逐字；行 05 的 U+FFFD 是探针控制台管道对 CP936 hook 输出的有损视图、行 26
+    /// footer 的 `↑/` 后缺 `↓` 是屏读字形读法实测（均非转写脱落，逐字保留）。
+    pub(crate) fn q_single_tab() -> Vec<String> {
+        lines(&[
+            " ▐▛███▛█   Claude Code v2.1.287",
+            "▝▜██████▀  ccs-claude-zhipu--glm-5.3-flash[1m] with max effort ·API Usage Billing",
+            " ▝▝   ▝▝   ~\\AppData\\Local\\Temp\\probe-auq-single-20261008",
+            "",
+            "  ⎿  SessionStart:startup hook error",
+            "  ⎿  Failed with non-blocking status code: ����λ�� ��:1 �ַ�: 48",
+            "",
+            "❯ Call the AskUserQuestion tool now: ask me exactly ONE question (single select, not multiple) with header Deploy and",
+            "  question Which database should we use? Offer exactly 3 numbered options: Postgres, SQLite, DuckDB. Do nothing else.",
+            "",
+            "  Thought for 8s (ctrl+o to expand)",
+            "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+            " ☐ Deploy",
+            "",
+            "Which database should we use?",
+            "",
+            "❯ 1. Postgres",
+            "     Powerful open-source relational database for prodrcpion workloads",
+            "  2. SQLite",
+            "     Lightweight embedded relational database, zero configuration",
+            "  3. DuckDB",
+            "     Fast in-process analytical database for OLAP workloads",
+            "  4. Type something.",
+            "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────",
+            "  5. Chat about this",
+            "",
+            "Enter to select ·↑/ to navigate ·Esc to cancel",
+        ])
     }
 }
 
