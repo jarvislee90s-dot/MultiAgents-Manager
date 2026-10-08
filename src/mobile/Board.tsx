@@ -442,7 +442,7 @@ export default function Board({
             type="button"
             data-testid="create-open"
             onClick={() => setCreateOpen(true)}
-            className="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-600 enabled:hover:bg-slate-100 dark:border-slate-800 dark:text-slate-300"
+            className="rounded-full border border-[var(--cb)] bg-[var(--cbg)] px-2.5 py-1 text-xs text-[var(--mut)]"
             aria-label="新建会话"
           >
             ＋ 新建

@@ -3,7 +3,10 @@
 // FilePreview 全屏态（fixed inset-0 z-50），文案硬编码中文（移动页无 i18n 契约，
 // PairPage 同口径）。数据源三方法均为 C10 客户端（api.ts「Phase C C10」段）：
 // fetchCreateProjects(7) / createSession（400/409 走返回值，非异常）/
-// fetchCreateStatus（404 走类型化 no_task）。
+// fetchCreateStatus（404 走类型化 no_task）。样式消费 mobile.css 语义 token
+// （--pg/--cbg/--cb/--tx/--mut/--bub/--btnp/--btnpt/--rr/--font-ui）：日/夜与
+// 六皮肤/字体/圆角随桌面外观配置器生效；状态语义色（红/黄/绿/sky）按仓内
+// 「状态色不随皮肤」口径保留裸 Tailwind 色。
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiError,
@@ -17,6 +20,10 @@ import type { AgentType, Session } from "@/types/session";
 
 /** 新建会话 v1 工具面（计划 §C11）：固定四选；其余工具不在本入口提供 */
 const CREATE_TOOLS = ["claude", "codex", "kimi", "opencode"] as const;
+
+/** 最近项目快捷 chips 上限：chips 是加速器非信息面（候选列表才是全量信息面），
+ *  后端已按最近活跃降序，只取前 8 个铺顶部横滚行 */
+const CREATE_RECENT_CHIPS_MAX = 8;
 
 /** 进度轮询节奏（计划权威：2s） */
 const CREATE_POLL_MS = 2000;
@@ -64,6 +71,58 @@ const ACTIVE_HINT_TEXT = "该项目已有该工具的活跃会话，多实例下
  *  仅提示不拦截——服务端权威校验（400 bad_windows_form） */
 function needsWindowsFormHint(path: string): boolean {
   return /^[a-zA-Z]:(?!\\)/.test(path);
+}
+
+/** chips 两态类（镜像 Board 的 chipCls 口径；仓内惯例组件内联同款，不建共享模块） */
+const recentChipCls = (on: boolean) =>
+  on
+    ? "shrink-0 rounded-full bg-[var(--btnp)] px-3 py-1 text-xs font-medium text-[var(--btnpt)]"
+    : "shrink-0 rounded-full border border-[var(--cb)] bg-[var(--cbg)] px-3 py-1 text-xs text-[var(--mut)]";
+
+/** chips 展示名 = 路径末段（\ 与 / 双分隔切，兜底原串）；完整路径放 title/aria-label */
+function recentChipLabel(path: string): string {
+  return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
+}
+
+/** 最近项目快捷 chips（纯展示）：置顶加速器行，点一下即选中候选/灌入手填框 */
+function RecentProjectChips({
+  projects,
+  selectedPath,
+  manualMode,
+  onPick,
+}: {
+  projects: CreateProjectView[];
+  selectedPath: string | null;
+  manualMode: boolean;
+  onPick: (p: CreateProjectView) => void;
+}) {
+  return (
+    <div
+      role="group"
+      aria-label="最近项目"
+      data-testid="create-recent-chips"
+      className="mb-4 flex gap-2 overflow-x-auto pb-1"
+    >
+      {projects.map((p, i) => {
+        // 选中权威在候选选中态：手填态一律不亮（避免与输入框双高亮歧义）
+        const on = !manualMode && selectedPath === p.path;
+        return (
+          <button
+            key={p.path}
+            type="button"
+            data-testid={`create-recent-chip-${i}`}
+            title={p.path}
+            aria-label={p.path}
+            aria-pressed={on}
+            onClick={() => onPick(p)}
+            className={`${recentChipCls(on)} max-w-[12rem] truncate`}
+          >
+            {recentChipLabel(p.path)}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 interface CreateSessionSheetProps {
@@ -155,6 +214,21 @@ export default function CreateSessionSheet({
       alive = false;
     };
   }, []);
+
+  /** 快捷标签点击：非手填态 = 直接选中该候选（与候选项点击同口径，黄字/已选
+   *  回显天然复用）；手填态 = 只把路径灌入输入框、不切态（以候选为起点可再
+   *  微调）。不清 formError/notice——点 chip 是路径操作，不该抹错误反馈 */
+  const pickRecent = useCallback(
+    (p: CreateProjectView) => {
+      if (manualMode) {
+        setManualPath(p.path);
+      } else {
+        setManualMode(false);
+        setSelectedPath(p.path);
+      }
+    },
+    [manualMode]
+  );
 
   const handleSubmit = useCallback(async () => {
     if (tool === null || !effectivePath) return;
@@ -304,7 +378,7 @@ export default function CreateSessionSheet({
   const activeHint = (
     <p
       data-testid="create-active-hint"
-      className="mb-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+      className="mb-3 rounded-[var(--rr)] bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
     >
       {ACTIVE_HINT_TEXT}
     </p>
@@ -313,16 +387,16 @@ export default function CreateSessionSheet({
   return (
     <div
       data-testid="create-sheet"
-      className="fixed inset-0 z-50 flex flex-col bg-white text-slate-800 dark:bg-slate-950 dark:text-slate-200"
+      className="fixed inset-0 z-50 flex flex-col bg-[var(--pg)] [font-family:var(--font-ui)] text-[var(--tx)]"
     >
-      <header className="flex items-center justify-between border-b border-slate-200 px-4 py-3 dark:border-slate-800">
+      <header className="flex items-center justify-between border-b border-[var(--cb)] px-4 py-3">
         <h2 className="text-base font-semibold">新建会话</h2>
         <button
           type="button"
           data-testid="create-close"
           aria-label="关闭"
           onClick={onClose}
-          className="rounded-full p-1 text-slate-500 hover:bg-slate-200 dark:hover:bg-slate-800"
+          className="rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)]"
         >
           ✕
         </button>
@@ -330,10 +404,20 @@ export default function CreateSessionSheet({
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {taskId === null ? (
           <>
+            {/* 最近项目快捷 chips：页面最顶的加速器行（进度态不渲染；候选为空
+                整节不渲染——候选区已有加载/空态文案，chips 再占位属重复） */}
+            {projects !== null && projects.length > 0 && (
+              <RecentProjectChips
+                projects={projects.slice(0, CREATE_RECENT_CHIPS_MAX)}
+                selectedPath={selectedPath}
+                manualMode={manualMode}
+                onPick={pickRecent}
+              />
+            )}
             {notice && (
               <p
                 data-testid="create-notice"
-                className="mb-3 rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-400"
+                className="mb-3 rounded-[var(--rr)] bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-400"
               >
                 {notice}
               </p>
@@ -341,7 +425,7 @@ export default function CreateSessionSheet({
             {formError && (
               <p
                 data-testid="create-error"
-                className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400"
+                className="mb-3 rounded-[var(--rr)] bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400"
               >
                 {formError}
               </p>
@@ -369,10 +453,10 @@ export default function CreateSessionSheet({
                       onClick={() => setTool(t)}
                       className={
                         selected
-                          ? "rounded-full bg-slate-800 px-3 py-1 text-xs font-medium text-white dark:bg-slate-100 dark:text-slate-900"
+                          ? "rounded-full bg-[var(--btnp)] px-3 py-1 text-xs font-medium text-[var(--btnpt)]"
                           : disabled
-                            ? "rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-400 dark:bg-slate-900 dark:text-slate-600"
-                            : "rounded-full bg-slate-200 px-3 py-1 text-xs text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                            ? "rounded-full bg-[var(--cb)] px-3 py-1 text-xs text-[var(--mut)] opacity-50"
+                            : "rounded-full bg-[var(--cb)] px-3 py-1 text-xs text-[var(--mut)]"
                       }
                     >
                       {TOOL_LABELS[t]}
@@ -388,7 +472,7 @@ export default function CreateSessionSheet({
             <section className="mb-4">
               <h3 className="mb-2 text-sm font-medium">目录</h3>
               {projects === null ? (
-                <p className="text-xs text-slate-500">目录候选加载中…</p>
+                <p className="text-xs text-[var(--mut)]">目录候选加载中…</p>
               ) : projects.length > 0 ? (
                 <ul data-testid="create-project-list" className="mb-2 space-y-1">
                   {projects.map((p, i) => (
@@ -401,14 +485,14 @@ export default function CreateSessionSheet({
                           setManualMode(false);
                           setSelectedPath(p.path);
                         }}
-                        className={`w-full rounded-lg border px-3 py-2 text-left ${
+                        className={`w-full rounded-[var(--rr)] border px-3 py-2 text-left ${
                           !manualMode && selectedPath === p.path
-                            ? "border-slate-800 bg-slate-100 dark:border-slate-100 dark:bg-slate-900"
-                            : "border-slate-200 dark:border-slate-800"
+                            ? "border-[var(--btnp)] bg-[var(--bub)]"
+                            : "border-[var(--cb)] bg-[var(--cbg)]"
                         }`}
                       >
                         <span className="block truncate text-sm">{p.path}</span>
-                        <span className="block text-xs text-slate-500 dark:text-slate-400">
+                        <span className="block text-xs text-[var(--mut)]">
                           {formatRelativeTime(p.lastActiveAt, now)} ·{" "}
                           {p.tools.map((t) => TOOL_LABELS[t as AgentType] ?? t).join("、")}
                         </span>
@@ -417,7 +501,7 @@ export default function CreateSessionSheet({
                   ))}
                 </ul>
               ) : (
-                <p className="mb-2 text-xs text-slate-500">
+                <p className="mb-2 text-xs text-[var(--mut)]">
                   {projectsFailed
                     ? "目录候选不可用，请手动输入路径"
                     : "近 7 天无活跃项目，请手动输入路径"}
@@ -430,8 +514,8 @@ export default function CreateSessionSheet({
                 onClick={() => setManualMode((v) => !v)}
                 className={`rounded-full px-3 py-1 text-xs ${
                   manualMode
-                    ? "bg-slate-800 text-white dark:bg-slate-100 dark:text-slate-900"
-                    : "bg-slate-200 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                    ? "bg-[var(--btnp)] text-[var(--btnpt)]"
+                    : "bg-[var(--cb)] text-[var(--mut)]"
                 }`}
               >
                 手动输入路径
@@ -444,7 +528,7 @@ export default function CreateSessionSheet({
                     value={manualPath}
                     onChange={(e) => setManualPath(e.target.value)}
                     placeholder="X:\path\to\project"
-                    className="mt-2 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
+                    className="mt-2 w-full rounded-[var(--rr)] border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2 text-sm text-[var(--tx)] placeholder:text-[var(--mut)]"
                   />
                   {needsWindowsFormHint(manualPath) && (
                     <p
@@ -457,7 +541,7 @@ export default function CreateSessionSheet({
                 </>
               )}
               {!manualMode && selectedPath !== null && (
-                <p data-testid="create-selected-path" className="mt-1 text-xs text-slate-500">
+                <p data-testid="create-selected-path" className="mt-1 text-xs text-[var(--mut)]">
                   已选：{selectedPath}
                 </p>
               )}
@@ -472,9 +556,9 @@ export default function CreateSessionSheet({
                 placeholder="hi"
                 value={firstMessage}
                 onChange={(e) => setFirstMessage(e.target.value)}
-                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
+                className="w-full rounded-[var(--rr)] border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2 text-sm text-[var(--tx)] placeholder:text-[var(--mut)]"
               />
-              <p className="mt-1 text-xs text-slate-500">留空将发送默认问候「hi」</p>
+              <p className="mt-1 text-xs text-[var(--mut)]">留空将发送默认问候「hi」</p>
             </section>
 
             {formYellow && activeHint}
@@ -484,7 +568,7 @@ export default function CreateSessionSheet({
               data-testid="create-submit"
               disabled={!canSubmit}
               onClick={() => void handleSubmit()}
-              className="w-full rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium text-white disabled:opacity-40 dark:bg-slate-100 dark:text-slate-900"
+              className="w-full rounded-[var(--rr)] bg-[var(--btnp)] px-3 py-2 text-sm font-medium text-[var(--btnpt)] disabled:opacity-40"
             >
               {submitting ? "提交中…" : "开始创建"}
             </button>
@@ -495,7 +579,7 @@ export default function CreateSessionSheet({
           <>
             <p
               data-testid="create-error"
-              className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400"
+              className="mb-3 rounded-[var(--rr)] bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400"
             >
               设备已失效，请重新配对
             </p>
@@ -504,14 +588,14 @@ export default function CreateSessionSheet({
                 type="button"
                 data-testid="create-retry"
                 onClick={() => backToForm()}
-                className="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium text-white dark:bg-slate-100 dark:text-slate-900"
+                className="flex-1 rounded-[var(--rr)] bg-[var(--btnp)] px-3 py-2 text-sm font-medium text-[var(--btnpt)]"
               >
                 返回重试
               </button>
               <button
                 type="button"
                 onClick={onClose}
-                className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
+                className="flex-1 rounded-[var(--rr)] border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2 text-sm"
               >
                 关闭
               </button>
@@ -522,7 +606,7 @@ export default function CreateSessionSheet({
           <>
             <p
               data-testid="create-error"
-              className="mb-3 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400"
+              className="mb-3 rounded-[var(--rr)] bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400"
             >
               任务已失效（主机可能重启），请重试
             </p>
@@ -531,14 +615,14 @@ export default function CreateSessionSheet({
                 type="button"
                 data-testid="create-retry"
                 onClick={() => backToForm()}
-                className="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium text-white dark:bg-slate-100 dark:text-slate-900"
+                className="flex-1 rounded-[var(--rr)] bg-[var(--btnp)] px-3 py-2 text-sm font-medium text-[var(--btnpt)]"
               >
                 返回重试
               </button>
               <button
                 type="button"
                 onClick={onClose}
-                className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
+                className="flex-1 rounded-[var(--rr)] border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2 text-sm"
               >
                 关闭
               </button>
@@ -556,7 +640,7 @@ export default function CreateSessionSheet({
             </p>
             <p
               data-testid="create-detail"
-              className="mb-4 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400"
+              className="mb-4 rounded-[var(--rr)] bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-400"
             >
               {detail ?? "创建失败，请重试"}
             </p>
@@ -565,14 +649,14 @@ export default function CreateSessionSheet({
                 type="button"
                 data-testid="create-retry"
                 onClick={() => backToForm()}
-                className="flex-1 rounded-lg bg-slate-800 px-3 py-2 text-sm font-medium text-white dark:bg-slate-100 dark:text-slate-900"
+                className="flex-1 rounded-[var(--rr)] bg-[var(--btnp)] px-3 py-2 text-sm font-medium text-[var(--btnpt)]"
               >
                 重试
               </button>
               <button
                 type="button"
                 onClick={onClose}
-                className="flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
+                className="flex-1 rounded-[var(--rr)] border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2 text-sm"
               >
                 关闭
               </button>
@@ -591,13 +675,13 @@ export default function CreateSessionSheet({
             {detail && (
               <p
                 data-testid="create-detail"
-                className="mb-3 rounded-lg bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-400"
+                className="mb-3 rounded-[var(--rr)] bg-sky-500/10 px-3 py-2 text-xs text-sky-700 dark:text-sky-400"
               >
                 {detail}
               </p>
             )}
             {sessionId === null ? (
-              <p className="text-sm text-slate-500">会话已创建，请到看板查看</p>
+              <p className="text-sm text-[var(--mut)]">会话已创建，请到看板查看</p>
             ) : waitHint ? (
               <>
                 <p
@@ -609,13 +693,13 @@ export default function CreateSessionSheet({
                 <button
                   type="button"
                   onClick={onClose}
-                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
+                  className="w-full rounded-[var(--rr)] border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2 text-sm"
                 >
                   关闭
                 </button>
               </>
             ) : (
-              <p className="text-sm text-slate-500">等待会话上板后自动打开…</p>
+              <p className="text-sm text-[var(--mut)]">等待会话上板后自动打开…</p>
             )}
           </>
         ) : (
@@ -626,14 +710,14 @@ export default function CreateSessionSheet({
               {phase === null ? "正在获取进度…" : (CREATE_PHASE_LABELS[phase] ?? phase)}
             </p>
             {detail && (
-              <p data-testid="create-detail" className="mb-3 text-xs text-slate-500">
+              <p data-testid="create-detail" className="mb-3 text-xs text-[var(--mut)]">
                 {detail}
               </p>
             )}
             {stalledHint && (
               <p
                 data-testid="create-stalled-hint"
-                className="mb-3 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+                className="mb-3 rounded-[var(--rr)] bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
               >
                 创建耗时已超 2 分钟仍未完成——主机侧可能异常（断连/停摆），可稍后在
                 看板确认结果，或返回重试
@@ -645,11 +729,11 @@ export default function CreateSessionSheet({
               onClick={() =>
                 backToForm("已取消跟踪进度；主机侧创建仍将继续至终态，完成后会话将出现在看板")
               }
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm dark:border-slate-700"
+              className="w-full rounded-[var(--rr)] border border-[var(--cb)] bg-[var(--cbg)] px-3 py-2 text-sm"
             >
               取消跟踪
             </button>
-            <p className="mt-2 text-xs text-slate-500">
+            <p className="mt-2 text-xs text-[var(--mut)]">
               取消仅停止本页进度跟踪，主机侧创建仍将继续至终态
             </p>
           </>

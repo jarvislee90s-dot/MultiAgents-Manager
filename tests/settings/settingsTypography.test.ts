@@ -30,7 +30,9 @@ const SURFACE = [
     .filter((f) => f.endsWith(".tsx"))
     .map((f) => path.join(SETTINGS_DIR, f)),
 ];
-const rel = (f: string) => path.relative(ROOT, f);
+// rel 统一正斜杠：EXEMPT 登记的是正斜杠路径，win32 的 path.relative 返回反斜杠
+// 会导致集合查不中、把豁免面自己误报成外溢（2026-10-08 实测 Windows 全红）
+const rel = (f: string) => path.relative(ROOT, f).replace(/\\/g, "/");
 
 /**
  * **豁免面**：小字号在这里是「装得下优先」，抬字号会把版面挤爆 —— 属版面问题，不属排版规范。

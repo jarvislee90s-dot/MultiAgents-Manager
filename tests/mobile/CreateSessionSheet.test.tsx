@@ -302,6 +302,87 @@ describe("CreateSessionSheet 表单", () => {
   });
 });
 
+// ==== 最近项目快捷 chips（置顶加速器行）====
+describe("CreateSessionSheet 最近项目快捷 chips", () => {
+  it("有候选 → chips 置顶渲染：文案 = 路径末段，title = 完整路径", async () => {
+    routes.projects = [
+      project({ path: "E:\\proj\\alpha" }),
+      project({ path: "E:\\proj\\beta", lastActiveAt: "2026-09-30T10:00:00Z" }),
+    ];
+    installFetch();
+    render(
+      <CreateSessionSheet
+        enabledTools={new Set(["claude", "codex"])}
+        installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
+        boardSessions={[]}
+        onClose={vi.fn()}
+      />
+    );
+    await advance(0);
+    expect(screen.getByTestId("create-recent-chips")).toBeInTheDocument();
+    expect(screen.getByTestId("create-recent-chip-0").textContent).toBe("alpha");
+    expect(screen.getByTestId("create-recent-chip-0")).toHaveAttribute("title", "E:\\proj\\alpha");
+    expect(screen.getByTestId("create-recent-chip-1").textContent).toBe("beta");
+  });
+
+  it("非手填态点 chip → 直接选中该候选（回显 + aria-pressed，与候选列表同口径）", async () => {
+    routes.projects = [project()];
+    installFetch();
+    render(
+      <CreateSessionSheet
+        enabledTools={new Set(["claude", "codex"])}
+        installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
+        boardSessions={[]}
+        onClose={vi.fn()}
+      />
+    );
+    await advance(0);
+    fireEvent.click(screen.getByTestId("create-recent-chip-0"));
+    expect(screen.getByTestId("create-selected-path").textContent).toContain("E:\\proj\\alpha");
+    expect(screen.getByTestId("create-recent-chip-0")).toHaveAttribute("aria-pressed", "true");
+    // 与候选列表选中态同步
+    expect(screen.getByTestId("create-project-0")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("手填态点 chip → 只灌入手填框、不退出手填态（以候选为起点可再微调）", async () => {
+    routes.projects = [project({ path: "E:\\proj\\alpha" })];
+    installFetch();
+    render(
+      <CreateSessionSheet
+        enabledTools={new Set(["claude", "codex"])}
+        installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
+        boardSessions={[]}
+        onClose={vi.fn()}
+      />
+    );
+    await advance(0);
+    fireEvent.click(screen.getByTestId("create-manual-toggle"));
+    fireEvent.click(screen.getByTestId("create-recent-chip-0"));
+    expect((screen.getByTestId("create-manual-input") as HTMLInputElement).value).toBe(
+      "E:\\proj\\alpha"
+    );
+    expect(screen.getByTestId("create-manual-toggle")).toHaveAttribute("aria-pressed", "true");
+    // 手填态不亮 chip 选中（选中权威在输入框，不双高亮）
+    expect(screen.getByTestId("create-recent-chip-0")).toHaveAttribute("aria-pressed", "false");
+    expect(screen.queryByTestId("create-selected-path")).not.toBeInTheDocument();
+  });
+
+  it("候选为空 → chips 整节不渲染（空态不占位，候选区已有文案）", async () => {
+    routes.projects = [];
+    installFetch();
+    render(
+      <CreateSessionSheet
+        enabledTools={new Set(["claude", "codex"])}
+        installedTools={new Set(["claude", "codex", "kimi", "opencode"])}
+        boardSessions={[]}
+        onClose={vi.fn()}
+      />
+    );
+    await advance(0);
+    expect(screen.queryByTestId("create-recent-chips")).not.toBeInTheDocument();
+  });
+});
+
 // ==== 提交错误分診（400 reasonCode / 409 / 网络异常）====
 describe("CreateSessionSheet 提交错误分診", () => {
   it("409 conflict →「已有创建任务进行中」", async () => {
