@@ -1,6 +1,8 @@
 // 升级提醒弹窗（prerelease 渠道，2026-10-07 设计定案）：
 // - 三按钮语义：立即升级 / 忽略本版本（DB KV 持久，直到新版本出现）/ 稍后（仅本次）
-// - 正文以 release 页 body 为准，react-markdown 渲染 + 限高内滚（长 note 不撑爆弹窗）
+// - 正文 = release body 的「更新内容」节（Rust 侧 extract_release_notes 裁掉
+//   版本标题 + 下载清单头段——手动下载的人才需要它，塞进弹窗就是「没头没尾」）；
+//   react-markdown 渲染 + 限高内滚（长 note 不撑爆弹窗）
 // - 预发布角标；「在 GitHub 查看」跳具体 tag 页（html_url，非 /releases/latest）
 // - 自动模式（home 挂载）每次启动检查一次：可用且未被忽略才自动弹；
 //   手动模式（About 挂载）由按钮触发检查，出结果即弹
@@ -189,7 +191,9 @@ export function UpdaterDialog({ manualCheck = false }: UpdaterDialogProps) {
       // 下载中禁关：无取消下载手段，ESC/遮罩误关只会留下进度黑洞（评审 Minor）
       onOpenChange={(open) => !open && !downloading && closeDialog()}
     >
-      <DialogContent>
+      {/* 基座是 text-center sm:text-left：About 窗口宽约 500px，视口永远命不中
+          sm: ⇒ 全弹窗居中显业余，压回恒左对齐 */}
+      <DialogContent className="text-left">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {downloading ? t("updater.downloading") : t("updater.updateAvailable")}

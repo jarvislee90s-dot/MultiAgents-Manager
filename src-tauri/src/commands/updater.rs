@@ -67,6 +67,19 @@ pub fn parse_tag_version(tag: &str) -> Option<semver::Version> {
     semver::Version::parse(stripped).ok()
 }
 
+/// 应用内弹窗的 notes 只该是「更新内容」本体：release body 的头段（版本标题 +
+/// 「下载」清单）是给手动下载的人看的——整段塞进弹窗限高滚动框，第一屏就是与
+/// 场景无关的下载清单，真正的更新内容全在折叠线以下（0.5.2 用户实测「没头没尾」）。
+/// 以 CI 拼装 body 的固定分节符 `### 更新内容` 为界取其后；无分节符（旧版结构 /
+/// 手工 body）原样返回。
+fn extract_release_notes(body: &str) -> &str {
+    const SECTION: &str = "\n### 更新内容\n";
+    match body.find(SECTION) {
+        Some(i) => body[i + SECTION.len()..].trim_start(),
+        None => body.trim(),
+    }
+}
+
 /// 在 release 列表里挑 semver 最大的**可升级目标**（含 prerelease；draft 与
 /// 缺 latest.json 的 release 排除）。发布顺序与版本顺序不一致时以 semver 为准。
 pub fn pick_latest_updatable(releases: &[GithubRelease]) -> Option<&GithubRelease> {
@@ -88,7 +101,9 @@ pub fn pick_latest_updatable(releases: &[GithubRelease]) -> Option<&GithubReleas
 pub struct UpdateAvailable {
     pub version: String,
     pub prerelease: bool,
-    /// release 页正文（弹窗以它为准）
+    /// 弹窗正文 = release body 的「更新内容」节（`extract_release_notes` 裁掉
+    /// 版本标题与下载清单头段——那两段是给手动下载的人看的，完整 body 走
+    /// 「在 GitHub 查看」链接）
     pub notes: String,
     /// 具体 tag 页（如 releases/tag/v0.5.0-beta.1），不是 /releases/latest
     pub html_url: String,
@@ -243,7 +258,11 @@ pub async fn check_for_github_update(app: tauri::AppHandle) -> CheckUpdateStatus
         update: UpdateAvailable {
             version: latest_version.to_string(),
             prerelease: latest.prerelease,
-            notes: latest.body.clone().unwrap_or_default(),
+            notes: latest
+                .body
+                .as_deref()
+                .map(|b| extract_release_notes(b).to_string())
+                .unwrap_or_default(),
             html_url: latest.html_url.clone(),
             published_at: latest.published_at.clone(),
             tag: latest.tag_name.clone(),
@@ -583,6 +602,39 @@ mod tests {
         let releases = tauri::async_runtime::block_on(fetch_github_releases())
             .expect("经代理拉取 GitHub releases 失败");
         assert!(!releases.is_empty(), "releases 列表不应为空");
+    }
+
+    #[test]
+    fn extracts_notes_after_ci_section_marker() {
+        // CI 拼装的 body 形态：标题 + 下载清单 + --- + ### 更新内容 + 说明本体。
+        // 弹窗只该拿分节符之后的本体（0.5.2 用户实测：整段塞弹窗 = 第一屏全是
+        // 与场景无关的下载清单，真内容在折叠线下，「没头没尾」）
+        let body = "## MultiAgents Manager v0.5.2\n\
+                    \n\
+                    ### 下载\n\
+                    \n\
+                    - **macOS**: `MultiAgents-Manager-0.5.2-macOS.dmg`\n\
+                    \n\
+                    ---\n\
+                    \n\
+                    ### 更新内容\n\
+                    \n\
+                    # 🔧 v0.5.2 更新 — 两处修复\n\
+                    \n\
+                    本次主要做两件事。";
+        let notes = extract_release_notes(body);
+        assert!(
+            notes.starts_with("# 🔧 v0.5.2 更新"),
+            "应从说明本体开头起：{notes}"
+        );
+        assert!(!notes.contains("下载"), "下载清单不得进弹窗：{notes}");
+    }
+
+    #[test]
+    fn notes_without_marker_falls_back_to_whole_body() {
+        // 旧版结构 / 手工 body 没有分节符 → 原样返回（不猜、不裁错）
+        assert_eq!(extract_release_notes("# 手写说明"), "# 手写说明");
+        assert_eq!(extract_release_notes(""), "");
     }
 
     #[test]
