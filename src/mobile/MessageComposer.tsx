@@ -1112,8 +1112,9 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         </div>
       )}
       <div className="flex items-end gap-2">
-        {/* 附件入口（2026-09-20）：+ 选择文件；「?」知情披露（存储到用户项目目录） */}
-        <span className="flex shrink-0 items-center gap-0.5">
+        {/* 附件入口（2026-09-20）：+ 选择文件；「?」知情披露（存储到用户项目目录）。
+            2026-10-04 用户裁决：两钮横排占横向空间 → 改上下竖排（+ 大在上、? 小在下） */}
+        <span className="flex shrink-0 flex-col items-center gap-0.5">
           <input
             ref={fileInputRef}
             type="file"
@@ -1140,7 +1141,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             onClick={() => fileInputRef.current?.click()}
             className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] disabled:opacity-40 dark:hover:bg-[var(--btnp)]"
           >
-            <Plus size={16} />
+            <Plus size={20} />
           </button>
           <button
             type="button"
@@ -1150,7 +1151,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             onClick={() => setAttachHintOpen((v) => !v)}
             className="shrink-0 rounded-full p-0.5 text-[10px] leading-none text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
           >
-            <CircleHelp size={12} />
+            <CircleHelp size={10} />
           </button>
         </span>
         <textarea

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { Toaster } from "sonner";
 import { ExternalLink, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { TitleBar } from "@/components/common/title-bar";
@@ -8,7 +9,7 @@ import { WindowFrame } from "@/components/common/window-frame";
 import { useAppTranslation } from "@/hooks/use-app-translation";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { cancelDestroyWindow, destroyWindow } from "@/lib/window";
-import { useManualUpdateCheck } from "@/components/common/updater-dialog";
+import { useManualUpdateCheck, UpdaterDialog } from "@/components/common/updater-dialog";
 import packageJson from "../../package.json";
 
 const techVersions = {
@@ -56,6 +57,10 @@ export default function AboutPage() {
       titleBar={<TitleBar title={t("about.title")} showMinimize={false} showMaximize={false} />}
       contentClassName="flex flex-1 items-center justify-center overflow-hidden"
     >
+      {/* 手动检查出可用更新时在本窗口弹升级弹窗（store 为窗口内实例）；
+          Toaster 必须本窗口自挂——检查失败/忽略成功的 toast 否则丢进虚空（评审 I4） */}
+      <UpdaterDialog manualCheck />
+      <Toaster />
       <div className="w-full max-w-xs space-y-6">
         <div className="text-center">
           <h2 className="text-2xl font-bold">{t("about.appName")}</h2>

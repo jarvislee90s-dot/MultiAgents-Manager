@@ -6,6 +6,19 @@ pub mod approve;
 pub mod anchor_ledger;
 pub mod capability;
 pub mod confirm;
+// 问答交互方言表（2026-10-05 推广批 F1）：四家交互差异=数据——新工具接入=填表
+// +账本加行+探测定案，不新写阶段机。claude 六机不进表（活体参照语义，用户裁决）。
+pub mod dialect;
+pub mod question_screen_oc;
+// 新建会话状态机内核（spec §4，C4 进程锚定段起）：起窗后按「目标目录 cwd + 新进程」
+// 发现 TUI pid；C5 弹窗处置状态机追加于本文件。
+pub mod create;
+// 物化发现（C6）：首句注入后按工具落盘口径产出候选 session id（显式 base 路径参数
+// ——tempdir 可测；opencode 三件套拷贝红线），候选由调用方 confirm 戳终判。
+pub mod create_discover;
+// 新建会话路径校验纯核（spec §2，C2）：只判不建（递归创建在状态机校验段）；黑名单双表
+// ——SENSITIVE_DIRS 凭据表全局段匹配（策略扩展，见模块文档）+ CREATE_SYSTEM_DIRS 系统目录表。
+pub mod create_path;
 // 通用 N 选项审批对话框屏读解析（批次丙 T5）：纯函数跨平台可测，屏读源在
 // windows_console::read_screen_window（仅 Windows 有屏读 → macOS 自然降级二元卡）。
 // 丁T3 起同模块承载「对话框在场 = 控制类注入红线」的单点判据
@@ -36,9 +49,10 @@ pub mod timing;
 #[cfg(windows)]
 pub mod windows_console;
 
-/// 实机 E2E 专用测试支撑面（M9R–M9R 批次 Task 12，`tests/m9r_e2e.rs` 唯一消费方）。
+/// 实机 E2E 专用测试支撑面（M9R–M9R 批次 Task 12 起，`tests/m9r_e2e.rs` 与
+/// C8 `tests/create_e2e.rs` 两个集成测试目标消费）。
 /// **非公开 API 承诺**：`doc(hidden)` 不进文档；只 re-export Windows 执行层的
-/// spec 感知入口与统计类型（四例 E2E 直调引擎所需的最小面），零新逻辑零转发。
+/// spec 感知入口与统计类型（两例 E2E 直调引擎/屏读所需的最小面），零新逻辑零转发。
 /// 生产代码不得消费本模块——生产注入一律经 `engine::Injector` 缝（`RealInjector`
 /// 装配）与旧薄壳（`locate_and_inject` / `locate_and_send_key`）。
 #[doc(hidden)]
@@ -78,7 +92,9 @@ pub fn inject_list_audit(limit: Option<usize>) -> serde_json::Value {
 /// 与 session-send / queue / retract 端点审计两处共用，单一出口防词表漂移。
 /// 字段化入参而非 QueueRow：端点侧审计（send/queue/retract）没有整行可传。
 /// action 词表（W5）：send|queue|flush|jump|retract|approve|reject|fail|key|open
-/// （open = Task 11 一键 resume，Task 7 的预留标注已兑现）。批次乙 T8 追加
+/// （open = Task 11 一键 resume，Task 7 的预留标注已兑现）。Phase C 追加
+/// `create|dialog`（远程新建会话：create=任务终态行、dialog=弹窗处置逐条留痕）。
+/// 批次乙 T8 追加
 /// `answer`（AskUserQuestion 问答应答，select/toggle/submit/cancel 四动作统一
 /// 记 answer，摘要区分见 question::AnswerAction::audit_label）。批次丙追加
 /// `mode`（T6 模式切换，摘要=「切换模式至 <target>」）。**T9 打断式插队不新增

@@ -1,5 +1,5 @@
 // 写审计表 DAO（M7）：移动端注入动作的只追加账本（谁在何时经哪个通道对哪个会话做了什么）
-// action 词表：send | queue | flush | jump | retract | approve | reject | fail | key | open | answer | mode | slash
+// action 词表：send | queue | flush | jump | retract | approve | reject | fail | key | open | answer | mode | slash | create | dialog
 //（由调用方约束，本层不校验；answer = 批次乙 T8 问答应答；mode = 批次丙 T6 模式切换；
 //  **slash = 丁T3 斜杠命令裸注入**——裁2：`/` 开头消息不带签名（前后缀都会破坏命令与
 //  参数），终端不留痕是可接受的，溯源只此一处：本表 action=slash + device_name 列）

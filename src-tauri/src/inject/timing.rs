@@ -75,7 +75,13 @@ pub const POLL_STEP_MS: u64 = 100;
 /// 没时间」就是低估的表现。1500ms ≈ 10 × [`SUBMIT_DELAY_MS`]，给重绘与慢机器留足余量，
 /// 又远小于用户可感知的「卡住」阈值。**1500ms 同样是自裁值**，实测项见
 /// `d20_live_probe_tests::d20_menu_paint_latency_live_probe`。
-pub const MENU_POLL_TOTAL_MS: u64 = 1_500;
+///
+/// **2026-10-06 扩为 3000ms（kimi 2.1.1 实测依据）**：用户会话 11:07 轮 4/4
+/// 「菜单未出现」（应用重启后高负载期，菜单渲染超 1.5s 窗），同会话负载回落后
+/// 11:31 起 3/3 命中——1.5s 窗在重绘慢时不够。本常量现役只服务 kimi 权限菜单
+/// 轮询（codex 数字直达用 [`CODEX_MENU_OPEN_POLL_TOTAL_MS`]），扩到 3s 与 codex
+/// 开菜单窗取齐。
+pub const MENU_POLL_TOTAL_MS: u64 = 3_000;
 
 /// **Full Access 二次确认框**轮询窗（毫秒）：第二段提交后等确认框画出。
 ///
@@ -116,7 +122,12 @@ pub const MODE_READBACK_POLL_TOTAL_MS: u64 = 1_500;
 /// 的证据。**不跟着调**：没有新证据时改动既有无实测支撑的窗，只会把一次无依据的变更
 /// 记在账上（结论不得超过证据）。若 T5 实机探针（`inject::question::live_probe_t5`）
 /// 量出超窗，再按实测回填。
-pub const QUESTION_STAGE_POLL_TOTAL_MS: u64 = 2_000;
+///
+/// **2026-10-06 扩为 3000ms**：与 [`MENU_POLL_TOTAL_MS`] 同批同依据（kimi 2.1.1
+/// 用户会话重载期菜单渲染超 1.5s 窗——问答阶段机等的是同一类「注入后的重绘」，
+/// 同一负载场景必然同瓶颈；原实测 1s 为正常负载值，回填通道不变）。本窗与菜单窗
+/// 的「≥」关系由 `windows_dominate_submit_delay` 的编译期断言锁定，单扩一边先红。
+pub const QUESTION_STAGE_POLL_TOTAL_MS: u64 = 3_000;
 
 /// **审批数字直选验证窗**（批次戊 E2① DigitFirstWithVerify）：claude 计划批准框发
 /// 数字后，屏读轮询等「对话框已消失」（= 数字生效）——窗内仍在 → 导航回退。
@@ -260,13 +271,16 @@ mod tests {
     #[test]
     fn timing_constants_are_pinned() {
         assert_eq!(POLL_STEP_MS, 100);
-        assert_eq!(MENU_POLL_TOTAL_MS, 1_500, "D20：观察②的低估窗已放大");
+        assert_eq!(
+            MENU_POLL_TOTAL_MS, 3_000,
+            "2026-10-06 扩窗：kimi 2.1.1 重载期 1.5s 不够（依据见其文档）"
+        );
         assert_eq!(CONFIRM_POLL_TOTAL_MS, 1_500);
         assert_eq!(RECEIPT_POLL_TOTAL_MS, 1_500);
         assert_eq!(MODE_READBACK_POLL_TOTAL_MS, 1_500, "D20：观察①的修复窗");
         assert_eq!(
-            QUESTION_STAGE_POLL_TOTAL_MS, 2_000,
-            "未随三窗调整（理由见其文档）"
+            QUESTION_STAGE_POLL_TOTAL_MS, 3_000,
+            "2026-10-06 与菜单窗同批扩（同一重载场景，依据见其文档）"
         );
         assert_eq!(
             TURN_STOP_POLL_TOTAL_MS, 3_000,
@@ -277,15 +291,16 @@ mod tests {
         assert_eq!(SUBMIT_DELAY_MS, 150);
     }
 
-    /// 窗 → 轮数（D20(b) 的「步长 × 轮数」表达）：三窗与回读窗各 15 拍、问答 20 拍、
-    /// 等回合停 30 拍；非整除向上取整、0 也至少 1 拍（**不读**不是有界轮询）。
+    /// 窗 → 轮数（D20(b) 的「步长 × 轮数」表达）：三窗与回读窗各 15 拍、菜单/问答
+    /// 30 拍（2026-10-06 扩窗后）、等回合停 30 拍；非整除向上取整、0 也至少 1 拍
+    /// （**不读**不是有界轮询）。
     #[test]
     fn poll_rounds_are_bounded_and_nonzero() {
-        assert_eq!(poll_rounds(MENU_POLL_TOTAL_MS), 15);
+        assert_eq!(poll_rounds(MENU_POLL_TOTAL_MS), 30);
         assert_eq!(poll_rounds(CONFIRM_POLL_TOTAL_MS), 15);
         assert_eq!(poll_rounds(RECEIPT_POLL_TOTAL_MS), 15);
         assert_eq!(poll_rounds(MODE_READBACK_POLL_TOTAL_MS), 15);
-        assert_eq!(poll_rounds(QUESTION_STAGE_POLL_TOTAL_MS), 20);
+        assert_eq!(poll_rounds(QUESTION_STAGE_POLL_TOTAL_MS), 30);
         assert_eq!(
             poll_rounds(TURN_STOP_POLL_TOTAL_MS),
             30,

@@ -91,8 +91,14 @@
       "kinds": ["user", "assistant", "thinking", "tool-call"],
       "pending": false,
       "note": "零误报：普通会话（无计划类消息）"
+    },
+    {
+      "tool": "claude",
+      "kinds": ["user", "assistant", "plan"],
+      "pending": true,
+      "note": "2026-10-04 审批卡不出修复：claude 计划批准等待（ExitPlanMode 尾挂；实况取证 bb92857b——钩子标记 0 行、detect 对原生 UI 文案恒 miss，前端挂载门与后端扫描器 claude_plan_pending 同判据补位）"
     }
   ],
-  "non_plan_tools": ["claude", "opencode", "zcode", "dsh", "workbuddy", "openclaw", ""],
-  "non_plan_tools_note": "工具族收窄：非 codex/kimi 一律 false（即使尾部有计划类消息）——两侧同名单。空串对应 tool_id 兜底形态。"
+  "non_plan_tools": ["opencode", "zcode", "dsh", "workbuddy", "openclaw", ""],
+  "non_plan_tools_note": "工具族收窄：非计划族一律 false（即使尾部有计划类消息）——两侧同名单。claude 2026-10-04 起入计划族（出列本名单）：其计划批准等待由前端挂载门与后端扫描器 claude_plan_pending 同判据消费。空串对应 tool_id 兜底形态。"
 }

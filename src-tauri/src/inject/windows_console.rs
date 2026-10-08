@@ -54,8 +54,8 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::Console::{
     AttachConsole, FreeConsole, GetConsoleScreenBufferInfo, GetNumberOfConsoleInputEvents,
-    ReadConsoleOutputCharacterW, WriteConsoleInputW, CONSOLE_SCREEN_BUFFER_INFO, COORD,
-    INPUT_RECORD, KEY_EVENT,
+    ReadConsoleOutputAttribute, ReadConsoleOutputCharacterW, WriteConsoleInputW,
+    CONSOLE_SCREEN_BUFFER_INFO, COORD, INPUT_RECORD, KEY_EVENT,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{MapVirtualKeyW, VkKeyScanW, MAPVK_VK_TO_VSC};
 
@@ -615,6 +615,34 @@ pub fn inject_key_spec(pid: u32, key: &str, spec: &FamilySpec) -> Result<(), Str
     })
 }
 
+/// 批量退格（2026-10-04 计划反馈通道）：`count` 个 VK_BACK 成对事件按小步进批量
+/// 写入。退格是**纯删除键、无逐键重绘耦合**——不等 SUBMIT_DELAY（探测定案
+/// 2026-10-04 §S4：claude 2.1.287 composer 上批量 backspace×30 全清实证，日志
+/// `evidence/plan-feedback/probe-type-pf-20261004-165110.log`）。分块/背压/预算
+/// 沿用长文本口径（事件对数 ≈ 字符数）。crate 内生产可见，唯一消费者 =
+/// `remote::api` 的计划反馈编排。
+pub(crate) fn inject_backspaces_spec(
+    pid: u32,
+    count: usize,
+    spec: &FamilySpec,
+) -> Result<(), String> {
+    if count == 0 {
+        return Ok(());
+    }
+    let scan = WinKeyLayout.scan_of(0x08u16); // VK_BACK
+    let records: Vec<KeyRecordSpec> = (0..count)
+        .flat_map(|_| super::engine::key_pair(0x08u16, scan, 0x08u16))
+        .collect();
+    let _lock = CONSOLE_OP.lock().unwrap_or_else(|e| e.into_inner());
+    let chars = count; // 事件对数 ≈ 字符数（预算/背压同长文口径）
+    let bp = families::use_backpressure(spec, chars);
+    let deadline = Instant::now() + Duration::from_millis(families::inject_budget_ms(spec, chars));
+    inject_via(pid, move |handle| {
+        paced_write(handle, &records, bp, deadline)?;
+        Ok(())
+    })
+}
+
 /// 输入行尾部屏读（Task 4，M6R/§8.1：注入后读屏可判定「文本滞留输入行」）。
 /// 契约签名 `read_input_tail(pid, n)`：CONOUT$ + `ReadConsoleOutputCharacterW`
 /// 从光标处**同行向前**读 `min(n, cursor_x+1)` 个 UTF-16 unit，
@@ -726,6 +754,48 @@ fn read_window_lines(handle: HANDLE) -> Result<Vec<String>, String> {
         lines.push(line.trim_end().to_string());
     }
     Ok(lines)
+}
+
+/// **字符属性级读取**（2026-10-06 粗体探针专用，#[ignore] 实机消费）：与
+/// [`read_screen_window`] 同一视口定位，每行返回属性数组（`FOREGROUND_INTENSITY`
+/// 等位——粗体/高亮在属性层，字符层不可见）。仅探针消费，生产不依赖。
+#[cfg(windows)]
+#[allow(dead_code)] // 粗体探针通道（2026-10-06 定案：属性层可读）——生产消费下批
+pub(crate) fn read_screen_window_attrs(pid: u32) -> Result<Vec<Vec<u16>>, String> {
+    read_via(pid, |handle| {
+        let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+        // SAFETY: FFI 调用；info 为本函数栈上缓冲
+        unsafe { GetConsoleScreenBufferInfo(handle, &mut info) }.map_err(|e| {
+            format!(
+                "GetConsoleScreenBufferInfo 失败（0x{:08X}）",
+                e.code().0 as u32
+            )
+        })?;
+        let win = info.srWindow;
+        let width = (win.Right - win.Left + 1).max(0) as usize;
+        let height = (win.Bottom - win.Top + 1).max(0) as usize;
+        let mut rows = Vec::with_capacity(height);
+        for row in 0..height {
+            let mut buf = vec![0u16; width];
+            let mut read = 0u32;
+            let start = COORD {
+                X: win.Left,
+                Y: win.Top + row as i16,
+            };
+            // SAFETY: FFI 调用；buf 长度即读取上限
+            unsafe { ReadConsoleOutputAttribute(handle, &mut buf, start, &mut read) }.map_err(
+                |e| {
+                    format!(
+                        "ReadConsoleOutputAttribute 失败（0x{:08X}）",
+                        e.code().0 as u32
+                    )
+                },
+            )?;
+            buf.truncate(read as usize);
+            rows.push(buf);
+        }
+        Ok(rows)
+    })
 }
 
 /// 插队确认排空判定专用（Task 5 / A1 插队语义）：轮询目标输入缓冲占用直至

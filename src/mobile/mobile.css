@@ -426,3 +426,27 @@ html[data-radius="22"] {
 .dark .hljs-addition {
   color: #7ee787;
 }
+
+/* ============================================================
+ * 交互卡入场动画（2026-10-04 停靠批）：审批/问答/模式卡挂载即从下方
+ * 轻微上滑淡入（InteractiveCard 根类 card-slide-enter）。会话切换重挂
+ * 也重播；jsdom 无关动画，不影响测试断言。
+ * ============================================================ */
+@keyframes card-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.card-slide-enter {
+  animation: card-slide-up 0.2s ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .card-slide-enter {
+    animation: none;
+  }
+}

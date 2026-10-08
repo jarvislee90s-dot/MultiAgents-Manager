@@ -30,6 +30,10 @@ interface Routes {
   approve?: Record<string, unknown>;
   approveStatus?: number;
   approveBody?: Record<string, unknown>;
+  /** 2026-10-04 计划批准卡：/session-plan-feedback 回执（缺省 editor_ready） */
+  planFeedback?: Record<string, unknown>;
+  planFeedbackStatus?: number;
+  planFeedbackBody?: Record<string, unknown>;
 }
 
 let routes: Routes;
@@ -51,6 +55,16 @@ function installFetch() {
     if (url.includes("/session-approve-options")) {
       if (routes.optionsStatus) return new Response("no", { status: routes.optionsStatus });
       return new Response(JSON.stringify(routes.options ?? approveOptions()), { status: 200 });
+    }
+    if (url.includes("/session-plan-feedback")) {
+      if (routes.planFeedbackStatus) {
+        return new Response(JSON.stringify(routes.planFeedbackBody ?? { error: "internal" }), {
+          status: routes.planFeedbackStatus,
+        });
+      }
+      return new Response(JSON.stringify(routes.planFeedback ?? { status: "editor_ready" }), {
+        status: 200,
+      });
     }
     if (url.includes("/session-approve")) {
       if (routes.approveStatus) {
@@ -554,5 +568,81 @@ describe("ApproveCard：裁11 配色 tone 映射", () => {
     // 二元分支不编造编号徽标：按钮文本 = 纯 label（不夹带序号/键名）
     expect(screen.getByTestId("approve-option-approve").textContent).toBe("允许");
     expect(screen.getByTestId("approve-option-reject").textContent).toBe("拒绝");
+  });
+});
+
+// ==== 2026-10-04 计划批准卡：planDialog 形态 + 反馈入口 ====
+describe("ApproveCard：计划批准卡（2026-10-04）", () => {
+  /** claude 计划批准框夹具：屏读三选项 + 账本反馈锚命中 dialog:3 */
+  function planDialogOptions(): ApproveOptionsView {
+    return approveOptions({
+      dialog: true,
+      planDialog: true,
+      feedbackOption: "dialog:3",
+      options: [
+        { id: "dialog:1", label: "Yes, and use auto mode" },
+        { id: "dialog:2", label: "Yes, manually approve edits" },
+        { id: "dialog:3", label: "Tell Claude what to change" },
+      ],
+    });
+  }
+
+  it("planDialog 形态：标题「计划批准」+ 反馈项渲染为入口（其余项照常渲染）", async () => {
+    installFetch();
+    routes.options = planDialogOptions();
+    render(<ApproveCard session={{ id: "sess-plan-1" }} />);
+    expect(
+      await screen
+        .findByTestId("approve-card")
+        .then((el) => el.textContent)
+        .then((t) => t?.includes("计划批准")),
+    ).toBe(true);
+    // 反馈项 = 独立 testid 入口（不直发按键）
+    expect(screen.getByTestId("approve-option-feedback").textContent).toContain(
+      "Tell Claude what to change",
+    );
+    // 其余选项照常（dialog 编号 id 形态）
+    expect(screen.getByTestId("approve-option-dialog:1")).toBeTruthy();
+    expect(screen.getByTestId("approve-option-dialog:2")).toBeTruthy();
+  });
+
+  it('点反馈项：POST /session-approve {optionId:"dialog:3"} → key_sent 后上报 onPlanFeedbackReady（零 plan-feedback 调用）', async () => {
+    installFetch();
+    routes.options = planDialogOptions();
+    routes.approve = { status: "key_sent" };
+    const onReady = vi.fn();
+    render(<ApproveCard session={{ id: "sess-plan-2" }} onPlanFeedbackReady={onReady} />);
+    fireEvent.click(await screen.findByTestId("approve-option-feedback"));
+    await flushAsync();
+    expect(onReady).toHaveBeenCalledTimes(1);
+    // 选 3 = 走既有审批端点（探测定案 2026-10-04 §S3：选 3 = 回空 composer）
+    expect(approveCalls()).toHaveLength(1);
+    expect(JSON.parse(String((approveCalls()[0][1] as RequestInit).body))).toEqual({
+      sessionId: "sess-plan-2",
+      optionId: "dialog:3",
+    });
+    const fbCalls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-plan-feedback"),
+    );
+    expect(fbCalls).toHaveLength(0);
+  });
+
+  it("选 3 失败（failed 回执）：显示错误文案、不上报父级（按钮保持可点可重试）", async () => {
+    installFetch();
+    routes.options = planDialogOptions();
+    routes.approve = { status: "failed", error: "对话框已不在场，请到终端核对" };
+    const onReady = vi.fn();
+    render(<ApproveCard session={{ id: "sess-plan-3" }} onPlanFeedbackReady={onReady} />);
+    fireEvent.click(await screen.findByTestId("approve-option-feedback"));
+    expect(
+      await screen
+        .findByTestId("approve-error")
+        .then((el) => el.textContent)
+        .then((t) => t?.includes("对话框已不在场")),
+    ).toBe(true);
+    expect(onReady).not.toHaveBeenCalled();
+    expect((screen.getByTestId("approve-option-feedback") as HTMLButtonElement).disabled).toBe(
+      false,
+    );
   });
 });

@@ -267,6 +267,14 @@ pub type ArchiveDeleteFn = dyn Fn(Option<&str>) -> usize + Send + Sync;
 /// 共用 dao::unread::mark_read。
 pub type UnreadMarkReadFn = dyn Fn(&str, &str) + Send + Sync;
 
+/// C7 配对计数缝类型（spec §5，clippy type_complexity 收敛别名，对齐
+/// [`ConfirmProbeFn`] 先例）：返回运行进程的 (工具, 项目) 表——端点层计同键
+/// 出现次数判「配对不确定」（≥2）。生产 = sysinfo 快照 +
+/// `commands::session::running_projects_from_processes`（与桌面跳转门同一实现、
+/// 同一口径）；测试注入固定假表（sysinfo 真扫描在单测里造不出 ≥2 同键进程，
+/// 故必须缝出）。
+pub type PairingCounterFn = dyn Fn() -> Vec<(String, String)> + Send + Sync;
+
 /// 对话框在场探针缝类型（丁T3 §2.7，对齐 [`ConfirmProbeFn`] 先例）：
 /// 参数 = (session_id, pid)；返回 `Some(选项表)` = 屏读确认**编号选项对话框在场**。
 ///
@@ -301,9 +309,164 @@ pub type DialogProbeFn =
 /// 而不是只有真机能覆盖。
 pub type ScreenProbeFn = dyn Fn(&str, u32) -> Option<Vec<String>> + Send + Sync;
 
+/// 物化发现缝类型（C6，主会话裁决：做成缝——单测免真实 FS/家目录）：参数 =
+/// (tool, since, 目标目录)；返回候选 session id 列表（最新在前，调用方 confirm 终判）。
+/// 生产 = `create_discover::discover_new_session` + 真实家目录 root（闭包内
+/// `create_store_root` 推导）；测试注入 tempdir/脚本化假体。
+pub type CreateDiscoverFn = dyn Fn(&str, std::time::SystemTime, &str) -> Vec<String> + Send + Sync;
+
+/// TUI pid 锚定缝类型（C6）：参数 = (tool, 目标目录)。生产 =
+/// `create::find_tui_pid`（30s 轮询，真实 sysinfo 扫描）；测试注入即时
+/// Ok(pid)/Err 假体——真实轮询含 1.2s 步距睡眠，不缝则全链端点测试必烧 30s。
+pub type CreatePidFindFn = dyn Fn(&str, &std::path::Path) -> Result<u32, String> + Send + Sync;
+
+/// 远程新建会话任务共享态（C6）：**内存态，不持久化**——MAM 重启即丢任务，
+/// status 端点 404 引导重试（spec §3）。
+#[derive(Debug, Clone)]
+pub struct CreateTaskShared {
+    /// 当前相（opening_terminal / dialog_handling / injecting_first /
+    /// waiting_materialize / done / failed——终态 done|failed 不占单飞额度）
+    pub phase: String,
+    /// 补充说明（失败回执中文现场 / Done 附带 codex hooks 信任提示）
+    pub detail: Option<String>,
+    /// 物化成功的会话 id（成功终态才有）
+    pub session_id: Option<String>,
+    /// 起窗后锚定的 TUI pid
+    pub spawned_pid: Option<u32>,
+}
+
+/// 远程新建会话任务簿 + create 域缝束（C6）。
+///
+/// **布局说明（计划字面为 `create_tasks: Arc<Mutex<HashMap<u64, CreateTaskShared>>>`、
+/// 自增 id 计数器、create_discoverer 缝；此处束为单字段 `Arc<CreateTaskHub>`）**：
+/// RemoteState 既有 20+ 处结构字面量测试夹具（server.rs/queue.rs），逐字段追加会把
+/// 每处撑成 4-6 行——束成单字段让既有夹具一行适配；内部 `tasks`（Mutex<HashMap>）、
+/// `next_id`（AtomicU64，计划授权的计数器形态）、`discoverer`（裁决缝）与计划语义
+/// 一一对应，pid_finder / tool_probe / pacer 为计划测试契约（零真实 FS / 零真实
+/// 睡眠 / 确定性工具门）所要求的配套缝，见各字段文档。任务簿仅内存态。
+pub struct CreateTaskHub {
+    /// 任务账本：task_id → 共享态（锁自愈取锁——毒锁不连坐）
+    pub tasks: std::sync::Mutex<std::collections::HashMap<u64, CreateTaskShared>>,
+    /// 任务 id 自增（fetch_add + 1，从 1 起）
+    pub next_id: std::sync::atomic::AtomicU64,
+    /// 物化发现缝（生产 = discover_new_session + 真实家目录；测试 = tempdir/脚本假体）
+    pub discoverer: Box<CreateDiscoverFn>,
+    /// TUI pid 锚定缝（生产 = find_tui_pid 30s；测试 = 即时假体）
+    pub pid_finder: Box<CreatePidFindFn>,
+    /// 工具安装探测缝（C6 工具门第三道）：生产 = `create::tool_installed`（PATH
+    /// 扫描 + OnceLock）；测试注入真假体——OnceLock 进程级缓存使真探测在无该工具
+    /// 的机器上恒 false，「合法 → 200」用例将不确定，故缝出（C6 报告登记）
+    pub tool_probe: Box<dyn Fn(&str) -> bool + Send + Sync>,
+    /// 步距睡眠缝（C6 pacing 承载点）：生产 = `std::thread::sleep`；测试 no-op。
+    /// 屏读步距 / 键间隔 / 物化轮询步距全部经它——内核与管线零真实睡眠（
+    /// `SCREEN_POLL_STEP_MS` 的消费契约由本缝 + 管线闭包兑现，C6 报告登记）
+    pub pacer: Box<dyn Fn(u64) + Send + Sync>,
+    /// 证据落档目录缝（§4.4 补实现，2026-10-03 用户裁决）：生产 = `~/.mam/
+    /// create-evidence/`；测试 = None（禁用——缝测试驱动 unrecognized_screen 失败
+    /// 臂也不写真实 ~/.mam，零污染红线）。None 时管线跳过落档（不阻塞失败回执）
+    pub evidence_dir: Box<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>,
+}
+
+impl CreateTaskHub {
+    /// 生产装配（remote::mod.rs STATE 消费）
+    pub fn production() -> Self {
+        Self {
+            tasks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            next_id: std::sync::atomic::AtomicU64::new(0),
+            discoverer: Box::new(|tool, since, dir| {
+                let Some(home) = dirs::home_dir() else {
+                    return Vec::new();
+                };
+                let Some(root) = crate::inject::create_discover::create_store_root(tool, &home)
+                else {
+                    return Vec::new();
+                };
+                crate::inject::create_discover::discover_new_session(tool, &root, since, dir)
+            }),
+            pid_finder: Box::new(|tool, dir| {
+                crate::inject::create::find_tui_pid(tool, dir, std::time::Duration::from_secs(30))
+            }),
+            tool_probe: Box::new(crate::inject::create::tool_installed),
+            pacer: Box::new(|ms| std::thread::sleep(std::time::Duration::from_millis(ms))),
+            evidence_dir: Box::new(|| {
+                dirs::home_dir().map(|h| h.join(".mam").join("create-evidence"))
+            }),
+        }
+    }
+
+    /// 测试装配：安装探测恒 true、pid 锚定即时 Ok(4242)、发现空表、步距 no-op。
+    /// 全链端点测试缺省缝——「合法 → 200 / 409 单飞 / 终态复建 / 审计三类行」
+    /// 瞬时闭环（零真实 FS、零真实睡眠）。**测试支撑面**（doc(hidden)，对齐
+    /// `inject::e2e_support` 先例）：集成测试（tests/，无 cfg(test)）与 lib 内测
+    /// 共用；生产装配一律 [`production`]。
+    #[doc(hidden)]
+    pub fn stub() -> Self {
+        Self::stub_with(Box::new(|_, _, _| Vec::new()))
+    }
+
+    /// 测试装配变体：自定义物化发现缝（其余同 [`stub`]）。
+    #[doc(hidden)]
+    pub fn stub_with(discoverer: Box<CreateDiscoverFn>) -> Self {
+        Self {
+            tasks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            next_id: std::sync::atomic::AtomicU64::new(0),
+            discoverer,
+            pid_finder: Box::new(|_, _| Ok(4242)),
+            tool_probe: Box::new(|_| true),
+            pacer: Box::new(|_| {}),
+            evidence_dir: Box::new(|| None),
+        }
+    }
+
+    /// 单飞占位（原子）：无在飞任务时登记新任务并返回 id；有在飞（phase ≠
+    /// done/failed）→ None。终态任务保留在账本（可查、不占额度）。
+    pub fn reserve(&self) -> Option<u64> {
+        let mut m = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if m.values().any(|t| t.phase != "done" && t.phase != "failed") {
+            return None;
+        }
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        m.insert(
+            id,
+            CreateTaskShared {
+                phase: "opening_terminal".to_string(),
+                detail: None,
+                session_id: None,
+                spawned_pid: None,
+            },
+        );
+        Some(id)
+    }
+
+    /// 逐段更新任务态（缺失 id 静默忽略——任务簿只增不删，理论不可达）
+    pub fn update(&self, id: u64, f: impl FnOnce(&mut CreateTaskShared)) {
+        let mut m = self.tasks.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = m.get_mut(&id) {
+            f(t);
+        }
+    }
+
+    /// 快照读（status 端点载荷源）
+    pub fn snapshot(&self, id: u64) -> Option<CreateTaskShared> {
+        self.tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&id)
+            .cloned()
+    }
+}
+
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
+    /// C7 配对不确定信号缝（spec §5）：运行进程的 (工具, 项目) 表——/sessions 打标
+    /// `pairingAmbiguous`、session-send 成功回执附 `pairingHint`（**只提示不拦截**）。
+    /// 生产 = sysinfo 全量快照 + 桌面跳转门同款 `running_projects_from_processes`
+    /// （单一实现，桌面门零改动）；测试注入固定假表。
+    pub pairing_counter: Box<PairingCounterFn>,
     /// 看板隐藏集合读源（APP 软归档，2026-09-20 体验批二）：生产 =
     /// database::board_hidden_ids；测试注入固定集合（零真实 ~/.mam 接触）
     pub board_hidden_ids: Box<dyn Fn() -> Vec<String> + Send + Sync>,
@@ -398,6 +561,10 @@ pub struct RemoteState {
     /// **注入能力开关表**（2026-10-03 数字直选自适应）：per-state 持有——端点测试
     /// 各自独立表避免并行探测写回互相污染；生产装配共享同一 Arc（全局一份）
     pub capability_table: crate::inject::capability::Table,
+    /// 远程新建会话任务簿 + create 域缝束（C6）：任务账本（内存态）、物化发现缝、
+    /// pid 锚定缝、工具安装探测缝、步距睡眠缝。布局说明与各缝语义见
+    /// [`CreateTaskHub`] 文档；测试装配 `CreateTaskHub::stub()`。
+    pub create_hub: std::sync::Arc<CreateTaskHub>,
     /// 敏感黑名单主目录基准注入缝（M5 P2-a 追记）：生产 = `dirs::home_dir()`；
     /// 测试注入 tempdir home（零接触真实主目录）。**端点必须消费它**——
     /// 3d22e2e 曾传 None 使 ~/.ssh 等黑名单整段失效（单元测试全绿而生产裸奔）
@@ -448,6 +615,7 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
             get(api::session_approve_options),
         )
         .route("/session-approve", post(api::session_approve))
+        .route("/session-plan-feedback", post(api::session_plan_feedback))
         // 批次乙 T8：问答端点（AskUserQuestion 问答卡——可用性/题目结构 + 应答注入
         // 序列；PIN 门禁内层 gate 结构性覆盖，新端点不需要各自鉴权代码）
         .route("/session-question", get(api::session_question))
@@ -475,6 +643,12 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // M6R–M9R Task 11：一键 resume 端点（R5，PIN 门禁内层 gate 结构性覆盖，
         // 新端点不需要各自鉴权代码；spawn 缝注入使测试零真开窗）
         .route("/session-open", post(api::session_open))
+        // C6 远程新建会话（spec §3/§5）：起窗 + 弹窗处置 + 首句注入 + 物化确认的
+        // 异步任务三端点（PIN 门禁内层 gate 结构性覆盖，新端点不需要各自鉴权代码；
+        // 任务簿内存态 + 全局单飞 + 审计三类行 create|dialog|send）
+        .route("/session-create", post(api::session_create))
+        .route("/session-create/status", get(api::session_create_status))
+        .route("/create-projects", get(api::create_projects))
         // 历史会话区（spec 2026-09-20-mobile-archive-history §6.1）：懒加载列表 + 手动管理
         .route(
             "/sessions-archived",
@@ -581,6 +755,9 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -619,11 +796,20 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         })
     }
 
     async fn body_string(b: axum::http::Response<Body>) -> String {
         String::from_utf8(b.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap()
+    }
+
+    /// C6：create 缝束缺省测试装配（安装探测恒真 / pid 锚定即时 Ok(4242) / 物化
+    /// 发现空表 / 步距 no-op——零真实 FS 零真实睡眠）。session-create 端点用例
+    /// 按需以 `CreateTaskHub::stub_with` / 结构字面量覆盖各缝。
+    fn create_hub_stub() -> std::sync::Arc<CreateTaskHub> {
+        std::sync::Arc::new(CreateTaskHub::stub())
     }
 
     #[tokio::test]
@@ -1217,6 +1403,9 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -1248,6 +1437,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         // 预置有效设备，令 gate 放行（否则不会走到 session_source，测试失去意义）
         let now = chrono::Utc::now().timestamp_millis();
@@ -1600,6 +1791,9 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -1636,6 +1830,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1705,6 +1901,9 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -1769,6 +1968,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         let app = router(state.clone());
         let now = chrono::Utc::now().timestamp_millis();
@@ -1918,6 +2119,9 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -1960,6 +2164,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         let app = router(state.clone());
         persist_device(&state, "fe");
@@ -2209,6 +2415,9 @@ mod tests {
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -2239,6 +2448,8 @@ mod tests {
                 h.store(true, std::sync::atomic::Ordering::SeqCst);
                 Some(home_s.clone())
             }),
+            // C7：配对计数缝缺省空表（本用例不触配对打标）
+            pairing_counter: Box::new(Vec::new),
         });
         let app = router(state.clone());
         persist_device(&state, "fe");
@@ -2386,6 +2597,9 @@ mod tests {
                 injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
                 // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
                 resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+                // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+                // session-create 用例就地覆盖
+                create_hub: create_hub_stub(),
                 archive_source: Box::new(Vec::new),
                 archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
                 // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -2414,6 +2628,8 @@ mod tests {
                 via_hosts_source: via_source,
                 rate_bucket_channels_source: rate_channels,
                 home_source: Box::new(|| None),
+                // C7：配对计数缝缺省空表（A3 用例不触配对打标）
+                pairing_counter: Box::new(Vec::new),
             }),
             t,
         )
@@ -3595,6 +3811,8 @@ mod tests {
                     resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| {
                         Ok(())
                     }),
+                    // C6：create 缝束缺省 stub（仅 session-create 用例就地覆盖）
+                    create_hub: create_hub_stub(),
                     archive_source: Box::new(Vec::new),
                     archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
                     // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -3623,6 +3841,8 @@ mod tests {
                     via_hosts_source: Box::new(|| None),
                     rate_bucket_channels_source: Box::new(Vec::new),
                     home_source: Box::new(|| None),
+                    // C7：配对计数缝缺省空表（限速用例不触配对打标）
+                    pairing_counter: Box::new(Vec::new),
                 }),
                 t,
             )
@@ -3906,6 +4126,16 @@ mod tests {
                     crate::session::SessionStatus::Waiting,
                 )
             },
+            {
+                // 签名开关测试独占（守卫 id 立规，2026-10-05）：send_composes_signature_
+                // when_setting_on 专用 Waiting 会话（pid 26）
+                inj_sess(
+                    "sess_sig",
+                    crate::session::AgentType::Claude,
+                    26,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
         ];
         Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
@@ -3919,6 +4149,9 @@ mod tests {
             injector,
             // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：参数化（inject_state 缺省恒命中）
@@ -3945,6 +4178,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         })
     }
 
@@ -3997,16 +4232,26 @@ mod tests {
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         sess_a_last: Option<&str>,
     ) -> Arc<RemoteState> {
-        approve_state_with_dialog(injector, sess_a_last, std::sync::Arc::new(|_, _| None))
+        approve_state_with_dialog(
+            injector,
+            sess_a_last,
+            std::sync::Arc::new(|_, _| None),
+            None,
+        )
     }
 
     /// 丁T3 F4-2：approve_state + 可注入对话框探针（审批侧 `read_dialog_options` 经
     /// 该缝取屏读结论——补上 T5 的 dialog 分支在门禁内的自动化证据：真实屏读需要
     /// conhost，CI 恒 None 时那两条断言只在有窗口的机器上才走得到）。
+    #[allow(clippy::too_many_arguments)]
     fn approve_state_with_dialog(
         injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
         sess_a_last: Option<&str>,
         dialog_probe: std::sync::Arc<crate::remote::server::DialogProbeFn>,
+        // 2026-10-04 审批卡不出修复：可选的消息尾页桩——Some(page) 时 message_source
+        // 返回它（驱动 claude 计划预期态/plan 聚合判据）；None 保持既有 Err 桩
+        // （既有用例零感知）
+        tail_page: Option<Vec<crate::remote::content::SessionMessage>>,
     ) -> Arc<RemoteState> {
         let sessions = vec![
             {
@@ -4138,6 +4383,9 @@ mod tests {
             injector,
             // R5 一键 resume spawn 缝（Task 11）：本夹具不触 session-open，注 no-op 桩
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             // A1 写入确认缝（M9R Task 5）：测试恒命中（首轮即中，零延迟零等待）
@@ -4147,7 +4395,13 @@ mod tests {
             dialog_probe,
             screen_probe: std::sync::Arc::new(|_, _| None),
             host_source: Box::new(|| serde_json::Value::Null),
-            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            message_source: Box::new(move |_, _, _| match &tail_page {
+                Some(p) => Ok(crate::remote::content::MessagesPage {
+                    messages: p.clone(),
+                    truncated: false,
+                }),
+                None => Err("测试桩：未注入内容源".to_string()),
+            }),
             path_source: Box::new(|_, _, _| (Vec::new(), false)),
             watcher_tx: tokio::sync::broadcast::channel(64).0,
             board_hidden_ids: Box::new(Vec::new),
@@ -4164,7 +4418,44 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         })
+    }
+
+    /// **签名开关开**（2026-10-05 用户裁决的另一半）：settings KV
+    /// `remote_message_signature=on` → compose 产物带尾部 `[mobile 测试设备]` 签名。
+    /// 经 store.with 走本测自己的内存库（零污染；开关读取单点的接线验证）。
+    #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
+    async fn send_composes_signature_when_setting_on() {
+        let fake = FakeInjector::ok();
+        let state = inject_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        state.store.with(|conn| {
+            crate::database::dao::settings::set_setting_conn(conn, "remote_message_signature", "on")
+        });
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_sig","text":"带签名的一句话"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert!(
+            fake.recorded()
+                .iter()
+                .any(|(_, t)| t.ends_with(" [mobile 测试设备]")),
+            "开关开 → 注入文本带尾部设备签名：{:?}",
+            fake.recorded()
+        );
     }
 
     /// 直发可输入态（Waiting）：200 delivered + 注入器收到 compose 产物（裁决 6 归一）
@@ -4202,12 +4493,13 @@ mod tests {
             body.contains("\"status\":\"delivered\""),
             "可输入态直发应 delivered：{body}"
         );
-        // 注入器收到 (pid=11, "你好\n继续 [mobile 测试设备]")——真实换行归一为字面 \n
-        //（裁决 6）+ 丁T3 裁2 签名**后置**
+        // 注入器收到 (pid=11, "你好\n继续")——真实换行归一为字面 \n（裁决 6）。
+        // 签名默认关（2026-10-05 用户裁决，KV 未设 = off）→ 裸正文；开关开的形态
+        // 由 send_composes_signature_when_setting_on 专测覆盖
         assert_eq!(
             fake.recorded(),
-            vec![(11u32, "你好\\n继续 [mobile 测试设备]".to_string())],
-            "直发必须携带 W1 来源标记与归一正文"
+            vec![(11u32, "你好\\n继续".to_string())],
+            "直发必须携带归一正文（签名默认关=裸注入）"
         );
         // 审计：最新一条 action=send result=ok channel=fake
         //（flush_one 落账并行写的 action=flush 审计紧随其后——Task 6 最小演进：直发终态
@@ -4235,6 +4527,208 @@ mod tests {
             body_string(r).await.contains("\"items\":[]"),
             "直发后队列不得有 pending 残留"
         );
+    }
+
+    // ==== C7：配对不确定信号（spec §5）——端点层打标 + 投递回执提示，不拦截 ====
+    // 与表单黄字（C6 hasActiveSession/activeTools = ≥1 活跃会话）是两个分层信号：
+    // 本组锁「同工具同项目 ≥2 运行进程」的 pairingAmbiguous / pairingHint。
+
+    /// C7 夹具：test_state 就地换 session_source / pairing_counter（Arc::get_mut
+    /// 先例见 archive_api_tests::archive_state——比整份 RemoteState 字面量轻 30+ 行）。
+    /// 其余缝与 test_state 同口径（内存库、空事件通道、确认恒命中等）。
+    fn pairing_state(
+        sessions: Vec<crate::session::Session>,
+        processes: Vec<(String, String)>,
+    ) -> Arc<RemoteState> {
+        let mut st = test_state();
+        let s = Arc::get_mut(&mut st).expect("test_state 独占引用");
+        s.session_source = Box::new(move || crate::session::SessionsResponse {
+            sessions: sessions.clone(),
+            total_count: sessions.len(),
+            waiting_count: 0,
+        });
+        s.pairing_counter = Box::new(move || processes.clone());
+        st
+    }
+
+    /// C7 断言 1（/sessions 打标）：fake 快照两条同工具同项目会话 + 进程计数 ≥2 →
+    /// 两会话 `pairingAmbiguous=true`；单会话（进程计数 1 < 2 阈值）→ false。
+    /// 假表混入工具/项目大小写与尾分隔符变体，锁 (tool, project) 归一与桌面门同口径；
+    /// 另加异工具会话证明打标按会话键逐条判定（非同工具连坐）。
+    #[tokio::test]
+    async fn sessions_flags_pairing_ambiguous_per_session() {
+        // ① 两条同工具同项目（claude/proj）+ 进程表两条同键（大小写/尾分隔符变体）
+        let st = pairing_state(
+            vec![
+                inj_sess(
+                    "c7_a",
+                    crate::session::AgentType::Claude,
+                    31,
+                    crate::session::SessionStatus::Idle,
+                ),
+                inj_sess(
+                    "c7_b",
+                    crate::session::AgentType::Claude,
+                    32,
+                    crate::session::SessionStatus::Idle,
+                ),
+            ],
+            vec![
+                ("Claude".into(), "PROJ".into()),
+                ("claude".into(), "proj\\".into()),
+            ],
+        );
+        persist_device(&st, "c7");
+        let r = router(st)
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=c7"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        let arr = v["sessions"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for s in arr {
+            assert_eq!(
+                s["pairingAmbiguous"], true,
+                "同工具同项目 ≥2 运行进程 → 该键会话全部打标：{s}"
+            );
+        }
+        // ② 单会话 + 进程表仅一条同键（1 < 2）→ false（字段仍恒在场）
+        let st = pairing_state(
+            vec![inj_sess(
+                "c7_c",
+                crate::session::AgentType::Claude,
+                33,
+                crate::session::SessionStatus::Idle,
+            )],
+            vec![("claude".into(), "proj".into())],
+        );
+        persist_device(&st, "c7");
+        let r = router(st)
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=c7"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["sessions"][0]["pairingAmbiguous"], false,
+            "单进程不构成配对不确定（阈值严格 ≥2）"
+        );
+        // ③ 异工具不连坐：进程表只歧义 claude/proj，codex/proj 会话恒 false
+        let st = pairing_state(
+            vec![
+                inj_sess(
+                    "c7_d",
+                    crate::session::AgentType::Codex,
+                    34,
+                    crate::session::SessionStatus::Idle,
+                ),
+                inj_sess(
+                    "c7_e",
+                    crate::session::AgentType::Claude,
+                    35,
+                    crate::session::SessionStatus::Idle,
+                ),
+            ],
+            vec![
+                ("claude".into(), "proj".into()),
+                ("claude".into(), "proj".into()),
+            ],
+        );
+        persist_device(&st, "c7");
+        let r = router(st)
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/sessions",
+                Some("mam_device=c7"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["sessions"][0]["pairingAmbiguous"], false, "异工具不连坐");
+        assert_eq!(v["sessions"][1]["pairingAmbiguous"], true, "同键会话打标");
+    }
+
+    /// C7 断言 2（session-send 回执提示）：命中同工具同项目 ≥2 运行进程 → delivered
+    /// 回执附 `pairingHint=true` 且**投递照常**（不拦截，status 语义不变）；未命中
+    /// （同键进程 1 条）→ delivered + `pairingHint=false`（恒在场 = 无提示）。
+    #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
+    async fn session_send_receipt_carries_pairing_hint_without_blocking() {
+        // ① 命中：同键进程 2 条 → delivered + pairingHint=true + 注入器确实收到
+        let fake = FakeInjector::ok();
+        let mut st = pairing_state(
+            vec![inj_sess(
+                "c7_send",
+                crate::session::AgentType::Claude,
+                41,
+                crate::session::SessionStatus::Waiting,
+            )],
+            vec![
+                ("claude".into(), "proj".into()),
+                ("claude".into(), "proj".into()),
+            ],
+        );
+        Arc::get_mut(&mut st).unwrap().injector = fake.clone();
+        persist_device(&st, "c7");
+        let r = router(st)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=c7"),
+                Some(r#"{"sessionId":"c7_send","text":"你好"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["status"], "delivered", "提示不改变投递语义（不拦截）");
+        assert_eq!(v["pairingHint"], true, "命中配对不确定 → 回执附提示");
+        assert_eq!(fake.recorded().len(), 1, "不拦截：注入照常发生");
+        // ② 未命中：同键进程仅 1 条 → delivered + pairingHint=false
+        let fake2 = FakeInjector::ok();
+        let mut st2 = pairing_state(
+            vec![inj_sess(
+                "c7_send2",
+                crate::session::AgentType::Claude,
+                42,
+                crate::session::SessionStatus::Waiting,
+            )],
+            vec![("claude".into(), "proj".into())],
+        );
+        Arc::get_mut(&mut st2).unwrap().injector = fake2.clone();
+        persist_device(&st2, "c7");
+        let r = router(st2)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-send",
+                Some("mam_device=c7"),
+                Some(r#"{"sessionId":"c7_send2","text":"你好"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["status"], "delivered");
+        assert_eq!(
+            v["pairingHint"], false,
+            "未命中 = 无提示（字段恒在场 false）"
+        );
+        assert_eq!(fake2.recorded().len(), 1, "未命中同样照常投递");
     }
 
     /// 运行中（Processing 黄态）：200 queued + itemId/position + 审计 action=queue +
@@ -4294,7 +4788,7 @@ mod tests {
         let body = body_string(r).await;
         assert!(
             body.contains(&format!("\"id\":{item_id}"))
-                && body.contains("排队消息 [mobile 测试设备]")
+                && body.contains("排队消息")
                 && body.contains("\"position\":1")
                 && body.contains("\"enqueuedAt\":"),
             "排队视图应含 id/content/enqueuedAt/position，实际 {body}"
@@ -4353,8 +4847,7 @@ mod tests {
         assert_eq!(r.status(), 200);
         let body = body_string(r).await;
         assert!(
-            body.contains(&format!("\"id\":{item_id}"))
-                && body.contains("修改后重发 [mobile 测试设备]"),
+            body.contains(&format!("\"id\":{item_id}")) && body.contains("修改后重发"),
             "queueOnly 条目应留在队列等自动放行：{body}"
         );
     }
@@ -4387,7 +4880,7 @@ mod tests {
         );
         assert_eq!(
             fake.recorded(),
-            vec![(11u32, "普通发送 [mobile 测试设备]".to_string())],
+            vec![(11u32, "普通发送".to_string())],
             "queueOnly=false 直发行为不得漂移"
         );
     }
@@ -4777,7 +5270,7 @@ mod tests {
         // 注入器收到的是插队目标（第二条）的 compose 产物
         assert_eq!(
             fake.recorded(),
-            vec![(12u32, "第二条 [mobile 测试设备]".to_string())],
+            vec![(12u32, "第二条".to_string())],
             "插队必须照发目标条目（运行中 TUI 把消息放进自身输入缓冲）"
         );
         // 审计 action=jump（settle 落账写入；此刻 retract 尚未发生，最新一条即 jump）
@@ -5126,6 +5619,9 @@ mod tests {
     /// 审批默认表 marker 命中句（DEFAULT_MAPPINGS_JSON claude.prompt_markers 含
     /// "do you want to proceed"——M9R 评审 F3/D4 收紧后句式）
     const APPROVE_HIT_MSG: &str = "Do you want to proceed?";
+
+    /// opencode 多选题载荷（GET 快照用例；引号直接写——raw string 内不需转义）
+    const PAYLOAD_OC_MULTI: &str = r#"{"questions":[{"header":"优化重点","multiSelect":true,"question":"你希望这次优化重点放在哪些方面？","options":[{"label":"画面美感与细节"},{"label":"性能与兼容性"}]}]}"#;
 
     /// 审批选项（可批）：sess_a Waiting + last_message 命中 → 200 available=true +
     /// options 恰为 允许/拒绝 两项（**无 key 字段**——键位不外泄给 UI）+
@@ -5706,6 +6202,32 @@ mod tests {
             sess("sess_z", 36, crate::session::SessionStatus::Waiting),
             sess("sess_aa", 37, crate::session::SessionStatus::Waiting),
             sess("sess_ab", 38, crate::session::SessionStatus::Waiting),
+            {
+                // opencode toggle 翻转校验独占会话（守卫 id 立规，2026-10-05）
+                inj_sess(
+                    "sess_ocflip",
+                    crate::session::AgentType::OpenCode,
+                    48,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
+            {
+                // opencode 切题到达验证独占会话 ×2（守卫 id 立规，2026-10-05）
+                inj_sess(
+                    "sess_ocadv",
+                    crate::session::AgentType::OpenCode,
+                    49,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
+            {
+                inj_sess(
+                    "sess_ocadv2",
+                    crate::session::AgentType::OpenCode,
+                    50,
+                    crate::session::SessionStatus::Waiting,
+                )
+            },
             sess("sess_ac", 39, crate::session::SessionStatus::Waiting),
             sess("sess_ad", 40, crate::session::SessionStatus::Waiting),
             // 守卫 id 立规补正（2026-10-07 存量红清理）：**问题投递**类用例各自独占 id。
@@ -5752,6 +6274,25 @@ mod tests {
                 s.last_message = Some("Which folder should hold build output?".to_string());
                 s
             },
+            // 2026-10-05 推广批 T8：kimi 能力位契约独占会话（multiFreeText=false——
+            // 多选形态未定案，探测批 K）
+            {
+                let mut s = inj_sess(
+                    "sess_ao",
+                    crate::session::AgentType::Kimi,
+                    49,
+                    crate::session::SessionStatus::Waiting,
+                );
+                s.last_message = Some("Which fruits do you like?".to_string());
+                s
+            },
+            // 2026-10-05 推广批 T9：sess_ad 守卫竞争根治——advance/submit 两测试
+            // 迁到全测试集未占用的 sess_av/sess_aw（守卫 id 立规；pid 断言同步 53/54）
+            sess("sess_av", 53, crate::session::SessionStatus::Waiting),
+            sess("sess_aw", 54, crate::session::SessionStatus::Waiting),
+            // 2026-10-05 推广批 T9：sess_ad 守卫竞争根治——advance/submit/审批标记
+            // 三测试各得独占会话（守卫 id 立规；并行 POST 互抢 INFLIGHT 致偶发
+            // 「投递进行中」假红，连续多轮全量命中后按立规根治；pid 顺延 50-52）
             // 丁T1 复评 F-2 独占会话（全测试集唯一 id）：**最强对照形态**——问题待决
             // 的语义红 + last_message **恰为审批 marker 命中句**（模型把问题写成审批
             // 措辞的自然形态）。这正是 F-2 要拦的场景：detect 纯文本命中会误出审批卡，
@@ -6011,6 +6552,9 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector,
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
@@ -6036,6 +6580,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         })
     }
 
@@ -7042,6 +7588,9 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: adv,
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe: std::sync::Arc::new(|_, _| None),
             screen_probe: script.probe(),
@@ -7065,6 +7614,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         persist_named_device(&state, "mm", "测试设备");
         (state, inner, script)
@@ -7320,14 +7871,13 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(r.status(), 409, "kimi 多选自由作答仍拒（形态未取证）");
-        assert!(
-            body_string(r).await.contains("tool_readonly"),
-            "拒绝码须可程序分诊"
-        );
+        // 2026-10-06 语义变更：multiFreeText 点亮 + 门同面放行——freeText 走
+        // KimiFreeText 阶段机（Other 计数位直达；本测试假体屏读 Other 行不在场
+        // → 阶段机第 1 段如实中止 = 零投递，「未验不出手」由屏读把守）
+        assert_eq!(r.status(), 200, "门与旗标同面（不再 409 一刀切）");
         assert!(
             inner.recorded_keys().is_empty() && inner.recorded().is_empty(),
-            "拒绝路径零投递"
+            "假体屏读无 Other 行 → 阶段机第 1 段如实中止、零投递"
         );
     }
 
@@ -7600,6 +8150,169 @@ mod tests {
         assert!(fake.recorded_keys().is_empty(), "多问题零注入");
     }
 
+    /// **能力位契约逐工具断言**（2026-10-05 推广批 T8/F6）：GET 载荷的
+    /// `multiFreeText` / `screen` 按取证状态给值——codex 点亮（探测批 C 实证）且
+    /// 无快照（解析器留位）；kimi 全关（探测批 K：多选自由作答未定案）；快照失败
+    /// 保守 None。
+    #[tokio::test]
+    async fn question_capability_flags_by_tool() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let payload = r#"{"questions":[{"header":"h","multiSelect":true,"question":"q?","options":[{"label":"a"},{"label":"b"}]}]}"#;
+        for (tool, sid) in [("codex", "sess_al"), ("kimi", "sess_ao")] {
+            state.store.with(|conn| {
+                crate::database::dao::question_wait::mark(
+                    conn,
+                    tool,
+                    sid,
+                    1_000,
+                    "等待回答",
+                    Some(payload),
+                )
+            });
+        }
+        let app = router(state.clone());
+        // (sid, multiFreeText, freeTextOverwrite)：覆盖写入/清空能力位逐工具断言
+        // （2026-10-05 深夜；2026-10-06 扩 codex）——opencode=多选回删语义实证；
+        // codex=Tab 清空备注（footer 活体明文「tab or esc to clear note」）；
+        // kimi 多选自由作答未接入 → false
+        for (sid, expect_mft, expect_ovw) in [("sess_al", true, true), ("sess_an", false, false)] {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/m/api/v1/session-question?session_id={sid}"),
+                    Some("mam_device=mm"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+            assert_eq!(
+                v["multiFreeText"], expect_mft,
+                "{sid} multiFreeText 按取证状态"
+            );
+            assert_eq!(
+                v["freeTextOverwrite"], expect_ovw,
+                "{sid} freeTextOverwrite 按取证状态"
+            );
+            assert_eq!(
+                v["screen"],
+                serde_json::Value::Null,
+                "{sid} 快照解析器留位 → null（前端维持本地状态）"
+            );
+        }
+    }
+
+    /// **opencode 屏读快照**（2026-10-05 推广批 F3）：opencode 会话 + 屏读探针返回
+    /// 题页夹具（用户实测屏面形态）→ GET 载荷带 `screen.checked`（勾选态按屏上序）
+    /// + `multiFreeText=true` 旗标；Confirm 页形态 → `screen.review=true`。
+    #[tokio::test]
+    async fn question_get_carries_opencode_screen_snapshot() {
+        let fake = FakeInjector::ok();
+        let oc_page = vec![
+            "OC | 优化重点: 你想加的动效".to_string(),
+            "你希望这次优化重点放在哪些方面？（可多选）".to_string(),
+            "1. [ ] 画面美感与细节".to_string(),
+            "2. [v] 性能与兼容性".to_string(),
+            "6. [ ] Type your own answer".to_string(),
+            "⇆ tab  ↑↓ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let probe_page = oc_page.clone();
+        let state = question_state_full(
+            fake.clone(),
+            Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            std::sync::Arc::new(move |tool: &str, _pid: u32| -> Option<Vec<String>> {
+                if tool == "opencode" {
+                    Some(probe_page.clone())
+                } else {
+                    None
+                }
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let payload1 = PAYLOAD_OC_MULTI.to_string();
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "opencode",
+                "sess_am",
+                1_000,
+                "等待回答",
+                Some(payload1.as_str()),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_am",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["multiFreeText"], true, "opencode 多选自由作答能力位");
+        let screen = &v["screen"];
+        assert!(screen.is_object(), "题页必须回快照：{v}");
+        assert_eq!(
+            screen["checked"],
+            serde_json::json!([false, true, false]),
+            "勾选态按屏上序"
+        );
+        assert_eq!(screen["freeTextPresent"], true);
+        assert_eq!(
+            screen["freeText"],
+            serde_json::Value::Null,
+            "鲜态无已存文本"
+        );
+
+        // Confirm 页形态 → review:true（前端直接进确认卡）
+        let probe_confirm = vec![
+            "Questions".to_string(),
+            "⇆ tab  enter submit  esc dismiss".to_string(),
+        ];
+        let state2 = question_state_full(
+            fake,
+            Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            std::sync::Arc::new(move |tool: &str, _pid: u32| -> Option<Vec<String>> {
+                if tool == "opencode" {
+                    Some(probe_confirm.clone())
+                } else {
+                    None
+                }
+            }),
+        );
+        persist_named_device(&state2, "mm", "测试设备");
+        let payload2 = PAYLOAD_OC_MULTI.to_string();
+        state2.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "opencode",
+                "sess_am",
+                1_000,
+                "等待回答",
+                Some(payload2.as_str()),
+            )
+        });
+        let app2 = router(state2);
+        let r2 = app2
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_am",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v2: serde_json::Value = serde_json::from_str(&body_string(r2).await).unwrap();
+        assert_eq!(v2["screen"]["review"], true, "Confirm 页 → review 快照");
+    }
+
     /// **claude 多题接入**（2026-09-24）：GET 旗标（multiQuestion=true + advance=true）
     /// + 多题 toggle 走闭环切勾阶段机（脚本：焦点在首选项 → 空格后已勾）。
     /// 还原动作：把 GET 闸门里的 claude 摘掉 → 前两句断言先红。
@@ -7848,6 +8561,7 @@ mod tests {
         mark_question(&state, "claude", "sess_qsub", Q_TWO_Q_MULTI_FIRST_PAYLOAD);
         let app = router(state.clone());
         let r = app
+            .clone()
             .oneshot(req(
                 "POST",
                 "/m/api/v1/session-question/answer",
@@ -7857,7 +8571,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
-        let body = body_string(r).await;
+        let mut body = body_string(r).await;
+        // INFLIGHT 守卫按裸 id 全局占用（守卫 id 立规注）：并行测试偶尔让位 →
+        // 「投递进行中」是良性可重试态（2026-10-05 起连续全量命中的已知 flaky
+        // 根治——仅测试侧重试，生产语义零改动）
+        if body.contains("投递进行中") {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "POST",
+                    "/m/api/v1/session-question/answer",
+                    Some("mam_device=mm"),
+                    Some(r#"{"sessionId":"sess_qsub","action":"submit"}"#),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 200);
+            body = body_string(r).await;
+        }
         assert!(
             body.contains("\"status\":\"key_sent\"") && body.contains("\"verified\":true"),
             "已在 Review 屏 → 直接确认并核验终态：{body}"
@@ -7868,6 +8599,118 @@ mod tests {
             "键序 = ['1']（抄屏上编号；零走位零回车）：{:?}",
             fake.recorded_keys()
         );
+    }
+
+    /// **opencode toggle 后置翻转校验**（2026-10-05 屏读标准补齐）：数字发出后
+    /// 读屏核对目标行勾选翻转 → 回执 checked=Some(true)/verified=true。
+    /// 屏剧本：f0（目标行未勾）→ 守卫探针翻+还原 → 数字落（目标行勾上）。
+    /// 守卫 id 立规：sess_ocflip 独占。
+    #[tokio::test]
+    async fn opencode_toggle_flip_verified_by_screen() {
+        let page = |mark: &str| {
+            vec![
+                format!("1. {mark} alpha"),
+                "2. [ ] bravo".to_string(),
+                "3. [ ] charlie".to_string(),
+                "4. [ ] delta".to_string(),
+                "5. [ ] echo".to_string(),
+                "6. [ ] Type your own answer".to_string(),
+                "⇆ tab  ↑↓ select  enter toggle  esc dismiss".to_string(),
+            ]
+        };
+        let (state, _fake, _script) = stage_rig(
+            vec![page("[ ]"), page("[✓]"), page("[ ]"), page("[✓]")],
+            false,
+        );
+        mark_question(
+            &state,
+            "opencode",
+            "sess_ocflip",
+            r#"{"questions":[{"header":"h","multiSelect":true,"question":"q?","options":[{"label":"a"},{"label":"b"},{"label":"c"},{"label":"d"},{"label":"e"},{"label":"f"}]}]}"#,
+        );
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ocflip","action":"toggle","index":0}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"checked\":true") && body.contains("\"verified\":true"),
+            "翻转校验必须实证回传：{body}"
+        );
+    }
+
+    /// **opencode 切题到达验证**（2026-10-05 屏读标准补齐）：tab 前后各读一屏——
+    /// ① 屏变化 = 到达 → AdvanceDone（advanced:true + 到达后快照）；
+    /// ② 屏相同 = tab 未生效 → Failed「tab 未生效」可重试。
+    /// 守卫 id 立规：sess_ocadv / sess_ocadv2 独占。
+    #[tokio::test]
+    async fn opencode_advance_arrival_verified_by_screen() {
+        let q1_page = vec![
+            "优化重点".to_string(),
+            "你希望这次优化重点放在哪些方面？（可多选）".to_string(),
+            "1. [ ] 画面美感与细节".to_string(),
+            "2. [ ] 交互动效".to_string(),
+            "⇆ tab  ↑↓ select  enter toggle  esc dismiss".to_string(),
+        ];
+        let q2_page = vec![
+            "想加的动效".to_string(),
+            "如果加动效，你希望加哪些？".to_string(),
+            "1. [ ] 角色动态".to_string(),
+            "2. [ ] 海面与云动效".to_string(),
+            "⇆ tab  ↑↓ select  enter toggle  esc dismiss".to_string(),
+        ];
+        // ① tab 生效：pre=q1 页 → post=q2 页（屏变化）
+        let (state, _fake, _script) = stage_rig(vec![q1_page.clone(), q2_page.clone()], false);
+        mark_question(
+            &state,
+            "opencode",
+            "sess_ocadv",
+            r#"{"questions":[{"header":"优化重点","multiSelect":true,"question":"你希望这次优化重点放在哪些方面？","options":[{"label":"画面美感与细节"},{"label":"交互动效"}]},{"header":"想加的动效","multiSelect":true,"question":"如果加动效，你希望加哪些？","options":[{"label":"角色动态"},{"label":"海面与云动效"}]}]}"#,
+        );
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ocadv","action":"advance","direction":"next"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"advanced\":true") && body.contains("想加的动效"),
+            "到达验证必须回传 advanced+到达后快照：{body}"
+        );
+
+        // ② tab 未生效：前后屏相同 → Failed
+        let (state2, _fake2, _script2) = stage_rig(vec![q1_page.clone(), q1_page], false);
+        mark_question(
+            &state2,
+            "opencode",
+            "sess_ocadv2",
+            r#"{"questions":[{"header":"优化重点","multiSelect":true,"question":"你希望这次优化重点放在哪些方面？","options":[{"label":"画面美感与细节"},{"label":"交互动效"}]}]}"#,
+        );
+        let app2 = router(state2.clone());
+        let r2 = app2
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-question/answer",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_ocadv2","action":"advance","direction":"next"}"#),
+            ))
+            .await
+            .unwrap();
+        let body2 = body_string(r2).await;
+        assert!(body2.contains("tab 未生效"), "{body2}");
     }
 
     /// guard 矩阵：缺 index / 域外 action / 空 sessionId → 400 bad_request；越界
@@ -9718,6 +10561,8 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             resume_spawner: spawner,
+            // C6：create 缝束缺省 stub（仅 session-create 用例就地覆盖）
+            create_hub: create_hub_stub(),
             archive_source: Box::new(Vec::new),
             archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
@@ -9743,6 +10588,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         })
     }
 
@@ -10725,6 +11572,9 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             // 丁T3：本组测试的对话框在场探针缺省「无法判定」（None）——控制类注入
             // 照常投递；「在场即拒」的用例就地建 state 覆盖为假体（见 mode_switch_* 用例）
@@ -10755,6 +11605,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         })
     }
 
@@ -11002,6 +11854,9 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: fake.clone(),
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe: {
                 let opts = real_dialog_fixture();
@@ -11030,6 +11885,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         persist_named_device(&state2, "mm", "测试设备");
         let app = router(state2.clone());
@@ -11158,6 +12015,7 @@ mod tests {
             fake.clone(),
             Some(APPROVE_HIT_MSG),
             std::sync::Arc::new(move |_, _| Some(opts.clone())),
+            None,
         );
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
@@ -11201,6 +12059,223 @@ mod tests {
         );
     }
 
+    /// 2026-10-04 计划批准卡：缝返回 **claude 计划批准框**选项表（带账本
+    /// FEEDBACK_OPTION 锚的 "Tell Claude what to change"）→ GET 载荷必须下发
+    /// `planDialog=true` + `feedbackOption="dialog:3"`（前端把该选项渲染为
+    /// 「告诉 Claude 要改什么」反馈入口的依据）。
+    #[tokio::test]
+    async fn approve_dialog_plan_payload_flags_feedback_option() {
+        let fake = FakeInjector::ok();
+        let opts = vec![
+            crate::inject::dialog::DialogOption {
+                number: 1,
+                label: "Yes, and use auto mode".into(),
+                highlighted: true,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 2,
+                label: "Yes, manually approve edits".into(),
+                highlighted: false,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 3,
+                label: "Tell Claude what to change".into(),
+                highlighted: false,
+            },
+        ];
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some(APPROVE_HIT_MSG),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+            None,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["dialog"], true);
+        assert_eq!(v["planDialog"], true, "带反馈锚的对话框 = 计划批准框");
+        assert_eq!(
+            v["feedbackOption"], "dialog:3",
+            "反馈选项 id = 账本锚命中的屏上编号"
+        );
+    }
+
+    /// 反向锁：缝给**非计划框**的普通对话框选项（无 FEEDBACK_OPTION 锚）→
+    /// `planDialog=false` + `feedbackOption=null`（普通审批卡的渲染不受影响）。
+    #[tokio::test]
+    async fn approve_dialog_non_plan_payload_has_no_feedback_flags() {
+        let fake = FakeInjector::ok();
+        let opts = vec![
+            crate::inject::dialog::DialogOption {
+                number: 1,
+                label: "允许".into(),
+                highlighted: false,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 2,
+                label: "拒绝".into(),
+                highlighted: false,
+            },
+        ];
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some(APPROVE_HIT_MSG),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+            None,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["dialog"], true);
+        assert_eq!(v["planDialog"], false);
+        assert_eq!(v["feedbackOption"], serde_json::Value::Null);
+    }
+
+    /// 2026-10-04 审批卡不出修复：**claude 计划预期态 → 屏读出 1/2/3**。
+    /// 实况取证（用户会话 bb92857b）：钩子标记 0 行、last_message 中文 prose
+    /// （detect 恒 miss）、原生对话框标题不落 JSONL——三信号全灭致卡自隐。
+    /// 修法后：尾部计划挂起（message_source 桩给 kind="plan" 尾页）即视为等审批
+    /// → 屏读命中计划批准框 → available=true + dialog 选项 + planDialog/feedbackOption。
+    #[tokio::test]
+    async fn approve_card_appears_via_claude_plan_pending_with_dialog() {
+        let fake = FakeInjector::ok();
+        let opts = vec![
+            crate::inject::dialog::DialogOption {
+                number: 1,
+                label: "Yes, and use auto mode".into(),
+                highlighted: true,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 2,
+                label: "Yes, manually approve edits".into(),
+                highlighted: false,
+            },
+            crate::inject::dialog::DialogOption {
+                number: 3,
+                label: "Tell Claude what to change".into(),
+                highlighted: false,
+            },
+        ];
+        // last_message = 中文计划 prose（detect 不命中——实况形态）；标记表空
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some("我已经读完了《末班车》的全部版本。下面问你两道多选题，来确定优化方向："),
+            std::sync::Arc::new(move |_, _| Some(opts.clone())),
+            Some(vec![
+                crate::remote::content::SessionMessage {
+                    seq: 0,
+                    role: "assistant".into(),
+                    kind: "user".into(),
+                    content: "继续优化计划".into(),
+                    ts: Some(1000),
+                    tool_name: None,
+                    tool_args: None,
+                    collapsed: false,
+                },
+                crate::remote::content::SessionMessage {
+                    seq: 1,
+                    role: "assistant".into(),
+                    kind: "plan".into(),
+                    content: "# 计划：创建 a.txt".into(),
+                    ts: Some(2000),
+                    tool_name: Some("ExitPlanMode".into()),
+                    tool_args: None,
+                    collapsed: false,
+                },
+            ]),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["available"], true,
+            "计划预期态 = 等审批（修复前 false，卡自隐）"
+        );
+        assert_eq!(v["dialog"], true, "屏读命中计划批准框");
+        assert_eq!(v["planDialog"], true);
+        assert_eq!(v["feedbackOption"], "dialog:3");
+        assert!(v["plan"].is_object(), "计划正文随卡聚合");
+        let options = v["options"].as_array().unwrap();
+        assert_eq!(options.len(), 3, "1/2/3 三个选项（用户诉求的选项卡）");
+    }
+
+    /// 反向档：计划预期态在场但**对话框没读到**（未绘制/非 Windows）→ 不给二元键
+    /// （「允许='1'」对计划框是无效键，R1 实证），落「计划待确认」形态
+    /// （available=true + planPending=true + 空 options + 计划正文）。
+    #[tokio::test]
+    async fn approve_card_claude_plan_pending_without_dialog_shows_pending_bar() {
+        let fake = FakeInjector::ok();
+        let state = approve_state_with_dialog(
+            fake.clone(),
+            Some("我已经读完了《末班车》的全部版本。"),
+            std::sync::Arc::new(|_, _| None),
+            Some(vec![crate::remote::content::SessionMessage {
+                seq: 0,
+                role: "assistant".into(),
+                kind: "plan".into(),
+                content: "# 计划：创建 a.txt".into(),
+                ts: Some(2000),
+                tool_name: Some("ExitPlanMode".into()),
+                tool_args: None,
+                collapsed: false,
+            }]),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-approve-options?session_id=sess_a",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["planPending"], true);
+        assert_eq!(v["dialog"], false);
+        assert_eq!(
+            v["degradedHint"],
+            serde_json::Value::Null,
+            "计划待确认形态不叠加二元错位警示"
+        );
+        let options = v["options"].as_array().unwrap();
+        assert!(options.is_empty(), "零按钮——不给可能错位的二元键");
+        assert!(v["plan"].is_object());
+    }
+
     /// F4-2 格②：缝返回 `None`（CI/非 Windows/对话框未绘制）→ 降级二元卡 +
     /// `degradedHint`（R1-3 防重警示：二元键可能错位命中非预期选项）。
     /// 与格①成对：同一夹具、同一会话，只换探针结论。
@@ -11211,6 +12286,7 @@ mod tests {
             fake.clone(),
             Some(APPROVE_HIT_MSG),
             std::sync::Arc::new(|_, _| None),
+            None,
         );
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
@@ -11264,6 +12340,9 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector,
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe,
             screen_probe: std::sync::Arc::new(|_, _| None),
@@ -11287,6 +12366,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         (state, sid_out)
     }
@@ -11312,6 +12393,9 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector: FakeInjector::ok(),
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe: std::sync::Arc::new(|_, _| None),
             screen_probe: std::sync::Arc::new(|_, _| None),
@@ -11335,6 +12419,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         (state, sid_out)
     }
@@ -11390,6 +12476,9 @@ mod tests {
             store: crate::remote::pairing::DeviceStore::memory(),
             injector,
             resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            // C6：create 缝束缺省 stub（任务簿+发现/pid/工具探测/步距缝），仅
+            // session-create 用例就地覆盖
+            create_hub: create_hub_stub(),
             confirm_probe: std::sync::Arc::new(|_, _, _| true),
             dialog_probe,
             screen_probe,
@@ -11413,6 +12502,8 @@ mod tests {
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
             home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
         });
         (state, sid_out)
     }
@@ -12271,18 +13362,20 @@ mod tests {
         );
     }
 
-    /// **无判据可读 → 不轮询**（D20(a)：判据不存在就没有轮询可做）：kimi 权限组的
-    /// `spec.readback == false`（实测底栏不含权限档文本）→ `expected_mode_after` 给
-    /// `None` → 内核只读一拍（`mode::poll_mode_readback` 的「短路径 ②」）。
+    /// **kimi 权限组全两段式**（2026-10-06 探针会话 2.1.1 定案）：`/auto`（Bypass，
+    /// `/yolo` 同理）的第一段 = **文本 + 提交回车①**——2.1.1 实测：键入文本只出行内
+    /// 自动补全，回车①执行命令后完整菜单才打开并停留；确认回车②由闭环导航发（屏读
+    /// 确认高亮才发）。历史备注：曾误诊「回车消费 picker」改为纯文本首段（5744e45），
+    /// 探针证实纯文本态菜单永不出现——已回退，本测试钉回退后的正确形态。
     ///
-    /// 读数断言 = **2**：① 注入前的 `before` 快照 1 次（D20(c) 的瞬时快照，kimi 整体
-    /// 支持回读故这一次会读）+ ② 回读一拍。若是 16（= 1 + 15 拍睡满窗）说明有人把
-    /// 短路径拆了——那正是 D20(a) 禁止的「固定睡眠」。
+    /// 假体环境屏读不可用（菜单轮询的真 conhost 读失败）→ 恰好钉住**不盲发红线**：
+    /// 注入动作 = `/auto` 文本 + 命令提交回车①，**到此为止**——无导航键、无第二次
+    /// 确认回车；回执 `status=failed` 且说明「命令已发送」请人工核对。屏读探针读数
+    /// = **1**（before 快照；投递未成功 → 回读段不启动）。
     ///
-    /// 还原动作：把内核的 `if expected.is_some() { rounds.max(1) } else { 1 }` 改回
-    /// `rounds.max(1)` → 本测试先红（读数 16）。
+    /// 还原动作：把 kimi 第一段改回纯文本（不带回车）→ 本测试先红（keys 变空）。
     #[tokio::test]
-    async fn session_mode_switch_does_not_spin_when_group_has_no_readback_source() {
+    async fn session_mode_switch_kimi_permission_bypass_is_menu_two_stage_not_blind_confirm() {
         let fake = FakeInjector::ok();
         let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let reads_for_probe = reads.clone();
@@ -12315,21 +13408,978 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
         assert_eq!(
-            fake.recorded(), // `/auto` 是 kimi 权限组 Bypass 的直达命令
+            fake.recorded(), // `/auto` 现在是 kimi 权限组 Bypass 的**开菜单命令**（全两段式）
             vec![(97u32, "/auto".to_string())],
-            "kimi 权限组 Bypass = /auto 直达：{v}"
+            "kimi 权限组 Bypass = /auto 开菜单并预选：{v}"
+        );
+        // 屏读不可用 → 菜单轮询如实失败：除命令提交回车①外**零按键**（无导航键、
+        // 无第二次确认回车——「不盲发」红线在端点级钉住）
+        let keys: Vec<String> = fake
+            .recorded_key_specs()
+            .into_iter()
+            .map(|(_, k, _)| k)
+            .collect();
+        assert_eq!(keys, vec!["enter".to_string()], "只有命令提交回车①：{v}");
+        assert_eq!(
+            v["status"].as_str(),
+            Some("failed"),
+            "菜单无法定位 = 如实失败（不假装成功）：{v}"
+        );
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("命令已发送"),
+            "失败回执说明命令已投递、请人工核对终端：{v}"
         );
         assert_eq!(
             reads.load(std::sync::atomic::Ordering::SeqCst),
-            2,
-            "① before 快照 1 次 + ② 无判据时只读一拍（不是 15 拍睡满窗）：{v}"
+            1,
+            "before 快照 1 次；投递未成功 → 回读段不启动（旧 Text 路径的 2 次不再适用）：{v}"
+        );
+    }
+
+    // ============================================================
+    // C6 远程新建会话端点（spec §3/§5）：POST /session-create 三校验链 + 全局单飞
+    // + 黄字信号 + status 快照 + create-projects 聚合 + 审计三类行。
+    // 零污染：DB 依赖全走 DeviceStore::memory()（审计/设备/KV）；会话与归档走注入源；
+    // create 缝束（发现/pid/工具探测/步距）全假体——全链端到端在单测内闭环，
+    // 零真实 FS（mkdir 目标用 tempdir）、零真实睡眠、零真实 spawn。
+    // ============================================================
+
+    /// C6 专用 state：create 缝束 / 注入器 / 屏序 / host / 快照 / 归档六点可注入，
+    /// 其余缝与 test_state 同口径（内存库，零接触真实 ~/.mam）。
+    /// 屏序假体：按调用序弹出（耗尽后恒 None = 读屏失败轮）；弹屏次序驱动
+    /// run_pipeline 走「处置 → idle → 注入首句 → waiting_materialize」。
+    fn create_state(
+        hub: std::sync::Arc<CreateTaskHub>,
+        injector: std::sync::Arc<dyn crate::inject::engine::Injector>,
+        screens: Vec<Vec<String>>,
+        host: serde_json::Value,
+        sessions: Vec<crate::session::Session>,
+        archive: Vec<crate::database::SessionArchiveRow>,
+    ) -> Arc<RemoteState> {
+        let queue: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<Vec<String>>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(screens.into()));
+        let q = queue.clone();
+        Arc::new(RemoteState {
+            session_source: Box::new(move || crate::session::SessionsResponse {
+                sessions: sessions.clone(),
+                total_count: sessions.len(),
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector,
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            create_hub: hub,
+            capability_table: crate::inject::capability::new_table(),
+            archive_source: Box::new(move || archive.clone()),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(move |_, _| q.lock().unwrap().pop_front()),
+            host_source: Box::new(move || host.clone()),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            // 配对限速通道来源缝（#119 取代 tunnel_hosts_source；空表 = fail-closed）
+            rate_bucket_channels_source: Box::new(Vec::new),
+            via_hosts_source: Box::new(|| None),
+            home_source: Box::new(|| None),
+            // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
+            pairing_counter: Box::new(Vec::new),
+            ui_config_source: Box::new(|| None),
+        })
+    }
+
+    /// 缺省 host 载荷（enabledTools 含 claude——合法用例的工具门放行形态）
+    fn create_host_default() -> serde_json::Value {
+        serde_json::json!({
+            "host": { "name": "test-host", "platform": "windows", "version": "0.0.0-test" },
+            "enabledTools": ["claude"]
+        })
+    }
+
+    /// 轮询至任务终态（测试侧协调；假缝下瞬时到达——3s 超时 = 管线卡死即断言失败）
+    fn wait_terminal(hub: &CreateTaskHub, id: u64) -> CreateTaskShared {
+        for _ in 0..600 {
+            if let Some(t) = hub.snapshot(id) {
+                if t.phase == "done" || t.phase == "failed" {
+                    return t;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("任务 {id} 未在 3s 内到达终态");
+    }
+
+    /// 审计行过滤助手
+    fn audit_rows_of(state: &Arc<RemoteState>) -> Vec<crate::database::dao::write_audit::AuditRow> {
+        state
+            .store
+            .with(|c| crate::database::dao::write_audit::recent_conn(c, 100))
+    }
+
+    /// ① 校验链：非 ASCII 路径 400（reasonCode=non_ascii_path）+ trim 契约（合法
+    /// 路径带首尾空白 → 校验按 trim 形态通过，create_dir_all 落在 trim 后路径）
+    #[tokio::test]
+    async fn create_rejects_non_ascii_path_and_honors_trim() {
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-c6a", "手机C6a");
+        let app = router(state.clone());
+
+        // CJK 路径 → 400 non_ascii_path（v1 纯 ASCII 同规）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6a"),
+                Some(
+                    &serde_json::json!({"tool": "claude", "projectPath": r"E:\项目\demo"})
+                        .to_string(),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["error"], "bad_request");
+        assert_eq!(v["reasonCode"], "non_ascii_path", "{v}");
+
+        // trim 契约（评审 I1）：首尾空白合法路径 → 通过校验且 mkdir 用 trim 后串。
+        // 落盘点选构建 target 下唯一子目录——tempdir 位于 %TEMP%（AppData 段）会被
+        // create_path::validate 的凭据黑名单**正确拒绝**（AppData ∈ SENSITIVE_DIRS），
+        // 本用例要的是合法路径
+        let unique = format!(
+            "c6-trim-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(&unique);
+        assert!(!target.exists(), "前置：目标目录尚未创建");
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6a"),
+                Some(
+                    &serde_json::json!({
+                        "tool": "claude",
+                        "projectPath": format!("  {}  ", target.display())
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200, "首尾空白不得改变校验结论");
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert!(v["taskId"].is_u64(), "{v}");
+        assert_eq!(v["hasActiveSession"], false);
+        assert!(
+            target.exists(),
+            "create_dir_all 必须落在 trim 后路径（盘上不得出现带空格目录）"
+        );
+        // 注：不再探测 "name "/" name" 变体——Win32 路径层本就会剥尾部空白，
+        // 该探测在 Windows 上恒解析回同一目录，无判别力（C6 报告登记）
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// ①d P1-2 canonicalize 真值复核（评审 2026-10-03）：junction 隐藏段名——
+    /// 用户路径本身无任何命中段（第一道 validate 放行），mkdir 后取真值路径命中
+    /// 系统目录表 → 400 blacklisted + reason 回显命中段。8.3 短名（C:\PROGRA~1）
+    /// 同为 canonicalize 解真值机制覆盖，junction 免管理员权限可在测试环境构造，
+    /// 故以 junction 为代表锚。仅 Windows（复核逻辑 cfg windows；mklink /J 亦然）
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn create_rejects_junction_into_blocked_target() {
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-p12", "手机P12");
+        let app = router(state.clone());
+
+        // 测试自建目录树：<base>\Windows（段名撞系统目录表，仅为复核判据载体，
+        // 非真系统目录）+ junction <base>\lnk → 该目录；用户路径 <base>\lnk 无命中段。
+        // 前置清场：上次中断残留的半建目录会让 mklink /J 拒绝访问（实测 flaky 根因）
+        let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!(
+                "p12-junction-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let _ = std::fs::remove_dir_all(&base);
+        let blocked_name_dir = base.join("Windows");
+        std::fs::create_dir_all(&blocked_name_dir).unwrap();
+        let lnk = base.join("lnk");
+        // mklink 是 cmd 内建命令：整串单参数会被 MSVCRT 引号转义打坏（实跑
+        // 「目录名语法不正确」），分体传参由 Command 逐参引号包裹
+        let mk = std::process::Command::new("cmd")
+            .arg("/c")
+            .arg("mklink")
+            .arg("/J")
+            .arg(&lnk)
+            .arg(&blocked_name_dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            mk.status.success(),
+            "mklink /J 失败：{}{}",
+            String::from_utf8_lossy(&mk.stdout),
+            String::from_utf8_lossy(&mk.stderr)
+        );
+
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-p12"),
+                Some(
+                    &serde_json::json!({
+                        "tool": "claude",
+                        "projectPath": lnk.display().to_string()
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "junction 真值命中黑名单必须拒绝");
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["reasonCode"], "blacklisted", "{v}");
+        assert!(
+            v["reason"].as_str().is_some_and(|r| r.contains("windows")),
+            "复核命中段须回显（定位详情直达消费方，修复批 I1 同口径）：{v}"
+        );
+
+        // 清场：先删联接点（remove_dir 只摘链接不递归目标），再删整树
+        let _ = std::fs::remove_dir(&lnk);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// ①c 黑名单拒绝的定位详情可达消费方（修复批 I1）：400 body 须带 reason
+    /// （命中段 + 所属表），不能只在 create_path 单测里成立。跨平台：.ssh 段
+    /// 双形态（凭据表，读侧同源表全局段匹配）
+    #[tokio::test]
+    async fn create_blacklisted_carries_reason_detail() {
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-c6i1", "手机C6i1");
+        let app = router(state.clone());
+        let bad_path = if cfg!(windows) {
+            r"D:\keys\.ssh\k".to_string()
+        } else {
+            "/tmp/x/.ssh/k".to_string()
+        };
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6i1"),
+                Some(&serde_json::json!({"tool": "claude", "projectPath": bad_path}).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["error"], "bad_request");
+        assert_eq!(v["reasonCode"], "blacklisted", "{v}");
+        let reason = v["reason"].as_str().unwrap_or_default();
+        assert!(reason.contains(".ssh"), "reason 应含命中段：{v}");
+        assert!(reason.contains("凭据表"), "reason 应含所属表名：{v}");
+    }
+
+    /// ①b 首句入参封顶（C6 评审 I1）：firstMessage 超 MAX_SEND_CHARS → 400
+    /// （与 /session-send 同标尺；防无界注入文本进 compose/终端）
+    #[tokio::test]
+    async fn create_rejects_oversized_first_message() {
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-c6f", "手机C6f");
+        let app = router(state.clone());
+        // 落盘点：路径合法（tempdir_in 于 CARGO_MANIFEST_DIR）——让 400 只能来自封顶
+        let td = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("tempdir_in");
+        let oversized = "x".repeat(crate::remote::api::MAX_SEND_CHARS + 1);
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6f"),
+                Some(
+                    &serde_json::json!({
+                        "tool": "claude",
+                        "projectPath": td.path().join("proj").to_string_lossy(),
+                        "firstMessage": oversized
+                    })
+                    .to_string(),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "超长首句必须 400");
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["error"], "bad_request", "{v}");
+
+        // 超长路径 → 400 reasonCode=path_too_long（评审修复⑥，移动端分診可辨）
+        let oversized_path = format!(
+            "E:\\long\\{}",
+            "x".repeat(crate::remote::api::MAX_SEND_CHARS)
+        );
+        let r2 = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6f"),
+                Some(
+                    &serde_json::json!({ "tool": "claude", "projectPath": oversized_path })
+                        .to_string(),
+                ),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), 400, "超长路径必须 400");
+        let v2: serde_json::Value = serde_json::from_str(&body_string(r2).await).unwrap();
+        assert_eq!(v2["reasonCode"], "path_too_long", "{v2}");
+    }
+
+    /// ② 工具门三道：白名单外 / enabledTools 关 / 安装探测 false → 400
+    /// reasonCode=tool_unavailable
+    #[tokio::test]
+    async fn create_tool_gate_requires_whitelist_enabled_and_installed() {
+        // enabledTools 关（host_source 同源数据源）
+        let host_off = serde_json::json!({
+            "host": { "name": "t", "platform": "windows", "version": "0" },
+            "enabledTools": []
+        });
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            host_off,
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-c6b", "手机C6b");
+        let app = router(state);
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6b"),
+                Some(r#"{"tool":"claude","projectPath":"E:\\gate\\proj"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["reasonCode"], "tool_unavailable", "{v}");
+
+        // 安装探测 false（缝注入——OnceLock 真探测在无该工具机器上会恒 false，
+        // 端点契约必须确定，故探测缝可覆写，C6 报告登记）
+        let mut hub = CreateTaskHub::stub();
+        hub.tool_probe = Box::new(|_| false);
+        let state2 = create_state(
+            std::sync::Arc::new(hub),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state2, "dev-c6b2", "手机C6b2");
+        let r = router(state2)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6b2"),
+                Some(r#"{"tool":"claude","projectPath":"E:\\gate\\proj"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "enabledTools 开而未安装仍须拒");
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["reasonCode"], "tool_unavailable", "{v}");
+
+        // 白名单外（workbuddy 不在 create 四家表）
+        let host_wb = serde_json::json!({
+            "host": { "name": "t", "platform": "windows", "version": "0" },
+            "enabledTools": ["workbuddy"]
+        });
+        let state3 = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            host_wb,
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state3, "dev-c6b3", "手机C6b3");
+        let r = router(state3)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6b3"),
+                Some(r#"{"tool":"workbuddy","projectPath":"E:\\gate\\proj"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400, "白名单外工具不入 create 域");
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["reasonCode"], "tool_unavailable", "{v}");
+    }
+
+    /// ③ 全局单飞：合法 → 200 {taskId}；任务在飞（非终态，物化轮询被停）第二个
+    /// 请求 → 409 conflict；终态（failed）后可再建 → 新 taskId。
+    /// 顺带锁 status 在飞快照 phase=waiting_materialize（④ 在飞臂）。
+    #[tokio::test]
+    async fn create_single_flight_conflict_and_recreate_after_terminal() {
+        // 发现缝：首轮进入即发信号并停（任务停在 waiting_materialize 在飞），
+        // 释放后返回空表 → 15 轮 × no-op 步距 → materialize_timeout 终态。
+        // Sender/Receiver 非 Sync（CreateDiscoverFn 要求 Sync）——Mutex 包装
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let entered_tx = std::sync::Mutex::new(entered_tx);
+        let release_rx = std::sync::Mutex::new(release_rx);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c2 = calls.clone();
+        let disc: Box<CreateDiscoverFn> = Box::new(move |_t, _s, _d| {
+            if c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                let _ = entered_tx.lock().unwrap().send(());
+                // 释放前停在发现轮（in-flight 保持）；超时兜底放行防测试泄漏悬挂线程
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(std::time::Duration::from_secs(10));
+            }
+            Vec::new()
+        });
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub_with(disc)),
+            FakeInjector::ok(),
+            // 屏序：直接 idle 两轮（双读确认，C8 定案 → 注入首句 → waiting_materialize）
+            vec![
+                vec!["manual mode on · ? for shortcuts".into()],
+                vec!["manual mode on · ? for shortcuts".into()],
+            ],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-c6c", "手机C6c");
+        let app = router(state.clone());
+        let hub = state.create_hub.clone();
+        // 落盘点（C6 评审 I2）：tempdir_in 于 CARGO_MANIFEST_DIR——自动唯一+自动清理
+        // （%TEMP% 在 AppData 段会被 SENSITIVE_DIRS 正确拒绝，不能用作合法路径）
+        let td = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("tempdir_in");
+        let dir = td.path().join("proj").to_string_lossy().to_string();
+        let dir_other = td.path().join("other").to_string_lossy().to_string();
+        let payload =
+            |p: &str| serde_json::json!({ "tool": "claude", "projectPath": p }).to_string();
+
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6c"),
+                Some(&payload(&dir)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["taskId"], 1, "任务 id 自 1 起自增：{v}");
+        assert_eq!(v["hasActiveSession"], false);
+
+        // 管线进入物化轮询（在飞）后第二个请求 → 409 conflict
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("管线未进入物化轮询");
+        assert_eq!(
+            hub.snapshot(1).map(|t| t.phase).as_deref(),
+            Some("waiting_materialize"),
+            "在飞相 = waiting_materialize（④ 在飞臂一并锁定）"
+        );
+        let r2 = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6c"),
+                Some(&payload(&dir_other)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r2.status(), 409);
+        let v2: serde_json::Value = serde_json::from_str(&body_string(r2).await).unwrap();
+        assert_eq!(v2["error"], "conflict", "{v2}");
+
+        // 释放 → 15 轮空发现 → materialize_timeout（终态可查，不占单飞额度）
+        let _ = release_tx.send(());
+        let t = wait_terminal(&hub, 1);
+        assert_eq!(t.phase, "failed");
+        assert!(t.detail.as_deref().unwrap_or_default().contains("物化超时"));
+
+        let r3 = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6c"),
+                Some(&payload(&dir)),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r3.status(), 200, "终态任务不占单飞额度——可再建");
+        let v3: serde_json::Value = serde_json::from_str(&body_string(r3).await).unwrap();
+        assert_eq!(v3["taskId"], 2, "新任务拿到下一个 id：{v3}");
+        wait_terminal(&hub, 2);
+    }
+
+    /// ④ status 端点：未知 taskId → 404；终态快照 {phase, sessionId, spawnedPid}
+    /// 完整；done 后可再建（与 ③ 的终态不占单飞合并断言）。
+    #[tokio::test]
+    async fn create_status_endpoint_unknown_404_and_done_snapshot() {
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub_with(Box::new(|_, _, _| {
+                vec!["sid-c6-ok".to_string()]
+            }))),
+            FakeInjector::ok(),
+            // 屏序：信任框（处置 down,enter）→ idle 双读确认 → 注入首句 → waiting_materialize
+            vec![
+                vec![
+                    "Quick safety check: Is this a project you created or one you trust?".into(),
+                    "❯ No, exit".into(),
+                ],
+                vec!["manual mode on · ? for shortcuts".into()],
+                vec!["manual mode on · ? for shortcuts".into()],
+            ],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-c6d", "手机C6d");
+        let app = router(state.clone());
+        let hub = state.create_hub.clone();
+
+        // 未知 taskId → 404（含畸形值）
+        for q in ["?taskId=999", "?taskId=abc", ""] {
+            let r = app
+                .clone()
+                .oneshot(req(
+                    "GET",
+                    &format!("/m/api/v1/session-create/status{q}"),
+                    Some("mam_device=dev-c6d"),
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(r.status(), 404, "未知/畸形 taskId 一律 404：{q}");
+        }
+
+        // 落盘点（C6 评审 I2）：tempdir_in 自动唯一+自动清理
+        let td = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("tempdir_in");
+        let dir = td.path().join("proj").to_string_lossy().to_string();
+        let r = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6d"),
+                Some(&serde_json::json!({ "tool": "claude", "projectPath": dir }).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["taskId"], 1);
+        let t = wait_terminal(&hub, 1);
+        assert_eq!(t.phase, "done");
+
+        // 终态快照：sessionId = 物化回读、spawnedPid = 锚定假体 4242
+        let r = app
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-create/status?taskId=1",
+                Some("mam_device=dev-c6d"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["phase"], "done", "{v}");
+        assert_eq!(v["sessionId"], "sid-c6-ok", "{v}");
+        assert_eq!(v["spawnedPid"], 4242, "pid 锚定缝假体值透出：{v}");
+    }
+
+    /// ⑤ 审计三类行（内存库可查，设备名 = 发起设备 cookie 名）：
+    /// 成功链 = dialog（场景+键序）+ send（首句原文）+ create（ok, session_id=物化者）；
+    /// 失败链 = create（failed:<code>, session_id=""），无 dialog/send 行。
+    #[tokio::test]
+    async fn create_audit_rows_success_and_failure() {
+        // ---- 成功链 ----
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub_with(Box::new(|_, _, _| {
+                vec!["sid-audit-1".to_string()]
+            }))),
+            FakeInjector::ok(),
+            vec![
+                vec![
+                    "Quick safety check: Is this a project you created or one you trust?".into(),
+                    "❯ No, exit".into(),
+                ],
+                vec!["Quick safety check".into()],
+                vec!["manual mode on · ? for shortcuts".into()],
+                // idle 双读确认（C8 定案）
+                vec!["manual mode on · ? for shortcuts".into()],
+            ],
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state, "dev-c6e", "手机C6e");
+        let app = router(state.clone());
+        // 落盘点（C6 评审 I2）：tempdir_in 自动唯一+自动清理，路径随平台无盘符依赖
+        let td = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("tempdir_in");
+        let dir = td.path().join("proj").to_string_lossy().to_string();
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6e"),
+                Some(&serde_json::json!({ "tool": "claude", "projectPath": dir }).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        wait_terminal(state.create_hub.as_ref(), 1);
+
+        let rows = audit_rows_of(&state);
+        let by_action = |a: &str| {
+            rows.iter()
+                .filter(|r| r.action == a)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        // dialog 行：summary = 场景+键序（claude 信任框红线键序），result ok，物化前 sid=""
+        let dialogs = by_action("dialog");
+        assert_eq!(dialogs.len(), 1, "恰好一条 dialog 行：{rows:?}");
+        assert_eq!(dialogs[0].summary, "create_trust: down,enter", "{rows:?}");
+        assert_eq!(dialogs[0].result, "ok");
+        assert_eq!(dialogs[0].session_id, "", "物化前 dialog 行 sid 为空");
+        assert_eq!(dialogs[0].device_name, "手机C6e");
+        assert_eq!(dialogs[0].agent_type, "claude");
+        // send 行：content = composed 原文（默认探针 hi；签名默认关=裸正文，2026-10-05），sid=""
+        let sends = by_action("send");
+        assert_eq!(sends.len(), 1, "恰好一条 send 行（首句）：{rows:?}");
+        assert_eq!(sends[0].summary, "hi", "{rows:?}");
+        assert_eq!(sends[0].result, "ok");
+        assert_eq!(sends[0].session_id, "");
+        assert_eq!(sends[0].device_name, "手机C6e");
+        // create 行：ok + 物化 session_id + 目录+tool 摘要（不写首句原文）。
+        // 摘要经 audit 摘要上限截断（Linux runner 的 tempdir 路径超限会带 … 尾）
+        // ——期望值用同一 summarize 算，环境路径长短不改变结论
+        let creates = by_action("create");
+        assert_eq!(creates.len(), 1, "恰好一条 create 行：{rows:?}");
+        assert_eq!(creates[0].result, "ok");
+        assert_eq!(creates[0].session_id, "sid-audit-1");
+        assert_eq!(
+            creates[0].summary,
+            crate::inject::normalize::summarize(
+                &format!("create claude @ {}", dir),
+                crate::inject::normalize::AUDIT_SUMMARY_CHARS
+            ),
+            "{rows:?}"
         );
         assert!(
-            v["hint"]
-                .as_str()
+            !creates[0].summary.contains("hi"),
+            "create 行不得写首句原文：{rows:?}"
+        );
+
+        // ---- 失败链（未识别屏 → failed:unrecognized_screen，现场保留）----
+        let state2 = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            FakeInjector::ok(),
+            (0..16)
+                .map(|_| vec!["某种未识别界面".to_string()])
+                .collect(),
+            create_host_default(),
+            vec![],
+            vec![],
+        );
+        persist_named_device(&state2, "dev-c6e2", "手机C6e2");
+        // 落盘点（C6 评审 I2）：tempdir_in 自动唯一+自动清理
+        let td2 = tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).expect("tempdir_in");
+        let dir2 = td2.path().join("fail").to_string_lossy().to_string();
+        let r = router(state2.clone())
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-create",
+                Some("mam_device=dev-c6e2"),
+                Some(&serde_json::json!({ "tool": "claude", "projectPath": dir2 }).to_string()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let t = wait_terminal(state2.create_hub.as_ref(), 1);
+        assert_eq!(t.phase, "failed");
+        assert!(
+            t.detail
+                .as_deref()
                 .unwrap_or_default()
-                .contains("无法自动确认"),
-            "无回读源 → 回执如实说「无法自动确认」（不假装）：{v}"
+                .contains("终端窗口保留供查看现场"),
+            "失败不自动清场——detail 注明现场保留：{:?}",
+            t.detail
+        );
+        let rows2 = audit_rows_of(&state2);
+        let creates2: Vec<_> = rows2.iter().filter(|r| r.action == "create").collect();
+        assert_eq!(creates2.len(), 1, "{rows2:?}");
+        assert_eq!(
+            creates2[0].result, "failed:unrecognized_screen",
+            "{rows2:?}"
+        );
+        assert_eq!(creates2[0].session_id, "", "失败/物化前 create 行 sid 为空");
+        assert!(
+            !rows2.iter().any(|r| r.action == "dialog"),
+            "未识别失败无 dialog 行：{rows2:?}"
+        );
+        assert!(
+            !rows2.iter().any(|r| r.action == "send"),
+            "失败链无 send 行（首句未注入）：{rows2:?}"
+        );
+    }
+
+    /// ⑥ create-projects：archive 三条（7 天内 / 8 天前 / 非 ASCII）+ 快照活跃一条
+    /// → 只含 7 天内与活跃项；同目录去重（快照尾斜杠形态 ∪ archive）、lastActiveAt
+    /// 取新、tools 并集、activeTools 仅快照、lastActiveAt 降序。
+    #[tokio::test]
+    async fn create_projects_window_dedupe_and_sort() {
+        let now = chrono::Utc::now();
+        let iso =
+            |d: chrono::Duration| (now - d).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        // 夹具路径按运行平台取合法形态（M1 过滤器按 std::env::consts::OS 校验——
+        // posix 形态路径在 windows 上会以 bad_windows_form 被正确滤除，夹具须与
+        // 平台一致才能测到窗口/去重语义本身）
+        let pa: &str = if cfg!(windows) {
+            r"E:\proj\pa"
+        } else {
+            "/tmp/pa"
+        };
+        let pb: &str = if cfg!(windows) {
+            r"E:\proj\pb"
+        } else {
+            "/tmp/pb"
+        };
+        let pc: &str = if cfg!(windows) {
+            r"E:\proj\pc"
+        } else {
+            "/tmp/pc"
+        };
+        let pz: &str = if cfg!(windows) {
+            r"E:\proj\pz"
+        } else {
+            "/tmp/pz"
+        };
+        let archive = vec![
+            crate::database::SessionArchiveRow {
+                session_id: "a1".into(),
+                agent_type: "claude".into(),
+                project_path: pa.into(),
+                project_name: "pa".into(),
+                title: None,
+                last_status: "finished".into(),
+                first_seen: iso(chrono::Duration::days(6)),
+                last_seen: iso(chrono::Duration::days(2)),
+                updated_at: iso(chrono::Duration::days(2)),
+            },
+            // 8 天前 → 出窗
+            crate::database::SessionArchiveRow {
+                session_id: "a2".into(),
+                agent_type: "codex".into(),
+                project_path: pb.into(),
+                project_name: "pb".into(),
+                title: None,
+                last_status: "finished".into(),
+                first_seen: iso(chrono::Duration::days(9)),
+                last_seen: iso(chrono::Duration::days(8)),
+                updated_at: iso(chrono::Duration::days(8)),
+            },
+            // 非 ASCII 路径 → 过滤（v1 同规）
+            crate::database::SessionArchiveRow {
+                session_id: "a3".into(),
+                agent_type: "claude".into(),
+                project_path: "E:\\项目".into(),
+                project_name: "cjk".into(),
+                title: None,
+                last_status: "finished".into(),
+                first_seen: iso(chrono::Duration::days(1)),
+                last_seen: iso(chrono::Duration::days(1)),
+                updated_at: iso(chrono::Duration::days(1)),
+            },
+            // 同目录另一工具（tools 并集来源）
+            crate::database::SessionArchiveRow {
+                session_id: "a5".into(),
+                agent_type: "codex".into(),
+                project_path: pa.into(),
+                project_name: "pa".into(),
+                title: None,
+                last_status: "finished".into(),
+                first_seen: iso(chrono::Duration::days(6)),
+                last_seen: iso(chrono::Duration::days(2)),
+                updated_at: iso(chrono::Duration::days(2)),
+            },
+            // 次新目录（排序第二位）
+            crate::database::SessionArchiveRow {
+                session_id: "a4".into(),
+                agent_type: "kimi".into(),
+                project_path: pc.into(),
+                project_name: "pc".into(),
+                title: None,
+                last_status: "finished".into(),
+                first_seen: iso(chrono::Duration::days(4)),
+                last_seen: iso(chrono::Duration::days(3)),
+                updated_at: iso(chrono::Duration::days(3)),
+            },
+        ];
+        let mut live = inj_sess(
+            "live-1",
+            crate::session::AgentType::Claude,
+            42,
+            crate::session::SessionStatus::Waiting,
+        );
+        live.project_path = format!("{pa}/"); // 尾斜杠形态——归一后与 archive 同目录
+        live.last_activity_at = iso(chrono::Duration::hours(1));
+
+        let state = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![live],
+            archive,
+        );
+        persist_named_device(&state, "dev-c6f", "手机C6f");
+        let r = router(state)
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/create-projects",
+                Some("mam_device=dev-c6f"),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        let projects = v["projects"].as_array().expect("projects 数组");
+        assert_eq!(
+            projects.len(),
+            2,
+            "只含 7 天内与活跃项（pb 出窗、CJK 过滤）：{v}"
+        );
+        // 第一位 = pa：lastActiveAt 取新（快照 1h 前 > archive 2 天前）
+        let pa_json = &projects[0];
+        assert_eq!(pa_json["path"], pa, "去重展示形态取快照优先: {v}");
+        assert_eq!(
+            pa_json["lastActiveAt"],
+            iso(chrono::Duration::hours(1)),
+            "lastActiveAt = 最近活跃: {v}"
+        );
+        assert_eq!(
+            pa_json["tools"],
+            serde_json::json!(["claude", "codex"]),
+            "tools = 快照 ∪ archive 工具并集: {v}"
+        );
+        assert_eq!(
+            pa_json["activeTools"],
+            serde_json::json!(["claude"]),
+            "activeTools = 快照中该路径有活跃会话的工具: {v}"
+        );
+        // 第二位 = pc（3 天前归档，无活跃）
+        let pc_json = &projects[1];
+        assert_eq!(pc_json["path"], pc);
+        assert_eq!(pc_json["tools"], serde_json::json!(["kimi"]));
+        assert_eq!(pc_json["activeTools"], serde_json::json!([]));
+        // days 窗生效：显式 days=1 → 只剩活跃快照项
+        // （换新 state 避免与上一请求的断言耦合）
+        let state2 = create_state(
+            std::sync::Arc::new(CreateTaskHub::stub()),
+            std::sync::Arc::new(crate::inject::engine::RealInjector),
+            vec![],
+            create_host_default(),
+            vec![],
+            vec![crate::database::SessionArchiveRow {
+                session_id: "a9".into(),
+                agent_type: "claude".into(),
+                project_path: pz.into(),
+                project_name: "pz".into(),
+                title: None,
+                last_status: "finished".into(),
+                first_seen: iso(chrono::Duration::days(2)),
+                last_seen: iso(chrono::Duration::days(2)),
+                updated_at: iso(chrono::Duration::days(2)),
+            }],
+        );
+        persist_named_device(&state2, "dev-c6f2", "手机C6f2");
+        let r = router(state2)
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/create-projects?days=1",
+                Some("mam_device=dev-c6f2"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["projects"].as_array().map(Vec::len),
+            Some(0),
+            "2 天前归档不出 1 天窗：{v}"
         );
     }
 }

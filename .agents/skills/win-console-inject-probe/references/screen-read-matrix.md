@@ -105,3 +105,14 @@
 | 加码 | q1 活体 dump | **发现分隔线闩锁缺陷**：滚回区 `─` 分隔线把其后的整个题屏判死——解析恒 0 行，打击所有多题题屏（事故主根因，比锚缺失更早命中） |
 
 **闸门 1 的活教材**：事故后首版修复曾以「重建测试」验证 q1 解析——重建屏从页签栏起造、没造滚回区，6 行块全绿但实机仍 0 行。活体 dump 对比才暴露闩锁。**夹具必须整屏逐字（含滚回区），手抄/省略即失去证据力。**
+
+## kimi 形态矩阵（2026-10-06 探针会话，kimi 2.1.1）
+
+| (tool, version, 屏形) | 锚判据 | 解析产出 | 按键路径 | 已知边界 |
+|---|---|---|---|---|
+| (kimi, 2.1.1, 权限菜单) | 标题 `select permission mode` + footer `enter select · esc cancel`（账本） | 两行组标签+`❯`高亮+`← current` | `/yolo`+enter① 开菜单→闭环→enter② | 键入态只有行内补全（非菜单） |
+| (kimi, 2.1.1, 底栏·双轴) | 行含 `thinking:` | 模式轴=分词 plan；权限轴=行首标签（manual 缺席推断） | — | 非 manual 才渲染权限标签 |
+| (kimi, 2.1.1, 单选题页) | `? 题干` + `[N]` 方括号行形 + footer `↵ choose` | 未入快照（→ 高亮可读，下批） | 数字→Review；←返回撤销✓ | 单选选中=→ 前缀字符可见 |
+| (kimi, 2.1.1, 多选页) | footer 含 `tab switch` | `[ ]`/`[?]`/`[✓]`/`[√]` 多候选勾选 | 数字按位 toggle | 多选 Other 无编号 |
+| (kimi, 2.1.1, Review 屏) | `ready to submit your answers?`（账本） | `→ [1] Submit`/[2] Cancel 确认编号 | 1/Enter 确认；←返回 | (✓) 题签已答标记 |
+| (kimi, 2.1.1, Other 编辑态) | `type answer  ↵ save` footer | `→ [N] Other: <残留>`（K7 重进带旧文） | 退格逐字符清；enter 保存；空 enter no-op | Esc 语义未探 |
