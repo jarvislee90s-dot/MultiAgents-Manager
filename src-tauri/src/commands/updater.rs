@@ -16,10 +16,15 @@ use tauri_plugin_updater::UpdaterExt;
 const GITHUB_REPO: &str = "jarvislee90s-dot/MultiAgents-Manager";
 const RELEASES_API_URL: &str =
     "https://api.github.com/repos/jarvislee90s-dot/MultiAgents-Manager/releases?per_page=30";
+/// 钉 IP 直连的域名（resolve 只对**直连**生效；兜底客户端必须 no_proxy，见下）
+const GITHUB_API_HOST: &str = "api.github.com";
 /// GitHub API 强制要求 User-Agent，否则 403
 const USER_AGENT: &str = "multi-agents-manager-updater";
 /// 进度事件名（沿用 `mam-` 前缀惯例）
 pub const PROGRESS_EVENT: &str = "mam-updater-progress";
+/// 兜底直连最多试几个 DoH 地址（同 reach.rs B-M7 口径：首条陈旧时还有得试，
+/// 全试一遍又太贵）
+const PINNED_MAX_ADDRS: usize = 3;
 
 // —— 发现层：GitHub API 响应的最小字段子集（draft 对匿名请求本就不可见，过滤作纵深防御）——
 
@@ -110,6 +115,85 @@ pub enum CheckUpdateStatus {
     Error { message: String },
 }
 
+/// 把错误的**完整源链**拍平成一行。reqwest 的 Display 只有顶层一句
+/// （「error sending request for url」），定位成因的关键信息全在 source 链里
+/// （「invalid peer certificate」= DNS 污染假证书 /「连接被拒绝」= 代理没在听 /
+/// 超时 = 弱网）——0.5.1 的 toast 只插值顶层，用户照旧分不清，违背「失败原因
+/// 第一眼可定位」的初衷（420f48a）。
+fn flatten_error_chain(e: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut cur = e.source();
+    while let Some(s) = cur {
+        parts.push(format!("[{}]", s));
+        cur = s.source();
+    }
+    parts.join(" ")
+}
+
+/// 默认管道一次请求（reqwest 默认读环境变量与 Windows/macOS 系统代理——挂 VPN
+/// 时走的就是它；hyper-util 注册表读取链路 2026-10-08 独立探针实证可用）
+async fn fetch_releases_with_client(client: reqwest::Client) -> Result<Vec<GithubRelease>, String> {
+    let resp = client
+        .get(RELEASES_API_URL)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("GitHub API 请求失败: {}", flatten_error_chain(&e)))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API 状态异常: {}", resp.status()));
+    }
+    resp.json::<Vec<GithubRelease>>()
+        .await
+        .map_err(|e| format!("GitHub API 响应解析失败: {e}"))
+}
+
+/// DoH 解析 + 钉 IP 直连兜底：**绕开本地 DNS 污染与失效代理**。
+/// 2026-10-08 实测（本机，VPN 关）：本地解析被污染（TCP 通、TLS 假证书
+/// 「invalid peer certificate: UnknownIssuer」），经阿里 DoH 拿真实地址后钉 IP
+/// 直连 HTTP 200——GitHub 真实 IP 本身没被封，坏的只是域名解析。
+async fn fetch_releases_via_doh_pinned() -> Result<Vec<GithubRelease>, String> {
+    // DoH 解析复用 reach.rs 的生产探针（多源、IP 字面量、禁系统代理、有界超时）；
+    // 内部是 reqwest::blocking——async 上下文直接调会 panic，必须 spawn_blocking
+    //（与 reach verify 步同纪律）
+    let addrs = tauri::async_runtime::spawn_blocking(|| {
+        crate::remote::tailscale::real_probe()("api.github.com")
+    })
+    .await
+    .map_err(|e| format!("DoH 解析任务失败: {e}"))?
+    .map_err(|e| format!("DoH 解析失败（所有源都不可用）: {e}"))?;
+
+    // 钉 IP 直连：**必须 no_proxy**——经 HTTP 代理的 CONNECT 隧道把域名交给代理
+    // 自己解析，resolve() 只对直连生效；这条路径的意义就是绕开一切本地干扰
+    let mut last_err = "DoH 没有给出可用地址".to_string();
+    for ip in addrs.iter().take(PINNED_MAX_ADDRS) {
+        let Ok(addr) = ip.parse::<std::net::IpAddr>() else {
+            continue;
+        };
+        let client = match reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .no_proxy()
+            .resolve(GITHUB_API_HOST, std::net::SocketAddr::new(addr, 443))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                last_err = format!("钉 IP {addr} 客户端构建失败: {e}");
+                continue;
+            }
+        };
+        match fetch_releases_with_client(client).await {
+            Ok(list) => return Ok(list),
+            Err(e) => last_err = format!("钉 IP {addr} 直连失败: {e}"),
+        }
+    }
+    Err(last_err)
+}
+
+/// 检查更新取数的两层编排：① 默认管道（环境变量 + 系统代理——挂 VPN 的正路）；
+/// ② 失败后 DoH 钉 IP 直连兜底（VPN 关/代理失效/DNS 污染都覆盖）。两层各自的
+/// 失败原因都如实上报，不给一句笼统的「网络错误」。
 async fn fetch_github_releases() -> Result<Vec<GithubRelease>, String> {
     let client = reqwest::Client::builder()
         .user_agent(USER_AGENT)
@@ -117,18 +201,15 @@ async fn fetch_github_releases() -> Result<Vec<GithubRelease>, String> {
         .timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| format!("HTTP 客户端构建失败: {e}"))?;
-    let resp = client
-        .get(RELEASES_API_URL)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API 请求失败: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API 状态异常: {}", resp.status()));
+    match fetch_releases_with_client(client).await {
+        Ok(list) => Ok(list),
+        Err(via_default) => match fetch_releases_via_doh_pinned().await {
+            Ok(list) => Ok(list),
+            Err(via_pinned) => Err(format!(
+                "{via_default}；DoH 钉 IP 直连兜底也失败: {via_pinned}"
+            )),
+        },
     }
-    resp.json::<Vec<GithubRelease>>()
-        .await
-        .map_err(|e| format!("GitHub API 响应解析失败: {e}"))
 }
 
 /// 启动/手动触发时检查更新：GitHub API 挑最新（含 prerelease），与当前版本比 semver。
@@ -501,6 +582,49 @@ mod tests {
         );
         let releases = tauri::async_runtime::block_on(fetch_github_releases())
             .expect("经代理拉取 GitHub releases 失败");
+        assert!(!releases.is_empty(), "releases 列表不应为空");
+    }
+
+    #[test]
+    fn flattens_error_source_chain_into_one_line() {
+        // toast 的「失败原因第一眼可定位」依赖 source 链——拍平器必须逐层带上
+        #[derive(Debug)]
+        struct Leaf;
+        impl std::fmt::Display for Leaf {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "invalid peer certificate: UnknownIssuer")
+            }
+        }
+        impl std::error::Error for Leaf {}
+        #[derive(Debug)]
+        struct Top {
+            cause: Leaf,
+        }
+        impl std::fmt::Display for Top {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "error sending request for url (https://api.github.com)")
+            }
+        }
+        impl std::error::Error for Top {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.cause)
+            }
+        }
+
+        let flat = flatten_error_chain(&Top { cause: Leaf });
+        assert!(flat.contains("error sending request"), "顶层信息必须保留");
+        assert!(
+            flat.contains("invalid peer certificate"),
+            "source 链的成因（DNS 污染假证书）必须带出：{flat}"
+        );
+    }
+
+    #[test]
+    #[ignore = "需真机联网（不需要代理）——DoH 钉 IP 直连兜底的实链路验证；\
+                本机 DNS 污染/VPN 关闭环境恰是它的目标场景"]
+    fn fetches_releases_via_doh_pinned_fallback() {
+        let releases = tauri::async_runtime::block_on(fetch_releases_via_doh_pinned())
+            .expect("DoH 钉 IP 直连拉取 releases 失败");
         assert!(!releases.is_empty(), "releases 列表不应为空");
     }
 }

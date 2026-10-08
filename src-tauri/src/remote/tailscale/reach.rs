@@ -574,7 +574,9 @@ fn probe_http(host: &str, ip: &str) -> Result<(), String> {
 /// [`parse_doh_response`] 定性。**同样禁用系统代理**——经本地 MITM 的 DoH 应答不可信；
 /// **目标全是 IP 字面量**（[`DOH_SOURCES`]）→ 不触发任何系统 DNS 解析。
 /// 每个源的超时 = [`DOH_TIMEOUT`]（单源单类型；最坏 = 源数 × 类型数 × 超时）。
-pub(super) fn real_probe() -> &'static ProbeFn {
+/// `pub(crate)`（而非本模块惯例的 pub(super)）：经 `tailscale::real_probe` 再导出，
+/// 升级检查的 DoH 钉 IP 兜底（commands/updater.rs）是 tailscale 之外的第二消费方。
+pub(crate) fn real_probe() -> &'static ProbeFn {
     static PROBE: std::sync::OnceLock<Box<ProbeFn>> = std::sync::OnceLock::new();
     // get_or_init 给 &Box<ProbeFn>，一步 deref+unsize 到 &ProbeFn
     let probe: &ProbeFn = PROBE.get_or_init(|| {

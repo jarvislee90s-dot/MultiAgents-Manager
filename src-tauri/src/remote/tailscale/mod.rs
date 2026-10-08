@@ -27,6 +27,9 @@ mod wizard;
 pub(crate) use reach::{
     reachability, record_pending_hint, Reachability, RECORD_PENDING_HINT, RECOVERING_HINT,
 };
+// 升级检查的 DoH 钉 IP 兜底（commands/updater.rs）：直连/代理失败后经生产探针解析
+// api.github.com 真实地址——2026-10-08 实测本机 DNS 污染（假证书），钉 IP 直连 200
+pub(crate) use reach::real_probe;
 // 重开档常量：生产路径经 `record_pending_hint(republish)` 取文案（不直接引用常量），
 // crate 内只有**测试**要按名断言两档不同 ⇒ 仅测试构建再导出（与 set_reachability 同纪律）
 #[cfg(test)]
