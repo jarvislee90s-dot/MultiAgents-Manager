@@ -36,6 +36,9 @@ pub(crate) use reach::RECORD_REPUBLISH_HINT;
 #[cfg(test)]
 pub(crate) use reach::set_reachability;
 pub(crate) use status::{set_ts_snapshot, start_channel, stop_all, stop_channel, ts_snapshot};
+// I1（2026-10-08 架构评审）：应用退出钩子要能把 `tailscale login` 的等待者一起收掉
+// （kill + wait，不留孤儿进程）——`lib.rs` 的 RunEvent::Exit 是唯一的生产消费方。
+pub(crate) use wizard::cancel_login_attempt;
 pub(crate) use wizard::{run_step, wizard_status};
 
 // 测试模块需要看见三个子模块的内部件（`use super::*` 从 tests 取用）；仅测试构建存在。
@@ -88,6 +91,8 @@ fn set_run_cli_override(f: Option<Box<RunCliFake>>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 发现链测试要构造候选路径（`super::*` 只带进 tailscale 模块自己的名字）
+    use std::path::PathBuf;
 
     /// 实测样本（2026-10-06，macOS 1.102.4 真机 `status --json` 截取关键字段）。
     /// 注意 `Self.DNSName` **带结尾点**——这是解析必须处理的真实形态。
@@ -102,6 +107,18 @@ mod tests {
     const STATUS_NEEDS_LOGIN: &str = r#"{
         "BackendState": "NeedsLogin",
         "AuthURL": "https://login.tailscale.com/a/abc123",
+        "Self": { "DNSName": "" },
+        "CertDomains": []
+    }"#;
+
+    /// **⑤ 新装未发起过登录的形态**（2026-10-07 诊断所得，用户实测场景）：
+    /// `NeedsLogin` **但 AuthURL 为空**——授权链接由尾网在**发起一次交互式登录**时才生成
+    /// （`tailscale login` / GUI 的「Log in」按钮），MAM 此前从不发起 ⇒ 链接永远不出现，
+    /// 而前端只在 `probe.authUrl` 非空时才渲染「去登录」，于是登录步成为**死胡同**：
+    /// 行里有"需要你操作：去浏览器登录"的文案，却没有任何可点的东西。
+    const STATUS_NEEDS_LOGIN_NO_URL: &str = r#"{
+        "BackendState": "NeedsLogin",
+        "AuthURL": "",
         "Self": { "DNSName": "" },
         "CertDomains": []
     }"#;
@@ -1228,6 +1245,38 @@ mod tests {
         }
     }
 
+    /// **2026-10-08 缺口锚点（用户实测）**：Windows 走 MSI，**安装向导会让用户选安装路径**
+    /// （MAM 执行 `msiexec /i` **刻意不加 /qn**——选择权本就该给用户）⇒ 安装步的动作文案
+    /// 必须**逐平台分叉**：Windows 那份要事前点明「用默认路径最省事 / 装到别处也可以，
+    /// 请记住那个路径」；macOS 那份**不得夹带**（.pkg 由 `installer` 固定装到
+    /// /Applications，用户根本无从选择，套 Windows 的话就是张冠李戴的谎报）。
+    /// 变异：把 install 步的文案键改回两平台同值 → 本测试必红。
+    #[test]
+    fn install_step_action_key_warns_windows_users_about_the_install_path() {
+        let install_key = |p: Platform| {
+            wizard_steps(p)
+                .into_iter()
+                .find(|s| s.id == "install")
+                .expect("两平台都必有 install 步")
+                .human_action_key
+        };
+        assert_eq!(
+            install_key(Platform::Windows),
+            "settings.remote.tsWizard.actAdminWinMsi",
+            "Windows 的 MSI 会让用户选安装路径 ⇒ 动作文案必须点明（默认路径最省事）"
+        );
+        assert_eq!(
+            install_key(Platform::Mac),
+            "settings.remote.tsWizard.actAdmin",
+            "macOS 的 .pkg 固定装到 /Applications，不得套用 Windows 特有的路径提示"
+        );
+        assert_ne!(
+            install_key(Platform::Mac),
+            install_key(Platform::Windows),
+            "两平台文案必须分叉（同值 = 又把 Windows 特有的话塞给 mac 用户）"
+        );
+    }
+
     /// A1（2026-10-07 Windows 实测）**变异锚点**：Funnel 首次开通**不必然**要求浏览器
     /// 批准——Windows 11 家庭版 / Tailscale 1.102.4 MSI 实测 `funnel --bg 19999` 退出码 0、
     /// 0.1 秒返回、**零批准链接、零人工点击**（推测该尾网 ACL 已允许本节点 Funnel）；
@@ -1535,23 +1584,26 @@ mod tests {
             "other"
         };
         assert_eq!(p["platform"], expected_platform);
-        // I-3：Windows 验证位**按覆盖面如实拆细**（不得让验证位大于证据）——
-        // 本次真机探测从第 6 步（shields_up）开始，故 1–5 步的流程没被端到端跑过：
-        // platform 级载荷必须与纯函数同源（不写死、不两处漂移）
+        // I-3 → ②（2026-10-07 用户实机确认）：Windows 验证位仍**按覆盖面如实派生**，
+        // 但覆盖面已经**从第一步起**了——用户在本机 Windows 上卸载 Tailscale 后**从零
+        // 走完 MAM 向导全程**（下载 → 安装 UAC → 登录 → 关 shields-up → 开通 Funnel →
+        // 可达性校验），全程正常，故 detect/download/install/login 四步的**流程**已被
+        // 端到端实机跑过（此前记录的 shields_up 起点是更早一次、从第 6 步起的探测）。
+        // 验证位仍然由清单派生（不是硬编码 true）——机制与派生关系见下方
+        // `windows_verification_list_is_derived_from_coverage_start`。
         let win = windows_verification_for(Platform::Windows);
         assert_eq!(
-            win["windowsVerified"], false,
-            "整条 Windows 流程没验过（detect/download/install/login 四步没端到端跑过）\
-             ——旧实现用整行布尔把提示整条撤下，是验证位大于证据: {win}"
+            win["windowsVerified"], true,
+            "用户 2026-10-07 实机走完 MAM 向导全程 ⇒ 整条 Windows 流程已实测: {win}"
         );
         assert_eq!(
-            win["windowsVerifiedFrom"], "shields_up",
-            "实测覆盖从第 6 步起（2026-10-07 真机探测起点）: {win}"
+            win["windowsVerifiedFrom"], "detect",
+            "实测覆盖起点 = 步骤表第一步（清单因此为空）: {win}"
         );
         assert_eq!(
             win["windowsUnverifiedSteps"],
-            serde_json::json!(["detect", "download", "install", "login"]),
-            "没被端到端实机跑过的四步必须点名（按步骤表顺序派生，表变了跟着变）: {win}"
+            serde_json::json!([]),
+            "已无未实测步骤（清单随起点派生，表变了跟着变）: {win}"
         );
         // 本机平台（测试机上 = mac）：无 Windows 行 → 不声称任何 Windows 覆盖
         let here = windows_verification_for(current_platform());
@@ -1604,6 +1656,670 @@ mod tests {
             );
         }
         teardown_globals();
+    }
+
+    /// **② 诚实标注的机制仍在，且三位都由「实测覆盖起点」派生**（2026-10-07 用户实机
+    /// 确认后：起点前移到第一步 ⇒ 清单为空 ⇒ `windowsVerified = true`，黄标随之撤下）。
+    ///
+    /// 为什么要有这条：本轮改的是**事实**（Windows 全流程已被实机跑过），不是**机制**
+    /// ——`8e10e12` 那批「诚实标注」的资产（起点常量 + 派生清单 + 两个位 + 前端弱提示）
+    /// 必须留着，将来若又出现未实测的段落（新步骤 / 新平台形态），把起点挪回那一步即可
+    /// （清单与两个位自动跟着变）。本测试用**起点参数化**证明机制活着：
+    /// 变异：① 把 `windows_unverified_steps` 改成恒返回空表（删掉派生）→ 下方
+    /// `from("shields_up", …)` 的清单断言必红；② 把 `windowsVerified` 改成硬编码 true
+    /// → 同一条断言必红（清单非空却声称整条验过）；③ 把 `WINDOWS_VERIFIED_FROM` 改成
+    /// 非第一步而仍声称整条流程已验 → 最后一条断言必红。
+    #[test]
+    fn windows_verification_list_is_derived_from_coverage_start() {
+        // 起点一旦后移，那四步自动回到未验清单——正是 8e10e12 建立的机制
+        let past = windows_verification_for_from("shields_up", Platform::Windows);
+        assert_eq!(
+            past["windowsUnverifiedSteps"],
+            serde_json::json!(["detect", "download", "install", "login"]),
+            "起点后移 ⇒ 起点之前的步骤自动点名（机制必须仍然生效）: {past}"
+        );
+        assert_eq!(
+            past["windowsVerified"], false,
+            "清单非空 ⇒ 整条流程不算验过（位由清单派生，不得硬编码 true）: {past}"
+        );
+        // 生产起点 = 步骤表第一步 ⇒ 起点之前没有任何步骤 ⇒ 清单为空 ⇒ 位为 true
+        assert_eq!(
+            WINDOWS_VERIFIED_FROM,
+            wizard_steps(Platform::Windows)
+                .first()
+                .expect("Windows 步骤表非空")
+                .id,
+            "「整条 Windows 流程已实测」的充要条件 = 覆盖起点就是步骤表第一步"
+        );
+        assert_eq!(
+            windows_unverified_steps(Platform::Windows),
+            Vec::<&str>::new(),
+            "本次生产口径：无未实测步骤"
+        );
+        // 非 Windows 平台：清单恒空、起点恒 null（不得张冠李戴）
+        let other = windows_verification_for_from("shields_up", Platform::Other);
+        assert_eq!(other["windowsUnverifiedSteps"], serde_json::json!([]));
+        assert!(other["windowsVerifiedFrom"].is_null(), "{other}");
+    }
+
+    // ============================================================
+    // ⑤ 登录步：MAM 不代登录，但**必须主动把链接取来**（2026-10-07 用户实测诊断）
+    // ============================================================
+    //
+    // 根因（读码 + 注入缝复现，见 STATUS_NEEDS_LOGIN_NO_URL 的注释）：新装机器上
+    // `status --json` 是 `NeedsLogin ∧ AuthURL=""`——授权链接要**发起一次交互式登录**
+    // 才由尾网生成，而全仓 `run_cli` 调用点里**从来没有 `up` / `login`**（只有
+    // status / get / funnel status / funnel --bg / set / funnel reset），MAM 从不发起
+    // ⇒ 链接永远不出现；前端又只在 `probe.authUrl` 非空时才渲染链接 ⇒ 登录步无可点之物。
+    // 修法（**不越合规红线**：只递链接、不代登录、不持凭据）：后台发起 `tailscale login`
+    //（与 GUI「Log in」按钮同义，**只让尾网生成授权链接**）+ 有界轮询 status 取 AuthURL。
+    //
+    // 注入缝 = (读状态, 发起登录, 等待)：测试零进程零睡眠，且能把「有界」断言到底。
+
+    /// 读状态序列（测试替身：按调用次数吐预置序列，越界后一直吐最后一个）
+    fn status_reader_seq(seq: Vec<&'static str>) -> impl Fn() -> Result<TsStatus, String> {
+        let idx = std::cell::Cell::new(0usize);
+        move || {
+            let i = idx.get();
+            idx.set(i + 1);
+            let raw = seq.get(i).copied().unwrap_or_else(|| *seq.last().unwrap());
+            parse_status(raw)
+        }
+    }
+
+    /// 空 URL 的待登录态（新装形态）→ 一次发起 → 轮询拿到链接：**这就是用户实测的那条路**
+    #[test]
+    fn login_step_actively_requests_link_and_returns_it() {
+        let reads = std::cell::Cell::new(0usize);
+        let seq = status_reader_seq(vec![
+            STATUS_NEEDS_LOGIN_NO_URL,
+            STATUS_NEEDS_LOGIN_NO_URL,
+            STATUS_NEEDS_LOGIN,
+        ]);
+        let triggered = std::cell::Cell::new(0usize);
+        let waited = std::cell::RefCell::new(Vec::new());
+        let r = login_step_with(
+            || {
+                reads.set(reads.get() + 1);
+                seq()
+            },
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |d| waited.borrow_mut().push(d),
+            |_| {},
+        )
+        .expect("登录步应成功返回");
+        assert_eq!(
+            triggered.get(),
+            1,
+            "AuthURL 为空时必须**发起一次**登录尝试（否则链接永远不出现）: {r}"
+        );
+        assert_eq!(
+            r["authUrl"], "https://login.tailscale.com/a/abc123",
+            "拿到链接必须原样递出（MAM 只递链接，不代登录）: {r}"
+        );
+        assert_eq!(r["done"], false, "还没登录完，不得报 done: {r}");
+        assert!(
+            reads.get() >= 3,
+            "必须轮询（第一次读到空 → 发起 → 继续读），实际读了 {} 次: {r}",
+            reads.get()
+        );
+        // 有界：注入的等待总时长不得超过轮询窗上限
+        let total: std::time::Duration = waited.borrow().iter().sum();
+        assert!(
+            total <= LOGIN_LINK_POLL_WINDOW,
+            "轮询必须有界（≤{:?}），实际累计等了 {total:?}",
+            LOGIN_LINK_POLL_WINDOW
+        );
+    }
+
+    /// 幂等：已经有链接时**不得**再发起登录尝试（用户可能正拿着那条链接在浏览器里操作）
+    #[test]
+    fn login_step_does_not_trigger_when_link_is_already_present() {
+        let triggered = std::cell::Cell::new(0usize);
+        let r = login_step_with(
+            status_reader_seq(vec![STATUS_NEEDS_LOGIN]),
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |_| {},
+            |_| {},
+        )
+        .expect("登录步应成功返回");
+        assert_eq!(triggered.get(), 0, "已有链接 → 不发起（幂等）: {r}");
+        assert_eq!(r["authUrl"], "https://login.tailscale.com/a/abc123");
+    }
+
+    /// 已登录（Running）：无需链接、不发起任何东西
+    #[test]
+    fn login_step_reports_done_without_triggering_when_already_running() {
+        let reads = std::cell::Cell::new(0usize);
+        let triggered = std::cell::Cell::new(0usize);
+        let r = login_step_with(
+            || {
+                reads.set(reads.get() + 1);
+                parse_status(STATUS_RUNNING)
+            },
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |_| {},
+            |_| {},
+        )
+        .expect("登录步应成功返回");
+        assert_eq!(r["done"], true, "Running = 已登录完成: {r}");
+        assert_eq!(r["authUrl"], "");
+        assert_eq!(reads.get(), 1, "已登录 ⇒ 读一次就够，不该轮询: {r}");
+        assert_eq!(triggered.get(), 0);
+    }
+
+    /// 链接始终不出现：**有界放弃**并如实回报（不许无限轮询、不许谎报有链接）
+    #[test]
+    fn login_step_gives_up_bounded_when_link_never_appears() {
+        let reads = std::cell::Cell::new(0usize);
+        let triggered = std::cell::Cell::new(0usize);
+        let waited = std::cell::RefCell::new(Vec::new());
+        let r = login_step_with(
+            || {
+                reads.set(reads.get() + 1);
+                parse_status(STATUS_NEEDS_LOGIN_NO_URL)
+            },
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |d| waited.borrow_mut().push(d),
+            |_| {},
+        )
+        .expect("登录步应成功返回（拿不到链接不是错误，是「还没生成」）");
+        assert_eq!(triggered.get(), 1, "仍要发起（下一次可能就拿到了）: {r}");
+        assert_eq!(r["authUrl"], "", "拿不到就如实给空串，不编链接: {r}");
+        assert_eq!(r["triggered"], true, "回执要如实说明「已发起」: {r}");
+        // 有界：读次数 = 1（首次）+ 轮询步数；等待累计 = 轮询窗
+        assert_eq!(
+            reads.get(),
+            1 + LOGIN_LINK_POLL_DELAYS_MS.len(),
+            "轮询次数必须固定（有界），实际读了 {} 次",
+            reads.get()
+        );
+        let total: std::time::Duration = waited.borrow().iter().sum();
+        assert!(
+            total <= LOGIN_LINK_POLL_WINDOW,
+            "累计等待 {total:?} 超过窗口 {:?}",
+            LOGIN_LINK_POLL_WINDOW
+        );
+        // note 如实说明成因（中文硬编码、前端不渲染——消费方约定见 src/lib/api/remote.ts）
+        assert!(
+            r["note"].as_str().unwrap_or_default().contains("没有拿到"),
+            "必须给出成因说明: {r}"
+        );
+    }
+
+    /// 读状态失败 = Err（fail-closed：绝不拿"读不到"当"已登录/已拿到链接"）
+    #[test]
+    fn login_step_fails_closed_when_status_unreadable() {
+        let triggered = std::cell::Cell::new(0usize);
+        let e = login_step_with(
+            || Err("未检测到 Tailscale（尚未安装）".to_string()),
+            || {
+                triggered.set(triggered.get() + 1);
+                Ok(())
+            },
+            |_| {},
+            |_| {},
+        )
+        .expect_err("读不到状态必须 Err");
+        assert!(e.contains("尚未安装"), "{e}");
+        assert_eq!(triggered.get(), 0, "状态都读不到就不该去发起登录: {e}");
+    }
+
+    /// 发起登录失败（CLI 调不起来）= 如实 Err（不静默吞、也不谎报有链接）
+    #[test]
+    fn login_step_reports_trigger_failure() {
+        let e = login_step_with(
+            status_reader_seq(vec![STATUS_NEEDS_LOGIN_NO_URL]),
+            || Err("启动 tailscale login 失败: 权限不足".to_string()),
+            |_| {},
+            |_| {},
+        )
+        .expect_err("发起失败必须 Err");
+        assert!(e.contains("权限不足"), "{e}");
+    }
+
+    // ============================================================
+    // I1（2026-10-08 架构评审）：登录子进程的**生命周期**——有界 + 单飞 + 窗尽/退出收尸
+    // ============================================================
+    //
+    // 评审三条：① 只 spawn + 收尸线程 ⇒ 每次点击泄漏 1 进程 + 1 阻塞线程；② `login` 的
+    // `--timeout` 默认 0s = 一直等 ⇒ 用户不登录它就一直活着；③ 轮询失败后无清理 ⇒ MAM
+    // 退出后成孤儿进程（本仓纪律：不留孤儿进程）。修法 = 评审给的 a+b：`--timeout 15s`
+    // 有界 + 模块级 `Mutex<Option<Child>>` 单飞 + 窗尽/应用退出 kill + wait。
+    //
+    // **杀与 AuthURL 的关系待真机复核**（本机无法验证 Windows 行为，见 LoginCleanup 的
+    // 注释）：故杀法**保守**——只在"轮询窗已尽**且拿不到链接**"时杀，拿到链接一律不杀。
+
+    /// 窗尽收尾的决策表（纯函数）——保守口径逐格锁死
+    #[test]
+    fn login_cleanup_decision_is_conservative() {
+        assert_eq!(
+            login_cleanup_decision(true, false),
+            LoginCleanup::Keep,
+            "已登录（Running）：CLI 自己的等待条件已满足，它会自然退出——不需要我们杀"
+        );
+        assert_eq!(
+            login_cleanup_decision(false, true),
+            LoginCleanup::Keep,
+            "**拿到链接 ⇒ 绝不杀**：杀掉等待者会不会让已生成的 AuthURL 失效，本机无法验证\n\
+             Windows 行为 ⇒ 保守处理（登记为待真机复核）"
+        );
+        assert_eq!(
+            login_cleanup_decision(false, false),
+            LoginCleanup::Kill,
+            "窗尽且没拿到链接：再等下去也不会有链接（默认 0s 会一直等）⇒ 必须杀 + 收尸，\n\
+             否则 MAM 退出后就是一个孤儿进程"
+        );
+    }
+
+    /// 收尾决策**接进登录步**（不是只写在抽屉里的纯函数）：拿不到链接 → Kill；
+    /// 拿到链接 → Keep。变异：把 login_step_with 尾部的 cleanup 调用删掉/改成恒 Keep → 必红。
+    #[test]
+    fn login_step_settles_waiter_conservatively() {
+        let decisions = std::cell::RefCell::new(Vec::new());
+        // ① 轮询窗耗尽、始终没有链接 → Kill
+        login_step_with(
+            status_reader_seq(vec![STATUS_NEEDS_LOGIN_NO_URL]),
+            || Ok(()),
+            |_| {},
+            |d| decisions.borrow_mut().push(d),
+        )
+        .expect("拿不到链接不是错误");
+        assert_eq!(
+            decisions.borrow().as_slice(),
+            [LoginCleanup::Kill],
+            "窗尽且无链接必须收掉等待者（否则它按默认 0s 一直等）"
+        );
+        // ② 轮询中拿到链接 → Keep（保守：不杀）
+        decisions.borrow_mut().clear();
+        login_step_with(
+            status_reader_seq(vec![STATUS_NEEDS_LOGIN_NO_URL, STATUS_NEEDS_LOGIN]),
+            || Ok(()),
+            |_| {},
+            |d| decisions.borrow_mut().push(d),
+        )
+        .expect("拿到链接应成功返回");
+        assert_eq!(
+            decisions.borrow().as_slice(),
+            [LoginCleanup::Keep],
+            "拿到链接 ⇒ 不杀（AuthURL 是否随之失效待真机复核）"
+        );
+    }
+
+    /// **合规红线自查清单**（凭据类 + 偏好类旗标前缀）：登录发起**一个都不许带**。
+    /// 两个测试共用同一份清单——常量内容白名单（`login_attempt_args_are_a_closed_whitelist`）
+    /// 与**实际 argv** 行为断言（`login_attempt_command_carries_only_the_whitelist_argv`）
+    /// 各查一遍，避免两处清单漂移。
+    const LOGIN_FORBIDDEN_FLAGS: &[&str] = &[
+        "--auth-key",
+        "--client-secret",
+        "--id-token",
+        "--shields-up",
+        "--advertise-routes",
+        "--advertise-exit-node",
+        "--accept-routes",
+        "--exit-node",
+        "--hostname",
+        "--login-server",
+        "--operator",
+        "--reset",
+    ];
+
+    /// **一切"往命令里加参数"的调用形态**（方法态 + 关联函数态）——形态针靠它把
+    /// "argv 只能从白名单来"从偏好变成可执行约束。
+    ///
+    /// 为什么逐个列全、而不是只写旧针的 `.arg(`：Windows `CommandExt` 的 `.raw_arg(` 与
+    /// `Command::args(&mut cmd, …)` 这类**关联函数形态**都不含子串 `.arg(`，旧针漏掉它们
+    /// （2026-10-08 收口轮实测：在调用点补 `.args(&["--auth-key", …])` 旧针**不红**）。
+    const ARGV_ADDING_PATTERNS: &[&str] = &[
+        ".arg(",
+        ".args(",
+        ".arg_os(",
+        ".args_os(",
+        ".raw_arg(",
+        "::arg(",
+        "::args(",
+        "::arg_os(",
+        "::args_os(",
+        "::raw_arg(",
+    ];
+
+    /// **I2（2026-10-08 架构评审）：argv 是封闭白名单**——红线是「**不带任何凭据参数、
+    /// 不碰偏好**」，而旧形态针只禁等待类调用、**没锁参数**（往 `login` 后面加
+    /// `--auth-key` / `--shields-up=false` 不会变红）。本测试把白名单本身断言到底：
+    /// - **被测对象是 `login_argv()`**（生产实际取参的那个纯函数），不是常量本身——
+    ///   `assert_eq!(login_argv(), LOGIN_ARGS)` 把两者钉成同一个，改任何一边都红；
+    /// - 除 `login` 外只允许 `--timeout <有界秒数>`（默认 0s = 一直等，正是 I1 要修的）；
+    /// - 任何凭据 / 偏好旗标（`--auth-key` / `--shields-up` / `--advertise-*` / …）出现即红。
+    ///
+    /// 变异：往 LOGIN_ARGS（或 `login_argv()`）里加任何一个参数 → 必红。
+    #[test]
+    fn login_attempt_args_are_a_closed_whitelist() {
+        let argv = login_argv();
+        assert_eq!(
+            argv, LOGIN_ARGS,
+            "`login_argv()` 必须是白名单常量本身（argv 的唯一出处，两边不许分叉）"
+        );
+        assert_eq!(
+            argv.len(),
+            3,
+            "argv 只允许 `login --timeout <n>s` 三条：{argv:?}"
+        );
+        assert_eq!(argv[0], "login", "只允许 login 子命令（up 语义不同）");
+        assert_eq!(argv[1], "--timeout", "第二条只允许有界等待参数");
+        // 有界：0s = 「blocks forever」（1.102.4 `login --help` 原文）⇒ 必须是有限秒数
+        let secs: u64 = argv[2]
+            .strip_suffix('s')
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("--timeout 必须是有界秒数（如 15s）: {argv:?}"));
+        assert!(
+            (1..=60).contains(&secs),
+            "等待上限必须小而有界（1..=60 秒），实际 {secs}s"
+        );
+        // 红线自查（与上面的长度断言同源，但把「不许带什么」写成可读的清单）
+        for &forbidden in LOGIN_FORBIDDEN_FLAGS {
+            assert!(
+                !argv.iter().any(|a| a.starts_with(forbidden)),
+                "登录发起**不得**带 {forbidden}（合规红线：不带任何凭据参数、不碰偏好）"
+            );
+        }
+    }
+
+    /// **argv 的行为断言（2026-10-08 收口轮补强）**：直读生产**真正会 spawn 的那个
+    /// `Command` 对象**的 `get_args()`——不是扫源码字符串。
+    ///
+    /// 起因（旧针被实测证伪）：旧形态针只断言 `body.contains(".args(LOGIN_ARGS)")` 且
+    /// `!body.contains(".arg(")`，于是**在调用点再补一行 `.args(&["--auth-key", …])`
+    /// 两个断言都不会红**（`.args(` 不含子串 `.arg(`；白名单测试只管常量本身、不管调用点）。
+    /// 实测：加完变异后 `login_attempt_spawns_detached_and_never_waits` +
+    /// `login_attempt_args_are_a_closed_whitelist` **双双通过**（4 passed / 0 failed）。
+    ///
+    /// 本测试查三层：① `login_argv()` == 白名单常量；② `login_command()` 造出的命令其
+    /// **实际 argv 逐条等于**白名单（长度 + 顺序 + 内容，多一条即红）；③ 红线自查落在
+    /// **实际 argv** 上（任何凭据/偏好旗标前缀出现即红）——"注释里说安全"变成"argv 被断言"。
+    /// 变异：在 `login_command` 的 `.args(login_argv())` 之后再补
+    /// `.args(&["--auth-key", "x"])` → ②③ 必红（实测报错见提交说明）。
+    #[test]
+    fn login_attempt_command_carries_only_the_whitelist_argv() {
+        assert_eq!(
+            login_argv(),
+            LOGIN_ARGS,
+            "argv 的唯一出处必须是白名单常量本身"
+        );
+        let bin = std::path::Path::new("tailscale"); // 只是占位路径：本测试不 spawn
+        let cmd = login_command(bin);
+        assert_eq!(
+            cmd.get_program(),
+            bin.as_os_str(),
+            "程序名必须是被注入的 CLI 路径（不许换成别的可执行）"
+        );
+        let got: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let want: Vec<String> = LOGIN_ARGS.iter().map(|a| (*a).to_string()).collect();
+        assert_eq!(
+            got, want,
+            "生产命令的**实际 argv** 必须逐条等于白名单（长度/顺序/内容）——多一条即触红线"
+        );
+        for &forbidden in LOGIN_FORBIDDEN_FLAGS {
+            assert!(
+                !got.iter().any(|a| a.starts_with(forbidden)),
+                "生产命令的**实际 argv** 里出现了 {forbidden}\
+                 （合规红线：不带任何凭据参数、不碰偏好）: {got:?}"
+            );
+        }
+    }
+
+    /// **argv 只有一个出处**（形态针，与上面的行为断言配对）：唯一拼装点 `login_command`
+    /// 体内 argv 调用**恰好一处**，且必须是 `.args(login_argv())`——加第二处（哪怕加空数组）
+    /// 即红；`.raw_arg(` 之类的关联/扩展形态也一并禁掉。
+    /// 变异：在 `login_command` 里再加一行 `.args(...)` → 必红。
+    #[test]
+    fn login_command_assembles_argv_only_from_the_whitelist_source() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/remote/tailscale/wizard.rs"
+        ))
+        .expect("读 wizard.rs");
+        let start = src
+            .find("fn login_command(")
+            .expect("argv 的唯一拼装点必须存在（spawn_login_attempt 调它）");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("函数体结束");
+        let body = &body[..end];
+        assert!(
+            body.contains(".args(login_argv())"),
+            "唯一拼装点必须从 `login_argv()`（白名单纯函数）**整条**取参: {body}"
+        );
+        for &pat in ARGV_ADDING_PATTERNS {
+            // 只允许 `.args(login_argv())` 那一处；其余形态一次都不许出现
+            let expected = usize::from(pat == ".args(");
+            assert_eq!(
+                body.matches(pat).count(),
+                expected,
+                "拼装点里 `{pat}` 的出现次数不对（只允许 `.args(login_argv())` 这一处）——\
+                 多一处就可能就地拼参数（合规红线）: {body}"
+            );
+        }
+    }
+
+    /// **不许同步阻塞**（本项目刚修过 `wait_child_bounded` 那类「命令阻塞把 UI 挂死」）：
+    /// 生产发起入口 `spawn_login_attempt` 只能 spawn，**不得**出现任何等待/收取输出的调用。
+    /// 形态针（与既有 `run_cli(&["funnel", "reset"])` 调用形态针同一手法）：
+    /// 变异：把 `spawn_login_attempt` 里的 `spawn()` 换成 `output()` / 加 `wait()` / 改走
+    /// `run_cli`（内部会 `wait_child_bounded`）→ 本测试必红。
+    ///
+    /// **I2 追加（2026-10-08 架构评审）：形态针必须连 argv 一起锁。** 旧针只禁等待类调用，
+    /// 往登录命令后面加 `--auth-key` / `--shields-up=false` **不会变红**——而这条命令的合规
+    /// 红线恰恰是「不带任何凭据参数、不碰偏好」。
+    ///
+    /// **2026-10-08 收口轮补强（旧针再次被实测证伪）**：旧针的 argv 判据是
+    /// `body.contains(".args(LOGIN_ARGS)")` 且 `!body.contains(".arg(")`——**在调用点再补一行
+    /// `.args(&["--auth-key", "x"])` 两个断言都不会红**（`.args(` 不含子串 `.arg(`；白名单
+    /// 测试只管常量本身、不管调用点）。实测：加完变异后本测试 + 白名单测试 **4 passed**。
+    /// 现在改成"调用点不许自己拼 argv"：
+    /// - spawn 点必须**逐字**调用唯一拼装点 `login_command(&bin)`（签名/实参一变即不匹配）；
+    /// - 本函数体内**不得出现任何 argv 拼装形态**（[`ARGV_ADDING_PATTERNS`]：`.arg(` /
+    ///   `.args(` / `.args_os(` / `.raw_arg(` 及关联函数形态）——旧判据 `.arg(` 是其中之一，
+    ///   **没有削弱**；
+    /// - argv 的**内容**由行为断言 `login_attempt_command_carries_only_the_whitelist_argv`
+    ///   直读真实 `Command::get_args()` 锁死（不再依赖源码扫描）。
+    ///
+    /// 变异：在 `spawn_login_attempt` 里加 `.args(&["--auth-key", "x"])` → 必红（实测报错见
+    /// 提交说明）；把 `login_command(&bin)` 换成任何别的东西 → 必红。
+    ///
+    /// **2026-10-08 评审 Important #2（TOCTOU）**：单飞门从「reap / 判空 / 登记三次各自
+    /// 取锁」收紧为**一锁到底**——判空与 spawn/登记之间不许再有放锁窗口（旧形态两个并发
+    /// `run_step("login")` 可同时通过判空 ⇒ 双 spawn、第二次登记覆盖第一次句柄）。判据
+    /// 同步改为：体内取 `login_child_lock()` 守卫、判空看 `slot.is_some()`、登记走
+    /// `adopt_login_child_locked(&mut slot, child)`（同一守卫）。变异：把判空改回免锁版
+    /// `login_child_slot_is_empty()`、或把登记改回独立取锁 → 必红。入口接线由
+    /// [`login_arm_dispatches_only_through_spawn_login_attempt`] 补锁（评审 Important #1）。
+    #[test]
+    fn login_attempt_spawns_detached_and_never_waits() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/remote/tailscale/wizard.rs"
+        ))
+        .expect("读 wizard.rs");
+        let start = src
+            .find("fn spawn_login_attempt()")
+            .expect("生产发起入口必须存在（run_step 的 login 臂传它）");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("函数体结束");
+        let body = &body[..end];
+        assert!(
+            body.contains(".spawn()"),
+            "必须用 spawn 起进程（不等待）: {body}"
+        );
+        for forbidden in [
+            ".output()",
+            ".status()",
+            "wait_child_bounded",
+            "wait_timeout",
+            "run_cli(",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "发起登录**不得**同步阻塞（出现 {forbidden}）——tailscale login 默认会一直\n\
+                 等用户在浏览器完成；同步等它=把向导挂死: {body}"
+            );
+        }
+        // I1：spawn 出来的子进程必须**登记进单飞槽**（否则窗尽/退出时无从 kill + wait，
+        // 就成了评审说的"每次点击泄漏 1 进程 + 1 阻塞线程、退出后成孤儿"）。
+        // TOCTOU 修复：登记必须是**持同一守卫**的带锁版——登记与 spawn 同临界区
+        // （旧形态 spawn 后放开锁、二次取锁再登记，两次取锁之间可被并发发起插队，
+        // 第二次登记覆盖第一次的句柄）。
+        assert!(
+            body.contains("adopt_login_child_locked(&mut slot, child)"),
+            "spawn 出来的 wait 者必须在**同一临界区**登记进单飞槽（I1 + TOCTOU：\n\
+             窗尽/应用退出要能 kill + wait，且并发发起不得互相覆盖句柄）: {body}"
+        );
+        // I1：单飞门——「取锁 → 判空 → spawn → 登记」必须**一锁到底**（TOCTOU 修复）。
+        // 旧形态三次取锁（reap/判空/登记各自取放），判空与登记之间放锁做 IO + spawn
+        // ⇒ 两个并发发起可同时通过判空、双 spawn、第二次登记覆盖第一次句柄。
+        // 变异：把判空改回免锁版 `login_child_slot_is_empty()`（放锁读）→ 本断言红。
+        assert!(
+            body.contains("let mut slot = login_child_lock();") && body.contains("slot.is_some()"),
+            "单飞门必须持锁判空（`login_child_lock()` 取守卫后，在同一守卫上看 \
+             `slot.is_some()`）——同一时刻至多一个 `tailscale login`: {body}"
+        );
+        // I2（2026-10-08 收口轮补强）：argv 一律经**唯一拼装点** `login_command`。
+        // 调用逐字锁死——多传/少传实参、换成别的构造都会让这一行不匹配。
+        assert!(
+            body.contains("login_command(&bin)"),
+            "spawn 点必须逐字调用 `login_command(&bin)`（argv 的唯一拼装点，\
+             内容由 login_attempt_command_carries_only_the_whitelist_argv 断言）: {body}"
+        );
+        // 本函数体内**不得出现任何 argv 拼装**：旧判据 `.arg(` 只是其中一种形态，
+        // 这里把方法态与关联函数态一并禁掉——`.args(&["--auth-key", …])` 这类追加在旧针下
+        // 不红，正是本轮补上的缺口（实测见本测试文档）。
+        for &pat in ARGV_ADDING_PATTERNS {
+            assert!(
+                !body.contains(pat),
+                "spawn 点**不得**就地拼 argv（出现 {pat}）——argv 只能经 `login_command` / \
+                 `login_argv` 从白名单来（合规红线：不带任何凭据参数、不碰偏好）: {body}"
+            );
+        }
+        // 命令必须是 login（不是 up）：up 与 login 是两条不同的上游命令（up 是"连上网络
+        // 并按需登录"，login 是"发起一次交互式登录"），本步语义只要后者 —— 事实版理由见
+        // LOGIN_ARGS 与 spawn_login_attempt 的注释
+        assert!(
+            login_argv().contains(&"login"),
+            "必须调 `tailscale login`（只发起交互式登录、让尾网生成授权链接）: {:?}",
+            login_argv()
+        );
+    }
+
+    // ============================================================
+    // 红线守卫链的最后一环（2026-10-08 评审 Important #1）：入口接线
+    // ============================================================
+
+    /// **login 臂只能经 [`spawn_login_attempt`] 发起**：argv 三层守卫（常量内容断言 /
+    /// 唯一拼装点形态针 / `get_args()` 行为断言）锁的全是**对象内部**（`login_command` /
+    /// `spawn_login_attempt` 两个函数体），而消费它们的入口——`run_step` 的 login 臂——
+    /// 此前没有任何测试锁。实测变异：把臂里的 `spawn_login_attempt` 换成就地拼装的
+    /// `Command::new(bin).args(&["login","--timeout","15s","--auth-key",…]).spawn()`，
+    /// 定向 138 个测试**全绿**（同时静默绕掉单飞槽、kill 路径与退出钩子——孤儿进程
+    /// 回归也不红）。本形态针补上这一环：臂内不得出现任何 argv 拼装形态 / `Command::new` /
+    /// 裸 `.spawn(`，发起只能以函数值 `spawn_login_attempt` 交给 `login_step_with` 编排；
+    /// 臂内唯一允许的 CLI 调用是状态读（`run_cli` 是同步等待的，经它跑 `login` 是另一条
+    /// 逃逸路——同步挂死向导）。
+    /// 变异：把臂的 trigger 换成就地拼 argv + 裸 spawn → 必红（`.args(` / `Command::new` /
+    /// `.spawn(` 任一出现即红）。
+    #[test]
+    fn login_arm_dispatches_only_through_spawn_login_attempt() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/remote/tailscale/wizard.rs"
+        ))
+        .expect("读 wizard.rs");
+        let start = src
+            .find("\"login\" => login_step_with(")
+            .expect("run_step 的 login 臂必须存在，且直接经 login_step_with 编排");
+        let rest = &src[start..];
+        let end = rest
+            .find("\"shields_up\" =>")
+            .expect("login 臂之后应衔接 shields_up 臂（截取臂体用）");
+        let arm = &rest[..end];
+        assert!(
+            arm.contains("spawn_login_attempt,"),
+            "login 臂的发起口只能是生产入口 `spawn_login_attempt`（函数值直传）——argv \
+             白名单 / 单飞槽 / kill 路径全挂在那条链上，绕过即失控: {arm}"
+        );
+        // 读侧一并锁形：臂内恰好一条 run_cli 调用，且就是状态读
+        assert_eq!(
+            arm.matches("run_cli(&[").count(),
+            1,
+            "login 臂内 run_cli 调用必须恰好一条（状态读）——多一条就可能经它跑别的命令: {arm}"
+        );
+        assert!(
+            arm.contains("run_cli(&[\"status\", \"--json\"])"),
+            "login 臂内的 CLI 读必须是 `status --json`（别的命令走这条口就是逃逸）: {arm}"
+        );
+        for forbidden in ["Command::new", "std::process::", ".spawn("] {
+            assert!(
+                !arm.contains(forbidden),
+                "login 臂**不得**就地构造/派生进程（出现 {forbidden}）——发起一律经 \
+                 `spawn_login_attempt`: {arm}"
+            );
+        }
+        for &pat in ARGV_ADDING_PATTERNS {
+            assert!(
+                !arm.contains(pat),
+                "login 臂**不得**就地拼 argv（出现 {pat}）——argv 只能经 `login_command` / \
+                 `login_argv` 从白名单来（合规红线：不带任何凭据参数、不碰偏好）: {arm}"
+            );
+        }
+    }
+
+    // ============================================================
+    // I1（2026-10-08 架构评审）：退出钩子必须把登录等待者一起收
+    // ============================================================
+
+    /// **应用退出不留孤儿**：`lib.rs` 的 `RunEvent::Exit` 钩子此前只 `tunnel::stop_all` +
+    /// `tailscale::stop_all`（隧道/通道），而 `tailscale login` 的等待者**不是通道**——
+    /// 它是本模块唯一的长期子进程（`--timeout 15s` 有界，但 15 秒内 MAM 退出就是孤儿）。
+    /// 形态针：退出钩子里必须出现 `tailscale::cancel_login_attempt()`。
+    /// 变异：删掉 lib.rs 里那一行 → 必红。
+    #[test]
+    fn app_exit_hook_reaps_login_attempt() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"))
+            .expect("读 lib.rs");
+        let start = src
+            .find("RunEvent::Exit")
+            .expect("退出钩子必须存在（M4：应用退出清理子进程）");
+        let hook = &src[start..];
+        assert!(
+            hook.contains("tailscale::cancel_login_attempt()"),
+            "退出钩子必须收掉 `tailscale login` 的等待者（kill + wait）——\n\
+             否则 MAM 退出后它就是一个孤儿进程: {hook}"
+        );
+    }
+
+    /// 槽空时收尾口必须是**无副作用的安全调用**（退出钩子会在任何状态下调用它：
+    /// 用户可能一次都没点过「获取登录链接」）。本用例不派生任何进程。
+    #[test]
+    fn cancel_login_attempt_is_safe_without_a_child() {
+        cancel_login_attempt(); // 槽空 → no-op，不得 panic
+        reap_login_attempt();
+        assert!(
+            login_child_slot_is_empty(),
+            "槽空时收尾口不得凭空变出一个子进程句柄"
+        );
     }
 
     /// **M4（2026-10-07 评审 Minor）恢复窗口内的卡点必须是琥珀档（amber）**：
@@ -2593,8 +3309,15 @@ mod tests {
     /// A5 **变异锚点**（2026-10-07 Windows 实测）：CLI 只在**完整安装路径**上找——
     /// `Get-Command tailscale` 为空（不在 PATH）、卸载登记项 `InstallLocation=（空）`
     /// （`WindowsInstaller=1` + `UninstallString=MsiExec.exe /X{...}` = MSI 版）。
-    /// 故 find_cli 只认标准安装位置：**不得**回落 PATH 查找，**不得**读 InstallLocation。
-    /// 变异：Windows 候选改成裸命令名 "tailscale"（PATH 查找）→ 本测试必红。
+    /// 故候选表只装标准安装位置的完整路径：**不得**回落 PATH 查找，**不得**读
+    /// InstallLocation。变异：Windows 候选改成裸命令名 "tailscale"（PATH 查找）→ 本测试必红。
+    ///
+    /// ⚠️ 2026-10-08 补：本测试锁的是**这张静态表**（仍为"逐平台固定完整路径"）。候选链
+    /// 自本日起多了一段**动态**来源（Windows = 服务登记 `ImagePath`，见
+    /// [`status::discovered_cli`]）——动态来源**不进这张表**（它依赖运行时注册表读数，
+    /// 塞进 `&'static [&'static str]` 既装不下、也会把"表 = 事实"这个前提弄脏）；
+    /// 顺序/fail-closed 契约由 `default_install_path_still_wins_and_second_source_stays_lazy`
+    /// 与 `cli_discovery_fails_closed_when_no_source_matches` 单独锁。
     #[test]
     fn cli_candidates_are_full_paths_only() {
         assert_eq!(
@@ -2614,6 +3337,371 @@ mod tests {
         for p in [Platform::Mac, Platform::Windows, Platform::Other] {
             assert!(!cli_candidates(p).is_empty(), "{p:?} 候选表不得为空");
         }
+    }
+
+    // ==== 2026-10-08：CLI 发现链补「服务登记」第二来源（治本）====
+    //
+    // **缺口（用户实测）**：Windows MSI 让用户自选安装路径（MAM 执行 `msiexec /i <包>`，
+    // **刻意不加 /qn**——选择权本就该给用户），而 find_cli 只在
+    // `C:\Program Files\Tailscale` 找。用户装到 `D:\软件\Tailscale`（带中文）⇒ 找不到
+    // ⇒ detect 判「没装」⇒ 向导又下载又安装 ⇒ 装完还是找不到（可能死循环）。
+    // 讽刺之处：路径选择框是 MAM 自己弹出来的，用户照做之后 MAM 就瞎了。
+    //
+    // **治本判据**：服务登记 `HKLM\SYSTEM\CurrentControlSet\Services\Tailscale\ImagePath`
+    // 指向**真实安装位置**，与盘符/目录名/中文都无关。**为什么选注册表而不是 `sc qc`**：
+    // 见 `status.rs::service_image_path` 的文档（`sc qc` 的字段名随系统显示语言本地化，
+    // 中文机上根本不是 `BINARY_PATH_NAME`；且它要派生子进程）。卸载登记的
+    // `InstallLocation` 实测为**空**，那条路已被 2026-10-07 真机排除。
+    //
+    // **本机（macOS）无法验证 Windows 注册表值的真实形态** ⇒ 解析写成**注入式纯函数**
+    // （存在性判据由调用方注入），全部形态在本组注入测试里锁死；唯一接触注册表的
+    // `service_image_path`（`#[cfg(windows)]`）只能由真机复核。
+
+    /// **形态锚点**：注册表子键路径逐字锁死（改路径 = 找不到服务 = 本测试必红）。
+    /// 末段 `Tailscale` 即 MSI 装出来的服务名（改了同样必红）。
+    #[test]
+    fn service_image_path_registry_key_is_the_real_one() {
+        assert_eq!(
+            TS_SERVICE_REG_PATH, r"SYSTEM\CurrentControlSet\Services\Tailscale",
+            "服务登记的注册表子键（HKLM 下），末段是服务名"
+        );
+    }
+
+    /// 带引号 + 带参数（MSI 装出来的常态形态）：取**第一对引号内**的内容——路径里的
+    /// 空格因此不构成歧义；**且不得为此触碰文件系统**（引号形态零歧义，注入的存在性
+    /// 判据一旦被调用就该炸）。
+    #[test]
+    fn image_path_quoted_with_args_parses_exe_without_fs_probe() {
+        let raw = r#""C:\Program Files\Tailscale\tailscaled.exe" --state=C:\ProgramData\Tailscale\tailscaled.state --port=0"#;
+        let got = parse_service_image_path_with(raw, |_| {
+            panic!("带引号形态无歧义，解析不得触碰文件系统")
+        });
+        assert_eq!(
+            got.as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscaled.exe"),
+            "引号内即 exe 路径，参数（含路径形态的参数）一概不吃进来"
+        );
+    }
+
+    /// 带引号 + 不带参数：同样只取引号内内容。
+    #[test]
+    fn image_path_quoted_without_args_parses_exe() {
+        let raw = r#""D:\软件\Tailscale\tailscaled.exe""#;
+        let got = parse_service_image_path_with(raw, |_| panic!("带引号形态不得触碰文件系统"));
+        assert_eq!(
+            got.as_deref(),
+            Some(r"D:\软件\Tailscale\tailscaled.exe"),
+            "用户实测的非默认路径（带中文）必须原样解析出来"
+        );
+    }
+
+    /// 不带引号 + 带参数（路径无空格）：按 Windows 的 `CreateProcess` 语义在**空白处**
+    /// 逐个加长成候选，取**真实存在**者——参数不得混进 exe 路径。
+    #[test]
+    fn image_path_unquoted_with_args_parses_exe() {
+        let raw = r"C:\Tailscale\tailscaled.exe --port=0";
+        let exists = |p: &str| p == r"C:\Tailscale\tailscaled.exe";
+        assert_eq!(
+            parse_service_image_path_with(raw, exists).as_deref(),
+            Some(r"C:\Tailscale\tailscaled.exe"),
+            "无引号时必须靠「存在性」把参数切掉"
+        );
+    }
+
+    /// 不带引号 + **路径含空格** + 不带参数（Windows 的经典歧义形态）：整串就是那个
+    /// 存在的文件 ⇒ 必须解析出完整路径，不能截成 `C:\Program`。
+    #[test]
+    fn image_path_unquoted_path_with_spaces_parses_whole_exe() {
+        let raw = r"C:\Program Files\Tailscale\tailscaled.exe";
+        let exists = |p: &str| p == r"C:\Program Files\Tailscale\tailscaled.exe";
+        assert_eq!(
+            parse_service_image_path_with(raw, exists).as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscaled.exe"),
+            "含空格的整串存在 ⇒ 整串就是 exe（不得截成第一个空白前的段）"
+        );
+    }
+
+    /// 不带引号 + **路径含空格** + 带参数：最长存在候选 = exe。
+    #[test]
+    fn image_path_unquoted_path_with_spaces_and_args_parses_exe() {
+        let raw = r"C:\Program Files\Tailscale\tailscaled.exe --state=C:\ProgramData\Tailscale\tailscaled.state";
+        let exists = |p: &str| p == r"C:\Program Files\Tailscale\tailscaled.exe";
+        assert_eq!(
+            parse_service_image_path_with(raw, exists).as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscaled.exe"),
+            "含空格 + 带参数：取「存在且最长」的候选"
+        );
+    }
+
+    /// 前后空白（含 CRLF / Tab）：注册表值实测可能带尾随空格 ⇒ 一律先 trim。
+    #[test]
+    fn image_path_trims_surrounding_whitespace() {
+        let raw = "  \t\"C:\\Program Files\\Tailscale\\tailscaled.exe\" --port=0\r\n ";
+        assert_eq!(
+            parse_service_image_path_with(raw, |_| panic!("trim 后仍是引号形态，不得触碰 FS"))
+                .as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscaled.exe"),
+            "首尾空白（空格/Tab/CRLF）必须先剥掉"
+        );
+    }
+
+    /// 大小写：解析**原样保留**大小写（Windows 路径大小写不敏感，但不得擅自改写用户机器上
+    /// 的真实拼写——路径要拿去原样启动进程）。
+    #[test]
+    fn image_path_keeps_original_case() {
+        let raw = r#""C:\PROGRAM FILES\TAILSCALE\TAILSCALED.EXE" --State=X"#;
+        assert_eq!(
+            parse_service_image_path_with(raw, |_| panic!("引号形态不得触碰 FS")).as_deref(),
+            Some(r"C:\PROGRAM FILES\TAILSCALE\TAILSCALED.EXE"),
+            "全大写形态必须原样解析（不得小写化/改写）"
+        );
+    }
+
+    /// **fail-closed**：形态不可解析 / 无存在者一律 `None`——**绝不返回一个猜的路径**
+    /// （返回猜的路径 = 把「没装」谎报成「装了」，随后 CLI 调用会以莫名错误失败）。
+    #[test]
+    fn image_path_unparsable_forms_yield_none() {
+        let never = |_: &str| false;
+        for raw in [
+            "",                                           // 空值
+            "   \r\n ",                                   // 全空白
+            "\"\"",                                       // 只有一对空引号
+            "\"   \"",                                    // 引号内全空白
+            r#""C:\Tailscale\tailscaled.exe"#,            // 只有开引号（形态残缺）
+            r"C:\Nope\tailscaled.exe --port=0",           // 无引号且候选都不存在
+            r"C:\Program Files\Tailscale\tailscaled.exe", // 无引号、含空格、整串不存在
+        ] {
+            assert_eq!(
+                parse_service_image_path_with(raw, never),
+                None,
+                "不可解析/无存在者的形态必须如实 None：{raw:?}"
+            );
+        }
+    }
+
+    /// **M6（2026-10-08 架构评审）：`REG_EXPAND_SZ` 必须展开 `%VAR%`。** 旧实现按字符串读
+    /// **但不展开** —— 于是 `ImagePath` 写成 `%ProgramFiles%\Tailscale\...` 的机器上，这条
+    /// "第二来源"会**静默失效**（fail-closed 成"未安装"：安全，但治不了本）。展开语义对齐
+    /// `ExpandEnvironmentStringsW`，**查找函数注入** ⇒ 任何宿主可测（本机只有 macOS）。
+    #[test]
+    fn image_path_expand_sz_is_expanded() {
+        let lookup = |n: &str| match n {
+            "ProgramFiles" => Some(r"C:\Program Files".to_string()),
+            _ => None,
+        };
+        let expanded = image_path_value(r"%ProgramFiles%\Tailscale\tailscaled.exe", true, lookup);
+        assert_eq!(
+            expanded, r"C:\Program Files\Tailscale\tailscaled.exe",
+            "REG_EXPAND_SZ ⇒ 必须展开成真实路径，否则第二来源静默失效"
+        );
+        // 与后面的解析链串起来：展开后的串必须还能推出同目录的 CLI
+        let exe = parse_service_image_path_with(&format!("\"{expanded}\" --port=0"), |_| {
+            panic!("带引号形态不得触碰 FS")
+        })
+        .expect("展开后的形态应当可解析");
+        assert_eq!(
+            cli_beside_service_exe(&exe).as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscale.exe"),
+            "展开 → 解析 exe → 同目录 CLI：整条第二来源在 REG_EXPAND_SZ 形态下必须仍然成立"
+        );
+    }
+
+    /// **按值的真实类型决定是否展开**（不是"凡串皆展开"）：`REG_SZ` 里合法出现的 `%`
+    /// 不得被改写——注入的查找函数一旦被调用就该炸。
+    #[test]
+    fn image_path_sz_is_not_expanded() {
+        let raw = r"C:\100%\Tailscale\tailscaled.exe";
+        assert_eq!(
+            image_path_value(raw, false, |_| panic!("REG_SZ 不得做变量查找")),
+            raw,
+            "值类型是 REG_SZ ⇒ 原样返回（不展开、不查环境变量）"
+        );
+    }
+
+    /// 展开的**边界语义**（对齐 `ExpandEnvironmentStringsW`：查不到 / 形态残缺一律
+    /// **原样保留**，绝不吞字符、绝不落空）：未知变量、缺配对的单个 `%`、空名 `%%`、
+    /// 无 `%` —— 四种都逐字保留；已知变量才替换。
+    #[test]
+    fn env_expansion_keeps_unknown_and_malformed_refs_verbatim() {
+        let lookup = |n: &str| (n == "Known").then(|| "V".to_string());
+        for raw in [
+            r"%Unknown%\x.exe",
+            r"C:\50%\x.exe",
+            r"%%\x.exe",
+            r"C:\Tailscale\tailscaled.exe",
+        ] {
+            assert_eq!(
+                image_path_value(raw, true, lookup),
+                raw,
+                "查不到/形态残缺的引用必须原样保留（Windows 语义）：{raw:?}"
+            );
+        }
+        assert_eq!(
+            image_path_value(r"%Known%\x.exe", true, lookup),
+            r"V\x.exe",
+            "已知变量必须替换"
+        );
+        // 多个引用 + 变量值里再带 `%`（替换结果不得被二次展开——单趟扫描）
+        assert_eq!(
+            image_path_value(r"%Known%\%Known%\x.exe", true, |_| Some("K".into())),
+            r"K\K\x.exe"
+        );
+    }
+
+    /// 形态针：唯一接触注册表的 `service_image_path`（Windows-only，本机跑不到）必须
+    /// **读原始值拿 vtype** 并**经纯函数展开**——接线断了上面那些纯函数测试就白测了。
+    /// 变异：退回 `get_value::<String,_>`（拿不到类型信息）/ 恒不展开 / 不接
+    /// `image_path_value` → 必红。
+    #[test]
+    fn registry_reader_wires_expand_sz_through_the_pure_expander() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/remote/tailscale/status.rs"
+        ))
+        .expect("读 status.rs");
+        let start = src
+            .find("fn service_image_path()")
+            .expect("注册表读取点必须存在（第二来源的第一跳）");
+        let body = &src[start..];
+        let end = body.find("\n}\n").expect("函数体结束");
+        let body = &body[..end];
+        assert!(
+            body.contains("get_raw_value("),
+            "必须读**原始值**才拿得到 vtype（`get_value::<String,_>` 把 REG_SZ / \
+             REG_EXPAND_SZ 归一成同一个 String，类型信息就丢了）: {body}"
+        );
+        assert!(
+            body.contains("REG_EXPAND_SZ"),
+            "必须认出 REG_EXPAND_SZ（形态门）: {body}"
+        );
+        assert!(
+            body.contains("image_path_value("),
+            "展开必须经纯函数 image_path_value（否则上面几条纯函数测试与生产脱钩）: {body}"
+        );
+    }
+
+    /// 由服务本体的 exe 推 CLI 路径（纯函数）：Tailscale 的服务跑的是 **`tailscaled.exe`**，
+    /// CLI 是**同目录**下的 `tailscale.exe` 兄弟文件 ⇒ 取同目录 + 换名。
+    /// **不用 `std::path::Path`**：本函数处理的是 Windows 形态路径串（反斜杠分隔），而
+    /// `Path` 的分隔符语义**跟随编译宿主**——在 macOS/Linux 上 `\` 不是分隔符，
+    /// `parent()` 会返回空串，测试根本跑不了。故自己按 `\` / `/` 取最后一段分隔符。
+    #[test]
+    fn cli_beside_service_exe_uses_same_directory() {
+        assert_eq!(
+            cli_beside_service_exe(r"C:\Program Files\Tailscale\tailscaled.exe").as_deref(),
+            Some(r"C:\Program Files\Tailscale\tailscale.exe"),
+            "服务本体是同目录的 tailscaled.exe ⇒ CLI 是它的同目录兄弟"
+        );
+        // 用户实测场景：非默认盘符 + 中文目录名
+        assert_eq!(
+            cli_beside_service_exe(r"D:\软件\Tailscale\tailscaled.exe").as_deref(),
+            Some(r"D:\软件\Tailscale\tailscale.exe"),
+            "非默认路径 + 中文目录（用户实测形态）必须推到同目录 CLI"
+        );
+        // 服务若直接跑 CLI 本体（上游变更），同目录 + 换名仍得到同一条路径
+        assert_eq!(
+            cli_beside_service_exe(r"D:\软件\Tailscale\tailscale.exe").as_deref(),
+            Some(r"D:\软件\Tailscale\tailscale.exe"),
+            "服务跑的就是 CLI 本体时结果不变（对上游变更免疫）"
+        );
+    }
+
+    /// 大小写 + 正斜杠 + 根目录：同目录推导对形态不敏感。
+    #[test]
+    fn cli_beside_service_exe_handles_case_slashes_and_root() {
+        assert_eq!(
+            cli_beside_service_exe(r"C:\TAILSCALE\TAILSCALED.EXE").as_deref(),
+            Some(r"C:\TAILSCALE\tailscale.exe"),
+            "大写目录名必须原样保留（CLI 名按上游固定小写）"
+        );
+        assert_eq!(
+            cli_beside_service_exe("C:/Tailscale/tailscaled.exe").as_deref(),
+            Some("C:/Tailscale/tailscale.exe"),
+            "正斜杠形态（等价写法）同样要能推到同目录"
+        );
+        assert_eq!(
+            cli_beside_service_exe(r"C:\tailscaled.exe").as_deref(),
+            Some(r"C:\tailscale.exe"),
+            "盘根目录下的服务本体"
+        );
+    }
+
+    /// **fail-closed**：没有目录成分（裸文件名）= 无从知道装在哪 ⇒ `None`（不猜，
+    /// 绝不返回一个相对路径让调用方在当前工作目录里瞎找）。
+    #[test]
+    fn cli_beside_service_exe_rejects_bare_filename() {
+        assert_eq!(cli_beside_service_exe("tailscaled.exe"), None);
+        assert_eq!(cli_beside_service_exe(""), None);
+    }
+
+    /// **候选链顺序锚点（只增不改语义）**：默认位置**仍最优先**，且第二来源必须**惰性**
+    /// ——默认位置命中时**连读都不许去读**服务登记（`panic` 替身证明：一旦提前求值就炸）。
+    /// 变异：把服务登记排到默认位置之前 → 本测试立即红。
+    #[test]
+    fn default_install_path_still_wins_and_second_source_stays_lazy() {
+        let got = find_cli_with(
+            &[r"C:\Program Files\Tailscale\tailscale.exe"],
+            || panic!("默认位置已命中，不得求值第二来源（顺序锚点）"),
+            |p| p == std::path::Path::new(r"C:\Program Files\Tailscale\tailscale.exe"),
+        );
+        assert_eq!(
+            got,
+            Some(PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe")),
+            "默认位置命中时必须原样返回默认位置（第二来源只在前面全落空时才用）"
+        );
+    }
+
+    /// **治本**：默认位置落空时启用服务登记推出来的路径——这正是用户实测场景
+    /// （装到 `D:\软件\Tailscale`）。
+    #[test]
+    fn service_registration_is_used_when_default_is_missing() {
+        let service_cli = r"D:\软件\Tailscale\tailscale.exe";
+        let got = find_cli_with(
+            &[r"C:\Program Files\Tailscale\tailscale.exe"],
+            || Some(PathBuf::from(service_cli)),
+            |p| p == std::path::Path::new(service_cli),
+        );
+        assert_eq!(
+            got,
+            Some(PathBuf::from(service_cli)),
+            "默认位置落空 ⇒ 必须启用服务登记来源（否则向导会陷入又下载又安装的死循环）"
+        );
+    }
+
+    /// **fail-closed 收口**：第二来源给出路径后**仍要过存在性门**；两处都落空 ⇒ `None`。
+    /// 绝不把「猜的路径」交给调用方（随后 CLI 调用会以莫名错误失败，比如实报「没装」更坏）。
+    #[test]
+    fn cli_discovery_fails_closed_when_no_source_matches() {
+        // ① 服务读不到 / 形态不可解析 ⇒ 第二来源 None
+        let got = find_cli_with(
+            &[r"C:\Program Files\Tailscale\tailscale.exe"],
+            || None,
+            |_| false,
+        );
+        assert_eq!(got, None, "两处都没有必须如实 None");
+        // ② 第二来源给出路径但该文件不存在 ⇒ 同样 None（存在性门在链尾统一收口）
+        let got = find_cli_with(
+            &[r"C:\Program Files\Tailscale\tailscale.exe"],
+            || Some(PathBuf::from(r"D:\软件\Tailscale\tailscale.exe")),
+            |_| false,
+        );
+        assert_eq!(
+            got, None,
+            "第二来源给出的路径也必须过存在性门，不得直接采信"
+        );
+    }
+
+    /// **平台门控**：本机（非 Windows）第二来源恒 `None` ⇒ `find_cli` 的行为与改动前
+    /// **逐字相同**（macOS 是固定 .app 位置、Linux 走包管理器路径，不存在"用户自选路径"
+    /// 这个问题；也不该在非 Windows 上做任何多余 IO）。
+    #[cfg(not(windows))]
+    #[test]
+    fn second_source_is_absent_off_windows() {
+        assert_eq!(
+            discovered_cli(),
+            None,
+            "非 Windows 不得启用服务登记来源（发现链与改动前行为一致）"
+        );
     }
 
     /// A4 定性（二选一，**选 ②「保留以备上游变更」并写明实测依据**）。

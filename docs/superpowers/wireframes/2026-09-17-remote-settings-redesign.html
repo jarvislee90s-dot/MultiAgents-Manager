@@ -226,7 +226,21 @@
             <div class="desc">永久地址，需你自己的域名</div>
           </div>
           <div class="mode" data-p="p-ext" onclick="pick(this)">
-            <div class="head"><span class="name"><span class="live"></span>外部域名（免域名）</span>
+            <!-- 2026-10-07 八次回写（用户实测 + 用户裁决）：
+                 卡名由「外部域名（免域名）」（9 字）改为「**外部域名**」（4 字，**去掉括号**）。
+                 根因：四列卡位的标题可用宽只有约 94px（880 窗口 − 侧栏 w-40(160) − 内容区
+                 p-4(32) − grid-cols-4/gap-2(24) ⇒ 每卡 166 − 边框 3 − p-2.5(20) − 开关
+                 w-8(32) − gap-1.5(6) − 状态点 7 − gap-1(4)），`truncate` 把 9 字（≈117px）
+                 切成了「外部域名（免…」——用户实测所见即此。
+                 用户原话：「改标题反正就改吧，那个括号我感觉不用。这 4 个字就挺好的，
+                 其他注释写在下面，我觉得无所谓。」
+                 故 ① 卡名收成 4 字（i18n `chanTailscale`；en 同步去括号 = `External domain`）；
+                 ② 括号里那层「免域名」信息**不丢**，由卡面备注承载（`.desc` / i18n
+                 `chanTailscaleDesc` =「永久地址，不需要域名」）；③ 标题再挂原生 `title`
+                 tooltip 兜底（将来某语言或更窄窗口仍超宽时悬停可见全名——兜底不等于可以
+                 把标题写长）。其余三卡按同一 94px 预算核对：局域网连接 ≈65px、临时隧道 /
+                 自有域名 / 外部域名各 ≈52px，都在预算内。 -->
+            <div class="head"><span class="name"><span class="live"></span>外部域名</span>
               <span class="switch" onclick="event.stopPropagation(); tg(this)"></span></div>
             <div class="desc">永久地址，不需要域名</div>
           </div>
@@ -328,8 +342,58 @@
           <div class="tri">
             <div class="tri-label"><span class="badge b-violet">状态二 · 配置中</span><span class="side">每一步都能看出进展与卡点</span></div>
             <div class="step done">✓ 检测与下载（官方源 + sha256 校验通过）</div>
-            <div class="step done">✓ 安装 Tailscale（已获管理员确认）</div>
-            <div class="step cur">⏳ 登录 Tailscale —— <button class="btn">打开登录页</button> 等待你在浏览器完成登录…</div>
+<!-- 2026-10-08 七次回写（用户实测缺口：Tailscale 装在非默认路径 ⇒ MAM 找不到）：
+                 MAM 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权本就该给
+                 用户（用户裁决原话：「你不能限制用户安装在哪里」）。但 MAM 原先只在
+                 `C:\Program Files\Tailscale` 找 CLI：用户装到 `D:\软件\Tailscale`（尤其
+                 路径带中文）⇒ detect 判「没装」⇒ 向导又下载又安装 ⇒ 装完还是找不到
+                 （可能死循环）。**治本**是补「服务登记 `ImagePath`」第二来源（与盘符 /
+                 目录名 / 中文无关）；线稿这里补的是两道**提示**（不是判据）：
+                 ① **事前提醒**——安装步的动作文案**逐平台分叉**：Windows 那份（MSI 才会
+                    让用户选路径）点明「用默认路径最省事；装到别处也可以，请记住那个路径」，
+                    macOS 那份（.pkg 由 installer 固定装到 /Applications，用户无从选择）
+                    保持原文案，不夹带 Windows 特有的话；
+                 ② **事后可查**——安装行的弱提示说清 MAM 的**两个查找位置**（默认安装目录 +
+                    「Tailscale」服务登记的可执行路径）并给出「装完点刷新状态」的动作，
+                    让"装完仍显示未安装"有据可查、不至于反复重装。 -->
+<!-- 2026-10-07 十次回写（④ 用户实测 + 用户裁决）：下载安装包这一步此前**没有任何
+                 进度反馈**（Rust 侧是一次同步下载，前端在整段下载里看不到动静），用户不知道
+                 是不是卡住了。用户原话：「如果下载没有百分比，你可以给一个模拟进度条，表示
+                 在走动。因为下载也不会花很长时间，就让用户知道没有卡住就行了。如果工作量
+                 很大，你也不用特意去做一个准确的下载百分比条了。」
+                 故：download（以及同样"没有任何其它动静"的 install 等待期）发起即挂一条
+                 **不确定进度（indeterminate）**指示器——转圈 + 「正在下载安装包…」文案，
+                 步骤返回即收起；**绝不给假百分比**（与移动端「速率未知只显示已传字节，
+                 不显示假百分比」同一条纪律）。实现为纯前端即可（已读码验证：
+                 `remote_ts_run_step` 是 async + spawn_blocking，Rust 主线程不被占用；
+                 `invoke()` 返回 Promise 不阻塞 JS 事件循环 ⇒ 动画照常跑）。 -->
+            <div class="step cur">⏳ 正在下载安装包（官方源 + sha256 校验）… <span class="side">（总量未知 ⇒ 只表示「在走动」，不给百分比；i18n `tsWizard.downloading`）</span></div>
+            <div class="step done">✓ 安装 Tailscale（已获管理员确认）<span class="side">（Windows MSI 版：安装向导会让你选安装路径——动作文案点明「用默认路径最省事」；安装行常驻弱提示，说明 MAM 的两个查找位置 + 装完点「刷新状态」）</span></div>
+            <!-- 2026-10-07 十一次回写（⑤ 用户实测 + 根因诊断）：原稿画的
+                 `<button class="btn">打开登录页</button>` 是**对的方向**，但实现此前只在
+                 `probe.authUrl` 非空时渲染一条**文字链接**，而新装机器上
+                 `tailscale status --json` 是 `NeedsLogin ∧ AuthURL=""`——授权链接要
+                 **发起一次交互式登录**（`tailscale login`，与 Windows GUI 的「Log in」
+                 按钮同义）才由尾网生成，而 MAM 全仓 `run_cli` 调用点**从来没有 up/login**，
+                 ⇒ 链接永远不出现 ⇒ **登录行里没有任何可点的东西**（用户实测原话：
+                 「登录代做，我没有看到有链接什么的」，只能自己去客户端手动登录）。
+                 故本行改为三件套（实现 = TailscaleWizard 的 login 行）：
+                 ① 拿到链接 → `<button>`（Button asChild 包 `<a target="_blank"
+                    rel="noreferrer noopener">`）；② 还没有链接 → 一个
+                    **「获取登录链接」按钮**（点它让 MAM 主动向后端要：后端**后台**发起
+                    `tailscale login`（只 spawn 不等待——该命令 `--timeout` 默认 0s
+                    会一直等用户在浏览器完成，同步等它=把向导挂死）+ **有界轮询**
+                    `status --json` 的 AuthURL（≤9.5s）取回）；③ 拿不到 → 一句**明确的
+                    下一步**（去本机 Tailscale 客户端点「Log in」/ 点「刷新状态」重试），
+                    而不是让用户自己去客户端里找。
+                 **合规红线不变（模块头注释写死）**：MAM **只递链接**——不代登录、
+                 不持有任何用户凭据；登录始终由用户在浏览器完成。
+                 另：登录窗口内窗口重新拿到 focus 时自动重探一次（用户切回 MAM 即见
+                 「已完成」），**不做定时轮询**（沿用「GET 时机 = 挂载/状态跃迁/动作后」）。 -->
+            <div class="step cur">⏳ 登录 Tailscale —— <button class="btn">去登录</button>
+              <button class="btn">获取登录链接</button>
+              <span class="side">（还没有链接时给「获取登录链接」+ 下一步文案；拿到后「去登录」做成按钮，新窗口打开。点「获取登录链接」在途期间同样挂不确定进度：后端最长 9.5s 取链接，i18n `tsWizard.fetchingLoginLink`）</span>
+              等待你在浏览器完成登录…</div>
             <!-- 2026-10-07 三次回写（A1 实测）：Windows 11 家庭版 / Tailscale 1.102.4 MSI
                  实测 `funnel --bg` 退出码 0、0.1 秒返回、**零批准链接、零人工点击**；而
                  macOS 实测首开确有一次批准。两平台各执一端 ⇒ 批准是**可能不出现的分支**，
@@ -354,6 +418,19 @@
             <div class="step"><span class="badge b-amber">恢复中</span> Tailscale 后端正在重连中——开机后通常 1–2 分钟自动恢复；配置与地址都不会变，无需任何操作。<span class="side">（成因 = 后端重连，不是域名发布；此时不给地址）</span></div>
             <div class="step"><span class="badge b-amber">发布中</span> Funnel 刚重新开通，公网 DNS 记录正在重新发布——通常 30 秒～1 分钟；地址不会变。<span class="side">（本进程内 MAM 执行过 funnel reset 时才给这一档）</span></div>
             <div class="step">公网 DNS 记录尚未发布——首次开通实测约需 5–6 分钟；若本机此前开通过，恢复通常快得多（1 分钟内）。地址要等记录发布后才从外网可达。<span class="side">（此时不给地址，见状态三说明）</span></div>
+            <!-- 2026-10-07 九次回写（③ 用户要求：让用户知道 Tailscale 是什么）：
+                 向导里此前**没有任何地方解释 Tailscale 是什么**——用户被要求装一个没听过的
+                 第三方软件、还要去它的官网登录一次，却看不到一句"这是干什么的、为什么需要
+                 它"。故向导**页脚**（步骤列表之下）恒挂一行说明（i18n
+                 `settings.remote.tsWizard.aboutTailscale`，zh/en 双语）：
+                 ① 它是什么 = 免费的个人组网工具；
+                 ② **为什么需要它** = 它给每台设备一个固定的私有地址，MAM 因此**不需要你
+                    自备域名**就能给出永久链接（正是本卡的卖点"免域名"的原理）；
+                 ③ 官网 = tailscale.com（外链，新窗口：target="_blank" +
+                    rel="noreferrer noopener"——安全惯例，不给 opener 句柄）。
+                 恒在（不随相位/平台变化）：未装、配置中、恢复中、未运行等任何挂载向导的
+                 形态都要能回答"这是什么"。 -->
+            <div class="step">这是什么？Tailscale 是一款免费的个人组网工具：它给每台设备一个固定的私有地址，所以我们不用你自备域名也能给出永久链接。<span class="side">官网 <a href="https://tailscale.com/" target="_blank" rel="noreferrer noopener">tailscale.com</a></span></div>
           </div>
           <div class="tri">
             <div class="tri-label"><span class="badge b-green">状态三 · 已配置</span><span class="side">地址只有<b>可达性校验通过</b>才上墙（§C3：不许把打不开的地址当可用呈现）</span></div>

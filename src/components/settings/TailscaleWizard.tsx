@@ -6,8 +6,10 @@
 // 自动含自愈）；头部看板地址只在 reach=Verified 时显示（未验证不得当可用地址展示）；
 // 动作失败（Err reject）落到对应步骤行的可见错误行——**不弹全局 toast、也不静默**。
 // Windows 行如实标注「尚未实机校验」弱提示（数据源 windowsVerified）——不把未验证的
-// 流程伪装成已验证。数据源 = remote_ts_probe / remote_ts_run_step（形状契约见
-// Rust 端 tailscale::wizard_status / run_step 注释）。
+// 流程伪装成已验证。**当前 Windows 已实测整条流程**（2026-10-07 用户实机走完 MAM 向导
+// 全程），故该提示在生产载荷下不渲染；机制保留（后端 `windowsUnverifiedSteps` 非空时
+// 自动回来并点名），见下方渲染块注释。数据源 = remote_ts_probe / remote_ts_run_step
+//（形状契约见 Rust 端 tailscale::wizard_status / run_step 注释）。
 // 导出组件：TailscaleWizard（步骤列表本体，RemoteSection 的 tailscale 卡详情区
 // 直接挂载——Task 9 卡片重排时已收敛，旧的独立入口行已撤）。tsWizard.* 两级键的
 // 字面量必须只出现在本文件：RemoteSection 的 i18n 守卫测试按字面量扫描单层键，
@@ -38,10 +40,30 @@ const STEP_KEY: Record<string, string> = {
   autostart: "settings.remote.tsWizard.step_autostart",
 };
 
+// 步骤 id → 本 locale 的步骤名（未知 id 原样回显）。**放模块级、t 由调用方传入**：
+// 步骤行标题、I-3 弱提示的起点名、未验清单三处走**同一条映射**（M1：文案从起点派生的
+// 前提）——三处各写一遍就是三份会漂移的副本。
+const stepLabel = (t: ReturnType<typeof useAppTranslation>["t"], id: string) =>
+  STEP_KEY[id] ? t(STEP_KEY[id]) : id;
+
 // 可自动触发的步（id 与 Rust wizard_steps 一致）。login 不在列：MAM 不代登录，
 // 动作是「去登录」链接；detect/sys_ext 是只读探针；verify 走下方专属「重试」按钮
 //（§C3，未验/失败都要能重触发校验）；autostart 是 MAM 自身行为（恒已完成）
 const RUNNABLE = new Set(["download", "install", "shields_up", "funnel"]);
+
+// ④ 「在走动」反馈的适用范围（2026-10-07 用户裁决）：只有这三步会给用户一段
+// **没有任何其它动静**的等待——download = 一次同步下载（Rust 侧 download_url_to 一次性
+// 取回，期间零反馈）；install = 系统授权框之后到安装器返回之间（msiexec/installer 阻塞）；
+// login = 「获取登录链接」的动作（后端后台发起 `tailscale login` + 有界轮询取链接，
+// 最长 9.5s——这一步同样只有"进行中…"可看，而它正是用户实测"没有可点之物"的那一步，
+// 更要让用户看见 MAM 确实去要了）。其余步（shields_up / funnel）是秒级 CLI 写，不给每步都挂噪音。
+// **不确定进度（indeterminate）**：总量未知 ⇒ 不给百分比（与移动端「速率未知只显示已传
+// 字节，不显示假百分比」同一条纪律），只表示「正在传输，没有卡住」。
+const LONG_STEP_HINT: Record<string, string> = {
+  download: "settings.remote.tsWizard.downloading",
+  install: "settings.remote.tsWizard.installing",
+  login: "settings.remote.tsWizard.fetchingLoginLink",
+};
 
 // **M3（2026-10-07 评审 Minor）**：线稿状态二的两行琥珀提示（wireframe 354-355：
 // 「恢复中」「发布中」）**带 badge**，与状态五同形（`b-amber` = 正在进行、无需操作的
@@ -70,12 +92,23 @@ export function TailscaleWizard() {
   const [busyStep, setBusyStep] = useState<string | null>(null);
   // funnel 步回执带出的批准链接（首次开通时上游要求一次浏览器批准；MAM 只递不代点）
   const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
+  // ⑤ login 步回执带出的授权链接（「获取登录链接」按钮的产物）：回执里拿到的链接**立即**
+  // 上墙，不等下一次探测——探测的 authUrl 是同一字段（后端 status --json 的 AuthURL），
+  // 两条路同源，回执只是把用户刚点出来的结果直接交回去（少一次"点了没反应"的空窗）。
+  // **M4（2026-10-08 架构评审）：回执必须有失效机制**——它只是"过渡态"，随**下一次探测
+  // 落地**作废（`receiptGen` 代数与 `probeGen` 对齐；探测是权威源，见 loginLink 的计算）。
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [receiptGen, setReceiptGen] = useState(0);
+  // 探测落地的代数（每次成功探到一轮读数 +1）：回执只对"它之后还没有新探测"的窗口有效
+  const [probeGen, setProbeGen] = useState(0);
   // 动作失败的落点（Task 6 评审移交指针）：按步骤行内展示，不再 catch 吞错零反馈
   const [stepError, setStepError] = useState<{ step: string; message: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
       setProbe(await remoteTsProbe());
+      // 探测落地 = 权威源更新一次 ⇒ 回执代数随之作废（M4）
+      setProbeGen((g) => g + 1);
       setLoadError(null);
     } catch (e) {
       setLoadError(typeof e === "string" ? e : String(e));
@@ -93,6 +126,12 @@ export function TailscaleWizard() {
     try {
       const r = await remoteTsRunStep(step);
       if (r.approvalUrl) setApprovalUrl(r.approvalUrl);
+      // ⑤ login 步回执的授权链接（后端主动取回的，MAM 只递不代登录）；M4：记下它到的
+      // **探测代数**——紧随其后的那次重探一落地，本回执即作废（探测是权威源）
+      if (r.authUrl) {
+        setAuthUrl(r.authUrl);
+        setReceiptGen(probeGen);
+      }
       await load(); // 动作回执后重探一次（GET 时机 = 挂载/动作后，不做时刻轮询）
     } catch (e) {
       // 失败不弹全局 toast 抢焦点：把错误落到对应步骤行（可见错误行），重探刷新状态
@@ -106,6 +145,38 @@ export function TailscaleWizard() {
   const stateOf = (id: string): TsStepState | undefined => probe?.states.find((s) => s.id === id);
   // §C3：头部地址门控——只有校验通过（Verified）才算可用地址；未验证/失败一律不展示
   const reachVerified = probe?.reach?.state === "verified";
+  // ⑤ 登录窗口：登录步未完成时，链接可能由两条路出现（用户点「获取登录链接」、或用户在
+  // 浏览器里点完了）——两条都在下面接住
+  const loginDone = stateOf("login")?.done ?? false;
+  // **权威源仍是探测**（与全仓「UI 以重探为权威源」一致）：探测有链接就用探测的（授权链接
+  // 会被 tailscaled 轮换/失效，回执里那条可能已经过期）。
+  // **M4（2026-10-08 架构评审）：回执有失效机制**——它只在"还没有新探测落地"的窗口里有效
+  //（`receiptGen === probeGen`，即它到的时候是第几代探测），把用户刚点出来的结果**立即**
+  // 上墙、免得出现"点了没反应"的空窗；下一次探测一落地就**一律以探测为准**（哪怕探测说
+  // "没有链接"——那是权威读数，不许拿旧回执硬撑）。旧实现在探测报空时仍回落到回执，
+  // 与"探测是权威源"的注释自相矛盾。
+  const receiptLive = authUrl !== null && receiptGen === probeGen;
+  // 探测（权威源）给的链接：**空串按"没有链接"处理**（后端用空串表示暂无链接，
+  // 不是"有链接"）——只有它为空串时，才轮到上面的回执顶上。
+  const probedLink = probe?.authUrl ? probe.authUrl : null;
+  const loginLink = probedLink ?? (receiptLive ? authUrl : null);
+
+  // ⑤ 登录窗口的**自动复评**（用户实测：登录步曾无可点之物，见下方渲染块注释）。
+  // 用户路径是「点链接 → 浏览器抢走焦点 → 在浏览器完成登录 → 切回 MAM」——窗口重新拿到
+  // focus 时重探一次，登录步自动翻「已完成」、向导继续往下走。
+  // **为什么不做定时轮询**：本仓纪律是「GET 时机 = 挂载 / 状态跃迁 / 动作后」，且这一窗口的
+  // 真值变化**只可能由用户离开/回到本窗口引起**；拿不到链接时用户手上还有「获取登录链接」
+  // 与「刷新状态」两条明路，不需要后台偷跑 CLI（探一次要派生 3 个进程）。
+  // **M5（2026-10-08 架构评审）：作用域收窄到"链接已在屏幕上"这一窗口。** 旧判据只有
+  // `!loginDone`，于是"已装未登录"的整段时间里每次聚焦都白跑一轮探测（3 个 CLI 派生）——
+  // 用户切个窗口回来就付这个代价；而上面那条用户路径**必然先有链接**（没链接时他还在
+  // 向导里点「获取登录链接」，不存在"去浏览器登录完切回来"这一幕）。
+  useEffect(() => {
+    if (loginDone || !loginLink) return;
+    const onFocus = () => void load();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [load, loginDone, loginLink]);
 
   return (
     <div data-testid="ts-wizard">
@@ -115,19 +186,29 @@ export function TailscaleWizard() {
           {t("settings.remote.tsWizard.refresh")}
         </Button>
       </div>
-      {/* Windows 行弱提示（I-3：验证位不得大于证据）：2026-10-07 真机探测**从第 6 步
-          （shields_up）开始**——detect/download/install(UAC)/login 四步的**流程**没被
-          端到端跑过，故提示**不得整行撤下**，而要收窄成精确范围并**点名**那几步
-          （清单来自后端 windowsUnverifiedSteps，随步骤表派生，不写死文案）。 */}
+      {/* Windows 行弱提示（I-3：验证位不得大于证据）——**机制保留，当前不渲染**：
+          2026-10-07 用户在本机 Windows 上卸载 Tailscale 后**从零走完 MAM 向导全程**
+          （下载 → 安装 UAC → 登录 → 关 shields-up → 开通 Funnel → 可达性校验，全程正常），
+          故后端把「实测覆盖起点」前移到第一步（`wizard.rs::WINDOWS_VERIFIED_FROM`）⇒
+          未验清单为空 ⇒ `windowsVerified=true` ⇒ 本行不渲染（用户实测看到的黄标就此撤下）。
+          **为什么保留这一块**：它承载的是「验证位不得大于证据」这条机制的 UI 侧——将来若
+          又出现未实测的段落（新增步骤 / 新平台形态），后端把起点挪回那一步，清单非空，
+          本行自动回来并按 `windowsUnverifiedSteps` **点名**那几步（清单随步骤表派生，
+          文案不写死）。详见 `tests/settings/tailscaleWizard.test.tsx` 的 I-3 组：
+          该组喂的是「清单非空」载荷，锁的正是这条机制。
+          **M1（2026-10-08 架构评审）：文案也从起点派生**——旧文案写死"只实测了**后半段**"
+          （当时的起点正是 `shields_up`），一旦起点挪到别处那句话就成了**假陈述**。现在
+          起点名（`windowsVerifiedFrom` → 本 locale 的步骤名）也随载荷下发、进 i18n 插值；
+          字段缺失（形态不符，生产对 Windows 恒下发）时显示 `—`——**可见的**降级，
+          好过一句读起来像事实的假话。 */}
       {probe?.platform === "windows" && !probe.windowsVerified && (
         <p
           data-testid="ts-windows-unverified"
           className="mt-1 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs text-amber-600 dark:bg-amber-500/10 dark:text-amber-400"
         >
           {t("settings.remote.tsWizard.windowsUnverified", {
-            steps: (probe.windowsUnverifiedSteps ?? [])
-              .map((id) => (STEP_KEY[id] ? t(STEP_KEY[id]) : id))
-              .join(" → "),
+            from: probe.windowsVerifiedFrom ? stepLabel(t, probe.windowsVerifiedFrom) : "—",
+            steps: (probe.windowsUnverifiedSteps ?? []).map((id) => stepLabel(t, id)).join(" → "),
           })}
         </p>
       )}
@@ -218,7 +299,18 @@ export function TailscaleWizard() {
           const done = st?.done ?? false;
           const busy = busyStep === step.id;
           const blocked = st?.blockedReason ?? null;
-          const actionText = step.needsHuman && step.humanActionKey ? t(step.humanActionKey) : "";
+          // ④ 长阻塞步的「在走动」文案键（非长阻塞步 ⇒ undefined ⇒ 不挂指示器）
+          const progressKey = LONG_STEP_HINT[step.id];
+          // **I3（2026-10-08 架构评审）：动作文案必须指向行内真实存在的按钮。**
+          // 后端下发的 `actLogin` 是"点击「去登录」…"，而「去登录」按钮**只在 loginLink
+          // 非空时渲染**（见下方 login 块）——无链接时行内只有「获取登录链接」(+兜底提示)，
+          // 沿用 actLogin 就是同一行两条矛盾指令（⑤ 要消灭的"无可点之物"的降级版）。
+          // 故无链接时换 `actLoginNoLink`（两个 locale 同步新增，文案里点名的正是那个真按钮）。
+          const actionKey =
+            step.id === "login" && !loginLink
+              ? "settings.remote.tsWizard.actLoginNoLink"
+              : step.humanActionKey;
+          const actionText = step.needsHuman && actionKey ? t(actionKey) : "";
           return (
             <div
               key={step.id}
@@ -237,7 +329,7 @@ export function TailscaleWizard() {
               <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className={cn("text-[13px]", done && "text-muted-foreground")}>
-                    {STEP_KEY[step.id] ? t(STEP_KEY[step.id]) : step.id}
+                    {stepLabel(t, step.id)}
                   </span>
                   <span className={SETTINGS_NOTE}>
                     {done
@@ -257,18 +349,42 @@ export function TailscaleWizard() {
                       {t("settings.remote.tsWizard.runStep")}
                     </Button>
                   )}
-                  {/* login：MAM 不代登录——只递授权链接（authUrl 由 probe/run_step 透出） */}
-                  {step.id === "login" && !done && probe?.authUrl && (
-                    <a
-                      data-auth
-                      data-testid="ts-auth-link"
-                      href={probe.authUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-xs text-blue-500 underline"
+                  {/* login：MAM 不代登录——只递授权链接。**⑤（2026-10-07 用户实测）**：
+                      旧实现只在 `probe.authUrl` 非空时渲染一条文字链接，而新装机器上
+                      `status --json` 是 `NeedsLogin ∧ AuthURL=""`（授权链接要**发起一次
+                      交互式登录**才由尾网生成）⇒ **登录行里没有任何可点的东西**，用户
+                      「没有看到有链接什么的」，只能自己去客户端手动登录。
+                      现在两条路都给：
+                      ① 拿到链接（回执 / 探测）→ 做成**明确的按钮**（Button asChild 包 <a>，
+                         新窗口 + noreferrer noopener）；
+                      ② 还没有链接 → 一个**「获取登录链接」按钮**（点它让 MAM 主动向后端要：
+                         后端后台发起 `tailscale login` + 有界轮询取链接，见 Rust
+                         `login_step_with`）+ 一句**明确的下一步**文案（不是让用户自己去
+                         客户端里找）。合规红线不变：**只递链接，不代登录、不持凭据**。 */}
+                  {step.id === "login" && !done && loginLink && (
+                    <Button asChild size="sm" className="h-6 px-2 text-xs">
+                      <a
+                        data-auth
+                        data-testid="ts-auth-link"
+                        href={loginLink}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                      >
+                        {t("settings.remote.tsWizard.openAuthUrl")}
+                      </a>
+                    </Button>
+                  )}
+                  {step.id === "login" && !done && (
+                    <Button
+                      variant={loginLink ? "ghost" : "outline"}
+                      size="sm"
+                      className="h-6 px-2 text-xs"
+                      data-testid="ts-login-link-btn"
+                      disabled={busyStep !== null}
+                      onClick={() => void run("login")}
                     >
-                      {t("settings.remote.tsWizard.openAuthUrl")}
-                    </a>
+                      {t("settings.remote.tsWizard.getLoginLink")}
+                    </Button>
                   )}
                   {/* verify：§C3 专属重试钮（未验/失败都可重触发校验；后端含自愈） */}
                   {step.id === "verify" && !done && (
@@ -284,6 +400,28 @@ export function TailscaleWizard() {
                     </Button>
                   )}
                 </div>
+                {/* ④ 长阻塞步的「在走动」反馈（用户裁决：不确定进度条即可，不要假百分比）：
+                    发起即显示（busy 在本步发起时同步置上）、步骤返回即收起。
+                    为什么纯前端够用（已读码验证，不是猜）：`remote_ts_run_step` 是
+                    `async fn` + `tauri::async_runtime::spawn_blocking`（Rust 主线程/IPC
+                    派发线程不被占用），前端 `invoke()` 返回 Promise 也**不阻塞 JS 事件
+                    循环** ⇒ 下载阻塞期间本行照常渲染、`animate-spin` 照常转。
+                    role=progressbar 且**不带 aria-valuenow** = 标准的「不确定进度」语义
+                    （有值就是假百分比的前身）；文案也如实说"总量未知，故不给百分比"。 */}
+                {busy && progressKey && (
+                  <p
+                    data-testid="ts-step-progress"
+                    role="progressbar"
+                    aria-label={t(progressKey)}
+                    className="text-muted-foreground mt-1 flex items-center gap-1.5 text-[11px]"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="inline-block h-3 w-3 flex-none animate-spin rounded-full border-2 border-blue-500 border-t-transparent"
+                    />
+                    {t(progressKey)}
+                  </p>
+                )}
                 {/* 需要人的步骤：动作文案突出显示（后端 humanActionKey 下发，前端只翻译）。
                     A1：可选人工步（humanOptional，目前只有 funnel 批准）额外挂一条弱提示
                     ——实测两平台各执一端（Windows 1.102.4 零批准链接、零点击；macOS 首开
@@ -292,6 +430,35 @@ export function TailscaleWizard() {
                 {actionText && (
                   <p className="mt-0.5 text-xs font-medium text-amber-600 dark:text-amber-400">
                     {actionText}
+                  </p>
+                )}
+                {/* 2026-10-08（用户实测缺口）：Windows 走 MSI，**安装向导会让用户选安装
+                    路径**（MAM 执行 msiexec 刻意不加 /qn——「装在哪里」的选择权本就该给
+                    用户）。装到自定义路径时后端已能经「服务登记 ImagePath」找到 CLI，但
+                    用户不会知道，只会一直看到「未安装」→ 又下载又安装（用户实测的死循环）。
+                    故安装行常驻一条弱提示：说清 MAM 的**两个查找位置**，并给出「装完点
+                    刷新状态」的动作（重探时机 = 挂载/动作后，不点就一直显示旧结论）。
+                    macOS 的 .pkg 由 installer 固定装到 /Applications，用户无从选择
+                    ⇒ 不显示（与后端 actAdminWinMsi 的逐平台分叉同口径）。 */}
+                {step.id === "install" && !done && probe?.platform === "windows" && (
+                  <p
+                    data-testid="ts-install-path-hint"
+                    className="text-muted-foreground mt-0.5 text-[11px]"
+                  >
+                    {t("settings.remote.tsWizard.installPathHint")}
+                  </p>
+                )}
+                {/* ⑤ 拿不到链接时的**明确下一步**（用户实测的正是这一段：行里只有动作文案、
+                    没有任何可点的东西，用户只能自己去客户端里手动登录）。文案说清三件事：
+                    点上面的按钮让 MAM 去要链接 / MAM 不代登录不碰账号 / 兜底可到本机
+                    Tailscale 客户端点「Log in」，或点右上「刷新状态」重试。
+                    busy 期间不挂（正在要链接，别同时喊两边）。 */}
+                {step.id === "login" && !done && !loginLink && !busy && (
+                  <p
+                    data-testid="ts-login-hint"
+                    className="text-muted-foreground mt-0.5 text-[11px] leading-snug"
+                  >
+                    {t("settings.remote.tsWizard.loginLinkHint")}
                   </p>
                 )}
                 {step.needsHuman && step.humanOptional && (
@@ -357,6 +524,27 @@ export function TailscaleWizard() {
           </a>
         </p>
       )}
+      {/* ③ 让用户知道 Tailscale 是什么（2026-10-07 用户要求）：向导此前**没有任何地方
+          解释它是什么**，而用户被要求装一个没听过的第三方软件、还要去它的官网登录一次。
+          页脚恒挂一行（不随相位/平台变化——未装 / 配置中 / 恢复中 / 未运行任何挂载形态
+          都要能回答「这是什么」）：① 它是什么 = 免费的个人组网工具；② **为什么需要它**
+          = 它给每台设备一个固定的私有地址，MAM 因此**不需要用户自备域名**就能给出永久
+          链接（正是本卡卖点「免域名」的原理）；③ 官网外链（新窗口 + noreferrer noopener:
+          不给新窗口 opener 句柄，安全惯例——与会话内其它外链同口径）。 */}
+      <p
+        data-testid="ts-about-tailscale"
+        className="text-muted-foreground mt-2 text-[11px] leading-snug"
+      >
+        {t("settings.remote.tsWizard.aboutTailscale")}{" "}
+        <a
+          href="https://tailscale.com/"
+          target="_blank"
+          rel="noreferrer noopener"
+          className="text-blue-500 underline"
+        >
+          tailscale.com
+        </a>
+      </p>
     </div>
   );
 }

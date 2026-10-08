@@ -335,14 +335,19 @@ pub fn run() {
     });
 }
 
-/// 退出清理三件套：停对外通道（隧道 + tailscale Funnel）与放电源锁。
-/// RunEvent::Exit 与 Windows 应用内升级共用——插件安装路径内部直接
-/// `process::exit(0)`，不经过事件循环，靠 commands::updater 安装链上的
-/// `on_before_exit` 钩子调用本函数，保证不留孤儿进程、不失电源锁。
+/// 退出清理四件套：停对外通道（隧道 + tailscale Funnel）、收 `tailscale login`
+/// 等待者与放电源锁。RunEvent::Exit 与 Windows 应用内升级共用——插件安装路径
+/// 内部直接 `process::exit(0)`，不经过事件循环，靠 commands::updater 安装链上
+/// 的 `on_before_exit` 钩子调用本函数，保证不留孤儿进程、不失电源锁。
 pub(crate) fn exit_cleanup() {
     crate::remote::tunnel::stop_all();
     // §C1 修复轮 1 Finding 2②：Funnel 无子进程可 kill_on_drop（守护 =
     // 轮询线程 + tailscaled 常驻配置），进程退出必须显式撤 + 收 DESIRED
     crate::remote::tailscale::stop_all();
+    // I1（2026-10-08 架构评审）：`tailscale login` 的等待者**不是通道**，
+    // stop_all 收不到它——它是本模块唯一长期存在的子进程（`--timeout 15s` 有界，
+    // 但 15 秒内 MAM 退出就是一个孤儿进程）。kill + wait 收掉；并进
+    // exit_cleanup 后升级安装路径（on_before_exit）同样不孤儿化它。
+    crate::remote::tailscale::cancel_login_attempt();
     crate::remote::power::release();
 }

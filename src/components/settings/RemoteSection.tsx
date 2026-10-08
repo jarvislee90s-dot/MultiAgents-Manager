@@ -1,7 +1,7 @@
 // 设置页「远程接入」分区（§C4：按线稿 v6 重排为 4 张对外通道卡，UI 唯一契约 =
 // docs/superpowers/wireframes/2026-09-17-remote-settings-redesign.html）。
 // 结构三段式：① 通用（总开关 / 电源保活 / 本机名称）② 通道四卡一排 + 唯一展开
-// 详情区（局域网连接 / 临时隧道 / 自有域名 / 外部域名（免域名）——「本机」不是
+// 详情区（局域网连接 / 临时隧道 / 自有域名 / 外部域名——「本机」不是
 // 通道，是访问方式：走局域网卡地址，零豁免 §C4）③ 访问与安全（访问密码 / 重置设备
 // / 已接入设备列表）。状态唯一数据源 = remote_status 的 channels + pin 载荷（M5 A5）；
 // tailscale 卡相位数据源 = remote_ts_probe（§C2/§C3；相位枚举见 TsPhase）；命令统一走
@@ -676,7 +676,7 @@ export function RemoteSection() {
   const tsAddr = tsChannel?.address ?? null;
   const tsErr = tsChannel?.error ?? null;
 
-  // 通道卡定义（线稿 v6 顺序：局域网连接 / 临时隧道 / 自有域名 / 外部域名（免域名）；
+  // 通道卡定义（线稿 v6 顺序：局域网连接 / 临时隧道 / 自有域名 / 外部域名；
   // 「本机」不再是卡——它是访问方式，走局域网卡地址，见 lan 展开区的未开启提示）
   const cardDefs: Array<{ key: ChannelKind; name: string; desc: string }> = [
     { key: "lan", name: t("settings.remote.chanLan"), desc: t("settings.remote.chanLanDesc") },
@@ -794,7 +794,16 @@ export function RemoteSection() {
                       chanRunning(c.key) ? "bg-emerald-500" : "bg-gray-300"
                     )}
                   />
-                  <span className="truncate">{c.name}</span>
+                  {/* ①（2026-10-07 用户实测 + 裁决）：卡位标题可用宽只有约 94px（880 窗口 −
+                      侧栏 160 − p-4 − 4 列 gap − 卡内边距 − 开关 32 − 点与间隙 11），
+                      `truncate` 会把它切掉——用户实测当时 zh「外部域名（免域名）」被切成
+                      「外部域名（免…」。用户裁决 =「那个括号不用，这 4 个字就挺好的，其他
+                      注释写在下面」⇒ 卡名收成 4 字（i18n chanTailscale），免域名那层信息
+                      由下方备注 chanTailscaleDesc 承载。`title` 是兜底：将来某语言（或更窄
+                      的窗口）仍超宽时，悬停可见全名——兜底不等于可以把标题写长。 */}
+                  <span className="truncate" title={c.name}>
+                    {c.name}
+                  </span>
                 </span>
                 {/* 开关独立于卡片选中（线稿 stopPropagation）；四卡同式，启停唯一
                     入口 = remote_toggle_channel（后端幂等 + 失败回滚）。开关态只认

@@ -1,5 +1,5 @@
 // tests/settings/remoteSection.test.tsx — §C4（零豁免计划 Task 9）：通道区重排为
-// 4 张对外卡片（局域网连接 / 临时隧道 / 自有域名 / 外部域名（免域名）），「本机」
+// 4 张对外卡片（局域网连接 / 临时隧道 / 自有域名 / 外部域名），「本机」
 // 不再是一条通道（它是访问方式，走局域网卡地址）。线稿 v6（wireframes/
 // 2026-09-17-remote-settings-redesign.html）为唯一 UI 契约。
 // 覆盖：四卡渲染与状态点映射（评审 C-I1：状态点 = running、开关本体 = enabled）/ 本机不在卡片区 / 点卡片唯一展开
@@ -145,7 +145,7 @@ describe("RemoteSection 四卡渲染与状态点映射（§C4 重排）", () => 
     // status 已载（总开关 Switch disabled={busy || !status}，载入后才可点）
     const master = screen.getByRole("switch", { name: /enable remote access/i });
     await waitFor(() => expect(master).toBeEnabled());
-    // 四卡齐全（局域网连接 / 临时隧道 / 自有域名 / 外部域名（免域名））
+    // 四卡齐全（局域网连接 / 临时隧道 / 自有域名 / 外部域名）
     for (const key of ["lan", "quick", "named", "tailscale"]) expect(card(key)).toBeTruthy();
     // 「本机」不再是通道（零豁免 §C4）：不占卡位；设备表为空时全页无该文案
     expect(document.querySelector('[data-card="local"]')).toBeNull();
@@ -175,6 +175,97 @@ describe("RemoteSection 四卡渲染与状态点映射（§C4 重排）", () => 
       expect(invokeMock).toHaveBeenCalledWith("remote_toggle", { enabled: false })
     );
     expect(screen.getByText(/Turning it off only stops external access/i)).toBeTruthy();
+  });
+});
+
+// ① 卡片标题被截断（2026-10-07 用户实测 + 裁决）：zh 的 chanTailscale 原为
+// 「外部域名（免域名）」9 字，而四列卡位的标题可用宽只有约 94px（见下），于是被
+// `truncate` 切成「外部域名（免…」——用户看到的就是这个。用户裁决原话：
+// 「改标题反正就改吧，那个括号我感觉不用。这 4 个字就挺好的，其他注释写在下面」。
+// 故：① zh 收成 4 个字「外部域名」；② en 同步去括号；③ 括号里那层「免域名」信息
+// **不许丢**——改由卡面备注（chanTailscaleDesc）承载；④ 标题挂原生 title tooltip
+// 兜底（将来某语言仍超宽时悬停可见全名）。线稿已同步（硬契约）。
+describe("RemoteSection ①通道卡标题不截断（用户裁决：4 个字、去掉括号）", () => {
+  const root = process.cwd();
+  const locale = (name: string) =>
+    JSON.parse(readFileSync(path.join(root, `src/i18n/locales/${name}.json`), "utf8"));
+
+  // 卡位标题可用宽（≈94px）逐项来源：设置窗口默认 880 − 侧栏 w-40(160) = 720；
+  // 内容区 p-4(32) ⇒ 688；grid-cols-4 + gap-2(8×3=24) ⇒ 每卡 166；卡边框 1.5×2 +
+  // p-2.5(10×2) ⇒ 内宽 143；标题行右侧开关 w-8(32) + gap-1.5(6) ⇒ 105；标题内状态点
+  // 7px + gap-1(4) ⇒ **94px**。字符宽按最宽语言的上界估：汉字 13px、拉丁 7.4px
+  // （实测 Hiragino/Helvetica 13px bold：汉字 13.0、拉丁词组均值 ≈6.6–7.0）。
+  const TITLE_BUDGET_PX = 94;
+  const widthPx = (s: string) =>
+    [...s].reduce((w, ch) => w + (/[\u2e80-\u9fff\uff00-\uffef]/.test(ch) ? 13 : 7.4), 0);
+
+  it("外部域名卡名收成「外部域名」（恰 4 字、无括号）；en 同步去括号", () => {
+    const zh = locale("zh");
+    const en = locale("en");
+    expect(zh.settings.remote.chanTailscale).toBe("外部域名");
+    expect(en.settings.remote.chanTailscale).not.toContain("(");
+    expect(en.settings.remote.chanTailscale).not.toContain("（");
+  });
+
+  it("zh 四张卡名都落在卡位标题宽内（旧「外部域名（免域名）」= 117px 必被截断）", () => {
+    const zh = locale("zh");
+    for (const k of ["chanLan", "chanQuick", "chanNamed", "chanTailscale"]) {
+      const name = zh.settings.remote[k] as string;
+      expect(
+        widthPx(name),
+        `卡名「${name}」≈${widthPx(name).toFixed(1)}px > 卡位 ${TITLE_BUDGET_PX}px，会被 truncate`
+      ).toBeLessThanOrEqual(TITLE_BUDGET_PX);
+    }
+  });
+
+  // **M2（2026-10-08 架构评审）**：宽度预算此前**只遍历 zh**——en 的
+  // `chanTailscale` = "External domain"（15 拉丁字符 ≈111px）**超预算**，而它同样会被
+  // `truncate` 切掉（用户可见后果与 zh 那条用户裁决的缺陷同类）。
+  // 本组把 en 也纳入断言，并把超预算那条**如实登记为已知边界**（不是"通过"）：
+  // 收短英文措辞会改用户可见文案，属**控制方裁决**（评审原话："改文案要先确认"），
+  // 故实现侧不擅自改；本断言一旦翻红，正是"有人收短了"的信号——那时请把它并入上面的
+  // 预算断言，并同步控制方的裁决记录。兜底机制（标题 title tooltip）由下一条测试锁。
+  it("M2：en 卡名纳入宽度断言——三张在预算内，chanTailscale 超预算是已登记边界（待裁决措辞）", () => {
+    const en = locale("en");
+    for (const k of ["chanLan", "chanQuick", "chanNamed"]) {
+      const name = en.settings.remote[k] as string;
+      expect(
+        widthPx(name),
+        `en 卡名「${name}」≈${widthPx(name).toFixed(1)}px > 卡位 ${TITLE_BUDGET_PX}px，会被 truncate`
+      ).toBeLessThanOrEqual(TITLE_BUDGET_PX);
+    }
+    const tail = en.settings.remote.chanTailscale as string;
+    const w = widthPx(tail);
+    expect(
+      w,
+      `en 卡名「${tail}」≈${w.toFixed(1)}px 已被登记为**超预算边界**（tooltip 兜底）；` +
+        "若它已收短到预算内，请把 en 并入上面的预算断言并撤回本边界登记"
+    ).toBeGreaterThan(TITLE_BUDGET_PX);
+  });
+
+  it("被删掉的限定信息不许丢：备注（chanTailscaleDesc）说明「无需自备域名」", () => {
+    const zh = locale("zh");
+    const en = locale("en");
+    expect(zh.settings.remote.chanTailscaleDesc).toContain("不需要域名");
+    expect(en.settings.remote.chanTailscaleDesc).toMatch(/no domain/i);
+  });
+
+  it("四张卡的标题元素挂原生 title（tooltip 兜底：某语言仍超宽时悬停可见全名）", async () => {
+    render(<RemoteSection />);
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: /enable remote access/i })).toBeEnabled()
+    );
+    const names: Array<[string, string]> = [
+      ["lan", "LAN"],
+      ["quick", "Quick tunnel"],
+      ["named", "Own domain"],
+      ["tailscale", "External domain"],
+    ];
+    for (const [key, name] of names) {
+      // 标题=截断元素本身：title 必须挂在那个 span 上，否则悬停拿不到全名
+      const el = within(card(key)).getByText(name);
+      expect(el.getAttribute("title"), `${key} 卡标题缺 title tooltip`).toBe(name);
+    }
   });
 });
 
@@ -1101,7 +1192,7 @@ describe("RemoteSection 已接入设备列表（M5 A6）", () => {
     expect(await screen.findByText("6 / 7")).toBeTruthy();
   });
 
-  it("via 五值徽标映射：quick→临时隧道、lan→局域网连接、local→本机、named→自有域名、tailscale→外部域名（免域名）；无 via 不渲染徽标", async () => {
+  it("via 五值徽标映射：quick→临时隧道、lan→局域网连接、local→本机、named→自有域名、tailscale→外部域名；无 via 不渲染徽标", async () => {
     render(<RemoteSection />);
     const row1 = (await screen.findByText("JARVIS 的 iPhone")).closest("li")!;
     expect(within(row1).getByText("Quick tunnel")).toBeTruthy();
@@ -1112,7 +1203,7 @@ describe("RemoteSection 已接入设备列表（M5 A6）", () => {
     const row4 = screen.getByText("iPad").closest("li")!;
     expect(within(row4).getByText("Own domain")).toBeTruthy();
     const row6 = screen.getByText("Nas").closest("li")!;
-    expect(within(row6).getByText("External domain (no domain needed)")).toBeTruthy();
+    expect(within(row6).getByText("External domain")).toBeTruthy();
     const row5 = screen.getByText("Legacy").closest("li")!;
     expect(within(row5).queryByText(/tunnel|LAN|machine|domain/i)).toBeNull();
   });

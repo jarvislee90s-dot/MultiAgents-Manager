@@ -151,8 +151,10 @@ export type TsStepState = {
 
 // remote_ts_probe 载荷：platform 三值；windowsVerified=false 时向导顶部显示
 // Windows 弱提示（不许把未验证流程伪装成已验证）。**I-3：Windows 验证位按覆盖面拆细**——
-// windowsVerified = **整条** Windows 流程是否都实机跑过（2026-10-07 的真机探测从第 6 步
-// shields_up 起，故当前为 false）；windowsVerifiedFrom = 实测覆盖从哪一步起；
+// windowsVerified = **整条** Windows 流程是否都实机跑过（2026-10-07 用户卸载后从零走完
+// MAM 向导全程 ⇒ 后端把实测覆盖起点前移到第一步 ⇒ **当前为 true**，弱提示随之撤下；
+// 机制保留：将来又有未实测段落时起点后移，清单非空、提示自动回来）；
+// windowsVerifiedFrom = 实测覆盖从哪一步起（当前 = 第一步 "detect"）；
 // windowsUnverifiedSteps = 没被端到端实机跑过的步骤（前端据此点名，不写死清单文案）。
 // authUrl = 待登录授权链接（login 步「去登录」按钮，MAM 不代登录）；
 // reach = 可达性态（**逐名枚举见上 TsReachability，不写死态数**——M6 纪律；
@@ -187,12 +189,26 @@ export type TsServeEntry = { ours: boolean; label: string };
 export type TsStepResult = {
   ok: boolean;
   approvalUrl?: string | null;
+  /** **login 步的授权链接**（⑤，2026-10-07 用户实测）：新装机器上 `status --json` 的
+   *  `AuthURL` 是**空串**（授权链接要**发起一次交互式登录**才由尾网生成），所以登录步
+   *  不再是"等链接自己出现"——`remote_ts_run_step("login")` 会**后台发起**一次
+   *  `tailscale login`（只 spawn、不等待；argv = `login --timeout 15s`，见 Rust
+   *  `wizard::LOGIN_ARGS`）并**有界轮询**（≤9.5s）把 `AuthURL` 取回来，链接随本字段
+   *  交回前端做成按钮。**MAM 只递链接：不代登录、不持凭据。**
+   *  已登录（Running）时为空串（无需链接）；始终拿不到时也为空串——前端据空串给
+   *  「去本机客户端点 Log in / 稍候重试」的兜底文案（走静态 i18n 键，不渲染 `note`）。
+   *  **M4（2026-10-08 架构评审）：前端把本字段当"过渡回执"用**——立即上墙，但**随下一次
+   *  探测落地作废**（`TailscaleWizard` 的 `receiptGen`/`probeGen`）：权威源永远只有探测
+   *  （`TsWizardProbe.authUrl`），探测说没有链接时不许拿旧回执硬撑（链接会被 tailscaled
+   *  轮换/失效）。 */
   authUrl?: string;
+  /** 本次 login 步**是否发起过**登录尝试（true = 已让尾网去生成链接；false/缺省 =
+   *  已有链接或已登录，未发起）。幂等语义：已有链接时不发起（用户可能正拿着它在浏览器操作）。 */
+  triggered?: boolean;
   /** Tailscale 后端状态（`sys_ext` / `login` 步回读；Deferred 回执里点明「卡在哪个态」） */
   backendState?: string;
   path?: string;
   skipped?: string;
-  triggered?: boolean;
   done?: boolean;
   /** W-A：后端重连/初始化窗口内这一步**没做**（后端拒绝写入，或不判定既有配置形态）——
    *  `true` **不是失败**（回执 `ok: true`），配套 `backendState` + `note` 说明成因；
