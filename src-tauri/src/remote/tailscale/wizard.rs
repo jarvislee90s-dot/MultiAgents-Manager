@@ -11,6 +11,7 @@ use super::status::{
     funnel_status_unreadable, parse_status, run_cli, serve_entries, serve_ownership,
     start_channel_inner, stop_inner, ts_snapshot, FunnelOutcome, ServeResetReport, TsStatus,
 };
+use crate::remote::NoWindow;
 
 // ============================================================
 // 首次配置引导（§C2 一条龙）：平台步骤表 + 安装包资产表 + 逐步探测
@@ -382,7 +383,10 @@ pub(super) fn run_installer(pkg: &std::path::Path) -> Result<(), String> {
         // Windows：msiexec 弹 UAC（per-machine 安装必然提权）。**不加 /qn**——
         // 静默参数是否可用仍在探测中（见探测提示词第 3 步），未实测前一律走交互式
         Platform::Windows => {
+            // 防闪窗：MSI 自己的安装向导 UI 不受影响（CREATE_NO_WINDOW 只抑制
+            // 控制台分配，不抑制 msiexec 的图形界面），少一个多余的 console 壳
             let out = std::process::Command::new("msiexec")
+                .no_window()
                 .arg("/i")
                 .arg(pkg)
                 .output()
@@ -734,6 +738,8 @@ pub(super) fn login_command(bin: &std::path::Path) -> std::process::Command {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // 防闪窗：login 等待者最长存活 15s，漏加 = 一个常驻黑窗（比轮询闪窗更显眼）
+    cmd.no_window();
     // 与 run_cli 同一条 macOS 适配（GUI standalone build 才认这条 CLI 入口）
     #[cfg(target_os = "macos")]
     cmd.env("TAILSCALE_BE_CLI", "1");

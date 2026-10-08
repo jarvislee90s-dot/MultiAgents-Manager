@@ -12,6 +12,7 @@ use std::path::PathBuf;
 
 use super::reach::{current_dns_host, poll_reverify, set_reachability, Reachability};
 use super::wizard::extract_approval_url;
+use crate::remote::NoWindow;
 
 /// `status --json` 的关键字段（只取需要的，不做全量建模）
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -550,6 +551,8 @@ pub(super) fn run_cli_with_timeout(
     let bin = find_cli().ok_or_else(|| "未检测到 Tailscale（尚未安装）".to_string())?;
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // 防闪窗（CREATE_NO_WINDOW）：本函数是轮询热路径（5–60s 一次），漏加就是连环黑窗
+    cmd.no_window();
     #[cfg(target_os = "macos")]
     cmd.env("TAILSCALE_BE_CLI", "1");
     let mut child = cmd

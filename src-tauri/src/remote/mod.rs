@@ -62,6 +62,51 @@ fn max_devices_from_kv() -> usize {
 }
 
 // ============================================================
+// spawn 防闪窗（2026-10-08 实测修复）：Windows 下 GUI 进程 spawn 控制台程序
+// 会新建一个控制台窗口再销毁（黑框一闪），必须 CREATE_NO_WINDOW 抑制——
+// 同 monitor/git.rs 先例。tailscale 通道开着时轮询每 5–60s 一次 CLI 探测
+// （status.rs run_cli），漏加就是用户看到的「连环黑色终端弹窗」。
+// remote 模块所有 spawn 点统一走这里，调用点不用 #[cfg] 门控（非 Windows no-op）。
+// ============================================================
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+pub(crate) trait NoWindow {
+    fn no_window(&mut self) -> &mut Self;
+}
+
+#[cfg(windows)]
+impl NoWindow for std::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        use std::os::windows::process::CommandExt as _;
+        self.creation_flags(CREATE_NO_WINDOW);
+        self
+    }
+}
+
+#[cfg(windows)]
+impl NoWindow for tokio::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        self.creation_flags(CREATE_NO_WINDOW);
+        self
+    }
+}
+
+#[cfg(not(windows))]
+impl NoWindow for std::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        self
+    }
+}
+
+#[cfg(not(windows))]
+impl NoWindow for tokio::process::Command {
+    fn no_window(&mut self) -> &mut Self {
+        self
+    }
+}
+
+// ============================================================
 // 通道独立开关（M5 A5；§C1 追加 tailscale）：KV + 惰性迁移 + bind 派生
 // ============================================================
 

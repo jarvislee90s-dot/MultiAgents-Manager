@@ -1,6 +1,7 @@
 // 外部通道（M4 T1）：cloudflared 获取层 + 隧道进程管理（Task 5）。
 // 设计出处：docs/superpowers/specs/2026-09-16-m4-external-fullchain-design.md T1b/T1c/T1d
 
+use crate::remote::NoWindow;
 use std::path::{Path, PathBuf};
 
 /// 通道三值（remote.channel 的值域；parse_channel 是唯一解析口）
@@ -535,6 +536,8 @@ async fn supervise(mode: String, port: u16, stop: Arc<AtomicBool>) {
         let started_at = std::time::Instant::now();
         let mut cmd = tokio::process::Command::new(&bin);
         cmd.arg("tunnel").arg("--no-autoupdate").kill_on_drop(true); // supervisor 被 abort 时子进程必死（无孤儿）
+                                                                     // 防闪窗：cloudflared 是控制台程序且**常驻运行**（隧道活多久黑窗挂多久）
+        cmd.no_window();
         if mode == KEY_CHANNEL_VALUE_QUICK {
             cmd.arg("--url").arg(format!("http://127.0.0.1:{port}"));
         } else {
