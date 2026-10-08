@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.2] - 2026-10-08
+
+### Fixed
+
+- **Windows 连环黑色终端弹窗修复**：remote 层 spawn 控制台程序（Tailscale CLI 探测 /
+  `tailscale login` 等待者 / msiexec / cloudflared）都没加 `CREATE_NO_WINDOW`——GUI 进程
+  每次 spawn 都会新建一个控制台窗口再销毁，而 Tailscale 通道开着时轮询每 5–60s 探测一次，
+  用户看到的就是「连环黑色终端弹窗」。现统一走 `remote::NoWindow` helper（对齐
+  `monitor/git.rs` 既有先例；非 Windows no-op）。**0.5.0 起即存在**，开发态从终端启动
+  （子进程继承父控制台）不会复现，只在安装版 GUI 进程上显现，故至今才被抓到
+- **检查更新在代理/DNS 污染网络下失败**：取数改双层编排——① 默认管道（环境变量 +
+  Windows/macOS 系统代理，挂 VPN 的正路；hyper-util 注册表读取链路经独立探针实证可用）；
+  ② 失败后 **DoH 解析 + 钉 IP 直连兜底**（复用 `reach.rs` 生产探针：三实测源、IP 字面量、
+  禁系统代理、有界超时；spawn_blocking 包裹防 runtime panic）——实测 DNS 污染网络
+  （TCP 通、TLS 假证书）下钉 IP 直连即 200。两层各自失败原因**带完整错误源链**上报
+  （reqwest 的 Display 只有顶层一句，证书不受信/代理拒连/超时等真正成因在 source 链里，
+  旧实现只插值顶层，「失败原因第一眼可定位」名存实亡）
+
+### Added
+
+- 真机联网用例 `fetches_releases_via_doh_pinned_fallback`（#[ignore]）：锁「DNS 污染
+  环境下钉 IP 兜底拉得到 releases」不回归（不需要代理，与既有 `fetches_releases_through_proxy`
+  互补）
+
 ## [0.5.1] - 2026-10-08
 
 ### Added
