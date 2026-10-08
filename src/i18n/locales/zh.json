@@ -216,6 +216,8 @@
       "enableCloseHint": "显性关闭只停止对外服务：已配对设备在重新开启后自动恢复；「重置设备」或修改访问密码才会清除设备",
       "keepalive": "电源保活",
       "keepaliveHint": "远程开启期间阻止系统与磁盘休眠（屏幕可熄）。macOS 合盖仍会休眠；电池模式下 macOS 需接电源才完整生效、Windows 临界电量会强制睡眠",
+      "signature": "远程消息带设备签名",
+      "signatureHint": "发送时在消息尾部附加 [mobile 设备名] 便于在终端一眼分辨来源；默认关闭以省 token。溯源始终记录在注入审计页，与终端是否留痕无关",
       "hostName": "本机名称",
       "groupGeneral": "① 通用",
       "groupChannels": "② 通道（开关各自独立，可同时开启；点卡片在下方展开详情）",

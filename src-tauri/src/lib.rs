@@ -90,6 +90,10 @@ pub fn run() {
     // **panic 消息也写日志文件**（评审 M3）：默认 panic hook 写 stderr，AttachConsole
     // 竞态下同样会污染外部终端。包一层：先落文件再交还原 hook。
     let panic_target = dirs::home_dir().map(|h| h.join(".mam").join("logs").join("mam.log"));
+    // 默认 hook 在**非 panicking 时**先取下保存——hook 内调用 take_hook 在新版
+    // Rust 会 panic（cannot modify the panic hook from a panicking thread），
+    // 递归 panic 直接 abort 且吞掉真实错误（12:47 启动实录）
+    let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         if let Some(path) = &panic_target {
             if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -101,9 +105,7 @@ pub fn run() {
                 let _ = writeln!(f, "[PANIC] {info}");
             }
         }
-        let hook = std::panic::take_hook();
-        hook(info);
-        // take_hook 后未还——进程即将 abort/unwind，无需复原
+        default_hook(info);
     }));
     database::init();
     // 后台增量导入（仅导入 DB 中不存在的 name）+ 补链，不阻塞启动

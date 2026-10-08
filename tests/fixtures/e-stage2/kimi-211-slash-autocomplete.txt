@@ -1,0 +1,7 @@
+# kimi 2.1.1 斜杠命令键入态 · 纯文本不回车 = 行内自动补全（非完整菜单——戊探D「picker 键入即现」在 2.1.1 过期）· 活体 dump 2026-10-06
+ ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+ │ > /yolo                                                                                                            │
+ │   → yolo        Ask When Needed mode: routine edits and commands run automatically; risky actions, questions,      │
+ │                 and plans still ask.                                                                               │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+Ask When Needed plan  DeepSeek V4.1 Flash thinking: high  C:\Users\bunny\AppData\Local\Temp\probe-kimi-211

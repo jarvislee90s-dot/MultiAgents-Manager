@@ -494,7 +494,25 @@ fn entry_status(e: &KimiWireEntry) -> Option<SessionStatus> {
         "context.append_message" => {
             let msg = e.message.as_ref()?;
             match msg.role.as_deref() {
-                Some("user") => Some(Thinking),
+                // **合成系统提醒不映射状态**（2026-10-06 用户实机 bug 修复）：kimi 会在
+                // turn.ended 之后追加 `<system-reminder> …` 形态的 role=user 消息（打断
+                // 回合收尾/plan 提示等——工具自己注入的上下文，不是用户敲输入）。旧实现
+                // 落到 user → Thinking，且它比 turn.ended 更新 → Idle 信号被永久压住，
+                // 会话卡 busy（用户实机：空闲发消息被误入排队）。真实用户输入有
+                // turn.prompt/turn.steer 信号在（Time 上必然晚于任何 reminder 追加），
+                // 过滤不掉真信号。
+                Some("user") => {
+                    let is_reminder = msg
+                        .content
+                        .as_ref()
+                        .and_then(|c| c.iter().find_map(|p| p.text.as_deref()))
+                        .is_some_and(|t| t.trim_start().starts_with("<system-reminder>"));
+                    if is_reminder {
+                        None
+                    } else {
+                        Some(Thinking)
+                    }
+                }
                 Some("assistant") => {
                     if msg.tool_calls.as_ref().is_some_and(|t| !t.is_empty()) {
                         Some(Processing) // 带工具调用的 assistant 消息 → 工具将执行
@@ -699,6 +717,55 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sessions = run_with_home(tmp.path(), || get_kimi_sessions(&[]));
         assert!(sessions.is_empty());
+    }
+
+    /// **合成系统提醒不得钉死 busy**（2026-10-06 用户实机 bug 回归锁）：kimi 在
+    /// turn.ended 之后追加 `<system-reminder> …`（role=user）——工具自注入的上下文，
+    /// 不是用户输入。旧实现映射 Thinking 且比 turn.ended 更新 → Idle 永久被压住 →
+    /// 空闲会话发消息被误判 busy 入队。真实序列取自 2026-10-06 11:07:40 用户 wire
+    /// （turn.cancel → turn.ended → reminder 追加 → prompt.aborted）。
+    #[test]
+    fn system_reminder_after_turn_end_keeps_idle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(&home).unwrap();
+        let (_, work_dir) = fixture_session(
+            &home,
+            "/work/demo",
+            &[
+                r#"{"type":"turn.prompt","input":[{"type":"text","text":"hi"}],"origin":{"kind":"user"},"time":1782300900000}"#,
+                r#"{"type":"turn.cancel","time":1782300901000}"#,
+                r#"{"type":"turn.ended","turnId":2,"reason":"cancelled","durationMs":100,"time":1782300901500}"#,
+                r#"{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"<system-reminder> The previous turn was interrupted by the user before completion; any partial output shown above is incomplete. The user's next message continues the conversation. </system-reminder>"}]},"time":1782300902000}"#,
+                r#"{"type":"prompt.aborted","time":1782300902500}"#,
+            ],
+        );
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(4243, &work_dir)])
+        });
+        assert_eq!(sessions.len(), 1);
+        // 倒扫穿过 reminder（不映射）命中 turn.ended → Idle（旧实现此处为 Thinking）
+        assert_eq!(sessions[0].status, SessionStatus::Idle);
+    }
+
+    /// 真实用户输入（非 reminder 的 role=user）仍映射 Thinking——过滤不得误伤真信号。
+    #[test]
+    fn real_user_message_still_maps_thinking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("kimi-home");
+        fs::create_dir_all(&home).unwrap();
+        let (_, work_dir) = fixture_session(
+            &home,
+            "/work/demo",
+            &[
+                r#"{"type":"turn.ended","turnId":1,"reason":"completed","durationMs":500,"time":1782300900000}"#,
+                r#"{"type":"context.append_message","message":{"role":"user","content":[{"type":"text","text":"继续"}]},"time":1782300901000}"#,
+            ],
+        );
+        let sessions = run_with_home(&home, || {
+            get_kimi_sessions(&[fake_process(4244, &work_dir)])
+        });
+        assert_eq!(sessions[0].status, SessionStatus::Thinking);
     }
 
     #[test]

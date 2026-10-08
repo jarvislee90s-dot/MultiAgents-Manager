@@ -73,6 +73,9 @@ const TUNNEL_TOKEN_KEY = "remote.tunnel_token";
 // 电源保活：与 Rust 端 remote::power::KEY_KEEPALIVE 对齐；默认开，
 // 后端 should_acquire（None/乱串 → true）是唯一口径，前端仅同步展示
 const KEEPALIVE_KEY = "remote.keepalive";
+// 远程消息设备签名开关（2026-10-05 用户裁决）：默认关（省 token；溯源在注入审计页）——
+// 与 Rust 侧 normalize::message_signature_enabled 的 KV 键/取值逐字对齐
+const SIGNATURE_KEY = "remote_message_signature";
 // P7 门特征文案（与 Rust PUBLIC_ACK_REQUIRED_MSG 单点常量同源的前缀特征）：前端只做
 // includes 判别分流弹既有 TLS Dialog，不复制门槛判定——文案漂移由后端常量保证
 const PUBLIC_ACK_FEATURE = "对外绑定需先确认已配置 TLS 反向代理";
@@ -201,6 +204,8 @@ export function RemoteSection() {
   const [status, setStatus] = useState<RemoteStatus | null>(null);
   // 电源保活开关（默认开）：受控 Switch，加载回填、切换落盘
   const [keepalive, setKeepalive] = useState(true);
+  // 设备签名开关（默认关）：受控 Switch，加载回填、切换落盘
+  const [signature, setSignature] = useState(false);
   // 本机名称：受控输入，加载回填、blur 落盘；未设置时默认系统名（host.name）
   const [hostName, setHostName] = useState("");
   const hostNameSavedRef = useRef(false);
@@ -268,6 +273,7 @@ export function RemoteSection() {
   // 保活回填：进面板读一次；null/非 "false" → 默认开（与后端 fail-safe 口径一致）
   useEffect(() => {
     void (async () => setKeepalive((await getSetting(KEEPALIVE_KEY)) !== "false"))();
+    void (async () => setSignature((await getSetting(SIGNATURE_KEY)) === "on"))();
   }, []);
 
   // 本机名回填：已存值优先；未设置 → 后续 effect 以系统名（status.host.name）兜底
@@ -479,6 +485,16 @@ export function RemoteSection() {
     try {
       await setSetting(KEEPALIVE_KEY, v ? "true" : "false");
       setKeepalive(v);
+    } catch (e) {
+      toast.error(formatInvokeError(e, t));
+    }
+  };
+
+  // 设备签名开关落盘：on/off 两值（Rust 侧只认 "on"，缺省关）
+  const changeSignature = async (v: boolean) => {
+    try {
+      await setSetting(SIGNATURE_KEY, v ? "on" : "off");
+      setSignature(v);
     } catch (e) {
       toast.error(formatInvokeError(e, t));
     }
@@ -716,6 +732,19 @@ export function RemoteSection() {
           checked={keepalive}
           disabled={!status}
           onCheckedChange={(v) => void changeKeepalive(v)}
+        />
+      </div>
+      <div className="flex items-center justify-between gap-4 py-3">
+        <div className="flex-1">
+          <label className="text-sm font-semibold">{t("settings.remote.signature")}</label>
+          <p className="text-muted-foreground mt-0.5 text-xs">
+            {t("settings.remote.signatureHint")}
+          </p>
+        </div>
+        <Switch
+          aria-label={t("settings.remote.signature")}
+          checked={signature}
+          onCheckedChange={(v) => void changeSignature(v)}
         />
       </div>
       <div className="flex items-center justify-between gap-4 py-3">

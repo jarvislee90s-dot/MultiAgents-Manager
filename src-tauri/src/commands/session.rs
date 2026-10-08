@@ -401,7 +401,7 @@ pub async fn session_open(session_id: String) -> Result<(), String> {
 
 /// 从进程快照收集运行会话的 (工具id, 项目目录名)——仅进程扫描，无文件解析开销
 #[cfg(windows)]
-fn running_projects_from_processes(system: &sysinfo::System) -> Vec<(String, String)> {
+pub(crate) fn running_projects_from_processes(system: &sysinfo::System) -> Vec<(String, String)> {
     use crate::monitor::process as monitor_process;
     let mut v = Vec::new();
     for (agent, procs) in [

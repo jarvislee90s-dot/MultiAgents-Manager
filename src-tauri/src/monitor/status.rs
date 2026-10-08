@@ -15,9 +15,20 @@ pub fn has_tool_use(content: &serde_json::Value) -> bool {
     has_block_of_type(content, "tool_use")
 }
 
-/// 检查是否所有 tool_use 都是用户输入类工具（如 AskUserQuestion）— 这些应算 Waiting
+/// 检查所有 tool_use 是否都是「等用户输入」类工具——这些应算 Waiting
+///
+/// 工具表（名字级判定，与 claude 官方工具名精确匹配）：
+/// - `AskUserQuestion`：问答等待（K1 既有）；
+/// - `ExitPlanMode`（2026-10-04 增补）：**计划批准等待**——claude 写出计划后尾挂
+///   ExitPlanMode tool_use 且无 tool_result 时，终端停在本机计划批准对话框
+///   （"Claude has written up a plan… Would you like to proceed?" 1/2/3 选项）等用户
+///   裁决。此前该形态落 Processing（黄），导致：看板不亮红、审批卡 waiting 门
+///   （`remote/api.rs` approve_options_scan + 移动端 `approveMounted`）永不打开——
+///   **用户在手机上没有任何入口批准计划**（手工验收实测）。落 Waiting 后红灯/
+///   提示音/审批卡全链打通；用户在终端批准后 tool_result 落盘，尾部形态解除，
+///   状态自然回落。
 pub fn is_waiting_for_user_input(content: &serde_json::Value) -> bool {
-    let user_input_tools = ["AskUserQuestion"];
+    let user_input_tools = ["AskUserQuestion", "ExitPlanMode"];
     if let serde_json::Value::Array(arr) = content {
         let tool_use_blocks: Vec<_> = arr
             .iter()
@@ -276,5 +287,57 @@ mod tests {
             determine_status(None, false, false, false, false, false, false, false),
             SessionStatus::Waiting
         );
+    }
+
+    #[test]
+    fn exit_plan_mode_pending_is_waiting_for_user_input() {
+        // 2026-10-04：计划批准等待（尾挂 ExitPlanMode 无 tool_result）→ Waiting——
+        // 修复「手机上没有任何入口批准计划」（手工验收实测：此前落 Processing 黄）
+        let plan_pending = serde_json::json!([
+            {
+                "type": "tool_use",
+                "id": "t1",
+                "name": "ExitPlanMode",
+                "input": { "plan": "# 计划\n\n- 第一步" }
+            }
+        ]);
+        assert!(is_waiting_for_user_input(&plan_pending));
+        assert_eq!(
+            determine_status(
+                Some("assistant"),
+                true,  // has_tool_use
+                false, // last_has_text
+                false, // last_has_tool_result
+                false,
+                false,
+                true, // is_user_input_tool（claude_parser 传 is_waiting_for_user_input 的结果）
+                false
+            ),
+            SessionStatus::Waiting
+        );
+    }
+
+    #[test]
+    fn exit_plan_mode_mixed_with_other_tools_is_not_waiting() {
+        // 保守条件不动：ExitPlanMode 与其他 pending 工具混在同一条 assistant →
+        // 不算「等用户输入」（全块均 user-input 才 Waiting）
+        let mixed = serde_json::json!([
+            { "type": "tool_use", "id": "t1", "name": "Bash", "input": {} },
+            { "type": "tool_use", "id": "t2", "name": "ExitPlanMode", "input": { "plan": "x" } }
+        ]);
+        assert!(!is_waiting_for_user_input(&mixed));
+    }
+
+    #[test]
+    fn ask_user_question_still_waiting_and_other_tools_not() {
+        // 既有语义回归锁：AskUserQuestion 单挂 → Waiting；普通工具单挂 → 不 Waiting
+        let auq = serde_json::json!([
+            { "type": "tool_use", "id": "t1", "name": "AskUserQuestion", "input": {} }
+        ]);
+        assert!(is_waiting_for_user_input(&auq));
+        let bash = serde_json::json!([
+            { "type": "tool_use", "id": "t1", "name": "Bash", "input": {} }
+        ]);
+        assert!(!is_waiting_for_user_input(&bash));
     }
 }

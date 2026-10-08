@@ -142,6 +142,7 @@ function installFetch() {
         JSON.stringify({
           host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
           enabledTools: [],
+          installedTools: ["claude", "codex", "kimi", "opencode"],
         }),
         { status: 200 }
       );
@@ -1176,6 +1177,7 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
           JSON.stringify({
             host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
             enabledTools: [],
+            installedTools: ["claude", "codex", "kimi", "opencode"],
           }),
           { status: 200 }
         );
@@ -1660,6 +1662,34 @@ describe("SessionDetail：过程一键折叠（2026-09-20）", () => {
     expect(screen.queryByText("内部思考内容")).toBeNull();
   });
 
+  it("运行态含 tool-result（wire 默认展开）：「过程折叠」真收起（2026-10-04 no-op 修复）", async () => {
+    installFetch();
+    routes.messages = [
+      msg({ seq: 0, kind: "user", content: "查一下" }),
+      msg({ seq: 1, kind: "tool-result", content: "工具输出正文" }),
+      msg({ seq: 2, kind: "assistant", content: "结论" }),
+    ];
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    await screen.findByText("结论");
+    const toggle = () => screen.getByTestId("process-collapse-toggle");
+    // 默认 tool-result 展开（wire collapsed=false）→ 按钮显示「过程折叠」；
+    // 旧实现此处点击 = 清覆盖表回落默认 = no-op（根因），修复后必须真收起
+    expect(screen.getByText("工具输出正文")).toBeTruthy();
+    expect(toggle().getAttribute("aria-label")).toBe("折叠全部过程");
+    fireEvent.click(toggle());
+    expect(screen.queryByText("工具输出正文")).toBeNull();
+    expect(toggle().getAttribute("aria-label")).toBe("展开全部过程");
+    // 单条手动展开（override）→ 计数变 → 按钮回到「过程折叠」；再点全收仍生效
+    fireEvent.click(screen.getByTestId("msg-1-toggle"));
+    expect(screen.getByText("工具输出正文")).toBeTruthy();
+    expect(toggle().getAttribute("aria-label")).toBe("折叠全部过程");
+    fireEvent.click(toggle());
+    expect(screen.queryByText("工具输出正文")).toBeNull();
+    // 「过程展开」恢复：全部强制展开（含 wire 默认折叠的 thinking/tool-call）
+    fireEvent.click(toggle());
+    expect(screen.getByText("工具输出正文")).toBeTruthy();
+  });
+
   it("无过程消息（纯 user/assistant）：折叠开关不渲染", async () => {
     installFetch();
     routes.messages = [
@@ -1888,6 +1918,7 @@ describe("SessionDetail：活状态流（T1）", () => {
             JSON.stringify({
               host: { name: "n", platform: "windows", version: "0", bootId: "boot-test" },
               enabledTools: ["claude"],
+              installedTools: ["claude", "codex", "kimi", "opencode"],
             }),
             { status: 200 }
           );
@@ -2438,15 +2469,32 @@ describe("SessionDetail：计划待确认挂载门的真机状态矩阵（丁T2 
     expect(screen.queryByTestId("approve-card")).toBeNull();
   });
 
-  // 反向锁：**idle 不等于放宽一切**——claude 的预期态门本就不成立（非计划对话框族），
-  // 且 claude 未落 Waiting 时不得借 idle 冒卡（零回归）。
-  it("claude idle + 尾部计划：不挂载（门仍按计划对话框族收窄——零回归）", async () => {
+  // 2026-10-04 翻转（审批卡不出修复）：claude **入**计划预期态门——其计划批准等待
+  // 的挂载面与后端扫描器 claude_plan_pending 同判据（实况取证：标记 0 行、detect
+  // 对原生 UI 文案恒 miss，旧依据「Waiting + detect 就够」已被证伪）。真机常态下
+  // 状态层（ExitPlanMode→Waiting）已亮红灯，本用例锁的是 idle+尾计划的**陈旧窗口**
+  // 也照样挂载（后端 available 裁决不变——门放宽只多一次 GET，卡自隐兜底）。
+  it("claude idle + 尾部计划：挂载计划待确认卡（2026-10-04 入族翻转）", async () => {
     installFetch();
     routes.messages = [planMsg(0, "# claude 的计划")];
     routes.approveOptions = realPlanPendingPayload;
     render(
       <SessionDetail
         session={makeSession({ status: "idle", agentType: "claude" })}
+        onBack={() => {}}
+      />
+    );
+    expect(await screen.findByTestId("approve-plan-pending")).toBeTruthy();
+  });
+
+  // 反向锁（保留）：**finished 仍排除**对 claude 同样生效——会话真结束不挂载不打 GET
+  it("claude finished + 尾部计划：不挂载（finished 排除对全工具一致）", async () => {
+    installFetch();
+    routes.messages = [planMsg(0, "# claude 的旧计划")];
+    routes.approveOptions = realPlanPendingPayload;
+    render(
+      <SessionDetail
+        session={makeSession({ status: "finished", agentType: "claude" })}
         onBack={() => {}}
       />
     );
@@ -2504,13 +2552,15 @@ describe("丁T2 N2：isPlanPending 与后端判据的跨语言共享夹具锁", 
     expect(seenLenientOnly).toBe(1);
   });
 
-  it("共享夹具的工具族名单：非 codex/kimi 一律不参与（与后端 plan_dialog_family 同名单）", () => {
+  it("共享夹具的工具族名单：非计划族一律不参与（族内 = codex/kimi + claude，2026-10-04 起claude 入族）", () => {
     for (const tool of planPendingCases.non_plan_tools) {
       // 用一条「在场」夹具驱动：工具不在族内 → 恒 false
       expect(isPlanPending([m("plan")], tool)).toBe(false);
     }
-    // 族内两家：同一夹具恒 true（对照，防「全员 false」的假绿）
-    for (const tool of ["codex", "kimi"]) {
+    // 族内三家：同一夹具恒 true（对照，防「全员 false」的假绿）。claude 2026-10-04
+    // 起入族（审批卡不出修复——其计划批准等待的挂载门与后端扫描器 claude_plan_pending
+    // 同判据；当年排除 claude 的依据已被实况证伪，见 isPlanPending 注释）
+    for (const tool of ["codex", "kimi", "claude"]) {
       expect(isPlanPending([m("plan")], tool)).toBe(true);
     }
     // 缺省/ null 工具 → 不放宽（不在族内）

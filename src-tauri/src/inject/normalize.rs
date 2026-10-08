@@ -51,12 +51,31 @@ fn is_strippable_control(c: char) -> bool {
 ///
 /// 设备花名同样归一：昵称来自手机端用户输入，可能含换行，不得破坏单行不变量。
 pub fn compose_injection(device_name: &str, text: &str) -> String {
+    compose_injection_flagged(device_name, text, true)
+}
+
+/// 带**签名开关**的组装变体（2026-10-05 用户裁决）：`signature=false`（设置
+/// 「远程消息带设备签名」关闭）→ 普通消息也**裸注入**——签名是纯溯源便利，
+/// 每条都吃 token；溯源真源在注入审计页（设备名逐条在账），终端不留痕可接受
+/// （与斜杠命令的裸注入同一裁决口径）。队列存的是 compose 产物 → 开关在入队
+/// 时刻生效（已入队消息维持入队时形态，语义自洽）。
+pub fn compose_injection_flagged(device_name: &str, text: &str, signature: bool) -> String {
     let body = normalize_newlines(text);
-    if is_slash_message(text) {
-        // 裸注入：不加签名（斜杠命令的任何附加文本都会使其失效）
+    if is_slash_message(text) || !signature {
+        // 裸注入：不加签名（斜杠命令的任何附加文本都会使其失效；签名关闭同理）
         return body;
     }
     format!("{} [mobile {}]", body, normalize_newlines(device_name))
+}
+
+/// 「远程消息带设备签名」设置的**读取单点**（api.rs 两处 compose 调用共用）：
+/// settings KV `remote_message_signature`，缺省 **off**（2026-10-05 用户裁决——
+/// 默认省 token，想要溯源签名的用户在设置里打开）。**连接注入式**（调用方经
+/// `RemoteState.store.with` 传入——测试内存库零接触真实 `~/.mam`，生产=全局库）。
+pub(crate) fn message_signature_enabled_conn(conn: &rusqlite::Connection) -> bool {
+    crate::database::dao::settings::get_setting_conn(conn, "remote_message_signature")
+        .map(|v| v == "on")
+        .unwrap_or(false)
 }
 
 /// 是否「斜杠命令消息」（裁2 的裸注入判据，**单点**——compose 分流与审计 action 取用
@@ -194,6 +213,26 @@ mod tests {
             " /permissions [mobile iPhone]",
             "前导空白不跳过（带空格的输入本就无法触发命令）"
         );
+    }
+
+    /// 签名开关（2026-10-05 用户裁决）：`signature=false` → 普通消息也裸注入——
+    /// 每条消息的 `[mobile X]` 尾签是纯溯源便利，默认关以省 token；溯源真源在
+    /// 注入审计页（设备名逐条在账）。斜杠命令在开关开/关两态下都必须裸注入。
+    #[test]
+    fn compose_flagged_signature_off_is_bare() {
+        use super::compose_injection_flagged as compose;
+        assert_eq!(
+            compose("iPhone", "帮我看看这个文件", false),
+            "帮我看看这个文件"
+        );
+        assert_eq!(
+            compose("iPhone", "帮我看看这个文件", true),
+            "帮我看看这个文件 [mobile iPhone]",
+            "开关开 = 既有签名形态（compose_injection 兼容壳同款）"
+        );
+        // 斜杠命令两态都裸（签名开关不得给命令追加任何文本）
+        assert_eq!(compose("iPhone", "/plan", false), "/plan");
+        assert_eq!(compose("iPhone", "/plan", true), "/plan");
     }
 
     /// `is_slash_message` 与 compose 的裸注入判据同源（单点判据的自锁）：
