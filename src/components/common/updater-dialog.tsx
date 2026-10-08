@@ -281,7 +281,9 @@ export function useManualUpdateCheck() {
       return;
     }
     if (r.status === "error") {
-      toast.error(t("updater.checkFailed"));
+      // Rust 侧 message 自带定位线索（如「GitHub API 请求失败: connection refused」），
+      // 不吞细节——弱网/代理/hosts 屏蔽场景用户第一眼就能看出卡在哪
+      toast.error(t("updater.checkFailed", { message: r.message }));
     }
     // available → UpdaterDialog（manualCheck 模式）自动弹窗
   };

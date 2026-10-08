@@ -10,13 +10,20 @@
 // T8 下载中禁关：ESC 不关弹窗（无取消下载手段，误关只留进度黑洞；评审 Minor 回归锁）
 // T7 手动二次检查（About 场景）：首查 up-to-date 不弹，再查 available 重开弹窗（评审 I5 回归锁）
 // T6 徽标：无更新不渲染；有更新渲染（含被忽略版本）且点击置 dialogOpen
+// T9 手动检查失败：toast 带具体原因（Rust message 不吞，弱网/代理/hosts 场景定位用）
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
-import { UpdaterDialog } from "@/components/common/updater-dialog";
+import { toast } from "sonner";
+import { UpdaterDialog, useManualUpdateCheck } from "@/components/common/updater-dialog";
 import { MainTitleBar } from "@/components/common/main-title-bar";
 import { useUpdaterStore } from "@/stores/updaterStore";
 import type { UpdateCheckResult } from "@/lib/updater";
+
+// toast 断言走 mock（同 bellJump 等既有模式；真 sonner 无 Toaster 挂载时无法断言）
+vi.mock("sonner", () => ({
+  toast: { error: vi.fn(), info: vi.fn(), success: vi.fn() },
+}));
 
 // tests/setup.ts 未初始化 i18n，显式引入并固定中文（文案按 zh 断言）
 import i18n from "@/i18n";
@@ -45,12 +52,13 @@ const AVAILABLE: Extract<UpdateCheckResult, { status: "available" }> = {
   },
 };
 
-/** 每用例的 mock 形态：检查结果 + 已忽略版本（含 install 失败/挂起） */
+/** 每用例的 mock 形态：检查结果 + 已忽略版本（含 install 失败/挂起、check 失败原因） */
 const mode = {
   upToDate: false,
   skipped: null as string | null,
   installReject: null as string | null,
   installHang: false,
+  checkError: null as string | null,
 };
 
 beforeAll(async () => {
@@ -63,6 +71,10 @@ beforeEach(() => {
   mode.skipped = null;
   mode.installReject = null;
   mode.installHang = false;
+  mode.checkError = null;
+  vi.mocked(toast.error).mockClear();
+  vi.mocked(toast.info).mockClear();
+  vi.mocked(toast.success).mockClear();
   useUpdaterStore.setState({
     result: null,
     checking: false,
@@ -76,22 +88,27 @@ beforeEach(() => {
   vi.mocked(invoke).mockImplementation((cmd: string, args?: unknown) => {
     switch (cmd) {
       case "check_for_github_update":
+        if (mode.checkError) {
+          return Promise.resolve({ status: "error", message: mode.checkError });
+        }
         return Promise.resolve(
           mode.upToDate
-            ? { status: "up-to-date", currentVersion: "0.5.0-beta.1", latestVersion: "0.5.0-beta.1" }
-            : AVAILABLE,
+            ? {
+                status: "up-to-date",
+                currentVersion: "0.5.0-beta.1",
+                latestVersion: "0.5.0-beta.1",
+              }
+            : AVAILABLE
         );
       case "get_setting":
         return Promise.resolve(
-          (args as { key?: string })?.key === "updater_skipped_version" ? mode.skipped : null,
+          (args as { key?: string })?.key === "updater_skipped_version" ? mode.skipped : null
         );
       case "set_setting":
         return Promise.resolve(undefined);
       case "install_github_update":
         if (mode.installHang) return new Promise(() => {});
-        return mode.installReject
-          ? Promise.reject(mode.installReject)
-          : Promise.resolve(undefined);
+        return mode.installReject ? Promise.reject(mode.installReject) : Promise.resolve(undefined);
       default:
         return Promise.resolve(undefined);
     }
@@ -102,7 +119,7 @@ beforeEach(() => {
 async function waitForCheck() {
   await waitFor(() => {
     expect(useUpdaterStore.getState().result?.status).toBe(
-      mode.upToDate ? "up-to-date" : "available",
+      mode.upToDate ? "up-to-date" : "available"
     );
     expect(useUpdaterStore.getState().skippedLoaded).toBe(true);
   });
@@ -169,9 +186,7 @@ describe("UpdaterDialog 自动模式（home 挂载）", () => {
     await waitFor(() => {
       expect(screen.queryByText("发现新版本")).not.toBeInTheDocument();
     });
-    const calls = vi.mocked(invoke).mock.calls.filter(
-      ([cmd]) => cmd === "set_setting",
-    );
+    const calls = vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === "set_setting");
     expect(calls).toHaveLength(0);
     expect(useUpdaterStore.getState().skippedVersion).toBeNull();
   });
@@ -236,20 +251,52 @@ describe("UpdaterDialog 自动模式（home 挂载）", () => {
     });
     expect(await screen.findByText("发现新版本")).toBeInTheDocument();
   });
+
+  it("T9 手动检查失败：toast 带具体原因，不吞 Rust 侧错误细节", async () => {
+    mode.checkError = "GitHub API 请求失败: connection refused";
+    // About 页的按钮形态：useManualUpdateCheck 消费检查结果并 toast
+    function ManualProbe() {
+      const { checkUpdate, checking } = useManualUpdateCheck();
+      return (
+        <button onClick={checkUpdate} disabled={checking}>
+          检查更新
+        </button>
+      );
+    }
+    render(<ManualProbe />);
+    fireEvent.click(screen.getByRole("button", { name: "检查更新" }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        "检查更新失败：GitHub API 请求失败: connection refused"
+      );
+    });
+    // 失败不弹升级弹窗（store 只落 error 结果）
+    expect(useUpdaterStore.getState().result?.status).toBe("error");
+    expect(screen.queryByText("发现新版本")).not.toBeInTheDocument();
+  });
 });
 
 describe("标题栏升级徽标", () => {
   it("T6 无更新不渲染；有更新渲染（含被忽略版本）且点击打开弹窗", async () => {
     // 无更新：不渲染徽标（直接置检查结果，徽标不依赖自动检查）
     useUpdaterStore.setState({
-      result: { status: "up-to-date", currentVersion: "0.5.0-beta.1", latestVersion: "0.5.0-beta.1" },
+      result: {
+        status: "up-to-date",
+        currentVersion: "0.5.0-beta.1",
+        latestVersion: "0.5.0-beta.1",
+      },
     });
     const { unmount } = render(<MainTitleBar />);
     expect(screen.queryByTitle(/发现新版本/)).not.toBeInTheDocument();
     unmount();
 
     // 有更新（且该版本已被忽略——徽标不受忽略影响）：渲染 + 点击置 dialogOpen
-    useUpdaterStore.setState({ result: AVAILABLE, skippedVersion: "0.5.0-beta.1", skippedLoaded: true });
+    useUpdaterStore.setState({
+      result: AVAILABLE,
+      skippedVersion: "0.5.0-beta.1",
+      skippedLoaded: true,
+    });
     render(<MainTitleBar />);
 
     const badge = screen.getByTitle("发现新版本 0.5.0-beta.1，点击查看");

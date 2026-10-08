@@ -55,7 +55,7 @@
   "updater": {
     "checkForUpdates": "检查更新",
     "checking": "检查中...",
-    "checkFailed": "检查更新失败。",
+    "checkFailed": "检查更新失败：{{message}}",
     "upToDate": "您正在使用最新版本！",
     "updateAvailable": "发现新版本",
     "prerelease": "预发布",

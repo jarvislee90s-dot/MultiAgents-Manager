@@ -480,4 +480,27 @@ mod tests {
         )
         .is_err());
     }
+
+    // 真机联网用例（#[ignore]：CI 与常规回归不跑）——锁「配置了代理就拉得到 releases」
+    // 不回归（用户挂代理场景）。reqwest 启用了 system-proxy（Cargo.toml M4 T1d），
+    // 默认客户端读环境变量与 Windows 注册表 / macOS 系统代理；注册表层无法在测试里
+    // 模拟，环境变量路径由本用例覆盖（同一套 Proxy::system 管道）：
+    //   HTTPS_PROXY=http://127.0.0.1:<port> cargo test --lib \
+    //     commands::updater::tests::fetches_releases_through_proxy -- --ignored --nocapture
+    #[test]
+    #[ignore = "需真机联网、GitHub API 可达且已设置代理环境变量；验证代理链路时手动运行"]
+    fn fetches_releases_through_proxy() {
+        // 前置断言：直连可达 GitHub 时本用例不带代理也会绿，测试名承诺的「经代理」
+        // 就锁空了——缺代理环境变量的误跑必须快速失败，不给假阳性
+        let has_proxy_env = ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+            .iter()
+            .any(|k| std::env::var(k).is_ok());
+        assert!(
+            has_proxy_env,
+            "请先设置 HTTPS_PROXY（或 ALL_PROXY）指向可达 GitHub 的代理，再运行本用例"
+        );
+        let releases = tauri::async_runtime::block_on(fetch_github_releases())
+            .expect("经代理拉取 GitHub releases 失败");
+        assert!(!releases.is_empty(), "releases 列表不应为空");
+    }
 }
