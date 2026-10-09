@@ -180,12 +180,12 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           body_path: ${{ env.RELEASE_BODY_PATH }}
-          # 草稿优先：云端编译产物先落 draft release，人工下载验收后再发布；
-          # 发布前 latest.json 不会被 updater 的 releases/latest 端点拾取（草稿不可见）。
-          # 注意：v2 对已存在的 release 只覆盖 assets，不覆盖 body（'update' 输入已移除）；
-          # draft 的初始 body 请用 docs/release-notes/v{VERSION}.md 内容手动预填，
-          # 或发布前手动 gh release edit 覆盖
-          draft: true
+          # 直接发正式版（用户裁决 2026-10-10：不再走草稿人工验收）。注意时序：
+          # 本 job 先发布 release，assemble-latest-json 随后补传 latest.json——
+          # 间隙内 latest.json 暂缺，updater 侧表现为「暂无更新」，数秒后自愈。
+          # v2 对已存在的 release 只覆盖 assets 不覆盖 body；body 由 body_path 在
+          # 创建时写入（内容 = docs/release-notes/v{VERSION}.md）
+          draft: false
           prerelease: false
           files: release-assets/*
         env:
