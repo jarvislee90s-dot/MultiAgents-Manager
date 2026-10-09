@@ -27,7 +27,7 @@ pub struct StoreIndex {
 fn store_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam/store/index.json")
+        .join(".tuvis/store/index.json")
 }
 
 pub fn read_index() -> Result<serde_json::Value, String> {

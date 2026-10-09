@@ -30,7 +30,7 @@ const measure: MeasureText = (text) => text.length * 10;
 /** 布局入参：与 `usage-export-layout.test.ts` 同形（这里的关注点是「画得对不对」） */
 function input(over: Partial<ExportInput> = {}): ExportInput {
   return {
-    brand: "MAM · 用量看板",
+    brand: "兔维斯 · 用量看板",
     rangeLabel: "近 7 天 · 09/27 – 10/03",
     heroLabel: "近 7 天 Token 合计",
     hero: "2,036,981",

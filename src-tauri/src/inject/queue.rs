@@ -45,7 +45,7 @@
 //! 2. `session_queue_jump`：同门（jump 是插队，绕过 is_running 但不该绕过对话框）；
 //! 3. 前端 `handleJump`：与 `handleSend` 共用 `probeCardPresence`（提示条 + 拦截回执）。
 //!
-//! 测试策略（零接触真实 ~/.mam）：`flush_one` 的 DB 依赖经 `RemoteState.store`
+//! 测试策略（零接触真实 ~/.tuvis）：`flush_one` 的 DB 依赖经 `RemoteState.store`
 //! （生产 = `DeviceStore::Global` 即全局 DB 同锁同连接；测试 = 内存库，端点测试
 //! 不触真实目录），单测另可拆分内核 [`try_flush`]（快照复核 + 注入 + A1 确认，
 //! 零 DB）+ [`settle`]（落账 + 审计，conn 显式注入内存库）直接驱动；两者的组合即
@@ -571,7 +571,7 @@ pub(crate) fn settle(
 ///   端点按 queued 回执，挂起项由 flush 循环/对账接力）。
 ///
 /// DB 依赖经 `st.store`：生产 `DeviceStore::Global`（即全局 DB 同锁同连接），
-/// 测试注入内存库（端点测试零接触真实 ~/.mam）。
+/// 测试注入内存库（端点测试零接触真实 ~/.tuvis）。
 pub fn flush_one(
     st: &crate::remote::server::RemoteState,
     session_id: &str,
@@ -981,7 +981,7 @@ mod tests {
         assert!(!is_input_ready_str("bogus"), "未知串保守不触发 flush");
     }
 
-    // ==== 拆分内核驱动（Fake session_source + FakeInjector + 内存 DB，零接触真实 ~/.mam） ====
+    // ==== 拆分内核驱动（Fake session_source + FakeInjector + 内存 DB，零接触真实 ~/.tuvis） ====
 
     /// 注入器假体：记录 locate_and_inject 调用（pid, text）与**按键调用**（T9 序
     /// 判定用）；fail=Some 时注入恒 Err；key_fail=Some 时按键恒 Err

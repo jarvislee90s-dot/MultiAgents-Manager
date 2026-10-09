@@ -9,7 +9,7 @@
 // 2026-10-07 的事故链是这样的：改依赖（摘掉 `@tauri-apps/plugin-global-shortcut`）⇒ Vite 的
 // 预打包依赖缓存失效并重建 ⇒ **dev server 重建后不再应答**（进程活着、状态 `U`、
 // 1420 端口 IPv4/IPv6 探活全部超时）⇒ WebView 请求 `index.html` 永远不完成 ⇒ **所有窗口空白**。
-// 因为 MAM 的窗口都是 `transparent: true`，空白看起来就是「看板是透明的」「宠物不显示」——
+// 因为 兔维斯 的窗口都是 `transparent: true`，空白看起来就是「看板是透明的」「宠物不显示」——
 // 两个症状一个根因，而**根因在 dev server，不在应用代码**。
 //
 // ## 它做两件事（都只在**明确信号**下动手，宁可不动也不误伤）
@@ -57,7 +57,8 @@ function isOurVite(pid) {
   }
 }
 
-/** 本仓的 **dev app 孤儿**（`target/debug/multi-agents-manager`）：dev 会话被 Ctrl+C 之后它常常活下来，
+/** 本仓的 **dev app 孤儿**（`target/debug/tuvis`，含改名前的 `multi-agents-manager` 旧产物）：
+ *  dev 会话被 Ctrl+C 之后它常常活下来，
  *  而它此时已经**加载不到任何页面**（dev server 没了）⇒ 所有窗口空白，且占着托盘/SQLite。
  *  只杀 dev 构建产物，**不碰** Release 安装版（路径不同）。 */
 function killStaleDevApp() {
@@ -65,7 +66,7 @@ function killStaleDevApp() {
   let pids = "";
   try {
     pids = execSync(
-      `pgrep -f "${ROOT}/src-tauri/target/debug/multi-agents-manager"`,
+      `pgrep -f "${ROOT}/src-tauri/target/debug/(multi-agents-manager|tuvis)"`,
       { encoding: "utf8" }
     ).trim();
   } catch {

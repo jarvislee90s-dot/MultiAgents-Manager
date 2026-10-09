@@ -2,7 +2,7 @@
 // 覆盖：空名保存不触发 create_preset；填名+勾项+工具私有类型 → create_preset 以含 meta
 // 的 camelCase args 调用；工具私有模式不适配（exclusiveTools 不含绑定工具）资源置灰 +
 // 原生技能分组（isNative && sourceTool === boundTool）；final review Finding 2 回归锁：
-// 工具私有勾选原生项后切「通用」，原生项不随保存泄漏进通用预设（spec §3.3 通用 = 仅 MAM 资源）
+// 工具私有勾选原生项后切「通用」，原生项不随保存泄漏进通用预设（spec §3.3 通用 = 仅 兔维斯 资源）
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -145,7 +145,7 @@ describe("PresetEditDialog（新建/编辑共用）", () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 
-  it("工具私有模式不适配置灰：exclusiveTools 不含绑定工具的 MAM 资源 disabled；原生技能组按 sourceTool 归属出现", async () => {
+  it("工具私有模式不适配置灰：exclusiveTools 不含绑定工具的 兔维斯 资源 disabled；原生技能组按 sourceTool 归属出现", async () => {
     renderDialog();
     expect(await screen.findByText("skill-alpha")).toBeInTheDocument();
     selectToolScope("codex");
@@ -170,10 +170,10 @@ describe("PresetEditDialog（新建/编辑共用）", () => {
     const onClose = renderDialog();
     expect(await screen.findByText("skill-alpha")).toBeInTheDocument();
     selectToolScope("codex");
-    checkItem("skill-alpha"); // MAM 资源：切通用后应保留
+    checkItem("skill-alpha"); // 兔维斯 资源：切通用后应保留
     checkItem("native-codex-skill"); // 原生技能：仅工具私有合法
     expect(screen.getByText("原生技能")).toBeInTheDocument();
-    // 切到通用：原生组整体消失（不可见即不可再勾选，spec §3.3 通用 = 仅 MAM 资源）
+    // 切到通用：原生组整体消失（不可见即不可再勾选，spec §3.3 通用 = 仅 兔维斯 资源）
     fireEvent.click(screen.getByLabelText("通用"));
     expect(screen.queryByText("原生技能")).not.toBeInTheDocument();
     expect(screen.queryByText("native-codex-skill")).not.toBeInTheDocument();
@@ -181,7 +181,7 @@ describe("PresetEditDialog（新建/编辑共用）", () => {
       target: { value: "通用组合" },
     });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
-    // 锁：create args 的 items 既不含原生 n1，也保留 MAM 的 s1
+    // 锁：create args 的 items 既不含原生 n1，也保留 兔维斯 的 s1
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("create_preset", {
         name: "通用组合",

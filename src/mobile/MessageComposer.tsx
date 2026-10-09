@@ -649,7 +649,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           setQueueItems((prev) => prev.filter((i) => i.id !== itemId));
         } else if (j.status === "submitted") {
           // E1 裁16 排队回执（kimi）：消息已进 TUI 内部队列（busy 直接投递=排队制，
-          // 回合结束自动开新回合）——已离开 MAM 队列 → 行移除 + 中性 submitted 回执
+          // 回合结束自动开新回合）——已离开 兔维斯 队列 → 行移除 + 中性 submitted 回执
           //（不谎报 delivered，也不落 failed；对账收敛会把它误报成 gone）
           queueMutatedAtRef.current = Date.now();
           setReceipt({ kind: "submitted" });
@@ -1136,7 +1136,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
             title={
               noCwd
                 ? "该会话没有项目目录信息，无法上传附件"
-                : "添加附件（保存到项目目录 .mam-attachments/）"
+                : "添加附件（保存到项目目录 .tuvis-attachments/）"
             }
             onClick={() => fileInputRef.current?.click()}
             className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] disabled:opacity-40 dark:hover:bg-[var(--btnp)]"
@@ -1194,7 +1194,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           data-testid="attach-hint"
           className="mt-1 rounded-lg bg-[var(--cbg)] px-2 py-1.5 text-[11px] leading-4 text-[var(--mut)]"
         >
-          附件将保存到用户项目目录 .mam-attachments/&lt;会话&gt;/（已在本地 git
+          附件将保存到用户项目目录 .tuvis-attachments/&lt;会话&gt;/（已在本地 git
           排除，不会提交）；项目收尾时可整目录清理。
         </p>
       )}

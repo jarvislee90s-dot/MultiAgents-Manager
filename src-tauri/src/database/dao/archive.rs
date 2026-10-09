@@ -1,5 +1,5 @@
 //! 历史会话归档 DAO（spec：2026-09-20-mobile-archive-history §5）。
-//! 登记制：只收 MAM 运行期间上过板的会话（活板扫描旁路 upsert），不做任何
+//! 登记制：只收 兔维斯 运行期间上过板的会话（活板扫描旁路 upsert），不做任何
 //! 死会话文件扫描（扫描预算契约 L1/L3 零触碰）。读取侧懒加载（历史页请求时），
 //! 写放大守卫：字段无变化且 last_seen 距上次写入 <60s → 零写事务（fsync 风暴
 //! 防护，口径同 dao::session::update_session_status 的 LAST_SEEN_REFRESH 模式）。
@@ -126,7 +126,7 @@ pub fn register_sessions_conn(conn: &Connection, sessions: &[Session]) -> usize 
     written
 }
 
-/// 全量归档行（last_seen DESC）。数据量为 MAM 运行期会话量级（小），端点在内存
+/// 全量归档行（last_seen DESC）。数据量为 兔维斯 运行期会话量级（小），端点在内存
 /// 做窗口过滤与活板排除（spec §6.1：缝保持「无参取数」最简形态）
 pub fn query_archive_all() -> Vec<SessionArchiveRow> {
     let conn = DB.lock().unwrap();

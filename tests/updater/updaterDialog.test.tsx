@@ -44,11 +44,11 @@ const AVAILABLE: Extract<UpdateCheckResult, { status: "available" }> = {
     version: "0.5.0-beta.1",
     prerelease: true,
     notes: "## v0.5.0-beta.1 更新\n\n- **手机远程操控**：发消息与排队\n- **远程审批**：屏读为准\n",
-    htmlUrl: "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/tag/v0.5.0-beta.1",
+    htmlUrl: "https://github.com/jarvislee90s-dot/tuvis/releases/tag/v0.5.0-beta.1",
     publishedAt: "2026-09-23T15:18:19Z",
     tag: "v0.5.0-beta.1",
     latestJsonUrl:
-      "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0-beta.1/latest.json",
+      "https://github.com/jarvislee90s-dot/tuvis/releases/download/v0.5.0-beta.1/latest.json",
   },
 };
 
@@ -198,7 +198,7 @@ describe("UpdaterDialog 自动模式（home 挂载）", () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("install_github_update", {
         latestJsonUrl:
-          "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0-beta.1/latest.json",
+          "https://github.com/jarvislee90s-dot/tuvis/releases/download/v0.5.0-beta.1/latest.json",
       });
     });
   });

@@ -455,12 +455,12 @@ export default function Board({
 
   return (
     <div className="min-h-screen bg-[var(--pg)] px-4 py-4 [font-family:var(--font-ui)] text-[var(--tx)]">
-      {/* 品牌行（P8a+P8b）：MAM + 版本号 + 本机名（右侧，双机双子域辨识）；
+      {/* 品牌行（P8a+P8b）：兔维斯 + 版本号 + 本机名（右侧，双机双子域辨识）；
           host 未拉到时整行隐藏（静默降级，见上方 state 注释）。
           内层不再加 px-4（M3 Task 2 顺手修）：容器已有 px-4，双层内边距导致品牌行偏右 */}
       {host && (
         <header className="flex items-center gap-2 pt-4 pb-2">
-          <span className="text-lg font-bold">MAM</span>
+          <span className="text-lg font-bold">兔维斯</span>
           <span className="font-mono text-xs text-[var(--mut)]">v{host.version}</span>
           <span className="ml-auto text-sm">{host.name}</span>
         </header>

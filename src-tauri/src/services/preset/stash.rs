@@ -4,11 +4,11 @@ use std::path::Path;
 
 use crate::database::{self, StashEntryRecord};
 
-/// 暂存区：~/.mam/stash/<tool>/skills
+/// 暂存区：~/.tuvis/stash/<tool>/skills
 pub fn stash_dir(tool_id: &str) -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("stash")
         .join(tool_id)
         .join("skills")
@@ -128,7 +128,7 @@ pub fn recover_orphans() -> usize {
     // 3) 无账孤儿：扫暂存区目录对账
     let stash_root = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("stash");
     if !stash_root.is_dir() {
         return recovered;

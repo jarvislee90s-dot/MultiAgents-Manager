@@ -74,7 +74,7 @@ export default defineConfig(async () => ({
    *
    * 后果不是「少优化了几个包」，而是**启动被拖长到近两分钟并在这段时间里不应答**
    * （实测 `scanning dependencies...` 11:09:54 → `dependencies optimized` 11:11:41），随后又一次
-   * `optimized dependencies changed. reloading`。而 MAM 的所有窗口都是 `transparent: true`，
+   * `optimized dependencies changed. reloading`。而 兔维斯 的所有窗口都是 `transparent: true`，
    * 页面加载不出来 ⇒ **看板看起来「透明」、桌宠「不显示」** —— 两个症状、一个根因，
    * 且根因在 dev server，不在应用代码。
    *

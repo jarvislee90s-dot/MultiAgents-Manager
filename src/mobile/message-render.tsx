@@ -57,7 +57,7 @@ export function linkifySegments(text: string, files: string[]): LinkSegment[] {
  *  同为 serde_json::to_string），字符串值里的换行全是 `\n` 转义，塞进 <pre> 不可读。
  *  按形态识别：toolArgs 解析出**非空字符串 `plan` 字段** → 返回该正文（走 markdown
  *  渲染）；其余一切情况 → null（维持原样渲染）。不看 toolName——zcode 的
- *  ExitPlanMode 输入同为 {plan}（zcode.cjs：校验 e.plan.trim()），但 MAM 记录的
+ *  ExitPlanMode 输入同为 {plan}（zcode.cjs：校验 e.plan.trim()），但 兔维斯 记录的
  *  是显示 title，按名字匹配会漏；形态匹配 claude/zcode 同覆盖。
  *  注意：纯 pretty-print（stringify(_,null,2)）救不了——字符串值里的 \n 依然是
  *  转义（JSON 规范）。用户裁决：其他工具的参数渲染不做通用美化。

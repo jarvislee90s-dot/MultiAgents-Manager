@@ -1,7 +1,7 @@
 [package]
-name = "multi-agents-manager"
+name = "tuvis"
 version = "0.5.2"
-description = "多 Agent 编程工具统一管理平台"
+description = "你的桌面多 Agent 指挥台"
 authors = ["jarvis"]
 edition = "2021"
 # MSRV：代码实际要求 1.89——src/linker/mod.rs:271 File::unlock（1.89 稳定）、
@@ -11,37 +11,37 @@ edition = "2021"
 # 以后再误用超版 API 会在 CI 直接暴露（本次即由该 lint 发现真实 MSRV 是 1.89 而非 1.85）。
 rust-version = "1.89"
 license = "MIT"
-# src/bin/mam-marker.rs（issue #43 marker helper）加入后仓库存在两个 bin，
+# src/bin/tuvis-marker.rs（issue #43 marker helper）加入后仓库存在两个 bin，
 # 不指定 default-run 时 `cargo run` / `pnpm tauri:dev` 报
 # "could not determine which binary to run"（2026-09-11 Windows 实机验收发现 1）
-default-run = "multi-agents-manager"
+default-run = "tuvis"
 
 [features]
 # helper bin 的构建门（默认关）：额外 bin 在 macOS universal 打包下会必然失败
 # （打包器要求额外 bin 存在于 universal 目录，2026-09-14 v0.4.0 tag 构建实证），
 # 故全部挂 required-features 门。两个 helper：
-#   - marker-helper：mam-marker（issue #43 窗口标题标记注入，Windows-only）
-#   - hook-listener：mam-hook-listener（批次甲 T1 hook 事件监听 helper）
+#   - marker-helper：tuvis-marker（issue #43 窗口标题标记注入，Windows-only）
+#   - hook-listener：tuvis-hook-listener（批次甲 T1 hook 事件监听 helper）
 # marker-helper 蕴含 hook-listener——Windows 发布构建（release.yml）与 CI
 # windows-gnu 门禁 / ubuntu 测试步已显式 `--features marker-helper`，发行与门禁
 # 自动同时构建两个 helper（工作流零改动）；本地单建 hook helper 时用
-# `cargo build --bin mam-hook-listener --features hook-listener`。
+# `cargo build --bin tuvis-hook-listener --features hook-listener`。
 # 声明 [[bin]] 后 bin 自动发现关闭，三个 bin 均显式声明
 hook-listener = []
 marker-helper = ["hook-listener"]
 
 [[bin]]
-name = "multi-agents-manager"
+name = "tuvis"
 path = "src/main.rs"
 
 [[bin]]
-name = "mam-marker"
-path = "src/bin/mam-marker.rs"
+name = "tuvis-marker"
+path = "src/bin/tuvis-marker.rs"
 required-features = ["marker-helper"]
 
 [[bin]]
-name = "mam-hook-listener"
-path = "src/bin/mam-hook-listener.rs"
+name = "tuvis-hook-listener"
+path = "src/bin/tuvis-hook-listener.rs"
 required-features = ["hook-listener"]
 
 [lib]
@@ -115,9 +115,9 @@ base64 = "0.22"
 [target.'cfg(windows)'.dependencies]
 junction = "2.1"
 # Console（AttachConsole/SetConsoleTitle 路线 B）、Diagnostics_ToolHelp + FileSystem
-# （父进程链遍历）为 mam-marker helper（src/bin）所需
+# （父进程链遍历）为 tuvis-marker helper（src/bin）所需
 # Win32_UI_Input_KeyboardAndMouse（M9R：VkKeyScanW/MapVirtualKeyW 真实键位布局）；
-# Win32_UI_WindowsAndMessaging：win32（窗口枚举）/ mam-marker（跳转 marker）/
+# Win32_UI_WindowsAndMessaging：win32（窗口枚举）/ tuvis-marker（跳转 marker）/
 # deep_link（深链）
 windows = { version = "0.62", features = ["Win32_Security", "Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Accessibility", "Win32_UI_Shell", "Win32_System_Com", "Win32_System_Threading", "Win32_System_Console", "Win32_Storage_FileSystem", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Power", "Win32_System_Registry", "Win32_NetworkManagement_IpHelper", "Win32_Networking_WinSock"] }
 winreg = "0.55"

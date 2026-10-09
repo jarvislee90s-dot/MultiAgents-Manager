@@ -4,7 +4,7 @@
 // **绝对路径**）。**不走** `<a download>` / Blob 下载 / 对象 URL：wry 未注册 download handler 时
 // 要么对 download 类导航直接 Cancel 且失败静默，要么把窗口导航到 blob URL（界面跑飞）；
 // 也不走 `dialog.save` + plugin-fs（未安装、未声明、二级窗口不在 capability 白名单 → 必被 ACL 拒）。
-// 定位复用既有 `revealDir`（白名单含 `~/.mam`），**不新写打开逻辑**。
+// 定位复用既有 `revealDir`（白名单含 `~/.tuvis`），**不新写打开逻辑**。
 // 剪贴板（`copyText` / `copyImage`）只作**副本**入口，**不得**作为导出的唯一出口。
 //
 // ## 三条外部约定（Rust 侧定的，前端只能遵守）
@@ -120,8 +120,8 @@ export async function saveBytes(
  * （照抄 ① 的 `UsageStatusSection.tsx` 同一条链路；传父目录只会打开目录，不会选中文件）。
  *
  * **失败原样上抛**（本层不吞、也不翻文案）：① 的口径是「定位失败仍算导出成功」，
- * 提示什么由调用方决定。开发机设了 `MAM_HOME` 时导出目录会重定向、而 reveal 白名单只认
- * `~/.mam` → 这里会真失败，正是这条口径要覆盖的场景。
+ * 提示什么由调用方决定。开发机设了 `TUVIS_HOME` 时导出目录会重定向、而 reveal 白名单只认
+ * `~/.tuvis` → 这里会真失败，正是这条口径要覆盖的场景。
  */
 export async function openContainingDir(
   filePath: string,

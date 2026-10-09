@@ -1,11 +1,11 @@
 // 移动端附件上传（2026-09-20 用户裁决，方案见计划 polished-gliding-simon）：
 //
-// 存储 = <会话工作目录>/.mam-attachments/<session_id>/（**用户项目目录下**）——
+// 存储 = <会话工作目录>/.tuvis-attachments/<session_id>/（**用户项目目录下**）——
 // 所有工具读自己工作区内的文件都天然零审批（各工具权限模型的公共下限）；
 // 附件随项目生命周期存在、收尾整目录清理。
 //
 // git 零污染 = 首份附件写入时幂等追加 `<cwd>/.git/info/exclude` 一行
-// `.mam-attachments/`——**本地管理区**（非 .gitignore 跟踪文件，MAM 不往用户
+// `.tuvis-attachments/`——**本地管理区**（非 .gitignore 跟踪文件，兔维斯 不往用户
 // 仓库写跟踪文件）；非 git 项目（无 .git）整步跳过（无版本库无误提交风险）。
 //
 // 纯函数核（消毒 / 目录计算 / exclude 行判定）与 IO（写盘 / 追加）分离：
@@ -14,11 +14,11 @@
 use std::path::{Path, PathBuf};
 
 /// 附件目录名（项目根下、点前缀隐藏目录）
-pub const ATTACHMENT_DIR_NAME: &str = ".mam-attachments";
+pub const ATTACHMENT_DIR_NAME: &str = ".tuvis-attachments";
 /// 单附件字节上限（20MB；端点同时显式 DefaultBodyLimit 硬兜底）
 pub const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
 /// git/info/exclude 里追加的排除行（尾斜杠 = 目录整体排除）
-pub const GIT_EXCLUDE_LINE: &str = ".mam-attachments/";
+pub const GIT_EXCLUDE_LINE: &str = ".tuvis-attachments/";
 /// 消毒后文件名的字符数上限（防超长名撑爆目录项）
 const MAX_FILE_NAME_CHARS: usize = 120;
 
@@ -53,7 +53,7 @@ pub fn sanitize_file_name(raw: &str) -> String {
     out
 }
 
-/// 落盘目录 = <cwd>/.mam-attachments/<session_id>（纯函数）
+/// 落盘目录 = <cwd>/.tuvis-attachments/<session_id>（纯函数）
 pub fn attachment_dir(cwd: &Path, session_id: &str) -> PathBuf {
     cwd.join(ATTACHMENT_DIR_NAME).join(session_id)
 }
@@ -142,14 +142,14 @@ pub fn write_attachment(
 
 // ---- 数据管理（C5，桌面端「数据管理」卡片的数据源）----
 //
-// 附件分散在各项目目录（.mam-attachments/<会话>/），桌面端要列出/清理就必须
-// 知道「哪些项目有附件」——索引文件 ~/.mam/attachments-index.json 在上传时
+// 附件分散在各项目目录（.tuvis-attachments/<会话>/），桌面端要列出/清理就必须
+// 知道「哪些项目有附件」——索引文件 ~/.tuvis/attachments-index.json 在上传时
 // 追加一条（服务端写入，客户端零路径输入），是项目发现的唯一可信来源。
 
-/// 索引条目（~/.mam/attachments-index.json 数组元素）
+/// 索引条目（~/.tuvis/attachments-index.json 数组元素）
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AttachmentIndexEntry {
-    /// 会话工作目录（.mam-attachments 所在项目）
+    /// 会话工作目录（.tuvis-attachments 所在项目）
     pub project: String,
     pub session: String,
     pub tool: String,
@@ -214,7 +214,7 @@ pub fn prune_index_for_project(home: &Path, project: &str) {
     }
 }
 
-/// 项目附件占用统计（IO：递归走 <project>/.mam-attachments）；目录不存在 → (0, 0)
+/// 项目附件占用统计（IO：递归走 <project>/.tuvis-attachments）；目录不存在 → (0, 0)
 pub fn project_attachment_stats(project: &Path) -> (u64, u64) {
     let root = project.join(ATTACHMENT_DIR_NAME);
     let mut files: u64 = 0;
@@ -299,7 +299,7 @@ mod tests {
     fn attachment_dir_is_cwd_dot_mam_session() {
         let dir = attachment_dir(Path::new("E:/proj"), "sess_abc");
         let s = dir.to_string_lossy().replace('\\', "/");
-        assert!(s.ends_with("/.mam-attachments/sess_abc"), "{s}");
+        assert!(s.ends_with("/.tuvis-attachments/sess_abc"), "{s}");
         assert!(s.contains("E:/proj"), "{s}");
     }
 
@@ -322,12 +322,12 @@ mod tests {
         assert!(file.ends_with("info/exclude"));
         ensure_git_exclude(&root, GIT_EXCLUDE_LINE);
         let content = std::fs::read_to_string(&file).unwrap();
-        assert!(content.contains(".mam-attachments/"), "{content}");
+        assert!(content.contains(".tuvis-attachments/"), "{content}");
         // 幂等：第二次不再追加（行数不涨）
         assert_eq!(pending_git_exclude(&root, GIT_EXCLUDE_LINE), None);
         ensure_git_exclude(&root, GIT_EXCLUDE_LINE);
         let content2 = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(content.matches(".mam-attachments/").count(), 1);
+        assert_eq!(content.matches(".tuvis-attachments/").count(), 1);
         assert_eq!(content2, content);
     }
 
@@ -345,7 +345,7 @@ mod tests {
         let content =
             std::fs::read_to_string(root.join(".git").join("info").join("exclude")).unwrap();
         assert!(
-            content.contains("node_modules\n.mam-attachments/"),
+            content.contains("node_modules\n.tuvis-attachments/"),
             "{content}"
         );
     }
@@ -361,8 +361,8 @@ mod tests {
         let parent = path.parent().unwrap();
         assert_eq!(
             parent,
-            root.join(".mam-attachments").join("sess_abc"),
-            "落盘 = <cwd>/.mam-attachments/<session>/"
+            root.join(".tuvis-attachments").join("sess_abc"),
+            "落盘 = <cwd>/.tuvis-attachments/<session>/"
         );
         // 2026-09-20 用户反馈：文件名保留原名（不加哈希前缀——文件池按名搜索、
         // agent 识名都依赖原始名）
@@ -372,7 +372,7 @@ mod tests {
         // 首份写入即完成本地排除（同一刻）
         let content =
             std::fs::read_to_string(root.join(".git").join("info").join("exclude")).unwrap();
-        assert!(content.contains(".mam-attachments/"));
+        assert!(content.contains(".tuvis-attachments/"));
     }
 
     #[test]
@@ -401,7 +401,7 @@ mod tests {
             session: "sess_1".into(),
             tool: "claude".into(),
             name: "a-shot.png".into(),
-            path: "E:/proj/a/.mam-attachments/sess_1/a-shot.png".into(),
+            path: "E:/proj/a/.tuvis-attachments/sess_1/a-shot.png".into(),
             size: 9,
             ts: 1000,
         };
@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn project_stats_walks_dir_tree() {
         let root = tempdir();
-        let att = root.join(".mam-attachments").join("sess_1");
+        let att = root.join(".tuvis-attachments").join("sess_1");
         std::fs::create_dir_all(&att).unwrap();
         std::fs::write(att.join("a.png"), b"12345").unwrap();
         std::fs::create_dir_all(att.join("nested")).unwrap();

@@ -1,12 +1,12 @@
 # 探测脚本套件（M6R 验证版 + opencode 实测迭代）
 
-来源：MAM M6R 探测（2026-09-18，经独立评审逐行核验）+ opencode 实测（2026-09-19）新增三件与 WT 定位修复。PowerShell 5.1 环境。
+来源：兔维斯 M6R 探测（2026-09-18，经独立评审逐行核验）+ opencode 实测（2026-09-19）新增三件与 WT 定位修复。PowerShell 5.1 环境。
 
 ## 路径约定（先读）
 
 脚本内多处引用探测主目录 `$env:USERPROFILE\mam-probe-m6r\`（dot-source ConIn.ps1、logs/、evidence/）。两种用法：
 
-1. 该目录存在（MAM 机器）→ 直接用；
+1. 该目录存在（兔维斯 机器）→ 直接用；
 2. 不存在 → 先建 `%USERPROFILE%\mam-probe-m6r\{logs,evidence}\`，或把脚本内该路径批量替换为本次探测目录（每脚本仅 1~3 处）。
 
 **新工具适配点（务必检查）**：

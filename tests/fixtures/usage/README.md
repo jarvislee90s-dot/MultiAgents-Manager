@@ -2,7 +2,7 @@
 
 ## 这是什么
 
-四份**真实后端返回**的 JSON，人肉从 MAM dev 窗口的 DevTools 控制台抓下来，供
+四份**真实后端返回**的 JSON，人肉从 兔维斯 dev 窗口的 DevTools 控制台抓下来，供
 `tests/pet/usage-contract-parity.test.tsx` 的**第一组**逐字对账：真实 wire 形状 ↔
 `src/types/usage.ts` 的 TS 镜像（契约 §2 的冻结件）。
 
@@ -22,10 +22,10 @@
 
 ## 怎么抓（DevTools 四步）
 
-前置：`~/.mam/mam.db` 四表有数据；设置页「用量统计」**总开关为开**（关闭时后端在读游标前就
+前置：`~/.tuvis/tuvis.db` 四表有数据；设置页「用量统计」**总开关为开**（关闭时后端在读游标前就
 早退，`usage_collect` 会返回空 `sources`，抓了也没用）。
 
-1. `pnpm tauri:dev` 起开发模式，在 MAM 主窗口打开 DevTools 控制台（macOS 上 ⌥⌘I）。
+1. `pnpm tauri:dev` 起开发模式，在 兔维斯 主窗口打开 DevTools 控制台（macOS 上 ⌥⌘I）。
 2. **先跑一次采集**（顺序不能反：`usage_dashboard` / `usage_records` 的 `collectedAt` 取自本进程
    最近一次采集结果；先采集，它才不是 `0` 这个「尚未采集」哨兵）：
 

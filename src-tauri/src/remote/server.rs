@@ -43,15 +43,15 @@ struct MobileAssets;
 /// 简报原稿的 `serve_asset("index.html")` 会 404，故 /m 与各处回落统一伺服 mobile.html
 const MOBILE_ENTRY: &str = "mobile.html";
 
-/// §C3 可达性探针的 **MAM 特征头**（B-I6）：看板入口响应写入，tailscale 探针读取。
+/// §C3 可达性探针的 **兔维斯 特征头**（B-I6）：看板入口响应写入，tailscale 探针读取。
 /// 为什么需要它：探针原口径「拿到任意 HTTP 响应即算通」挡不住 TUN / 透明重定向式 MITM
 /// ——用户把自签 CA 装进系统信任库后 TLS 仍"成功"，拦截页被读成「已验证」（§C3 残余风险）。
 /// 写入点唯一（本文件的 `entry_response`），读取点唯一（`tailscale::probe_http`），
 /// 值与本常量同处定义，改一处必然牵动另一处（`board_entry_carries_reach_marker_for_tailscale_probe`
 /// 在服务侧锁死其在场）。
 /// **诚实边界**：这不是鉴权也不是密码学证明——知道特征值的 MITM 仍可伪造；它的定位是
-/// 「廉价判据」：把「任意响应」收紧为「带 MAM 特征」，挡掉最常见的透明错误页
-pub(crate) const MAM_REACH_HEADER: &str = "x-mam-reach";
+/// 「廉价判据」：把「任意响应」收紧为「带 兔维斯 特征」，挡掉最常见的透明错误页
+pub(crate) const MAM_REACH_HEADER: &str = "x-tuvis-reach";
 /// 特征头的值（版本化 token：语义变更时同步改，两侧由编译期常量约束）
 pub(crate) const MAM_REACH_VALUE: &str = "board-1";
 
@@ -64,7 +64,7 @@ fn entry_response() -> Response {
         Some(f) => (
             [
                 (axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                // §C3（B-I6）：MAM 特征头——tailscale 可达性探针据此判定「是 MAM 答的」。
+                // §C3（B-I6）：兔维斯 特征头——tailscale 可达性探针据此判定「是 兔维斯 答的」。
                 // 只在**真的伺服了看板入口**时写：产物缺失（404 分支）不带特征
                 (
                     axum::http::HeaderName::from_static(MAM_REACH_HEADER),
@@ -320,7 +320,7 @@ pub type CreateDiscoverFn = dyn Fn(&str, std::time::SystemTime, &str) -> Vec<Str
 /// Ok(pid)/Err 假体——真实轮询含 1.2s 步距睡眠，不缝则全链端点测试必烧 30s。
 pub type CreatePidFindFn = dyn Fn(&str, &std::path::Path) -> Result<u32, String> + Send + Sync;
 
-/// 远程新建会话任务共享态（C6）：**内存态，不持久化**——MAM 重启即丢任务，
+/// 远程新建会话任务共享态（C6）：**内存态，不持久化**——兔维斯 重启即丢任务，
 /// status 端点 404 引导重试（spec §3）。
 #[derive(Debug, Clone)]
 pub struct CreateTaskShared {
@@ -361,9 +361,9 @@ pub struct CreateTaskHub {
     /// 屏读步距 / 键间隔 / 物化轮询步距全部经它——内核与管线零真实睡眠（
     /// `SCREEN_POLL_STEP_MS` 的消费契约由本缝 + 管线闭包兑现，C6 报告登记）
     pub pacer: Box<dyn Fn(u64) + Send + Sync>,
-    /// 证据落档目录缝（§4.4 补实现，2026-10-03 用户裁决）：生产 = `~/.mam/
+    /// 证据落档目录缝（§4.4 补实现，2026-10-03 用户裁决）：生产 = `~/.tuvis/
     /// create-evidence/`；测试 = None（禁用——缝测试驱动 unrecognized_screen 失败
-    /// 臂也不写真实 ~/.mam，零污染红线）。None 时管线跳过落档（不阻塞失败回执）
+    /// 臂也不写真实 ~/.tuvis，零污染红线）。None 时管线跳过落档（不阻塞失败回执）
     pub evidence_dir: Box<dyn Fn() -> Option<std::path::PathBuf> + Send + Sync>,
 }
 
@@ -389,7 +389,7 @@ impl CreateTaskHub {
             tool_probe: Box::new(crate::inject::create::tool_installed),
             pacer: Box::new(|ms| std::thread::sleep(std::time::Duration::from_millis(ms))),
             evidence_dir: Box::new(|| {
-                dirs::home_dir().map(|h| h.join(".mam").join("create-evidence"))
+                dirs::home_dir().map(|h| h.join(".tuvis").join("create-evidence"))
             }),
         }
     }
@@ -483,7 +483,7 @@ pub struct RemoteState {
     /// （单一实现，桌面门零改动）；测试注入固定假表。
     pub pairing_counter: Box<PairingCounterFn>,
     /// 看板隐藏集合读源（APP 软归档，2026-09-20 体验批二）：生产 =
-    /// database::board_hidden_ids；测试注入固定集合（零真实 ~/.mam 接触）
+    /// database::board_hidden_ids；测试注入固定集合（零真实 ~/.tuvis 接触）
     pub board_hidden_ids: Box<dyn Fn() -> Vec<String> + Send + Sync>,
     /// 隐藏写缝（hide）：生产 = database::board_hidden_hide；测试记录型假体
     pub board_hidden_hide: std::sync::Arc<dyn Fn(&str) -> usize + Send + Sync>,
@@ -496,7 +496,7 @@ pub struct RemoteState {
     /// CLI 会话硬杀缝（/session-close）：生产 = commands::session::kill_pid；
     /// 测试记录型假体（零真杀进程）
     pub session_close: std::sync::Arc<dyn Fn(u32) -> Result<(), String> + Send + Sync>,
-    /// 设备存储注入缝：生产 `DeviceStore::global()`；测试 `DeviceStore::memory()`（零接触真实 ~/.mam）
+    /// 设备存储注入缝：生产 `DeviceStore::global()`；测试 `DeviceStore::memory()`（零接触真实 ~/.tuvis）
     pub store: super::pairing::DeviceStore,
     /// host 载荷注入缝（M3 Task 1）：生产 = remote::host_info()；测试注入假 json（零 DB）
     pub host_source: Box<dyn Fn() -> serde_json::Value + Send + Sync>,
@@ -513,7 +513,7 @@ pub struct RemoteState {
     /// SSE 连接注册表（M4 T0a）：吊销/停止即时断连 + 在线口径数据源
     pub sse_registry: std::sync::Arc<SseRegistry>,
     /// 设备上限注入缝（M4 T2c）：生产 = 读 remote.max_devices KV；测试注入常量
-    /// （零 DAO 接触——端点测试不触碰真实 ~/.mam）
+    /// （零 DAO 接触——端点测试不触碰真实 ~/.tuvis）
     pub max_devices_source: Box<dyn Fn() -> usize + Send + Sync>,
     /// per-IP 限速状态机（M5 A3）：POST /pair/pin 锁内查改；内存态重启即清
     pub pin_limiter: std::sync::Mutex<crate::remote::pin::PinRateLimiter>,
@@ -548,7 +548,7 @@ pub struct RemoteState {
     /// （inject::resume::open_session_terminal_with 的 spawner 参数）
     pub resume_spawner: std::sync::Arc<crate::inject::resume::SpawnFn>,
     /// 归档读源注入缝（spec §6.1）：生产 = database::query_archive_all（全量行，
-    /// 窗口/排除在端点内做）；测试注入固定行集（零真实 ~/.mam 接触）
+    /// 窗口/排除在端点内做）；测试注入固定行集（零真实 ~/.tuvis 接触）
     pub archive_source: Box<dyn Fn() -> Vec<crate::database::SessionArchiveRow> + Send + Sync>,
     /// 归档删除缝：生产 = database::delete_archive；测试记录型假体返回计数
     pub archive_delete: std::sync::Arc<ArchiveDeleteFn>,
@@ -663,7 +663,7 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         // （POST）+ 纯屏读重同步（GET，零注入）
         .route("/session-mode/menu", post(api::session_mode_menu))
         .route("/session-mode/menu", get(api::session_mode_menu_read))
-        // 2026-09-20：移动端附件上传（落盘会话工作目录 .mam-attachments/<会话>/，
+        // 2026-09-20：移动端附件上传（落盘会话工作目录 .tuvis-attachments/<会话>/，
         // 路径随消息内联标记注入；PIN 门禁内层 gate 结构性覆盖；20MB 显式上限——
         // axum 默认 2MB；超限时 handler 先按 Content-Length 预检给结构化 413）
         .route(
@@ -784,7 +784,7 @@ mod tests {
                 total_count: 7,
                 waiting_count: 0,
             }),
-            store: crate::remote::pairing::DeviceStore::memory(), // 内存库——测试不碰真实 ~/.mam
+            store: crate::remote::pairing::DeviceStore::memory(), // 内存库——测试不碰真实 ~/.tuvis
             // M7 Task 5：注入器缝——本组测试不触 flush 路径，用生产占位
             injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
             // R5 一键 resume spawn 缝（Task 11）：本组测试不触 session-open，注 no-op 桩
@@ -1261,7 +1261,7 @@ mod tests {
     }
 
     // ==== Task 7 静态伺服（router_with_static 真装配；rust-embed debug 态从磁盘直读
-    // dist-mobile，零接触真实 ~/.mam；产物 hash 文件名动态取，不硬编码） ====
+    // dist-mobile，零接触真实 ~/.tuvis；产物 hash 文件名动态取，不硬编码） ====
 
     /// 嵌入清单里 assets/ 下第一个 .js 产物（vite hash 文件名随构建漂移，禁止硬编码）
     fn first_js_asset() -> String {
@@ -1279,8 +1279,8 @@ mod tests {
             .expect("头值非可见 ASCII")
     }
 
-    /// §C3（B-I6）**变异锚点**：看板入口响应必须带 MAM 特征头——tailscale 可达性探针
-    /// 据此把「拿到任意 HTTP 响应即算通」收紧为「MAM 自己的服务答的」，挡掉 TUN / 透明
+    /// §C3（B-I6）**变异锚点**：看板入口响应必须带 兔维斯 特征头——tailscale 可达性探针
+    /// 据此把「拿到任意 HTTP 响应即算通」收紧为「兔维斯 自己的服务答的」，挡掉 TUN / 透明
     /// 重定向式 MITM 返回的拦截页（自签 CA 在系统信任库时 TLS 仍"成功"）。
     /// 删掉 entry_response 的特征头 → 本测试必红（生产里探针会把一切都判成 Failed）。
     #[tokio::test]
@@ -1291,7 +1291,7 @@ mod tests {
         assert_eq!(
             header(&r, MAM_REACH_HEADER),
             MAM_REACH_VALUE,
-            "MAM 特征头是 §C3 探针判据的唯一数据源，不得缺失"
+            "兔维斯 特征头是 §C3 探针判据的唯一数据源，不得缺失"
         );
     }
 
@@ -1315,7 +1315,7 @@ mod tests {
             "/m 应返回入口 HTML，实际 {body:?}"
         );
         assert!(
-            body.contains("mam 远程"),
+            body.contains("兔维斯远程"),
             "入口应是 mobile.html 产物（含移动端标题）"
         );
 
@@ -2848,8 +2848,8 @@ mod tests {
 
     /// 【2026-10-06 spike 探针 → 修复后的回归锚点】直连域名 + **同机反向代理**场景。
     ///
-    /// 直连域名模式的接线是「MAM 绑端口供用户反向代理」（一期 spec §P7）。当用户的反代
-    /// （nginx / Caddy）与 MAM **同机**运行时，它是从**回环**把公网流量转发进来的，
+    /// 直连域名模式的接线是「兔维斯 绑端口供用户反向代理」（一期 spec §P7）。当用户的反代
+    /// （nginx / Caddy）与 兔维斯 **同机**运行时，它是从**回环**把公网流量转发进来的，
     /// 而 `Host` 是用户自有域名——该域名**不在** quick/named 隧道名单里。
     /// 豁免判据第 ③ 步是**黑名单**（"不在名单"即算本地），于是这批公网流量会被
     /// **误判为本机**而免密放行。
@@ -3968,7 +3968,7 @@ mod tests {
     // ==== M7 Task 6：session-send / send-info / queue 端点（PIN 门禁内 + 注入器缝）====
     // 零污染：DB 依赖全部经 RemoteState.store = DeviceStore::memory()（Task 6 缝演进：
     // flush_one / 队列 DAO / 审计全走 st.store——生产 Global 语义不变，测试内存库）；
-    // 会话快照走注入源；注入器用 FakeInjector。不触真实 ~/.mam。
+    // 会话快照走注入源；注入器用 FakeInjector。不触真实 ~/.tuvis。
 
     /// 注入器假体（记录 locate_and_inject 调用）；fail=Some 时恒 Err（直发失败回执用）。
     /// Task 11：补 key_calls 记录 locate_and_send_key 调用（审批按键注入路径）。
@@ -4100,7 +4100,7 @@ mod tests {
     /// 黑盒 / sess_d zcode headless / sess_e Waiting 供失败回执测试与直发测试错开会话 /
     /// sess_f Processing 备用 / sess_i Waiting 独占——busy 直发测试专用 / sess_t3
     /// Waiting 独占——D7/T3 直发未确认端点测试专用）+ 指定注入器；其余缝与
-    /// test_state 同口径（内存库，零接触真实 ~/.mam）。
+    /// test_state 同口径（内存库，零接触真实 ~/.tuvis）。
     /// **守卫 id 立规（复检裁决，全测试集适用）**：①守卫持到测尾（或长窗口占用）的
     /// 测试必须占**全测试集唯一** id；②两个夹具不得共享同一 id 字符串——INFLIGHT
     /// 按裸 id 字符串全局占用，跨夹具撞 id 即跨夹具串键（sess_h 曾被本夹具 busy
@@ -4264,7 +4264,7 @@ mod tests {
     // 零污染：设备表/队列/审计/KV 全走 RemoteState.store = DeviceStore::memory()；
     // 会话快照与注入器走注入缝；approve 映射 KV 经 store 缝读取（生产 Global=全局库
     // 同语义、测试 memory 自建库，缺省键回默认表），定制映射由各测试在内存库 seed。
-    // 不触真实 ~/.mam。
+    // 不触真实 ~/.tuvis。
 
     /// Task 11 专用 state：会话夹具与 inject_state 同一套（sess_a Waiting / **sess_t5m**
     /// Processing——原 id 叫 sess_b，但它与 `inject_state` 的 sess_b **撞了裸 id**
@@ -4281,7 +4281,7 @@ mod tests {
     /// claude，独占 id）：approve 忙让位回归独占（F1，守卫持到测尾）。sess_q（Waiting
     /// codex，独占 id）：审批族规格传递断言独占（F2）——p/q 为全测试集未占用字母
     /// （sess_m-sess_o 已归 open_state 族）。其余缝与
-    /// inject_state 同口径（内存库，零接触真实 ~/.mam）。
+    /// inject_state 同口径（内存库，零接触真实 ~/.tuvis）。
     /// **守卫 id 立规（复检裁决，全测试集适用）**：①守卫持到测尾的测试必须占**全测试集
     /// 唯一** id；②两个夹具不得共享同一 id 字符串——INFLIGHT 按裸 id 字符串全局占用，
     /// 跨夹具撞 id 即跨夹具串键（详见 inject_state doc）
@@ -5379,7 +5379,7 @@ mod tests {
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());
         // 直接入队一个快照外会话的 pending 项（session-send 对快照外会话 404 no_session
-        // 拦在入队前，故走 DAO 缝构造——同一内存库，零接触真实 ~/.mam）
+        // 拦在入队前，故走 DAO 缝构造——同一内存库，零接触真实 ~/.tuvis）
         let ghost_id = state.store.with(|c| {
             crate::database::dao::inject_queue::enqueue_conn(
                 c,
@@ -5832,7 +5832,7 @@ mod tests {
     /// T4 红卡接铃铛：等待标记路径——sess_t5m（Processing claude、无 last_message，
     /// 旧判定下必 available=false）seed 审批等待标记 → GET available=true 且选项齐
     /// （键位零泄漏）；POST approve 越过 409 not_waiting 直达键位分发（键位 "1"）。
-    /// 标记经 store.with 播种（内存库，零接触真实 ~/.mam）；state 实例按测试隔离
+    /// 标记经 store.with 播种（内存库，零接触真实 ~/.tuvis）；state 实例按测试隔离
     #[tokio::test]
     async fn approve_endpoints_honor_wait_mark() {
         let fake = FakeInjector::ok();
@@ -6141,7 +6141,7 @@ mod tests {
 
     // ==== 批次乙 T8：session-question / session-question/answer 端点 ====
     // 零污染：标记（question/approval）/审计/KV 全走 RemoteState.store = memory()；
-    // 会话快照与注入器走注入缝；通道 B 消息走 message_source 注入缝。不触真实 ~/.mam。
+    // 会话快照与注入器走注入缝；通道 B 消息走 message_source 注入缝。不触真实 ~/.tuvis。
     // **守卫 id 立规（approve_state 同款）**：每个 POST 用例独占会话 id（sess_u..
     // sess_aj 为全测试集未占用段——approve/inject/open 三族夹具已占 sess_a..sess_q /
     // sess_i / sess_t3 / sess_att）。
@@ -10038,8 +10038,8 @@ mod tests {
     /// 里不可达（真实序列：AUQ tool.call → interaction.request → resolved → tool.result；
     /// 计划审批序列：Write plan → interaction.request(plan_review) → resolved →
     /// ExitPlanMode）。**真实可达的错位双卡**来自**陈旧问答标记**：kimi 的
-    /// `question_wait_marks` 行靠清除事件删除，MAM 未运行/清除事件丢失时会残留
-    /// （`mam.db` 现状即 `question_wait_marks` 表空、kimi 无标记通道的实证背景）——
+    /// `question_wait_marks` 行靠清除事件删除，兔维斯 未运行/清除事件丢失时会残留
+    /// （`tuvis.db` 现状即 `question_wait_marks` 表空、kimi 无标记通道的实证背景）——
     /// 此时**批准在等计划确认、问答卡却按陈旧标记冒出来**，正是本门要拦的形态。
     ///
     /// 夹具：kimi 会话 + 播种问答标记（通道 A）+ 尾部计划提案（预期态）→ 问答必须
@@ -10297,7 +10297,7 @@ mod tests {
     /// 之外的域外 id 不得原样进审计
     /// action 列——key 是本次新增的收敛动作）且不 panic；域外 warn 在实现侧 log，
     /// 测试不断言日志。
-    /// KV 经内存库 seed（DeviceStore 缝，零接触真实 ~/.mam）；sess_j 全测试集唯一
+    /// KV 经内存库 seed（DeviceStore 缝，零接触真实 ~/.tuvis）；sess_j 全测试集唯一
     /// id（守卫 id 立规）。前端 AuditLogSection「action 原样小写展示」契约不受影响。
     #[tokio::test]
     async fn audit_action_vocab() {
@@ -10349,7 +10349,7 @@ mod tests {
 
     /// 严格档（M9R Task 10 裁决：未取证不出键，probe-pending 恒判漂移）：KV seed
     /// verified_with="probe-pending" 的 codex 定制映射（复用 Task 7 audit_action_vocab 的
-    /// store.with 内存库 seed 模式，零接触真实 ~/.mam）→
+    /// store.with 内存库 seed 模式，零接触真实 ~/.tuvis）→
     /// - GET session-approve-options：available=false + options 空 + reason=「键位待实测确认，
     ///   请用普通发送」（前端 ApproveCard 契约：available=false 且带 reason → 只渲染提示条）
     ///   ——即使 sess_k 处 Waiting 且 last_message 命中 marker；
@@ -10529,7 +10529,7 @@ mod tests {
 
     // ==== M6R–M9R Task 11：session-open 端点（R5 一键 resume）====
     // 零污染 + 零真开窗：spawn 缝（RemoteState.resume_spawner）注入记录型假
-    // spawner；会话快照/设备表/审计全走注入缝与内存库，不触真实 ~/.mam。
+    // spawner；会话快照/设备表/审计全走注入缝与内存库，不触真实 ~/.tuvis。
 
     /// Task 11 记录型假 spawner：克隆记录 SpawnSpec 不真开窗（R5 硬约束：
     /// spawner 缝使端点测试不真开窗；Windows 实开窗验证归用户手工/后续验收）
@@ -10571,7 +10571,7 @@ mod tests {
     /// session_open_endpoint_opens_and_audits 预存失败即此根因（task-3-report）。
     /// 故出手时顺手种一个 argv 携 resume 特征的暗桩进程（`sh -c "sleep 5 # 特征"`，
     /// 首轮/次轮采样即命中；5s > 3s 回查窗自灭，非终端窗口——「零真开窗」约束
-    /// 不破，~/.mam 零污染）。非 macOS 平台无回查探针，运行时 no-op。
+    /// 不破，~/.tuvis 零污染）。非 macOS 平台无回查探针，运行时 no-op。
     /// 共享作用域（原 nested 于 session_open_archive_fallback_tests，常红修复
     /// 时上提）：opens_and_audits 与归档回退两类 session-open 测试同用。
     fn spawn_effect_decoy(resume_cmd: &str) {
@@ -10590,7 +10590,7 @@ mod tests {
     /// Task 11 专用 state：会话夹具独占 id（守卫 id 立规的防串键纪律同源）——
     /// sess_m（claude Waiting 正常 cwd）/ sess_n（claude Waiting 空白 cwd）/
     /// sess_o（workbuddy Idle，未入 resume 命令表）；spawner 注入记录型假体。
-    /// 其余缝与 inject_state 同口径（内存库，零接触真实 ~/.mam）。
+    /// 其余缝与 inject_state 同口径（内存库，零接触真实 ~/.tuvis）。
     fn open_state(spawner: std::sync::Arc<crate::inject::resume::SpawnFn>) -> Arc<RemoteState> {
         open_state_with_home(spawner, None)
     }
@@ -11730,7 +11730,7 @@ mod tests {
             assert_eq!(r.status(), 404);
         }
     }
-    // ==== 移动端附件上传（2026-09-20）：落盘 <会话 cwd>/.mam-attachments/<会话>/ ====
+    // ==== 移动端附件上传（2026-09-20）：落盘 <会话 cwd>/.tuvis-attachments/<会话>/ ====
 
     /// 附件端点测试状态：单会话、project_path 指向 tempdir（零真实目录污染）
     fn attach_state(project_path: std::path::PathBuf, empty_cwd: bool) -> Arc<RemoteState> {
@@ -11839,10 +11839,10 @@ mod tests {
             body.contains("\"path\"") && body.contains("\"size\":9"),
             "{body}"
         );
-        // 落盘 = <cwd>/.mam-attachments/<session>/，**文件名保真**（5dc540a 用户
+        // 落盘 = <cwd>/.tuvis-attachments/<session>/，**文件名保真**（5dc540a 用户
         // 裁决：移除纳秒+内容哈希前缀，保留原始名——文件池按名搜索、agent 识名
         // 依赖原名；仅同名才追加 (1)(2) 序号。本断言系 5dc540a 漏改，F4 订正）
-        let dir = proj.join(".mam-attachments").join("sess_att");
+        let dir = proj.join(".tuvis-attachments").join("sess_att");
         let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
         assert_eq!(entries.len(), 1);
         let name = entries[0]
@@ -11855,7 +11855,7 @@ mod tests {
         // git 本地排除：首份写入即幂等追加；二次上传不重复
         let exclude =
             std::fs::read_to_string(proj.join(".git").join("info").join("exclude")).unwrap();
-        assert_eq!(exclude.matches(".mam-attachments/").count(), 1);
+        assert_eq!(exclude.matches(".tuvis-attachments/").count(), 1);
         // 二次上传：同一 state（设备注册仍有效），router 可重建
         let app = router(state.clone());
         let r = app
@@ -11869,7 +11869,7 @@ mod tests {
         assert_eq!(r.status(), 200);
         let exclude =
             std::fs::read_to_string(proj.join(".git").join("info").join("exclude")).unwrap();
-        assert_eq!(exclude.matches(".mam-attachments/").count(), 1, "幂等");
+        assert_eq!(exclude.matches(".tuvis-attachments/").count(), 1, "幂等");
     }
 
     #[tokio::test]
@@ -12883,7 +12883,7 @@ mod tests {
                 .map(|t| t["label"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             vec!["总是询问", "按需询问", "永不询问"],
-            "kimi 权限组屏显标签 = 该工具自己的词（不是 MAM 通用名）"
+            "kimi 权限组屏显标签 = 该工具自己的词（不是 兔维斯 通用名）"
         );
         // 三档全部可选（「总是询问」走两段式；另两档有直达变体）
         assert!(perm["tiers"]
@@ -13172,7 +13172,7 @@ mod tests {
     }
 
     /// **codex `/plan` 运行中不可用 → 如实回执**（§2.6 表末）：会话 Processing →
-    /// 200 failed + 中文说明，**零注入零审计**（codex 自己也会拒，MAM 提前拦）。
+    /// 200 failed + 中文说明，**零注入零审计**（codex 自己也会拒，兔维斯 提前拦）。
     /// 还原动作：删掉 `codex_plan_busy` 那道门 → 本断言先红（会变成投递 `/plan`）。
     #[tokio::test]
     async fn session_mode_switch_reports_codex_plan_busy() {
@@ -13642,7 +13642,7 @@ mod tests {
     // ============================================================
 
     /// C6 专用 state：create 缝束 / 注入器 / 屏序 / host / 快照 / 归档六点可注入，
-    /// 其余缝与 test_state 同口径（内存库，零接触真实 ~/.mam）。
+    /// 其余缝与 test_state 同口径（内存库，零接触真实 ~/.tuvis）。
     /// 屏序假体：按调用序弹出（耗尽后恒 None = 读屏失败轮）；弹屏次序驱动
     /// run_pipeline 走「处置 → idle → 注入首句 → waiting_materialize」。
     fn create_state(

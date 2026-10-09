@@ -2,7 +2,7 @@
 
 ## 项目宪法（最高设计依据）
 
-`docs/MASTER-PLAN.md`（MAM 远程接入与操控平台 · 总需求说明书）是本项目**唯一最高权威设计文档**，定义三期总纲（一期只读接入 / 二期消息注入 / 三期全控与任务流转）、共用底座、技术选型与横切原则。任何设计文档、spec、实现、任务列表与其冲突时，**一律以它为准**。
+`docs/MASTER-PLAN.md`（兔维斯 远程接入与操控平台 · 总需求说明书）是本项目**唯一最高权威设计文档**，定义三期总纲（一期只读接入 / 二期消息注入 / 三期全控与任务流转）、共用底座、技术选型与横切原则。任何设计文档、spec、实现、任务列表与其冲突时，**一律以它为准**。
 
 - **未经用户在场明确同意，任何人（含任何 AI agent）不得修改 `docs/MASTER-PLAN.md`**
 - 发现实现或下层文档与宪法冲突时：停下，向用户报告冲突点，由用户裁决"改宪法"还是"改实现"，不得自行处置
@@ -37,10 +37,10 @@ cd src-tauri && cargo clippy   # Rust 代码 lint
 
 ## 采集域开发纪律（2026-10-07 事故后新增）
 
-**改 `src-tauri/src/services/usage/**` 之前，先停 `pnpm tauri:dev`**（或把 `~/.dsh` / `MAM_HOME` 指到影子目录再动）。
+**改 `src-tauri/src/services/usage/**` 之前，先停 `pnpm tauri:dev`**（或把 `~/.dsh` / `TUVIS_HOME` 指到影子目录再动）。
 
 - **为什么**：`pnpm tauri:dev` 的文件监视器会在保存后重建并重启应用，而用量采集**会写真实账本**
-  （`~/.mam/mam.db`）。2026-10-07 的 dsh 时间归属改造中，应用在源文件改到一半时跑了三轮真实采集，
+  （`~/.tuvis/tuvis.db`）。2026-10-07 的 dsh 时间归属改造中，应用在源文件改到一半时跑了三轮真实采集，
   真机 dsh 账本被灌到约 4×（22.50B vs 事件流真值 5.67B），只能靠「删 dsh 行与游标 + 全量重采」
   重建（用户 18:38 裁决）。事故全文（根因 / 回退点路径 / 重建后验收 / 已知差异）见
   `docs/release-notes/2026-10-07-dsh-ledger-rebuild-incident.md`。
@@ -84,10 +84,10 @@ cd src-tauri && cargo clippy   # Rust 代码 lint
 
 ## 卡面状态权威源：屏读为准（2026-10-03 用户裁决）
 
-MAM 远程卡面（问答卡的勾选态、自由作答内容、当前所在题）的**状态权威源 = 终端屏读**，不是本地发送记忆。远程注入是「尽力而为」：网络/通道/用户在终端手动操作/应用重启，都会让两边漂移——本地记忆**只作乐观显示**，最终必须以屏读核对为准。
+兔维斯 远程卡面（问答卡的勾选态、自由作答内容、当前所在题）的**状态权威源 = 终端屏读**，不是本地发送记忆。远程注入是「尽力而为」：网络/通道/用户在终端手动操作/应用重启，都会让两边漂移——本地记忆**只作乐观显示**，最终必须以屏读核对为准。
 
 - **交互后延迟核对**：每次注入动作（点选项/打字/切题）的回执必须携带**动作后的屏读快照**（编排内置闭环核验，延迟 0.x 秒等 TUI 重绘）——核对不符时卡面回退到屏读状态（例如选项未翻转就不显示已选中），让用户重试；
-- **GET 初始化纠偏**：拉取问答载荷时附带终端当前屏的快照（题干对位到载荷题 + 勾选态 + 自由作答内容；Review 在场 → 直接进确认卡）——覆盖「MAM 重启后重开页面」「终端手动作答后回来」等漂移场景，**不做时刻轮询**（GET 时机 = 挂载/状态跃迁，交互回执时机 = 每次动作后）；
+- **GET 初始化纠偏**：拉取问答载荷时附带终端当前屏的快照（题干对位到载荷题 + 勾选态 + 自由作答内容；Review 在场 → 直接进确认卡）——覆盖「兔维斯 重启后重开页面」「终端手动作答后回来」等漂移场景，**不做时刻轮询**（GET 时机 = 挂载/状态跃迁，交互回执时机 = 每次动作后）；
 - **快照丢失保守降级**：屏读不可用（非 Windows/进程退出/attach 失败）→ 快照为 null，前端维持本地状态（不假清不假同步）；
 - **回执即快照的传播面**：toggle 回执 `checked`（既有）/ 多选自由作答回执 `text`+`checked` / 切题回执 `screen{heading,checked,freeText}` / GET `screen`——四路同一权威源；**中止回执不带快照但前端中止后自动重拉一次 GET**（键可能在轮询窗尽后才被终端消费）。
 - **已知边界（如实申报）**：单选题的选中项在终端屏上**无勾选框标记**（高亮是属性层，字符读法不可见）→ mqSelected 仍为本地记忆，快照权威源不覆盖该面；快照对位失败（题干匹配不到载荷题/多义匹配/勾选数不符）→ **放弃同步维持现状**（不猜纪律）；**终端手动输入且已切离该题的自由作答内容**不在任何快照窗口（快照只覆盖终端当前停着的题）→ 确认卡如实显示「未作答」（真值在终端 Review 页；Review 回显解析留待后续批次）。
@@ -104,10 +104,10 @@ MAM 远程卡面（问答卡的勾选态、自由作答内容、当前所在题�
 - **`monitor/`** — 进程扫描、JSONL 会话解析、Hook 事件读取、状态判定。
 - **`services/`** — 按功能域拆分：`skill/`（安装/启用/禁用）、`resource/`（扫描/导入/补链）、`mcp/`（JSON/TOML/JSONC）、`preset/`、`plugin/`、`manifest/`。
 - **`linker/`** — 符号链接/交接点管理，三层映射：
-  - **Layer 1**: SSOT 全局仓库 `~/.mam/skills/`
-  - **Layer 2**: 工具级激活目录 `~/.mam/active/<tool>/skills/`
-  - **Layer 3**: 子 Agent 级激活目录 `~/.mam/active/<tool>/<sub-agent>/skills/`
-- **`database/`** — SQLite 数据层（`~/.mam/mam.db`，schema/migration/dao）。
+  - **Layer 1**: SSOT 全局仓库 `~/.tuvis/skills/`
+  - **Layer 2**: 工具级激活目录 `~/.tuvis/active/<tool>/skills/`
+  - **Layer 3**: 子 Agent 级激活目录 `~/.tuvis/active/<tool>/<sub-agent>/skills/`
+- **`database/`** — SQLite 数据层（`~/.tuvis/tuvis.db`，schema/migration/dao）。
 - **`commands/`** — 所有 `#[tauri::command]` IPC 处理器，按模块拆分。
 - **`window/`** — 通过 AppleScript 聚焦终端（iTerm2/Terminal.app）和 tmux。
 - **`plugins/system_tray.rs`** — 系统托盘（状态指示 + 预设菜单）。
@@ -133,11 +133,11 @@ MAM 远程卡面（问答卡的勾选态、自由作答内容、当前所在题�
 ### 三层 Skill 映射
 
 ```
-Layer 1 (SSOT):    ~/.mam/skills/brainstorming/SKILL.md
+Layer 1 (SSOT):    ~/.tuvis/skills/brainstorming/SKILL.md
                          ↓ 符号链接
-Layer 2 (Tool):    ~/.mam/active/claude/skills/brainstorming → Layer 1
+Layer 2 (Tool):    ~/.tuvis/active/claude/skills/brainstorming → Layer 1
                          ↓ 符号链接
-Layer 3 (SubAgent):~/.mam/active/claude/sub-agent-1/skills/brainstorming → Layer 2
+Layer 3 (SubAgent):~/.tuvis/active/claude/sub-agent-1/skills/brainstorming → Layer 2
 ```
 
 Layer 3 指向 Layer 2（而非 Layer 1），因此工具级禁用会自动断开所有子 Agent 链接。
@@ -166,17 +166,17 @@ SQLite 类工具（查询即过滤，如 opencode / zcode）豁免第 2、3 条�
 
 ## 数据目录
 
-应用数据存储在 `~/.mam/`：
+应用数据存储在 `~/.tuvis/`：
 
 | 路径 | 用途 |
 |------|------|
-| `~/.mam/mam.db` | SQLite 数据库 |
-| `~/.mam/skills/` | 全局 Skill 仓库 |
-| `~/.mam/mcp/` | 全局 MCP 服务器配置 |
-| `~/.mam/plugins/` | 全局 Plugin 仓库 |
-| `~/.mam/hooks/status-hook.sh` | 共享 Hook 脚本 |
-| `~/.mam/stash/` | 预设独占模式的原生技能暂存区（应用时移入、恢复时回移，stash_journal 记账） |
-| `~/.mam/events/` | Hook 事件文件（自动清理，30 秒 TTL） |
+| `~/.tuvis/tuvis.db` | SQLite 数据库 |
+| `~/.tuvis/skills/` | 全局 Skill 仓库 |
+| `~/.tuvis/mcp/` | 全局 MCP 服务器配置 |
+| `~/.tuvis/plugins/` | 全局 Plugin 仓库 |
+| `~/.tuvis/hooks/status-hook.sh` | 共享 Hook 脚本 |
+| `~/.tuvis/stash/` | 预设独占模式的原生技能暂存区（应用时移入、恢复时回移，stash_journal 记账） |
+| `~/.tuvis/events/` | Hook 事件文件（自动清理，30 秒 TTL） |
 
 ## 贡献者行为准则
 

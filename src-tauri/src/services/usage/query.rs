@@ -472,7 +472,7 @@ pub fn dashboard_with_conn(
 ) -> Result<UsageDashboard, UsageError> {
     if !super::settings::load_from_conn(conn).enabled {
         // 总开关关闭：不采集不落库 → 查询出空态（零扫描、零行）。
-        // 用连接注入版读设置：单测直连内存库时不触碰真实 ~/.mam/mam.db（W-24：
+        // 用连接注入版读设置：单测直连内存库时不触碰真实 ~/.tuvis/tuvis.db（W-24：
         // 单测**不得**调进程级 `settings::load()`，那会被别的模块注入的值串味）
         return Ok(empty_dashboard(range, group_by));
     }
@@ -659,7 +659,7 @@ pub fn records_with_conn(
     }
     if !super::settings::load_from_conn(conn).enabled {
         // 总开关关闭：不采集不落库 → 查询出空态（零扫描、零行）。
-        // 用连接注入版读设置：单测直连内存库时不触碰真实 `~/.mam/mam.db`（W-24：
+        // 用连接注入版读设置：单测直连内存库时不触碰真实 `~/.tuvis/tuvis.db`（W-24：
         // 单测**不得**调进程级 `settings::load()`，那会被别的模块注入的值串味）。
         // `collected_at` 取 **0 哨兵**（契约把该字段定为非空 `number`，没有 null 可选）。
         return Ok(UsageRecords {
@@ -5114,7 +5114,7 @@ mod tests {
         );
     }
 
-    /// **真机账本冒烟**（`#[ignore]`，需开发机 `~/.mam/mam.db` 已有真机数据）：
+    /// **真机账本冒烟**（`#[ignore]`，需开发机 `~/.tuvis/tuvis.db` 已有真机数据）：
     /// `cargo test --lib -- --ignored --nocapture real_ledger_dashboard_smoke`
     ///
     /// 为什么值得单列：本文件其余用例都在**内存库**上跑（口径可断言、可复现），而真机数据的
@@ -5124,7 +5124,7 @@ mod tests {
     ///
     /// **⚠️ 本用例是「刻意的只读例外」（Task 16 / 2026-10-03 真机数据隔离守卫：勿改、勿删、勿"统一"）**：
     /// 它是全仓**唯一**需要真机数据**形状**的用例，天然安全——因为它**绕开了全部三条真机可达路径**：
-    /// ① 用**显式路径**自开连接（`MAM_HOME` 优先、否则 `dirs::home_dir()`）——**不走**
+    /// ① 用**显式路径**自开连接（`TUVIS_HOME` 优先、否则 `dirs::home_dir()`）——**不走**
     ///    `database::connection::app_data_home()`（Step 2 那个 `cfg(test)` 重定向分支在它这里
     ///    **根本不存在**，它也没被重定向影响）；
     /// ② **不走** `database::open()`、也**不碰**进程级 `DB`（设置读的是 `settings::load_from_conn`）；
@@ -5133,21 +5133,21 @@ mod tests {
     /// 后来者**不要**「顺手统一」成 `app_data_home()`——那会把它变成 Step 2 的测试对象，
     /// 同时毁掉它存在的唯一理由（读真机数据的**形状**）。
     #[test]
-    #[ignore = "真机冒烟：需 ~/.mam/mam.db（只读打开）"]
+    #[ignore = "真机冒烟：需 ~/.tuvis/tuvis.db（只读打开）"]
     fn real_ledger_dashboard_smoke() {
-        let home = std::env::var_os("MAM_HOME")
+        let home = std::env::var_os("TUVIS_HOME")
             .filter(|v| !v.is_empty())
             .map(std::path::PathBuf::from)
             .or_else(dirs::home_dir)
             .expect("无法定位用户目录");
-        let db = home.join(".mam").join("mam.db");
+        let db = home.join(".tuvis").join("tuvis.db");
         if !db.exists() {
             eprintln!("跳过：真机账本 {} 不存在", db.display());
             return;
         }
         let conn =
             rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .expect("只读打开真机账本失败（若 MAM 正在写，可能 SQLITE_BUSY）");
+                .expect("只读打开真机账本失败（若 兔维斯 正在写，可能 SQLITE_BUSY）");
         let enabled = crate::services::usage::settings::load_from_conn(&conn).enabled;
         let now = crate::services::usage::now_ms();
         println!(

@@ -1,6 +1,6 @@
 // 设置页「信号健康度」分区（T5：hook 通道自查面板）。
 // 待办判据 = 已注册 ∧ 该工具有活跃会话 ∧ 零事件 → 提示在工具终端输入 /hooks 信任
-// MAM 条目（codex 信任门：注册成功 ≠ 事件触发，TUI 内人工信任一次后 hash 落用户层）。
+// 兔维斯 条目（codex 信任门：注册成功 ≠ 事件触发，TUI 内人工信任一次后 hash 落用户层）。
 // 数据源 = hook_signal_health（后端复用会话扫描快照 + 30s TTL 事件目录既有信息，
 // 零新增扫描预算）；挂载/手动刷新各拉一次，无轮询（同 AuditLogSection 惯例）。
 import { SETTINGS_FIELD } from "@/components/settings/typography";

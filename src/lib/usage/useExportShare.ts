@@ -10,7 +10,7 @@
 //    与首屏网格同序），值用**精确千分位**（与 hero 同口径：摘要有列宽压力才缩写，图片没有）；
 //    `asOf` **不进**指标行——它归 `heroSub`（`collectedAt === 0` → `usage.notCollected`，§3 第 8 条）。
 //  * `heroLabel` 取 `usage.hero.label`（**不是** `usage.card.trend`：用了它全图会连着出现两次
-//    「用量趋势」）；品牌 = `` `MAM · ${t("usage.title")}` ``（**不新造** `summaryTitle`）。
+//    「用量趋势」）；品牌 = `` `兔维斯 · ${t("usage.title")}` ``（**不新造** `summaryTitle`）。
 //  * 不可得一律 `EM_DASH`，**绝不回退填 0**（`workSummary` 四条：`toolCalls` / `toolAvgMs` /
 //    `topTool` / `topToolMs`；§3 第 5 条）。
 //  * 命中率取 `format.ts` 的 `fmtPct`（**全仓唯一一套** 0–1 分数口径：1 位小数 + `%`）。
@@ -161,7 +161,7 @@ async function buildShareInput(
 
   return {
     input: {
-      brand: `MAM · ${t("usage.title")}`,
+      brand: `兔维斯 · ${t("usage.title")}`,
       // 跨度算不出（点 < 2）时**不挂**那个分隔符，避免出现「近 7 天 · 」这种半截头
       rangeLabel: span ? `${rangeName} · ${span}` : rangeName,
       heroLabel: t("usage.hero.label", { range: rangeName }),

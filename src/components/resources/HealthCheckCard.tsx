@@ -5,7 +5,7 @@
 // ③ 残留暂存：逐条回移 = restore_stash_entry（失败原样 toast，后端 message 已含原因）
 // ④ frontmatter 存量「待确认专属建议」（Task 17，spec §6）：逐条「设为专属/忽略本轮」，
 //    只列建议不自动写绑定表（2026-09-15 裁决）；忽略=前端收起，下次体检重新出现
-// ⑤ 空目录（wave33 Item D）：MAM 仓库 / 工具 skill 目录中的可清理空目录，
+// ⑤ 空目录（wave33 Item D）：兔维斯 仓库 / 工具 skill 目录中的可清理空目录，
 //    「清理空目录」批量 clean_empty_dirs（后端白名单自校验，返回实际删除数）
 // 无异常时折叠一行 + 「立即体检」（refetch）；标题处角标 = 未决差异数（④ 建议不计入：
 // 角标沿 Task 15 语义只反映漂移/不变量/暂存三类差异）
@@ -213,7 +213,7 @@ export function HealthCheckCard() {
   };
 
   // ⑤ 空目录清理（wave33 Item D）：传当前列出全部 path → clean_empty_dirs 返回
-  //    实际删除数；后端白名单自校验（MAM skill 仓库 / 启用工具 skill 目录），
+  //    实际删除数；后端白名单自校验（兔维斯 skill 仓库 / 启用工具 skill 目录），
   //    越界/失败以 Err 透出。成功后失效体检 + SSOT 资源（目录变化影响资源扫描视图）
   const cleanEmptyDirs = async () => {
     if (emptyDirs.length === 0 || emptyCleanPending) return;
@@ -330,7 +330,7 @@ export function HealthCheckCard() {
                       <div className="text-muted-foreground truncate text-[10px]">{item.path}</div>
                     </div>
                     {isManual ? (
-                      // needs_manual：橙色态无按钮（MAM 不动手，现场已保留）
+                      // needs_manual：橙色态无按钮（兔维斯 不动手，现场已保留）
                       <span className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-500">
                         {t("resources.health.needsManual")}
                       </span>

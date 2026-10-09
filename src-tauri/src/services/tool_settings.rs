@@ -1,5 +1,5 @@
 // 工具勾选管理（spec W5）：查询（含 managed 标志）与保存时的清理/重建。
-// 取消勾选 = skill/文件型插件的「MAM 链接」还原为真实文件 + MAM 管理的 MCP 条目移除 + 未读卡清除；
+// 取消勾选 = skill/文件型插件的「兔维斯 链接」还原为真实文件 + 兔维斯 管理的 MCP 条目移除 + 未读卡清除；
 // SSOT 仓库与 DB 分配关系全部保留（禁止删除）；重新勾选按原分配幂等重建。
 
 use crate::database::dao::{agent_tool, extension};
@@ -164,10 +164,10 @@ fn disable_tool_cleanup(tool_id: &str, result: &mut ApplyResult) {
         match ext.kind.as_str() {
             "skill" => {
                 if let Some(dir) = crate::adapter::skill_dir_for_tool(tool_id, &home) {
-                    // SSOT skill 仓库即 ensure_repo_dir()（~/.mam/skills/<name>）
+                    // SSOT skill 仓库即 ensure_repo_dir()（~/.tuvis/skills/<name>）
                     let ssot = crate::linker::ensure_repo_dir().join(&ext.name);
                     // P1-4：子 Agent 分配的 Layer 3 目标（skill_dir/subagents/<sub>/<name>，
-                    // 经 ~/.mam/active/<tool>/<sub>/ 直通 SSOT）同样要还原——工具级还原后
+                    // 经 ~/.tuvis/active/<tool>/<sub>/ 直通 SSOT）同样要还原——工具级还原后
                     // 该链仍可解析，「彻底隐藏」被绕过
                     match a.sub_agent_id.as_deref() {
                         Some(sub) => {
@@ -195,8 +195,8 @@ fn disable_tool_cleanup(tool_id: &str, result: &mut ApplyResult) {
             "plugin" => {
                 if let Some(adapter) = crate::adapter::adapter_by_id(tool_id) {
                     if let Some(dir) = adapter.plugin_dirs().first() {
-                        // 文件型插件 SSOT：~/.mam/plugins/<name>
-                        let ssot = home.join(".mam").join("plugins").join(&ext.name);
+                        // 文件型插件 SSOT：~/.tuvis/plugins/<name>
+                        let ssot = home.join(".tuvis").join("plugins").join(&ext.name);
                         report_restore(
                             restore_mam_link(&ssot, &dir.join(&ext.name), &ext.name),
                             &ext.name,
@@ -232,7 +232,7 @@ enum RestoreOutcome {
     /// 还原中断且现场已失（链接已移除、内容落位失败、重建链接恢复也失败），
     /// 计入 skipped_lost 逐项报告并提示重建
     SkippedLost,
-    /// 无需处理：目标非 MAM 链接态（原生目录或不存在），不报告也不计数
+    /// 无需处理：目标非 兔维斯 链接态（原生目录或不存在），不报告也不计数
     NotApplicable,
 }
 
@@ -247,7 +247,7 @@ fn report_restore(outcome: RestoreOutcome, name: &str, result: &mut ApplyResult)
     }
 }
 
-/// 还原单个「MAM 建的链接」为真实内容：仅链接态（Valid/Dangling）处理，
+/// 还原单个「兔维斯 建的链接」为真实内容：仅链接态（Valid/Dangling）处理，
 /// 原生目录（NotLink）与不存在（Missing）不动（NotApplicable）；
 /// SSOT 缺失或还原中途失败 → SkippedKept（链接保持不变）；
 /// 移除链接成功后落位失败 → 先尝试重建链接恢复现场（issue #36-4），恢复成功
@@ -356,10 +356,10 @@ fn rebuild_tool_links(tool_id: &str, result: &mut ApplyResult) {
 
     for a in &assignments {
         if let Some(mcp_name) = a.extension_id.strip_prefix("mcp-") {
-            // SSOT MCP 配置：~/.mam/mcp/<name>.json（与 save_mcp_config / import_mcp_to_ssot 一致）
+            // SSOT MCP 配置：~/.tuvis/mcp/<name>.json（与 save_mcp_config / import_mcp_to_ssot 一致）
             let path = dirs::home_dir()
                 .unwrap_or_default()
-                .join(".mam")
+                .join(".tuvis")
                 .join("mcp")
                 .join(format!("{}.json", mcp_name));
             let ok = match std::fs::read_to_string(&path)
@@ -379,7 +379,7 @@ fn rebuild_tool_links(tool_id: &str, result: &mut ApplyResult) {
         };
         let ok = match ext.kind.as_str() {
             // P1-4：带子 Agent 分配的行走 Layer 3 重建（assign_skill_to_subagent：
-            // 链 ~/.mam/active/<tool>/<sub>/ + 工具 skill 目录 subagents/<sub>/<name>），
+            // 链 ~/.tuvis/active/<tool>/<sub>/ + 工具 skill 目录 subagents/<sub>/<name>），
             // 工具级行走 enable_skill_for_tool（Layer 2 + 工具级目标）
             "skill" => match a.sub_agent_id.as_deref() {
                 Some(sub) => {
@@ -443,7 +443,7 @@ mod restore_tests {
         assert!(!tmp
             .path()
             .join("tools")
-            .join("skill-a.mam_restore_tmp")
+            .join("skill-a.tuvis_restore_tmp")
             .exists());
     }
 
@@ -516,7 +516,7 @@ mod restore_tests {
     #[test]
     fn skips_and_keeps_link_when_ssot_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        // SSOT 未创建（~/.mam/skills/<name> 被用户删除的场景），链接悬空
+        // SSOT 未创建（~/.tuvis/skills/<name> 被用户删除的场景），链接悬空
         let ssot = tmp.path().join("repo").join("gone");
         let target = tmp.path().join("tools").join("gone");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -539,7 +539,7 @@ mod restore_tests {
         );
     }
 
-    /// 目标为原生目录（非 MAM 链接态）：无需还原，返回 NotApplicable（不报告也不计入 restored）
+    /// 目标为原生目录（非 兔维斯 链接态）：无需还原，返回 NotApplicable（不报告也不计入 restored）
     #[test]
     fn not_applicable_for_native_dir() {
         let tmp = tempfile::tempdir().unwrap();

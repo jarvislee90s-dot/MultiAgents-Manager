@@ -41,7 +41,7 @@ const LAYOUT_COLORS = { PAGE: "#f5f6f8", CARD: "#ffffff", BUBBLE_BG: "#fffdf9" }
  *  用量趋势 / 分组分布 / 工具调用 / 纯 token · 含子代理 · 本地聚合） */
 function baseInput(over: Partial<ExportInput> = {}): ExportInput {
   return {
-    brand: "MAM · 用量看板",
+    brand: "兔维斯 · 用量看板",
     rangeLabel: "近 7 天 · 09/27 – 10/03",
     heroLabel: "近 7 天 Token 合计",
     hero: "2,036,981",

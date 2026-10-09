@@ -1,5 +1,5 @@
 // Layer 2：工具级激活目录管理
-// ~/.mam/active/<tool>/ 存放该工具已启用的 skill 链接
+// ~/.tuvis/active/<tool>/ 存放该工具已启用的 skill 链接
 
 use std::path::PathBuf;
 
@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub fn active_base_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("active")
 }
 
@@ -73,7 +73,7 @@ mod tests {
         assert!(dir
             .to_string_lossy()
             .replace('\\', "/")
-            .contains(".mam/active/claude"));
+            .contains(".tuvis/active/claude"));
     }
 
     #[test]
@@ -84,7 +84,7 @@ mod tests {
         assert!(dir
             .to_string_lossy()
             .replace('\\', "/")
-            .contains(".mam/active/test_tool"));
+            .contains(".tuvis/active/test_tool"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

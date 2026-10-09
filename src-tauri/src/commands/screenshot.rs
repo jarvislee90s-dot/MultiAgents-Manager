@@ -16,7 +16,7 @@ pub fn capture_window_screenshot(_app: tauri::AppHandle) -> ScreenshotResult {
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let screenshot_dir = dirs::home_dir()
             .unwrap_or_default()
-            .join(".mam")
+            .join(".tuvis")
             .join("screenshots");
         if let Err(e) = std::fs::create_dir_all(&screenshot_dir) {
             return ScreenshotResult {
@@ -28,7 +28,7 @@ pub fn capture_window_screenshot(_app: tauri::AppHandle) -> ScreenshotResult {
         let screenshot_path = screenshot_dir.join(format!("screenshot_{}.png", timestamp));
         let path_str = screenshot_path.to_string_lossy().to_string();
         let window_id_output = Command::new("sh")
-            .args(["-c", "osascript -e 'tell application \"System Events\" to get id of first process whose name contains \"multi-agents-manager\"' 2>/dev/null || echo ''"])
+            .args(["-c", "osascript -e 'tell application \"System Events\" to get id of first process whose name contains \"multi-agents-manager\" or name contains \"tuvis\"' 2>/dev/null || echo ''"])
             .output();
         let capture_result = if let Ok(output) = window_id_output {
             let window_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -84,7 +84,7 @@ pub fn capture_window_screenshot(_app: tauri::AppHandle) -> ScreenshotResult {
 pub fn list_screenshots() -> Vec<String> {
     let screenshot_dir = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("screenshots");
     if !screenshot_dir.exists() {
         return Vec::new();

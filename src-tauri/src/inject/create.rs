@@ -282,9 +282,9 @@ pub struct Params {
     /// 实际注入输入框的首句（已带移动端标签）
     pub composed: String,
     /// codex hooks 审查框的**核验式信任**决策（C8 用户在场裁决 2026-10-02）：
-    /// true = 调用方已核验本机 codex hooks.json 全条目命中 MAM 指纹
+    /// true = 调用方已核验本机 codex hooks.json 全条目命中 兔维斯 指纹
     /// （`monitor::hooks::codex_hooks_all_ours`）→ 遇 create_hooks 框发 '2'
-    /// （Trust all——信任的确是 MAM 自己注册的 hooks，远程创建的状态上报闭环）；
+    /// （Trust all——信任的确是 兔维斯 自己注册的 hooks，远程创建的状态上报闭环）；
     /// false = 混杂/核验失败/非 codex 工具 → 发 esc（屏面明示 esc skip，不信任
     /// 只解锁 composer）。调用方预计算，内核保持纯函数。
     pub hooks_trust_ok: bool,
@@ -516,7 +516,7 @@ pub fn run_pipeline(deps: &CreateDeps, p: &Params) -> CreateOutcome {
             }
             // hooks 审查框核验式信任（Params.hooks_trust_ok doc 有裁决全文）：
             // 核验通过 → '2'（选中 Trust all）+ enter（确认——C8 实机定案：该框
-            // 数字键只移动高亮不确认，框上明示「enter confirm」）→ MAM 功能闭环；
+            // 数字键只移动高亮不确认，框上明示「enter confirm」）→ 兔维斯 功能闭环；
             // 混杂/失败 → esc（屏面明示 esc skip——不信任只解锁，保守不代用户做
             // 混杂态信任决定）
             let keys: Vec<String> = if sc == scenario::CREATE_HOOKS {
@@ -944,9 +944,9 @@ mod pipeline_tests {
         assert_eq!(out.keys_sent, vec!["down", "enter"]); // 红线键序不变
     }
 
-    /// codex MAM hooks 审查框（C8 实机定案 + 用户在场裁决 2026-10-02）：
+    /// codex 兔维斯 hooks 审查框（C8 实机定案 + 用户在场裁决 2026-10-02）：
     /// **核验式自动信任**——hooks_trust_ok=true（调用方核验 hooks.json 全条目
-    /// 我方）→ '2'（Trust all and continue，MAM 状态上报闭环）；false（混杂/
+    /// 我方）→ '2'（Trust all and continue，兔维斯 状态上报闭环）；false（混杂/
     /// 核验失败/非 codex）→ esc（屏面明示 esc skip——不信任只解锁，保守）。
     #[test]
     fn codex_hooks_dialog_verified_trusts_and_unverified_skips() {

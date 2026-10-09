@@ -6,7 +6,7 @@
 // - `~/.zcode/v2/tasks-index.sqlite` → `tasks` 表：任务级索引（task_id/title/task_status/
 //   archived/deleted/updated_at 毫秒）。task_status 仅 Windows 可靠（macOS 旧任务续跑
 //   不翻回 running）——只作加速提示，不作状态主源；`error` 按完成处理转绿；
-//   unread_at/last_unread_at 是 ZCode 侧栏自己的未读标记，与 MAM 未读池语义不同步——不使用；
+//   unread_at/last_unread_at 是 ZCode 侧栏自己的未读标记，与 兔维斯 未读池语义不同步——不使用；
 // - `~/.zcode/cli/db/db.sqlite` → `session`/`message`/`part` 表：会话正文与消息流。
 //   session.task_type 只收 `interactive`（subagent_child/selection_side_chat/fork 过滤）；
 //   session.time_updated（毫秒）活动期间实时刷新；message.data 内含 role 与 semantics.kind；
@@ -1015,7 +1015,7 @@ mod tests {
         let cli = build_cli_db(&roots.cli_db);
         let now = now_ms();
         // 实测 task_type 枚举：interactive / subagent_child / selection_side_chat / fork
-        // ——MAM 只应收 interactive（其余三种被过滤）
+        // ——兔维斯 只应收 interactive（其余三种被过滤）
         insert_session(
             &cli,
             SID_A,

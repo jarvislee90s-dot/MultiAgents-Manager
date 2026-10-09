@@ -37,7 +37,7 @@ fn read_workbuddy_tail_digest(jsonl: &Path) -> WorkBuddyTailDigest {
     }
 }
 
-/// 心跳新鲜阈值：取 MAM 轮询周期（约 30s）的 3 倍，防止轮询间隙卡片闪烁
+/// 心跳新鲜阈值：取 兔维斯 轮询周期（约 30s）的 3 倍，防止轮询间隙卡片闪烁
 pub const HEARTBEAT_FRESH_MS: u64 = 90_000;
 
 /// 完成防抖窗（spec 假绿治理 §4.2）：assistant 语义尾 + JSONL mtime 年龄 < 该窗 → 拉回
@@ -572,7 +572,7 @@ pub fn compensate_vanished_heartbeats_in(
         }
         // review M1：状态缓存已记录「绿已被 sync 观测」（Idle/Finished）时，行缺席
         // 是因为用户已读删行——补偿不得复活（否则一次性复活未读卡）。
-        // issue #35-1：缓存可能已失忆（离板 TTL 清理 / MAM 重启），近期已读墓碑
+        // issue #35-1：缓存可能已失忆（离板 TTL 清理 / 兔维斯 重启），近期已读墓碑
         // 提供不依赖缓存的已读信号，同样不得复活
         if matches!(
             status_of(&session_id).as_deref(),
@@ -607,7 +607,7 @@ pub fn compensate_vanished_heartbeats_in(
 const OBSERVATION_TTL_MS: i64 = 24 * 3600 * 1000;
 
 /// 启动后首轮：把 DB 影子表中的近期观测还原进进程内 LAST_SEEN（issue #35-2）。
-/// MAM 重启清空进程内观测表后，停机期间「完成 + prewarm 回池删心跳文件」的会话
+/// 兔维斯 重启清空进程内观测表后，停机期间「完成 + prewarm 回池删心跳文件」的会话
 /// 无观测则补偿永不触发、未读提醒静默丢失；观测落库后跨重启仍可补偿。
 /// or_insert 不覆盖本轮已发现的更新条目（pid 复用时新会话胜出，见 restore_observations）。
 ///
@@ -1270,7 +1270,7 @@ mod tests {
             assert!(last_seen.lock().unwrap().is_empty());
         }
 
-        /// issue #35-1 回归锁：状态缓存失忆（status_of=None，跨过缓存 TTL / MAM
+        /// issue #35-1 回归锁：状态缓存失忆（status_of=None，跨过缓存 TTL / 兔维斯
         /// 重启）但近期已读墓碑在场 → 补偿同样不得复活已读会话
         #[test]
         fn compensation_skips_recently_read_session_with_forgotten_cache() {

@@ -4,11 +4,11 @@ Skill/MCP/Plugin installation and management
 
 ## Overview
 
-This chapter covers Resource Management functionality in MultiAgents Manager.
+This chapter covers Resource Management functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Resource Management features for managing AI programming tools.
+Tuvis provides comprehensive Resource Management features for managing AI programming tools.
 
 ## Steps
 

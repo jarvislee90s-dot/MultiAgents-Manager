@@ -1,10 +1,10 @@
 # Session Monitoring
 
-This guide covers the Session Monitoring feature of MultiAgents Manager.
+This guide covers the Session Monitoring feature of Tuvis.
 
 ## Overview
 
-MultiAgents Manager is a unified management platform for AI programming tools, supporting Claude Code, Codex CLI, OpenCode, and OpenClaw.
+Tuvis is a unified management platform for AI programming tools, supporting Claude Code, Codex CLI, OpenCode, and OpenClaw.
 
 ## Installation
 

@@ -60,6 +60,13 @@ research/
 # 临时输出
 check-output.txt
 
+# 吉祥物生成过程稿与品牌工作底稿（用户裁决：先留本地，不入库；正式资产定稿后再挑）
+docs/brand/BRAND.md
+docs/brand/mascot-gen/
+
+# 视频配音项目素材（本地创作，不入库）
+videomaker/
+
 # 音效源文件副本（正式音效在 public/sounds/）
 assets/NoticeSound/
 

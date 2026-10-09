@@ -1,5 +1,5 @@
 // Layer 3：子 Agent 级激活目录管理
-// ~/.mam/active/<tool>/<subagent>/ 存放子 Agent 已启用的 skill 链接
+// ~/.tuvis/active/<tool>/<subagent>/ 存放子 Agent 已启用的 skill 链接
 // 仅 Hermes 和 OpenCode 等支持子 Agent 独立 skill 目录的工具有此层
 // Claude Code 和 Codex CLI 不支持子 Agent 独立目录，此层对其为"仅 UI 记录"
 
@@ -112,6 +112,6 @@ mod tests {
         assert!(dir
             .to_string_lossy()
             .replace('\\', "/")
-            .contains(".mam/active/opencode/researcher"));
+            .contains(".tuvis/active/opencode/researcher"));
     }
 }

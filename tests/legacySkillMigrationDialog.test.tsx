@@ -50,7 +50,7 @@ describe("LegacySkillMigrationDialog", () => {
     expect(await screen.findByText("skill-a")).toBeInTheDocument();
     expect(screen.getByText("skill-b")).toBeInTheDocument();
     // 描述带数量插值（detect 返回 2 条）
-    expect(screen.getByText(/发现 2 个由 MAM 创建/)).toBeInTheDocument();
+    expect(screen.getByText(/发现 2 个由 兔维斯 创建/)).toBeInTheDocument();
     // 双按钮 + 语义说明 + 取消（zh 词条）
     expect(screen.getByRole("button", { name: "迁移到 .codex/skills" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保留为共享" })).toBeInTheDocument();

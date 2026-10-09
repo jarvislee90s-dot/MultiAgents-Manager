@@ -39,7 +39,7 @@ gh pr list --state open --json number,title,statusCheckRollup
 
 # 2. 全绿的：逐个合并；每合一个，其余会变 behind，先更新分支再等新 head 绿
 gh pr merge <N> --squash
-gh api -X PUT repos/jarvislee90s-dot/MultiAgents-Manager/pulls/<下一个N>/update-branch
+gh api -X PUT repos/jarvislee90s-dot/tuvis/pulls/<下一个N>/update-branch
 #    等新 head 的必需检查全绿（约 10–15 分钟）后再合下一个
 
 # 3. tauri 两半（若 parity 报「成对不一致」）：必须同批合，见 §4
@@ -61,7 +61,7 @@ gh workflow run ci.yml --ref main
 | `Backend Checks` 红：`error[E…]` 编译错误 | major 升级带来的 API 破坏（历史案例：`rand 0.10` 删除 `thread_rng`/`RngCore`；`windows 0.61` 句柄指针化；`sysinfo 0.39` 删除 `RefreshKind::new`） | 立"迁移任务"单独做；E0599 这类"方法找不到"会**掩盖后续类型错误**（windows 那次 CI 报 16 个、实际 21 个），必须本地 `cargo check` 迭代到干净 |
 | `Frontend Checks` 红：`typescript-eslint does not support TS X` | ESLint 工具链尚未支持该 TS 大版本（上游阻塞） | 对该依赖 `@dependabot ignore this major version`，等上游支持后 `unignore` |
 | `Build verification` 红：`tsconfig.json(...) TS5102: Option 'baseUrl' has been removed` | TS 7 移除 `baseUrl` | 迁移 `tsconfig.json` 的 `baseUrl` + `paths` 写法（后端/前端构建都要验） |
-| PR 显示 `behind` / 合并按钮灰 | `strict` 要求分支最新 | `gh api -X PUT repos/jarvislee90s-dot/MultiAgents-Manager/pulls/<N>/update-branch` |
+| PR 显示 `behind` / 合并按钮灰 | `strict` 要求分支最新 | `gh api -X PUT repos/jarvislee90s-dot/tuvis/pulls/<N>/update-branch` |
 | 改完 `dependabot.yml` 后**一个 PR 都不来** | 配置不合法（会让**所有**更新静默停摆） | Insights → Dependency graph → Dependabot 看有没有报错；确认写错就立刻回滚该文件 |
 
 ## 5. dependabot 评论命令（在 PR 里发评论）

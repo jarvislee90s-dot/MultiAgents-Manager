@@ -41,7 +41,7 @@ fn test_create_and_remove_link() {
 fn test_create_link_does_not_delete_through_parent_symlink() {
     support::setup();
     let home = std::path::PathBuf::from(std::env::var("HOME").unwrap());
-    let repo = home.join(".mam").join("skills");
+    let repo = home.join(".tuvis").join("skills");
     std::fs::create_dir_all(repo.join("suite").join("child")).unwrap();
     std::fs::write(repo.join("suite").join("child").join("SKILL.md"), "keep me").unwrap();
 
@@ -87,7 +87,7 @@ fn test_enable_skill_for_tool_creates_codex_harness_link() {
 
     // codex 注册表已切至私有目录（spec 2026-09-09 §4.1）：harness 链接落在
     // ~/.codex/skills；共享目录 ~/.agents/skills 中的手装源保持真实目录原样
-    //（MAM 不再写 .agents），仅作为只读导入源
+    //（兔维斯 不再写 .agents），仅作为只读导入源
     let harness_link = home
         .join(".codex")
         .join("skills")
@@ -97,7 +97,7 @@ fn test_enable_skill_for_tool_creates_codex_harness_link() {
     assert!(source.is_dir());
     assert!(!source.is_symlink());
     assert!(home
-        .join(".mam")
+        .join(".tuvis")
         .join("active")
         .join("codex")
         .join("demo-skill-codex-link")
@@ -119,7 +119,7 @@ fn enable_refuses_to_replace_divergent_real_dir_but_accepts_identical_copy() {
     std::fs::create_dir_all(&tool_target).unwrap();
     std::fs::write(tool_target.join("SKILL.md"), "手装内容 v1\n").unwrap();
     // SSOT 侧预置同名但内容不同的副本（模拟已导入他源/旧版本）
-    let repo_skill = home.join(".mam").join("skills").join("demo-guard-skill");
+    let repo_skill = home.join(".tuvis").join("skills").join("demo-guard-skill");
     std::fs::create_dir_all(&repo_skill).unwrap();
     std::fs::write(repo_skill.join("SKILL.md"), "SSOT 内容 v9\n").unwrap();
 
@@ -160,7 +160,7 @@ fn test_create_junction_for_dir() {
     assert!(source.join("SKILL.md").exists());
 }
 
-// install_to_repo 经 ensure_repo_dir 用 dirs::home_dir 定位 ~/.mam/skills；
+// install_to_repo 经 ensure_repo_dir 用 dirs::home_dir 定位 ~/.tuvis/skills；
 // Unix 下 dirs::home_dir 读 HOME 环境变量，support::setup 已把 HOME 重定向到临时目录，
 // 仓库根随之落在临时目录；Windows 下 dirs::home_dir 走 FOLDERID_Profile（忽略 HOME），
 // 无法重定向，故仅 Unix 编译运行（与 test_enable_skill_for_tool_creates_codex_harness_link 一致）。
@@ -177,7 +177,7 @@ fn test_install_to_repo_existing_without_overwrite_errors() {
     std::fs::write(source.join("SKILL.md"), "# new").unwrap();
 
     let dest = home
-        .join(".mam")
+        .join(".tuvis")
         .join("skills")
         .join("demo-skill-no-clobber");
     std::fs::create_dir_all(&dest).unwrap();
@@ -204,7 +204,7 @@ fn test_install_to_repo_existing_with_overwrite_replaces() {
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("SKILL.md"), "# new").unwrap();
 
-    let dest = home.join(".mam").join("skills").join("demo-skill-clobber");
+    let dest = home.join(".tuvis").join("skills").join("demo-skill-clobber");
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("SKILL.md"), "# old").unwrap();
 

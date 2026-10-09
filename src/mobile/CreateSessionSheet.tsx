@@ -291,7 +291,7 @@ export default function CreateSessionSheet({
   }, [tool, effectivePath, firstMessage]);
 
   // 进度轮询（2s，挂入即拍）：终态（done/failed）与失效（no_task）即停；
-  // 单拍网络异常不终止——任务在主机侧继续跑，MAM 重启会以 404 no_task 判定，
+  // 单拍网络异常不终止——任务在主机侧继续跑，兔维斯 重启会以 404 no_task 判定，
   // 不因一次抖动放弃跟踪（fetchSessionMessages「本层无状态」同纪律）
   useEffect(() => {
     if (taskId === null) return;
@@ -602,7 +602,7 @@ export default function CreateSessionSheet({
             </div>
           </>
         ) : noTask ? (
-          // 404 no_task：MAM 重启丢内存任务簿（或 taskId 非法）——如实告知 + 回表单重试
+          // 404 no_task：兔维斯 重启丢内存任务簿（或 taskId 非法）——如实告知 + 回表单重试
           <>
             <p
               data-testid="create-error"

@@ -2,7 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 // 处置模式：migrate = 迁移到 ~/.codex/skills（codex 私有目录接管）；
-// keep = 保留为共享（链接改指 ~/.mam/skills，脱钩 codex 启停）
+// keep = 保留为共享（链接改指 ~/.tuvis/skills，脱钩 codex 启停）
 export type MigrationMode = "migrate" | "keep";
 
 // 逐条迁移报告（与后端 MigrationItemReport serde 契约一致）
@@ -12,7 +12,7 @@ export interface MigrationItemReport {
   detail: string | null;
 }
 
-// 检测 ~/.agents/skills 下指向 codex 激活目录的 MAM 遗留链接（排序清单，空 = 无遗留）
+// 检测 ~/.agents/skills 下指向 codex 激活目录的 兔维斯 遗留链接（排序清单，空 = 无遗留）
 export async function detectLegacyAgentsLinks(): Promise<string[]> {
   return await invoke<string[]>("detect_legacy_agents_links");
 }

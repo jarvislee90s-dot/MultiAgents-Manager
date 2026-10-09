@@ -11,11 +11,11 @@
 //    返回看板即卸载、state 全丢；而用户要求「出会话窗口再切回来保留」。
 //    单例随 JS 上下文存活 → 切换视图自然保留。
 // 3. **刷新恢复（v1.1 补充）**：手机刷新页面会销毁 JS 上下文（内存单例清空），
-//    故镜像到 localStorage 并打上 bootId——同进程刷新恢复、MAM 重启清空。
+//    故镜像到 localStorage 并打上 bootId——同进程刷新恢复、兔维斯 重启清空。
 //
 // （v1.1 修订：不再「纯内存」——用户实测刷新网页即丢，补充 localStorage
-// 镜像 + bootId 守卫，语义仍是「随 MAM 消失」，只是把「消失」的判定从
-// JS 上下文销毁放宽到「MAM 进程重启」。）
+// 镜像 + bootId 守卫，语义仍是「随 兔维斯 消失」，只是把「消失」的判定从
+// JS 上下文销毁放宽到「兔维斯 进程重启」。）
 
 import { fetchHost } from "./api";
 
@@ -65,11 +65,11 @@ export function bookmarkPreview(content: string, max = 40): string {
 const store = new Map<string, Bookmark[]>();
 
 // ---- 刷新恢复（2026-09-16 用户裁决补充）：手机刷新页面会销毁 JS 上下文，
-// 内存单例随之清空——书签需镜像到 localStorage 并打上 bootId（MAM 进程
-// 生命周期标识，随 /host 下发）：同 bootId（同一 MAM 进程）→ 刷新后恢复；
-// bootId 变化（MAM 已重启）→ 自行清空。仍是「随 MAM 消失」，且更耐用。
+// 内存单例随之清空——书签需镜像到 localStorage 并打上 bootId（兔维斯 进程
+// 生命周期标识，随 /host 下发）：同 bootId（同一 兔维斯 进程）→ 刷新后恢复；
+// bootId 变化（兔维斯 已重启）→ 自行清空。仍是「随 兔维斯 消失」，且更耐用。
 // 关浏览器标签页也会清（localStorage 在该域下的这一键被覆盖前一直存在，
-// 但恢复依赖 bootId 匹配——MAM 重启后即使键还在也会被判空）。
+// 但恢复依赖 bootId 匹配——兔维斯 重启后即使键还在也会被判空）。
 
 const BOOKMARKS_STORAGE_KEY = "mam-bookmarks";
 let activeBootId: string | null = null;
@@ -105,7 +105,7 @@ function writeStorage(stored: StoredBookmarks): void {
   }
 }
 
-/** 设定当前 MAM 进程的 bootId 并恢复书签：bootId 与存储不一致（MAM 已重启）
+/** 设定当前 兔维斯 进程的 bootId 并恢复书签：bootId 与存储不一致（兔维斯 已重启）
  *  → 清空存储；一致 → 把存储的书签种回内存单例。幂等，可重复调用 */
 export function restoreBookmarks(bootId: string): void {
   activeBootId = bootId;

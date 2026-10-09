@@ -152,11 +152,11 @@ export type TsStepState = {
 // remote_ts_probe 载荷：platform 三值；windowsVerified=false 时向导顶部显示
 // Windows 弱提示（不许把未验证流程伪装成已验证）。**I-3：Windows 验证位按覆盖面拆细**——
 // windowsVerified = **整条** Windows 流程是否都实机跑过（2026-10-07 用户卸载后从零走完
-// MAM 向导全程 ⇒ 后端把实测覆盖起点前移到第一步 ⇒ **当前为 true**，弱提示随之撤下；
+// 兔维斯 向导全程 ⇒ 后端把实测覆盖起点前移到第一步 ⇒ **当前为 true**，弱提示随之撤下；
 // 机制保留：将来又有未实测段落时起点后移，清单非空、提示自动回来）；
 // windowsVerifiedFrom = 实测覆盖从哪一步起（当前 = 第一步 "detect"）；
 // windowsUnverifiedSteps = 没被端到端实机跑过的步骤（前端据此点名，不写死清单文案）。
-// authUrl = 待登录授权链接（login 步「去登录」按钮，MAM 不代登录）；
+// authUrl = 待登录授权链接（login 步「去登录」按钮，兔维斯 不代登录）；
 // reach = 可达性态（**逐名枚举见上 TsReachability，不写死态数**——M6 纪律；
 // 前端据此门控头部地址展示：只有 Verified 才显示）
 export type TsWizardProbe = {
@@ -179,12 +179,12 @@ export type TsWizardProbe = {
   reach: TsReachability;
 };
 
-// serve 配置里的一条 handler（B1 撤销预览/确认框用；ours = 是否 MAM 那一路）
+// serve 配置里的一条 handler（B1 撤销预览/确认框用；ours = 是否 兔维斯 那一路）
 export type TsServeEntry = { ours: boolean; label: string };
 
 // remote_ts_run_step 回执（按步取用，字段可选；verify 步带最终校验态；
 // disable_preview 步带撤销预览：foreign = 普通撤销会被守卫拒绝，
-// wouldClear = 会随 `funnel reset` 一并被清除的非 MAM 条目数，
+// wouldClear = 会随 `funnel reset` 一并被清除的非 兔维斯 条目数，
 // entries = 逐条清单——**撤销前的知情同意靠它**）
 export type TsStepResult = {
   ok: boolean;
@@ -194,7 +194,7 @@ export type TsStepResult = {
    *  不再是"等链接自己出现"——`remote_ts_run_step("login")` 会**后台发起**一次
    *  `tailscale login`（只 spawn、不等待；argv = `login --timeout 15s`，见 Rust
    *  `wizard::LOGIN_ARGS`）并**有界轮询**（≤9.5s）把 `AuthURL` 取回来，链接随本字段
-   *  交回前端做成按钮。**MAM 只递链接：不代登录、不持凭据。**
+   *  交回前端做成按钮。**兔维斯 只递链接：不代登录、不持凭据。**
    *  已登录（Running）时为空串（无需链接）；始终拿不到时也为空串——前端据空串给
    *  「去本机客户端点 Log in / 稍候重试」的兜底文案（走静态 i18n 键，不渲染 `note`）。
    *  **M4（2026-10-08 架构评审）：前端把本字段当"过渡回执"用**——立即上墙，但**随下一次
@@ -239,7 +239,7 @@ export type TsStepResult = {
    *  （RemoteSection 按本字段分支渲染），**不读**回执的 `note`（消费方见上方 `note` 注释） */
   unreadable?: boolean;
   clearedExtraServeEntries?: number;
-  /** M-1：随本次 `funnel reset` **实际**被一并清除的非 MAM 条目（与
+  /** M-1：随本次 `funnel reset` **实际**被一并清除的非 兔维斯 条目（与
    *  clearedExtraServeEntries 同源）——卡面「N 条」与逐条列表都取它，不再出现
    *  「确认框列预览条目、toast 报撤销时条数」两处对不上 */
   clearedEntries?: TsServeEntry[];

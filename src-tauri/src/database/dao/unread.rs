@@ -108,7 +108,7 @@ pub fn cleanup_expired_unread(conn: &Connection, now_ms: i64) {
 
 // ---- 已读墓碑（issue #35-1）----
 // 状态缓存（session_status_cache）对离板会话只保留有限时长，长间隙（系统睡眠唤醒 /
-// sidecar 挂起 / MAM 重启）后 prev=None 无法区分「首次转绿」与「缓存失忆的已读会话」，
+// sidecar 挂起 / 兔维斯 重启）后 prev=None 无法区分「首次转绿」与「缓存失忆的已读会话」，
 // Insert 边沿据此复活已读未读卡并重播完成通知。墓碑是「该会话已被用户读过」的持久
 // 信号，不依赖任何内存/缓存存活期
 

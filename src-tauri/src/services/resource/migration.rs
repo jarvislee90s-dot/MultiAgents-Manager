@@ -1,7 +1,7 @@
 // 遗留链接识别 + 迁移/保留核心（spec 2026-09-09 §4.3 / §6）
 //
 // 背景：codex 注册表已切至私有目录 `~/.codex/skills`（Task 1），历史版本在
-// `~/.agents/skills` 下留有 MAM 自建链接（→ `~/.mam/active/codex/<name>`）。
+// `~/.agents/skills` 下留有 兔维斯 自建链接（→ `~/.tuvis/active/codex/<name>`）。
 // 本模块为一次性迁移对话框提供后端：识别谓词 + migrate/keep 两种处置。
 //
 // 边界约束（F5）：DB assignments 与 Layer 2 是启用状态唯一真源，工具侧链接只是投影。
@@ -13,13 +13,13 @@ use std::path::{Path, PathBuf};
 
 /// 迁移边界路径（全部由调用方注入；生产从 dirs::home_dir() 构建，测试用 tempdir）
 pub struct MigrationPaths {
-    /// `~/.agents/skills`（共享目录；MAM 只读，唯一例外是本模块对 MAM 自建链接的处置）
+    /// `~/.agents/skills`（共享目录；兔维斯 只读，唯一例外是本模块对 兔维斯 自建链接的处置）
     pub agents_dir: PathBuf,
     /// `~/.codex/skills`（codex 私有技能目录，migrate 模式的搬迁目标）
     pub codex_skills_dir: PathBuf,
-    /// `~/.mam/skills`（Layer 1 SSOT 真目录，keep 模式的改指目标）
+    /// `~/.tuvis/skills`（Layer 1 SSOT 真目录，keep 模式的改指目标）
     pub layer1_dir: PathBuf,
-    /// `~/.mam/active/codex`（Layer 2 激活目录根，识别谓词的前缀边界）
+    /// `~/.tuvis/active/codex`（Layer 2 激活目录根，识别谓词的前缀边界）
     pub layer2_root: PathBuf,
 }
 
@@ -33,16 +33,16 @@ pub struct MigrationItemReport {
     pub detail: Option<String>,
 }
 
-/// 识别谓词（spec §4.3）：entry 是否为「指向 Layer 2 的 MAM 遗留 codex 链接」。
+/// 识别谓词（spec §4.3）：entry 是否为「指向 Layer 2 的 兔维斯 遗留 codex 链接」。
 /// 精确语义（勿走样）：
 /// 1. 是链接（symlink / Windows junction，`link_marker_is_present` 双平台判据）；
 /// 2. `read_link` 取**单跳字面 target**——绝不能用 `fs::canonicalize`：canonicalize
-///    会穿透 Layer 2 解析到 Layer 1 真目录（`~/.mam/skills/<name>`），前缀判断将
+///    会穿透 Layer 2 解析到 Layer 1 真目录（`~/.tuvis/skills/<name>`），前缀判断将
 ///    永不匹配；这是本谓词最关键的坑；
 /// 3. target 归一化后**组件级**位于 layer2_root 之下（`Path::starts_with` 逐组件
 ///    比较，天然避免 `/a/b` vs `/a/bc` 的字符串误判）；
 /// 4. **无论链路是否可达都命中**（review I-2）：迁移前发生 disable/uninstall 会删掉
-///    Layer 2，遗留链接随之悬空——若按可达性排除，这些 MAM 残链将永远脱离对话框
+///    Layer 2，遗留链接随之悬空——若按可达性排除，这些 兔维斯 残链将永远脱离对话框
 ///    管辖、滞留共享目录。断链项由 migrate 自愈（仅清理旧链，不建悬空新链）。
 fn is_legacy_codex_link(entry: &Path, layer2_root: &Path) -> bool {
     if !linker::link_marker_is_present(entry) {
@@ -57,7 +57,7 @@ fn is_legacy_codex_link(entry: &Path, layer2_root: &Path) -> bool {
     normalized.starts_with(layer2_root)
 }
 
-/// 检测 agents_dir 下的 MAM 遗留 codex 链接，返回命中的名称清单（排序）。
+/// 检测 agents_dir 下的 兔维斯 遗留 codex 链接，返回命中的名称清单（排序）。
 /// agents_dir 不存在 / 不可读 → 空结果静默（spec §6：无遗留 → 无对话框）。
 pub fn detect_legacy_links(paths: &MigrationPaths) -> Vec<String> {
     let mut names = Vec::new();
@@ -122,7 +122,7 @@ fn migrate_one(paths: &MigrationPaths, name: String, agents_entry: &Path) -> Mig
         }
     };
     // 断链自愈（review I-2，优先于冲突检查）：Layer 2 已被 disable/uninstall 删除 →
-    // 迁移本应建的 .codex 链只会是悬空死链，不该创建；MAM 自建残链无论 codex 侧
+    // 迁移本应建的 .codex 链只会是悬空死链，不该创建；兔维斯 自建残链无论 codex 侧
     // 状态如何都应清理（否则永久滞留共享目录），报 ok（自熄灭）
     if std::fs::metadata(agents_entry).is_err() {
         if let Err(e) = linker::remove_link(agents_entry) {
@@ -252,8 +252,8 @@ mod migration_tests {
         let paths = MigrationPaths {
             agents_dir: tmp.path().join("home/.agents/skills"),
             codex_skills_dir: tmp.path().join("home/.codex/skills"),
-            layer1_dir: tmp.path().join("home/.mam/skills"),
-            layer2_root: tmp.path().join("home/.mam/active/codex"),
+            layer1_dir: tmp.path().join("home/.tuvis/skills"),
+            layer2_root: tmp.path().join("home/.tuvis/active/codex"),
         };
         // Layer 1 真目录
         let layer1_skill = paths.layer1_dir.join(name);
@@ -265,13 +265,13 @@ mod migration_tests {
         .unwrap();
         // Layer 2 → Layer 1
         linker::create_link(&layer1_skill, &paths.layer2_root.join(name)).unwrap();
-        // .agents → Layer 2（遗留 MAM 链接）
+        // .agents → Layer 2（遗留 兔维斯 链接）
         std::fs::create_dir_all(&paths.agents_dir).unwrap();
         linker::create_link(&paths.layer2_root.join(name), &paths.agents_dir.join(name)).unwrap();
         (tmp, paths)
     }
 
-    /// §7.3 谓词：遗留 MAM 链接 ✓ / 手装真目录 ✗ / 外部无关链接 ✗ / 断链 ✓（review I-2：
+    /// §7.3 谓词：遗留 兔维斯 链接 ✓ / 手装真目录 ✗ / 外部无关链接 ✗ / 断链 ✓（review I-2：
     /// disable/uninstall 会先行删掉 Layer 2，悬空遗留链接必须入选对话框，由 migrate 自愈，
     /// 否则永久滞留共享目录）
     #[test]
@@ -302,11 +302,11 @@ mod migration_tests {
         .unwrap();
         linker::remove_link(&paths.layer2_root.join("ghost")).unwrap();
 
-        // 遗留 MAM 链接 + 断链遗留均命中（排序）
+        // 遗留 兔维斯 链接 + 断链遗留均命中（排序）
         assert_eq!(
             detect_legacy_links(&paths),
             vec!["broken".to_string(), "my-skill".to_string()],
-            "遗留 MAM 链接与断链遗留均应命中，手装真目录与外部链接不命中"
+            "遗留 兔维斯 链接与断链遗留均应命中，手装真目录与外部链接不命中"
         );
     }
 
@@ -359,7 +359,7 @@ mod migration_tests {
 
         let reports = migrate_legacy_links(&paths, "keep");
         let dangling = reports.iter().find(|r| r.name == "dangling-skill").unwrap();
-        // Layer 1（~/.mam/skills/dangling-skill）仍在 → keep 改指 Layer 1 成功
+        // Layer 1（~/.tuvis/skills/dangling-skill）仍在 → keep 改指 Layer 1 成功
         assert_eq!(dangling.status, "ok", "报告: {:?}", dangling);
         assert!(paths.agents_dir.join("dangling-skill").is_symlink());
         assert_eq!(
@@ -501,8 +501,8 @@ mod migration_tests {
         let paths = MigrationPaths {
             agents_dir: tmp.path().join("no-such-agents/skills"),
             codex_skills_dir: tmp.path().join("home/.codex/skills"),
-            layer1_dir: tmp.path().join("home/.mam/skills"),
-            layer2_root: tmp.path().join("home/.mam/active/codex"),
+            layer1_dir: tmp.path().join("home/.tuvis/skills"),
+            layer2_root: tmp.path().join("home/.tuvis/active/codex"),
         };
         assert!(detect_legacy_links(&paths).is_empty());
         assert!(migrate_legacy_links(&paths, "migrate").is_empty());

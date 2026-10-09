@@ -151,7 +151,7 @@ pub fn import_native_resources(
             log::warn!("原生技能 {} 登记失败: {}", name, e);
         }
         // 默认按来源工具自动创建工具目录链接，让 harness 立即读取 SSOT 中的 skill
-        // 用户主动导入时，按来源工具自动把原生目录替换为 MAM 软链接
+        // 用户主动导入时，按来源工具自动把原生目录替换为 兔维斯 软链接
         if let Err(e) = crate::services::enable_skill_for_tool(&name, &source_tool) {
             log::warn!("导入 {} 后为 {} 创建链接失败: {}", name, source_tool, e);
         }
@@ -210,12 +210,12 @@ fn migration_paths() -> crate::services::resource::migration::MigrationPaths {
     crate::services::resource::migration::MigrationPaths {
         agents_dir: home.join(".agents").join("skills"),
         codex_skills_dir: home.join(".codex").join("skills"),
-        layer1_dir: home.join(".mam").join("skills"),
-        layer2_root: home.join(".mam").join("active").join("codex"),
+        layer1_dir: home.join(".tuvis").join("skills"),
+        layer2_root: home.join(".tuvis").join("active").join("codex"),
     }
 }
 
-/// 检测 .agents/skills 下指向 ~/.mam/active/codex 的 MAM 遗留链接（spec §4.3）。
+/// 检测 .agents/skills 下指向 ~/.tuvis/active/codex 的 兔维斯 遗留链接（spec §4.3）。
 /// 纯文件系统检测，零 DB 访问（F5：工具侧链接只是投影）
 #[tauri::command]
 pub fn detect_legacy_agents_links() -> Vec<String> {
@@ -248,7 +248,7 @@ pub fn list_tool_resources(tool_id: String) -> serde_json::Value {
     // 补充 SSOT 仓库中已有但未在 DB extensions 中的 skill
     let mam_skills = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("skills");
     let ssot_skill_names = scan_skill_dirs(&mam_skills);
     let mut global_with_status: Vec<_> = global
@@ -326,7 +326,7 @@ pub fn reconcile_tool_batch(
     crate::services::resource::reconcile::reconcile_tool_batch(&tool_id, &mode)
 }
 
-/// 空目录扫描（wave33 Item 2）：MAM skill 仓库与启用工具 skill 目录中的
+/// 空目录扫描（wave33 Item 2）：兔维斯 skill 仓库与启用工具 skill 目录中的
 /// 可清理空目录清单
 #[tauri::command]
 pub fn scan_empty_dirs() -> Vec<crate::services::resource::reconcile::EmptyDirItem> {
@@ -377,7 +377,7 @@ pub struct SsotResources {
 /// 扫描 SSOT 仓库目录，返回三类资源的完整清单
 #[tauri::command]
 pub fn list_ssot_resources() -> SsotResources {
-    let mam = dirs::home_dir().unwrap_or_default().join(".mam");
+    let mam = dirs::home_dir().unwrap_or_default().join(".tuvis");
     let assignments = crate::database::list_all_assignments();
     let extensions = crate::database::list_extensions();
 
@@ -454,12 +454,12 @@ pub fn list_ssot_resources() -> SsotResources {
         })
         .collect();
 
-    // MCP 扫描：以 ~/.mam/mcp/ 为基础数据源，工具配置文件仅作补充
+    // MCP 扫描：以 ~/.tuvis/mcp/ 为基础数据源，工具配置文件仅作补充
     let scan_mcp = || -> Vec<SsotResource> {
         let mut all_mcps: std::collections::BTreeMap<String, Vec<String>> =
             std::collections::BTreeMap::new();
 
-        // 1) 从 ~/.mam/mcp/ 目录扫描 SSOT 管理的 MCP（排除 DB assignment 中已禁用的）。
+        // 1) 从 ~/.tuvis/mcp/ 目录扫描 SSOT 管理的 MCP（排除 DB assignment 中已禁用的）。
         //    M7：存储体里带 enable:false（导入时原样保留的工具侧停用标记）→ 记入
         //    source_disabled 供 UI「源已停用」标记
         let mut mcp_source_disabled: std::collections::BTreeMap<String, bool> =
@@ -607,7 +607,7 @@ pub fn list_ssot_resources() -> SsotResources {
 pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
     let repo = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("skills");
     let Some(tool_skill_dir) = crate::adapter::primary_skill_dir(&tool_id) else {
         return Vec::new();
@@ -635,7 +635,7 @@ pub fn detect_duplicate_skills(tool_id: String) -> Vec<String> {
 pub fn cleanup_duplicate_skills(tool_id: String, names: Vec<String>) -> Result<(), String> {
     let repo = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("skills");
     let tool_skill_dir = crate::adapter::primary_skill_dir(&tool_id)
         .ok_or_else(|| format!("未知工具: {}", tool_id))?;
@@ -736,7 +736,7 @@ pub fn enable_skill_for_tool_cmd(skill_name: String, tool_id: String) -> Result<
 }
 
 /// 从任意工具配置文件中提取 MCP 配置并保存到 SSOT 仓库
-/// 扫描所有工具，找到第一个包含该 MCP 的配置文件，提取配置写入 ~/.mam/mcp/<name>.json。
+/// 扫描所有工具，找到第一个包含该 MCP 的配置文件，提取配置写入 ~/.tuvis/mcp/<name>.json。
 /// enable:false 条目口径（M7，2026-09-11 拍板）：照常导入、原样保留 enable 字段——
 /// 禁用的配置也是有效资产，值得入库备用；与扫描侧「停用条目不计入启用列」口径
 /// 的差异是有意为之（展示如实、资产照收），UI 侧以「源已停用」标记区分
@@ -777,7 +777,7 @@ pub fn import_mcp_to_ssot(mcp_name: String) -> Result<(), String> {
         if let Some(config) = mcp_obj {
             let repo = dirs::home_dir()
                 .unwrap_or_default()
-                .join(".mam")
+                .join(".tuvis")
                 .join("mcp");
             let _ = std::fs::create_dir_all(&repo);
             let config_file = repo.join(format!("{}.json", mcp_name));
@@ -822,7 +822,7 @@ pub fn save_mcp_config(
 ) -> Result<(), String> {
     let repo = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("mcp");
     let _ = std::fs::create_dir_all(&repo);
     let config_file = repo.join(format!("{}.json", name));
@@ -956,7 +956,7 @@ pub async fn open_tool_resource(tool_id: String, kind: String) -> Result<String,
     Ok(path.to_string_lossy().to_string())
 }
 
-/// reveal_dir 白名单**根**的唯一出处（2026-10-07 A2 抽出）：`~/.mam`、`~/.agents`，
+/// reveal_dir 白名单**根**的唯一出处（2026-10-07 A2 抽出）：`~/.tuvis`、`~/.agents`，
 /// 以及**导出目录**（A2 之后 = 系统下载目录，见 `commands/export.rs::exports_dir()`）。
 ///
 /// 抽成独立函数是为了让「白名单根包含导出目录」这条不变量**可被零 IO 地测到** ——
@@ -964,20 +964,20 @@ pub async fn open_tool_resource(tool_id: String, kind: String) -> Result<String,
 /// 用例见 `export.rs::reveal_whitelist_contains_exports_dir`。
 ///
 /// ⚠️ 导出目录这一项**刻意是 `exports_dir()` 本身**（同一个函数），不是硬编码的 `~/Downloads`：
-/// debug 构建下 `MAM_HOME` 会把导出目录重定向到 `$MAM_HOME/Downloads`，硬编码会让测试环境里
+/// debug 构建下 `TUVIS_HOME` 会把导出目录重定向到 `$TUVIS_HOME/Downloads`，硬编码会让测试环境里
 /// 「白名单放行的目录」与「实际落盘的目录」错开（正是本函数要防的那类缺陷）。
 pub(crate) fn reveal_allowed_roots() -> Vec<std::path::PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
     vec![
-        home.join(".mam"),
+        home.join(".tuvis"),
         home.join(".agents"),
         crate::commands::export::exports_dir(),
     ]
 }
 
 /// reveal_dir 白名单校验核（wave33 Item 4，可测）：canonicalize 后必须以
-/// ~/.mam、~/.agents 或导出目录（A2 后 = 系统下载目录）为前缀
-/// （安全白名单——前端快捷跳转只允许 MAM 管辖目录与**用户自己的导出落点**）。
+/// ~/.tuvis、~/.agents 或导出目录（A2 后 = 系统下载目录）为前缀
+/// （安全白名单——前端快捷跳转只允许 兔维斯 管辖目录与**用户自己的导出落点**）。
 /// 词法预检 + canonicalize 复核双道（对不存在的路径 canonicalize 失败 → 报
 /// 不存在；越界路径无论存在与否一律拒绝）
 pub fn ensure_reveal_allowed(path: &str) -> Result<std::path::PathBuf, String> {
@@ -992,14 +992,14 @@ pub fn ensure_reveal_allowed(path: &str) -> Result<std::path::PathBuf, String> {
         .collect();
     if !lexically_allowed && !root_canons.iter().any(|r| canonical.starts_with(r)) {
         return Err(format!(
-            "路径不在允许打开的范围（~/.mam、~/.agents 或导出目录）: {}",
+            "路径不在允许打开的范围（~/.tuvis、~/.agents 或导出目录）: {}",
             path
         ));
     }
     // symlink 穿透复核：词法命中但 canonicalize 落到白名单外 → 拒绝
     if !root_canons.iter().any(|r| canonical.starts_with(r)) {
         return Err(format!(
-            "路径不在允许打开的范围（~/.mam、~/.agents 或导出目录）: {}",
+            "路径不在允许打开的范围（~/.tuvis、~/.agents 或导出目录）: {}",
             path
         ));
     }
@@ -1008,7 +1008,7 @@ pub fn ensure_reveal_allowed(path: &str) -> Result<std::path::PathBuf, String> {
 
 /// 快捷跳转（wave33 Item 4，前端波消费）：用系统文件管理器/默认程序打开
 /// 白名单内的目录或文件——打开机制照抄 open_tool_resource（目录走
-/// open_dir_in_system，文件走 open_file_in_system），但加了 ~/.mam / ~/.agents
+/// open_dir_in_system，文件走 open_file_in_system），但加了 ~/.tuvis / ~/.agents
 /// 前缀白名单（open_tool_resource 的目标由 adapter 推导、天然受限；本命令
 /// 接受任意路径，必须显式校验）
 #[tauri::command]

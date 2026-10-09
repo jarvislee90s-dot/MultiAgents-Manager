@@ -15,7 +15,7 @@
 //! - **P1-1 RAII 复位**：[`AttachGuard`] Drop → `FreeConsole` 无条件复位，任何
 //!   错误/panic 早退路径都兜底——滞留附加列表的进程在宿主终端窗口关闭时会收到
 //!   CTRL_CLOSE_EVENT，本应用不装 SetConsoleCtrlHandler，默认行为是**被系统终止**
-//!   （用户关一个收过消息的终端 = MAM 整个应用跟着退出，故复位不可省，计划明文）；
+//!   （用户关一个收过消息的终端 = 兔维斯 整个应用跟着退出，故复位不可省，计划明文）；
 //! - **自适应节流（§8.1）**：按族规格（`super::families`，M6R 探测定案表）分流——
 //!   快消费者 80 字符/块（160 事件单次写入）、块间 50ms；慢消费者/长文切背压，
 //!   每块后排空目标输入缓冲占用至 ≤ DRAIN_TO(40) 再续写（15ms 轮询）；
@@ -1056,7 +1056,7 @@ mod tests {
     // ===== Task 4 实机探测（占用监控 / 判冻回执 / 屏读层）=====
     // 两条测试均涉及真实控制台子进程（弹真实 conhost 窗口），按批次全局约束
     // 一律 #[ignore]——常规门禁只编译；实机真跑归 Task 12。测试只碰 temp 目录
-    // 探测会话，结束 taskkill 清场，零接触真实 ~/.mam。
+    // 探测会话，结束 taskkill 清场，零接触真实 ~/.tuvis。
 
     /// 探测会话起手（复用 [`ffi_hop_injects_into_fresh_console_cmd`] 已证拓扑与
     /// pid 查找法，temp 目录）：PowerShell Start-Process conhost.exe cmd /k →

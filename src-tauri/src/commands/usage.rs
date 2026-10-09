@@ -69,7 +69,7 @@ pub async fn usage_export_csv(
 /// 读用量设置。
 ///
 /// **A-5（P2-3）**：改成 `async` + `spawn_blocking` —— `settings::load()` 会取全局
-/// `DB.lock()` 并读 `mam.db`，同步命令在**主线程**上执行 ⇒ 最坏 0.5s UI 冻结
+/// `DB.lock()` 并读 `tuvis.db`，同步命令在**主线程**上执行 ⇒ 最坏 0.5s UI 冻结
 /// （与 `commands/session.rs:10-12` 同一个坑）。**JS 侧签名与返回形状一字未动**
 /// （命令名 / 入参 / 返回都不变），契约 §3 冻结的是这三样、不含 sync/async。
 #[tauri::command]
@@ -384,7 +384,7 @@ mod tests {
     ///   测试模块）。**为什么收紧**：「测试模块边界」是文本启发式，而 `#[cfg(test)] mod` 之外/之后
     ///   仍可能有代码 —— 本仓实测就有 `#[test] fn`（不在 `#[cfg(test)] mod` 里）、
     ///   `#[cfg(all(test, windows))] mod …`（复合 cfg 的测试模块，`last_test_mod` 认不出）、
-    ///   以及**真生产代码**（`bin/mam-marker.rs` 的 `#[cfg(windows)] mod win`）落在「最后一个测试
+    ///   以及**真生产代码**（`bin/tuvis-marker.rs` 的 `#[cfg(windows)] mod win`）落在「最后一个测试
     ///   模块之后」的形态（共 5 个文件，见台账第五轮全表）。整文件扫把非 usage / 非 commands 域的
     ///   **全部**代码纳入判据面，代价只是**测试代码也进面**（偏严 = 保守方向：宁可误报，不可漏报）。
     ///   全仓零误报（出现该码字面量的只有 `services/usage/error.rs` 的登记与 `commands/usage.rs`
@@ -411,7 +411,7 @@ mod tests {
     ///     一个测试模块之后**又写代码，那部分不在面内。**当前无实例**（实测：落在这条线之后的只有
     ///     `adapter/mod.rs` 的复合 cfg 测试模块、`inject/question.rs` 的测试段、
     ///     `remote/content.rs` 的顶层 `#[test] fn`、`services/mcp/jsonc.rs` 与
-    ///     `bin/mam-marker.rs` 的 `#[cfg(windows)] mod win` —— **没有一个是 `commands/` 下的**）。
+    ///     `bin/tuvis-marker.rs` 的 `#[cfg(windows)] mod win` —— **没有一个是 `commands/` 下的**）。
     ///     真要收紧，把这一支也改成整文件扫 + 让 pattern 匹配**跳过本文件自己的测试模块**即可；
     ///     本轮**刻意不做**（超出派单，且会改动锁自身的断言串布局）。
     ///

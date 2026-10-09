@@ -98,7 +98,7 @@ describe("SignalHealthSection 四态渲染（T5）", () => {
     expect(screen.getByText("Not registered")).toBeTruthy();
     // 判据命中（已注册 ∧ 活跃会话 ∧ 零事件）→ codex 信任门文案（含工具名）
     expect(
-      screen.getByText("Enter /hooks in the Codex terminal and trust the MAM entry (one-time)")
+      screen.getByText("Enter /hooks in the Codex terminal and trust the Tuvis entry (one-time)")
     ).toBeTruthy();
     // 非 codex 判据命中 → 通用零事件文案（无信任门措辞）
     expect(

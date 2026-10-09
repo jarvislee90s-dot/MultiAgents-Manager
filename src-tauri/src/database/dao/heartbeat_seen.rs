@@ -1,5 +1,5 @@
 // 心跳观测影子表（issue #35-2）—— LAST_SEEN_SESSIONS 的持久化副本：
-// MAM 重启即清空进程内观测表，停机期间「任务完成 + prewarm 回池删心跳文件」的
+// 兔维斯 重启即清空进程内观测表，停机期间「任务完成 + prewarm 回池删心跳文件」的
 // 会话若无观测记录则补偿永不触发、未读提醒静默丢失；观测落库后跨重启仍可补偿
 use rusqlite::{params, Connection};
 use std::collections::HashSet;

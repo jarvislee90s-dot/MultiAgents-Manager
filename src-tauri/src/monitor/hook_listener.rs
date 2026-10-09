@@ -1,7 +1,7 @@
 //! hook 事件监听内核（批次甲 T1 · 原生 helper 替换 bash —— issue #74 根因 2）
 //!
-//! 本模块是 mam-hook-listener helper 与主程序（`monitor::hooks` 读取侧）共享的
-//! 纯逻辑层：bin 侧经 `#[path]` 引入（独立编译单元，不链接整个 lib——mam-marker
+//! 本模块是 tuvis-hook-listener helper 与主程序（`monitor::hooks` 读取侧）共享的
+//! 纯逻辑层：bin 侧经 `#[path]` 引入（独立编译单元，不链接整个 lib——tuvis-marker
 //! 独立二进制先例，保证 helper 体积小、启动毫秒级），lib 侧作为常规子模块。因此
 //! 本模块 **禁止引用 `crate::`**，仅依赖 std + serde_json + dirs（零新依赖）。
 //!
@@ -272,7 +272,7 @@ pub fn event_body(parsed: &ParsedHook, ts: i64) -> String {
 /// ——承接来的信息永远不会活过读取侧本就会采信的时间窗，不放大失真。依据（实机
 /// 取证）：claude 对 AskUserQuestion 待答的事件序是
 /// `PreToolUse(AUQ)` → `PermissionRequest(AUQ)` → `Notification(permission_prompt)`
-/// （本机实测间隔 ≈1s / ≈7s），事件文件同会话覆盖写——若 MAM 那一轮轮询落在
+/// （本机实测间隔 ≈1s / ≈7s），事件文件同会话覆盖写——若 兔维斯 那一轮轮询落在
 /// Notification 落盘之后，读取侧只会看到不带 tool_name 的 Notification，问答识别
 /// 就丢了。承接把「未决的 AUQ 进入信号」带过 Notification 这一跳
 pub const NOTIFICATION_CARRY_FORWARD_SECS: i64 = 30;
@@ -353,12 +353,12 @@ pub fn write_event_file(
 }
 
 /// 应用数据主目录（与 `database/connection.rs::app_data_home` 同口径——helper 独立
-/// 编译单元无法复用 lib，两处同步维护）：MAM_HOME 仅 debug/test 构建生效（测试
+/// 编译单元无法复用 lib，两处同步维护）：TUVIS_HOME 仅 debug/test 构建生效（测试
 /// 重定向数据目录；Windows 下 dirs::home_dir 无法用 HOME 重定向），release 生产
 /// 恒为真实用户目录，防环境变量误设导致读写割裂
 pub fn app_data_home() -> std::path::PathBuf {
     if cfg!(debug_assertions) {
-        if let Some(home) = std::env::var_os("MAM_HOME") {
+        if let Some(home) = std::env::var_os("TUVIS_HOME") {
             if !home.is_empty() {
                 return std::path::PathBuf::from(home);
             }
@@ -370,7 +370,7 @@ pub fn app_data_home() -> std::path::PathBuf {
 /// 事件目录（helper 写侧与读取侧 read_hook_events 的同源定位点：写读两侧经同一
 /// 函数出路径，任何配置下都不会互看不到对方）
 pub fn default_events_dir() -> std::path::PathBuf {
-    app_data_home().join(".mam").join("events")
+    app_data_home().join(".tuvis").join("events")
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 // 数据管理命令（2026-09-20 用户要求）：桌面端「数据管理」卡片的数据源。
-// 首版只管移动端附件（<项目>/.mam-attachments/<会话>/）——列出各项目占用 +
-// 按项目清理。路径全部来自服务端索引（~/.mam/attachments-index.json，上传时
+// 首版只管移动端附件（<项目>/.tuvis-attachments/<会话>/）——列出各项目占用 +
+// 按项目清理。路径全部来自服务端索引（~/.tuvis/attachments-index.json，上传时
 // 服务端写入），**不接受客户端任意路径**（清理目标必须命中索引记录）。
 
 use serde::Serialize;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 /// 单项目的附件占用统计
 #[derive(Debug, Clone, Serialize)]
 pub struct AttachmentProjectStats {
-    /// 项目根（.mam-attachments 所在目录）
+    /// 项目根（.tuvis-attachments 所在目录）
     pub project: String,
     pub files: u64,
     pub bytes: u64,
@@ -126,10 +126,10 @@ mod tests {
         let home = tempdir();
         let proj = tempdir();
         seed_attachment(&home, &proj, "s1", "a.png", b"abc");
-        assert!(proj.join(".mam-attachments").exists());
+        assert!(proj.join(".tuvis-attachments").exists());
         clean_attachment_project_with(&home, proj.to_string_lossy().as_ref()).unwrap();
-        // 目录删除（含宿主空壳 .mam-attachments 移除）+ 索引剔空
-        assert!(!proj.join(".mam-attachments").exists());
+        // 目录删除（含宿主空壳 .tuvis-attachments 移除）+ 索引剔空
+        assert!(!proj.join(".tuvis-attachments").exists());
         assert!(crate::remote::attachments::read_index(&home).is_empty());
     }
 
@@ -146,14 +146,14 @@ mod tests {
         let proj = tempdir();
         seed_attachment(&home, &proj, "s1", "a.png", b"abc");
         // 用户手动删掉项目 → 索引残留；清理仍应成功（目录不存在 = 幂等）并剔索引
-        std::fs::remove_dir_all(proj.join(".mam-attachments")).unwrap();
+        std::fs::remove_dir_all(proj.join(".tuvis-attachments")).unwrap();
         clean_attachment_project_with(&home, proj.to_string_lossy().as_ref()).unwrap();
         assert!(crate::remote::attachments::read_index(&home).is_empty());
     }
 
     #[test]
     fn stats_count_files_only_at_project_root_path() {
-        // 防御：统计只走 <project>/.mam-attachments，不误扫项目其他目录
+        // 防御：统计只走 <project>/.tuvis-attachments，不误扫项目其他目录
         let home = tempdir();
         let proj = tempdir();
         std::fs::write(proj.join("unrelated.txt"), b"zz").unwrap();

@@ -3,7 +3,7 @@
 //!
 //! 与 `tests/msw/tauriMocks.test.ts`（mock 形状）的分工：
 //! * 本文件证明「**真跑通了**」——调的是 `multi_agents_manager_lib::commands::usage::*`，
-//!   走 `tauri::async_runtime::spawn_blocking` 与全局 `DB`（`support::setup()` 把 `HOME`/`MAM_HOME`
+//!   走 `tauri::async_runtime::spawn_blocking` 与全局 `DB`（`support::setup()` 把 `HOME`/`TUVIS_HOME`
 //!   重定向到临时目录，七个采集器因此只扫空目录，D-07 的真实库泄漏在本文件不成立）；
 //! * `tests/usage/usageMockParity.test.ts` 证明「**两端 mock 同形**」——它**不能**证明真实
 //!   命令接通了，那正是本文件存在的理由（IPC 层最容易「看起来接上了其实没接」）。
@@ -32,7 +32,7 @@ static SERIAL: Mutex<()> = Mutex::new(());
 /// 串行锁 + 环境重定向（`support::setup()` 是 `Once`：只生效一次，之后的调用是空操作）。
 /// `MutexGuard` 必须绑到具名变量上（绑 `_` 会立刻 drop，锁形同虚设——`clippy::let_underscore_lock`）。
 ///
-/// **额外隔离（本任务实测发现）**：`support::setup()` 只重定向了 `HOME`/`MAM_HOME`，但
+/// **额外隔离（本任务实测发现）**：`support::setup()` 只重定向了 `HOME`/`TUVIS_HOME`，但
 /// * dsh 采集器的根走 `monitor::dsh::dsh_home_with()`，**`DSH_HOME` 环境变量优先于 `~/.dsh`**；
 /// * kimi 采集器的根走 `KIMI_CODE_HOME`（优先于 `~/.kimi`）。`KIMI_CODE_HOME` 的注入
 ///   由 Task 13 的记录项目锁住（D-30）；两者若在本机被设置（本机 `DSH_HOME=~/.dsh`），
@@ -545,8 +545,8 @@ fn master_switch_off_yields_empty_state_with_zero_collected_at() {
 #[test]
 fn set_settings_reports_persist_failure_instead_of_success() {
     let _g = serial();
-    let mam_home = std::env::var("MAM_HOME").expect("support::setup() 必须设置 MAM_HOME");
-    let db_path = std::path::Path::new(&mam_home).join(".mam").join("mam.db");
+    let mam_home = std::env::var("TUVIS_HOME").expect("support::setup() 必须设置 TUVIS_HOME");
+    let db_path = std::path::Path::new(&mam_home).join(".tuvis").join("tuvis.db");
     assert!(
         db_path.exists(),
         "前提：全局 DB 文件必须在（{}）——否则本用例打不到真实写路径",

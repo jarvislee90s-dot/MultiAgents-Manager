@@ -7,14 +7,14 @@
 //! 两组按钮，单轴工具（claude/opencode）出**切换钮 + 当前档回显**；**回读失败显示
 //! 「请人工核对」，不假装成功**（红线 4 的同一口径）。
 //!
-//! # 统一模式枚举（对齐 happy 的 8 值，收敛为 MAM 5 值）
+//! # 统一模式枚举（对齐 happy 的 8 值，收敛为 兔维斯 5 值）
 //!
 //! happy 的 `PermissionMode = 'auto'|'default'|'acceptEdits'|'bypassPermissions'|
-//! 'plan'|'read-only'|'safe-yolo'|'yolo'`（调研档案 §3）。MAM 收敛为 5 值：把
+//! 'plan'|'read-only'|'safe-yolo'|'yolo'`（调研档案 §3）。兔维斯 收敛为 5 值：把
 //! happy 的 auto/safe-yolo/yolo 三档合并为「完全信任」（对 TUI 侧而言都是「别再
 //! 问我」），其余一一对应：
 //!
-//! | MAM 统一档 | happy 对应 | 语义 |
+//! | 兔维斯 统一档 | happy 对应 | 语义 |
 //! |---|---|---|
 //! | Plan | plan | 只读规划，不改文件 |
 //! | Default | default | 每步询问（默认档） |
@@ -27,18 +27,18 @@
 //! codex 与 kimi 的「模式」与「权限」是**两个正交轴**（模式 = 计划/默认；权限 =
 //! 要不要问你），故各自出两组按钮；claude 与 opencode 只有一个轴，出切换钮 + 回显。
 //! 每组档位带**屏显标签**——**标签用工具自己的词**（§2.6「档位（屏显标签）」列），
-//! 不是 MAM 通用名：kimi 权限组是「总是询问/按需询问/永不询问」，不能显示成 MAM 的
+//! 不是 兔维斯 通用名：kimi 权限组是「总是询问/按需询问/永不询问」，不能显示成 兔维斯 的
 //! 「默认/接受编辑/完全信任」（用户看到的是终端上的词，对不上号等于没回显）。
 //!
-//! ## kimi 权限三档 → MAM 5 值的映射（**判断依据，逐条写清**）
+//! ## kimi 权限三档 → 兔维斯 5 值的映射（**判断依据，逐条写清**）
 //!
 //! kimi 官方三档原文（`kimi.exe` 内嵌 i18n 与 `/permission` 选择器，2.0.2 实测抽取）：
 //!
-//! | kimi 档 | 官方原文 | 语义 | 映射到 MAM | 依据 |
+//! | kimi 档 | 官方原文 | 语义 | 映射到 兔维斯 | 依据 |
 //! |---|---|---|---|---|
-//! | manual | `Always Ask` — `Auto-read only; everything else needs your approval first.` | 只自动读，其余逐一向你确认 | [`MamMode::Default`] | 与 MAM「默认：每步询问」同义（happy 的 `default` 同格） |
-//! | yolo | `Ask When Needed` — `Routine edits and commands run automatically; risky actions, questions, and plans still ask.` | 常规改动/命令自动跑，高危与提问仍问 | [`MamMode::AcceptEdits`] | MAM 5 值里**唯一**的「常规改动自动放行、高危仍问」档就是 AcceptEdits（happy 把 yolo/safe-yolo 也并进 Bypass，但那是 happy 的收敛口径；本仓 AcceptEdits 的语义「自动接受文件编辑」正是 kimi yolo 描述的前半句，且**不会**把「仍会问你」说成「完全信任」——映射到 Bypass 会说假话） |
-//! | auto | `Never Ask` — `Never interrupts you; everything runs and is decided automatically.` | 完全不打断 | [`MamMode::Bypass`] | 与 MAM「完全信任：不再询问」逐字同义 |
+//! | manual | `Always Ask` — `Auto-read only; everything else needs your approval first.` | 只自动读，其余逐一向你确认 | [`MamMode::Default`] | 与 兔维斯「默认：每步询问」同义（happy 的 `default` 同格） |
+//! | yolo | `Ask When Needed` — `Routine edits and commands run automatically; risky actions, questions, and plans still ask.` | 常规改动/命令自动跑，高危与提问仍问 | [`MamMode::AcceptEdits`] | 兔维斯 5 值里**唯一**的「常规改动自动放行、高危仍问」档就是 AcceptEdits（happy 把 yolo/safe-yolo 也并进 Bypass，但那是 happy 的收敛口径；本仓 AcceptEdits 的语义「自动接受文件编辑」正是 kimi yolo 描述的前半句，且**不会**把「仍会问你」说成「完全信任」——映射到 Bypass 会说假话） |
+//! | auto | `Never Ask` — `Never interrupts you; everything runs and is decided automatically.` | 完全不打断 | [`MamMode::Bypass`] | 与 兔维斯「完全信任：不再询问」逐字同义 |
 //!
 //! **不加枚举值的理由**：加第 6 值要动 `MamMode`（wire 词表、前端 `MAM_MODE_LABELS`、
 //! happy 收敛表、GET/POST 契约）——这是一处**结构性改动**，而 kimi 的三档在 5 值里
@@ -162,7 +162,7 @@ pub fn jump_sequence(tool: &str) -> JumpSequence {
     }
 }
 
-/// MAM 统一模式档（5 值，对齐 happy 8 值收敛——见模块文档表）
+/// 兔维斯 统一模式档（5 值，对齐 happy 8 值收敛——见模块文档表）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MamMode {
     /// 只读规划（plan mode）
@@ -263,10 +263,10 @@ impl ModeGroupId {
     }
 }
 
-/// 单档：MAM 档 + **屏显标签**（工具自身词表）+ 可选性。
+/// 单档：兔维斯 档 + **屏显标签**（工具自身词表）+ 可选性。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModeTier {
-    /// MAM 统一档（wire 词见 [`MamMode::wire`]）
+    /// 兔维斯 统一档（wire 词见 [`MamMode::wire`]）
     pub mode: MamMode,
     /// 屏显标签（§2.6「档位（屏显标签）」列**逐字**；不等于 [`MamMode::label`] 时
     /// 以本字段为准——kimi 权限组即此例）
@@ -281,7 +281,7 @@ pub struct ModeTier {
 ///
 /// **刻意不放进 [`ModeGroupSpec::tiers`]**：tiers 是「可作为切换目标」的清单，而
 /// legacy 档**不得作为可选档**——放进去就必须给它们一个 [`MamMode`] 才能表达，
-/// 而 MAM 5 值里并没有对应值（发明一个值正是裁7 禁止的「作为可选档」）。故以独立
+/// 而 兔维斯 5 值里并没有对应值（发明一个值正是裁7 禁止的「作为可选档」）。故以独立
 /// 清单承载，供 GET 载荷**如实展示**「这两个档官方已退役」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LegacyTier {
@@ -301,7 +301,7 @@ pub enum GroupLayout {
     Toggle,
     /// **单选面板**（2026-09-23 用户方案）：单钮「切换权限」→ 点开后由后端**读回
     /// 终端菜单的选项表**（编号 = 屏上实读值、文本 = 屏上原文）→ 用户点选哪项，
-    /// MAM 就敲哪个数字键。**MAM 不再猜「该敲哪个数」**——codex 权限组用此布局
+    /// 兔维斯 就敲哪个数字键。**兔维斯 不再猜「该敲哪个数」**——codex 权限组用此布局
     /// （档位编号随 Guardian 配置前移，硬编码「4→1」会错）。
     Picker,
 }
@@ -561,7 +561,7 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 step: false,
                 // 权限档**没有**底栏回读源（实测底栏只有模式文本）→ 前端「请人工核对」
                 readback: false,
-                // **单选面板**（2026-09-23 用户方案）：MAM 读回终端菜单的选项表交给
+                // **单选面板**（2026-09-23 用户方案）：兔维斯 读回终端菜单的选项表交给
                 // 用户点，点哪项敲哪个数字键——不再由后端猜「该敲哪个数」（档位编号
                 // 随 Guardian 配置前移，硬编码「4→1」会错）
                 layout: GroupLayout::Picker,
@@ -872,7 +872,7 @@ pub fn mode_switch_block(
 /// **codex 模式组运行中不可用**（§2.6 表末「运行中不可用→如实回执」）——纯判据。
 /// 判据来源：codex 0.155.1 二进制内嵌文案 `Plan mode unavailable right now.`
 /// （`slash_dispatch` 分支，与 `/plan` 的 in-progress 门同源）——即 codex 自己就会
-/// 拒；MAM 侧**在投递前**判，才能给用户一份**如实回执**而不是「已发送」后无变化。
+/// 拒；兔维斯 侧**在投递前**判，才能给用户一份**如实回执**而不是「已发送」后无变化。
 ///
 /// 「运行中」的口径复用 [`crate::inject::queue::is_running`]（Processing / Thinking /
 /// Compacting 三态——队列层既有单一判据，不另立一份）。2026-09-23 起拦截面扩为
@@ -947,7 +947,7 @@ fn parse_claude_footer(lines: &[String]) -> Option<MamMode> {
             return Some(MamMode::Plan);
         }
         if lower.contains("auto mode on") {
-            // happy 的 auto 归 MAM 的 Bypass（调研档案 §3 的收敛表）
+            // happy 的 auto 归 兔维斯 的 Bypass（调研档案 §3 的收敛表）
             return Some(MamMode::Bypass);
         }
         if lower.contains("manual mode on") {
@@ -1300,7 +1300,7 @@ pub(crate) const KIMI_CURRENT_SUFFIX: &str = "current";
 ///
 /// 旧判据「关键词包含 + 计数互斥」对**整屏**逐行扫档位词，N6 实证其失败形态：kimi
 /// 描述行 `Never interrupts you; …` 含 `Never` 子串 → `Never Ask` 被计第 2 次 →
-/// 一致性闸判「档位表不自洽」→ 闭环中止（「总是询问」永不可达——失败全在 MAM 解析，
+/// 一致性闸判「档位表不自洽」→ 闭环中止（「总是询问」永不可达——失败全在 兔维斯 解析，
 /// TUI 导航无问题，用户 K-1 实测 ↓ 恰移一档）。戊探D 五锚实证（标题行 / footer 行 /
 /// `← current` / `❯` / 两行组）全部字符层可解析且唯一 → 本函数改为：
 ///
@@ -1419,7 +1419,7 @@ fn locate_codex_menu(
 /// # 为什么编号必须取屏上实读值（而不是像 [`locate_codex_menu`] 那样按出现顺序自编）
 ///
 /// Guardian 关闭时 `Approve for me` 会**缺席**、其后档位编号前移（实机已见
-/// `(non-admin sandbox)` 这类形态变体）——用户看到的编号是屏上印的那个，MAM 敲的
+/// `(non-admin sandbox)` 这类形态变体）——用户看到的编号是屏上印的那个，兔维斯 敲的
 /// 必须**同一个数**。自编序号只在「菜单整齐从 1 连续」时与屏上一致，一旦缺档就错位。
 ///
 /// # 过滤（两道，都必要）
@@ -1824,7 +1824,7 @@ pub fn menu_items_coherent(items: &[DialogOption], tool: &str) -> bool {
 /// 工具 → **目标档标签全集**（用户可切的三档；codex/kimi 各三条，见 §2.6）。
 ///
 /// **不含** codex 的 `Approve for me`：它只在 Guardian 开启时出现（实机取证档 §1 的
-/// 菜单里它在场、§4 的另一次菜单里也在场，但 §2.6 未把它列为 MAM 的目标档），
+/// 菜单里它在场、§4 的另一次菜单里也在场，但 §2.6 未把它列为 兔维斯 的目标档），
 /// 且算进完整集会误伤 Guardian 关闭时的正常菜单。
 fn menu_target_labels(tool: &str) -> &'static [&'static str] {
     match tool {
@@ -2034,7 +2034,7 @@ fn unique_highlight(items: &[DialogOption], stage: &str) -> Result<usize, String
 /// # 为什么要闭环（用户实机取证的**方法论要求**，原文见取证档案 §8）
 ///
 /// > 每按一次 ↓ 或者 ↑ 就**重新屏读**、确认高亮确实移到下一项……你**绝对不能默认**
-/// > 这个按键在什么位置，因为你并不知道 MAM 不在场的时候，这个敞开本身是什么权限，
+/// > 这个按键在什么位置，因为你并不知道 兔维斯 不在场的时候，这个敞开本身是什么权限，
 /// > 所以你必须读取 `/permissions` 之后实际哪个权限被选择了，才能从此定位切换到正确权限上。
 ///
 /// 旧实现（丁T4 首版的 `menu_navigation_sequence`，**本批删除**）是「一次算步进 + 盲发序列」：它先按
@@ -2463,7 +2463,7 @@ fn codex_preflight<T: MenuTerminal>(terminal: &mut T) -> Result<Option<Vec<Strin
 /// → `read_options()` 轮询到菜单画全。
 ///
 /// **与旧自动路径的关键差别**：本函数**不挑档、不敲数字**——它把屏上选项原样交给
-/// 调用方（进而交给用户点）。「用户自己选」正是 2026-09-23 用户方案的要点：MAM 不再
+/// 调用方（进而交给用户点）。「用户自己选」正是 2026-09-23 用户方案的要点：兔维斯 不再
 /// 猜「该敲哪个数」，只负责读屏与投递用户点选的那个数。
 pub fn run_codex_menu_open<T, O, P, W>(
     mut open_menu: O,
@@ -2627,7 +2627,7 @@ pub fn permission_receipt_verified(tool: &str, lines: &[String], target_label: &
 ///
 /// # 与 [`permission_receipt_verified`] 的差别（为什么两个都要）
 ///
-/// 后者要求「锚 + **目标档标签**」同在——因为它的场景里 MAM 自己知道目标档（旧自动
+/// 后者要求「锚 + **目标档标签**」同在——因为它的场景里 兔维斯 自己知道目标档（旧自动
 /// 路径按 wire 档敲）。picker 场景**目标档未知**：用户点的是**屏上编号**（1..N），
 /// 后端不知道它对应哪个 wire 档（档位集合随 Guardian 配置变化，用户也可能点了本机
 /// codex 新加的档）。故 picker 只能判「有没有成功回执行」，并把**原文**回给前端显示
@@ -2699,7 +2699,7 @@ mod tests {
         assert_eq!(
             MamMode::parse("yolo"),
             None,
-            "happy 的 yolo 在 MAM 收敛为 Bypass 单一档"
+            "happy 的 yolo 在 兔维斯 收敛为 Bypass 单一档"
         );
         assert_eq!(MamMode::parse("bogus"), None);
     }
@@ -2809,7 +2809,7 @@ mod tests {
         assert_eq!(
             p.layout,
             GroupLayout::Picker,
-            "权限组是**单选面板**（2026-09-23 用户方案：MAM 读回终端菜单选项，用户点选哪项就敲哪个数字）\
+            "权限组是**单选面板**（2026-09-23 用户方案：兔维斯 读回终端菜单选项，用户点选哪项就敲哪个数字）\
              ——不再是逐档按钮（那需要前端硬编码「哪档对应哪个数字」，而档位编号随 Guardian 配置前移）"
         );
         let labels: Vec<&str> = p.tiers.iter().map(|t| t.label).collect();
@@ -2837,14 +2837,14 @@ mod tests {
         assert_eq!(
             p.tiers.iter().map(|t| t.label).collect::<Vec<_>>(),
             vec!["总是询问", "按需询问", "永不询问"],
-            "§2.6 kimi 权限组屏显标签（工具自己的词，不是 MAM 通用名）"
+            "§2.6 kimi 权限组屏显标签（工具自己的词，不是 兔维斯 通用名）"
         );
-        // kimi 权限三档 → MAM 映射（模块文档表的机器可验版本）
+        // kimi 权限三档 → 兔维斯 映射（模块文档表的机器可验版本）
         assert_eq!(p.tiers[0].mode, MamMode::Default, "总是询问 = 每步询问");
         assert_eq!(
             p.tiers[1].mode,
             MamMode::AcceptEdits,
-            "按需询问 = 常规改动/命令自动、高危仍问 → MAM 唯一的「常规改动自动」档"
+            "按需询问 = 常规改动/命令自动、高危仍问 → 兔维斯 唯一的「常规改动自动」档"
         );
         assert_eq!(p.tiers[2].mode, MamMode::Bypass, "永不询问 = 不再询问");
         assert!(
@@ -3448,7 +3448,7 @@ mod tests {
                 &lines(&["  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents"])
             ),
             Some(MamMode::Bypass),
-            "happy 的 auto 归 MAM 的 Bypass（调研档案 §3）"
+            "happy 的 auto 归 兔维斯 的 Bypass（调研档案 §3）"
         );
         assert_eq!(
             parse_mode_from_screen(
@@ -5952,7 +5952,7 @@ mod tests {
             .values()
             .filter(|p| {
                 let name = p.name().to_string_lossy().to_lowercase();
-                if name.contains("multi-agents-manager") {
+                if name.contains("multi-agents-manager") || name.contains("tuvis") {
                     return false;
                 }
                 if name.contains("codex") {

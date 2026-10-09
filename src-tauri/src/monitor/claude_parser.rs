@@ -272,7 +272,7 @@ fn parse_claude_jsonl(
         .unwrap_or(false);
 
     let session_id = digest.session_id.clone()?;
-    // 卡片前缀统一 8 位（按字符截取，多字节 id 不 panic），与 hook marker（MAM:<id 前 8 位>）保持一致
+    // 卡片前缀统一 8 位（按字符截取，多字节 id 不 panic），与 hook marker（TUVIS:<id 前 8 位>）保持一致
     let session_title = session_id.chars().take(8).collect::<String>();
     let status = if digest.is_compacting {
         SessionStatus::Compacting

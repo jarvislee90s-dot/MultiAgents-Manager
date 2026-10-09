@@ -1,14 +1,14 @@
 # Introduction
 
-Overview of MultiAgents Manager features
+Overview of Tuvis features
 
 ## Overview
 
-This chapter covers Introduction functionality in MultiAgents Manager.
+This chapter covers Introduction functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Introduction features for managing AI programming tools.
+Tuvis provides comprehensive Introduction features for managing AI programming tools.
 
 ## Steps
 

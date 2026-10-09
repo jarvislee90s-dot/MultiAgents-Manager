@@ -1,5 +1,5 @@
 //! 强制可达性校验 + 自愈（§C3）：外部 DoH 解析（**多源、纯 IP 字面量**）→ **钉住 IP**
-//! 直连（绕开本机 DNS 与本机代理）→ **MAM 特征判据**（HTTP 200 + 特征头，不是"任意响应
+//! 直连（绕开本机 DNS 与本机代理）→ **兔维斯 特征判据**（HTTP 200 + 特征头，不是"任意响应
 //! 即算通"）→ 失败自愈。校验态（[`Reachability`]）经载荷三门门控地址展示，并经轮询守护
 //! 按窗口重验。
 //!
@@ -23,8 +23,8 @@ use super::status::{
 // ① 本机是尾网成员，该名字被 MagicDNS 接管，压根不走公网路径；② 本机可能装有
 // 网络加速/代理工具（实测机器上就有——它用自签 CA 做本地 MITM；实测正是被这点
 // 骗过：本地六项信号全绿而公网根本打不开）。故校验 = 公共 DoH 解析 + 解析结果
-// **钉住 IP** 直连，两者都绕开本机 DNS 与本机代理。**响应还必须是 MAM 自己的服务答的**
-//（HTTP 200 + MAM 特征头，B-I6）——钉 IP + 禁系统代理破不了 TUN / 透明重定向式 MITM，
+// **钉住 IP** 直连，两者都绕开本机 DNS 与本机代理。**响应还必须是 兔维斯 自己的服务答的**
+//（HTTP 200 + 兔维斯 特征头，B-I6）——钉 IP + 禁系统代理破不了 TUN / 透明重定向式 MITM，
 // 故在「有没有响应」之上再收紧一层（残余风险的诚实边界见 [`mam_response_ok`]）。
 // 外部解析服务不可用时按 **Failed（验证不了）** 处理（fail-closed）：宁可报「无法验证」，
 // 也不谎报「已生效」；成因三态（全源不可用 / 权威否定 / 有记录）由 [`probe_addresses`] 的
@@ -53,7 +53,7 @@ pub(crate) enum Reachability {
     Verifying,
     Verified,
     /// 公网 DNS 记录**尚未发布**（正常发布延迟，不是故障）。
-    /// `republish` 分辨两档：`true` = 本进程内 MAM 执行过 `funnel reset`（重开档，
+    /// `republish` 分辨两档：`true` = 本进程内 兔维斯 执行过 `funnel reset`（重开档，
     /// 实测 30–49 秒）；`false` = 其余（默认按首次开通档给 5–6 分钟，并同时给出
     /// "此前开通过 1 分钟内"的下界——见 [`record_pending_hint`]）。
     RecordPending {
@@ -176,14 +176,14 @@ pub(super) fn backend_init_overdue(
 }
 
 /// 降级文案（纯函数，可测）：**点名后端状态与已等时长 + 给出升级路径**，
-/// 并如实说明 MAM 在这个窗口里**没有**改配置（不判定、不重开）——用户据此判断
+/// 并如实说明 兔维斯 在这个窗口里**没有**改配置（不判定、不重开）——用户据此判断
 /// 是继续等还是去查 Tailscale 服务。
 pub(super) fn backend_init_overdue_reason(state: &str, elapsed: std::time::Duration) -> String {
     let mins = (elapsed.as_secs() / 60).max(1);
     format!(
         "Tailscale 后端持续未就绪（{state}，已 {mins} 分钟）——已超出开机恢复的宽限窗；\
          可在配置向导中重试，或检查 Tailscale 服务是否正常\
-         （宽限窗内 MAM 未判定 Funnel 配置、未重开，配置与地址不会被改动）"
+         （宽限窗内 兔维斯 未判定 Funnel 配置、未重开，配置与地址不会被改动）"
     )
 }
 
@@ -432,14 +432,14 @@ pub(super) type ProbeFn = dyn Fn(&str) -> Result<Vec<String>, String> + Send + S
 /// AAAA 始终不发布）。**这 5–6 分钟里用户唯一的感受就是"连不上"**——只写「尚未生效」
 /// 会让他以为是故障；写清预期时长才是如实告知（§C3 要求 2 与 §5「诚实」）。
 ///
-/// **两界都给（W-B）**：MAM 关着时被人手动 `funnel reset` 的情形**无法证实**是不是首次，
+/// **两界都给（W-B）**：兔维斯 关着时被人手动 `funnel reset` 的情形**无法证实**是不是首次，
 /// 故本档同时给出"此前开通过通常 1 分钟内"的下界——给区间，不编判据。
 pub(crate) const RECORD_PENDING_HINT: &str =
     "公网 DNS 记录尚未发布——首次开通实测约需 5–6 分钟（此前开通过则通常 1 分钟内）；\
      地址要等记录发布后才从外网可达";
 
 /// 用户可见的「记录尚未发布」口径——**重新开通档**（W-B，2026-10-07 真机实测）：
-/// `reset` 后重开的记录重发布**≈30–49 秒**。判据可证：本进程内 MAM 自己执行过
+/// `reset` 后重开的记录重发布**≈30–49 秒**。判据可证：本进程内 兔维斯 自己执行过
 /// `funnel reset`（[`pending_republish`]）。旧实现套用首开那句 5 分钟 = 把 30 秒说成
 /// 5 分钟（用户白等，且成因指向错误）。
 pub(crate) const RECORD_REPUBLISH_HINT: &str =
@@ -512,7 +512,7 @@ pub(super) fn verify_reachability(host: &str, probe: &ProbeFn) -> Reachability {
     }
 }
 
-/// 响应是否**MAM 自己的服务答的**（纯函数，可测——B-I6 判据）：HTTP 200 +
+/// 响应是否**兔维斯 自己的服务答的**（纯函数，可测——B-I6 判据）：HTTP 200 +
 /// [`crate::remote::server::MAM_REACH_HEADER`] 特征头命中。
 ///
 /// **为什么必须加这道判据**：旧口径「拿到**任意** HTTP 响应即算通」挡不住 TUN / 透明
@@ -521,25 +521,25 @@ pub(super) fn verify_reachability(host: &str, probe: &ProbeFn) -> Reachability {
 /// 不能只看"有没有响应"。
 ///
 /// **诚实边界（不要把它说成鉴权）**：这不是密码学证明——知道特征值的 MITM 仍可伪造。
-/// 它的定位是**廉价判据**：把「任意响应」收紧为「带 MAM 特征」，挡掉最常见的透明错误页
+/// 它的定位是**廉价判据**：把「任意响应」收紧为「带 兔维斯 特征」，挡掉最常见的透明错误页
 /// （代理拦截页 / 门户页 / 自签 CA 的错误页都不带这个头）。
 pub(super) fn mam_response_ok(status: u16, marker: Option<&str>) -> Result<(), String> {
     if status != 200 {
         return Err(format!(
-            "HTTP {status}（MAM 看板入口应为 200；疑似链路上的拦截/错误页）"
+            "HTTP {status}（兔维斯 看板入口应为 200；疑似链路上的拦截/错误页）"
         ));
     }
     match marker {
         Some(v) if v == crate::remote::server::MAM_REACH_VALUE => Ok(()),
         Some(other) => Err(format!(
-            "响应特征头为 {other:?}，不是 MAM 服务答的（疑似链路上的拦截页）"
+            "响应特征头为 {other:?}，不是 兔维斯 服务答的（疑似链路上的拦截页）"
         )),
-        None => Err("响应缺少 MAM 特征标记，不是 MAM 服务答的（疑似链路上的拦截/错误页）".into()),
+        None => Err("响应缺少 兔维斯 特征标记，不是 兔维斯 服务答的（疑似链路上的拦截/错误页）".into()),
     }
 }
 
-/// 用解析到的公网地址**钉住 IP** 去请求 MAM 看板入口（绕过本机 DNS 与本地代理），
-/// 并要求响应带 **MAM 特征**（[`mam_response_ok`]）——「链路通了」不等于「MAM 答了」。
+/// 用解析到的公网地址**钉住 IP** 去请求 兔维斯 看板入口（绕过本机 DNS 与本地代理），
+/// 并要求响应带 **兔维斯 特征**（[`mam_response_ok`]）——「链路通了」不等于「兔维斯 答了」。
 /// **不校验响应体内容**（那是前端产物的事，且会随构建漂移）；判据只用服务端写死的特征头
 fn probe_http(host: &str, ip: &str) -> Result<(), String> {
     #[cfg(test)]
@@ -556,7 +556,7 @@ fn probe_http(host: &str, ip: &str) -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
     // 请求**看板地址**（`/m`）而不是根路径：特征头由 entry_response 写在那里，
-    // 而根路径在 MAM 侧本就没有入口（非 /m 前缀 → 404）
+    // 而根路径在 兔维斯 侧本就没有入口（非 /m 前缀 → 404）
     let resp = client
         .get(format!("https://{host}/m"))
         .send()

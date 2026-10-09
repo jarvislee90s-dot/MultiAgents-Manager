@@ -148,8 +148,8 @@ FR-8 安全与透明             -> 条目 37-40
 ### [R12] Spec 005 FR-7.3 句子拆分消除歧义
 
 **文件**：`specs/005-extension-manifest/spec.md`
-**问题**：FR-7.3 当前写「manifest 中的 `compatibility` 决定可在哪些工具（Layer 2，`~/.mam/mcp/` 对 MCP 不适用，MCP 直接写入工具配置）启用」，括号内把 Layer 2 和 `~/.mam/mcp/` 并列容易误解--Layer 2 是 `~/.mam/active/<tool>/`，不是 `~/.mam/mcp/`。
-**操作**：拆为两句：「安装到 Layer 1（SSOT，`~/.mam/skills/<id>/`），manifest 中的 `compatibility` 决定可在哪些工具上启用。Skill 通过 Layer 2（`~/.mam/active/<tool>/`）符号链接映射；MCP 不走 Layer，直接写入工具配置文件，安装时在 `~/.mam/mcp/<id>/` 记录元数据。」
+**问题**：FR-7.3 当前写「manifest 中的 `compatibility` 决定可在哪些工具（Layer 2，`~/.tuvis/mcp/` 对 MCP 不适用，MCP 直接写入工具配置）启用」，括号内把 Layer 2 和 `~/.tuvis/mcp/` 并列容易误解--Layer 2 是 `~/.tuvis/active/<tool>/`，不是 `~/.tuvis/mcp/`。
+**操作**：拆为两句：「安装到 Layer 1（SSOT，`~/.tuvis/skills/<id>/`），manifest 中的 `compatibility` 决定可在哪些工具上启用。Skill 通过 Layer 2（`~/.tuvis/active/<tool>/`）符号链接映射；MCP 不走 Layer，直接写入工具配置文件，安装时在 `~/.tuvis/mcp/<id>/` 记录元数据。」
 
 ---
 

@@ -1,8 +1,8 @@
 <div align="center">
 
-# MultiAgents Manager
+# Tuvis
 
-**Unified Management Platform for Multi-Agent Programming Tools**
+**Your Desktop Multi-Agent Command Deck**
 
 A desktop app to monitor, notify, jump to, and manage Claude Code / Codex CLI / OpenCode / OpenClaw / Kimi Code / WorkBuddy / ZCode / dsh sessions
 
@@ -42,7 +42,7 @@ Open the same eight-tool session board from your phone browser. Settings → Rem
 | ------------------------------------ | ------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | 📶 LAN                               | Phone and computer on the same WiFi / cable (**recommended**) | Fastest; requires the access PIN; **your own browser on this computer uses this card's address too** (its switch must be on)                                                                                                                     |
 | 🔀 Quick tunnel                      | You're away and your phone is on cellular                     | Public, no signup (Cloudflare); **address changes every time it's enabled**                                                                                                                                                                      |
-| 🌐 Own domain                        | You want a stable entry point                                 | Needs a Cloudflare account (free plan works) + a Tunnel Token; the address is **permanent** once configured — MAM downloads and supervises cloudflared for you, with a step-by-step guide in Settings                                            |
+| 🌐 Own domain                        | You want a stable entry point                                 | Needs a Cloudflare account (free plan works) + a Tunnel Token; the address is **permanent** once configured — Tuvis downloads and supervises cloudflared for you, with a step-by-step guide in Settings                                            |
 | 🛰 External domain (no domain needed) | You don't have a domain but still want a permanent address    | **No domain required**: the card's wizard walks you through installing Tailscale and enabling Funnel to get a **permanent** address like `https://<machine>.<tailnet>.ts.net/m`; you only install and sign in to Tailscale once on this computer |
 
 **The access PIN applies to this computer too**: loopback access is **no longer PIN-free** — opening the board from this machine's own browser is treated exactly like a remote device (enter the PIN once, then remembered for 180 days). "This machine" is **no longer a channel card**: it is just one way to connect, using the address shown on the "LAN" card.
@@ -51,9 +51,9 @@ Open the same eight-tool session board from your phone browser. Settings → Rem
 
 > The screenshot above shows the old four-card UI from before this branch (Local / LAN / Quick tunnel / Named tunnel); its "Local · no PIN" note has since been overturned by the zero-exemption gate — a new screenshot is pending.
 
-How to connect: turn on "Enable Remote Access" → enable the channel you want → click its card to reveal the address / QR code (**the link already contains the PIN, so scanning fills it in automatically**) → open it on your phone (**the URL must end with `/m`**). **The first run of "External domain (no domain needed)" goes through the card's wizard**: click "One-click setup" and it walks through detect → download from the official source with checksum verification → install (one admin prompt from the system) → sign in to Tailscale (MAM turns the authorization link into a button; you finish in the browser) → turn off "block incoming connections" → enable Funnel → **reachability verification** — no command line at any point; on macOS you also approve Tailscale's system extension once in System Settings, and the first Funnel enablement may additionally need one browser approval (or none at all).
+How to connect: turn on "Enable Remote Access" → enable the channel you want → click its card to reveal the address / QR code (**the link already contains the PIN, so scanning fills it in automatically**) → open it on your phone (**the URL must end with `/m`**). **The first run of "External domain (no domain needed)" goes through the card's wizard**: click "One-click setup" and it walks through detect → download from the official source with checksum verification → install (one admin prompt from the system) → sign in to Tailscale (Tuvis turns the authorization link into a button; you finish in the browser) → turn off "block incoming connections" → enable Funnel → **reachability verification** — no command line at any point; on macOS you also approve Tailscale's system extension once in System Settings, and the first Funnel enablement may additionally need one browser approval (or none at all).
 
-**The address is only shown after it passes a real check from outside the tailnet**: while verifying or not yet effective, the card honestly reports "taking effect" and gives the expected wait for the situation (about 5–6 minutes on first setup; usually under a minute if it was enabled before, in which case the address does not change; about 1–2 minutes when recovering after boot) — it never puts a dead link in front of you. Once verified it is re-checked periodically (about once a minute, less often when idle) and recovers automatically on failure. The address never changes, paired devices never need re-pairing, and **MAM restores the channel automatically on every boot** (it waits for the Tailscale backend to be ready before re-enabling, so it never wipes a config that is still coming back).
+**The address is only shown after it passes a real check from outside the tailnet**: while verifying or not yet effective, the card honestly reports "taking effect" and gives the expected wait for the situation (about 5–6 minutes on first setup; usually under a minute if it was enabled before, in which case the address does not change; about 1–2 minutes when recovering after boot) — it never puts a dead link in front of you. Once verified it is re-checked periodically (about once a minute, less often when idle) and recovers automatically on failure. The address never changes, paired devices never need re-pairing, and **Tuvis restores the channel automatically on every boot** (it waits for the Tailscale backend to be ready before re-enabling, so it never wipes a config that is still coming back).
 
 The PIN applies to **all four channels** (**including access from this computer**): enter it once per device for **180 days**, and after a PIN change every device must re-enter it. Paired devices can be renamed or kicked from the "Paired Devices" list (up to 10).
 
@@ -68,7 +68,7 @@ The PIN applies to **all four channels** (**including access from this computer*
 - **File panel**: aggregates the files a session touched, newest first, with document/image filters and a **200 / 500 / 1000 message** look-back range; **modified** files are highlighted and **read-only** ones are neutral (both previewable), and tapping the secondary line reveals the full path
 - **File preview**: markdown / syntax highlighting / inline images; three switchable layouts — side-by-side (chat left, file right), stacked, and fullscreen overlay — with a draggable splitter; readable scope is the session project directory plus your home directory (sensitive directories such as keys are always refused)
 - **Transfer progress and honest bandwidth disclosure**: uploads and downloads both show a **progress bar** (bytes transferred / percentage / instantaneous rate / ETA); **when the rate or the total size is unknown it shows bytes transferred only and never invents a percentage**. On a bandwidth-limited tunnel channel the file panel and the attachment area say **in place** that this is a channel limit, not a malfunction, with time estimates based on this channel's measured rate (about 1.5 minutes to download and 3.3 minutes to upload a 20 MB attachment) and a **full-speed upgrade path** (install Tailscale on your phone and join the tailnet to connect directly, 1–2 orders of magnitude faster)
-- **Message bookmarks**: mark a spot to revisit with a colored dot (up to 10, one per color), jump back by tapping it, delete individually or clear all; stored in the browser — refresh-proof, cleared when MAM restarts or the tab is closed
+- **Message bookmarks**: mark a spot to revisit with a colored dot (up to 10, one per color), jump back by tapping it, delete individually or clear all; stored in the browser — refresh-proof, cleared when Tuvis restarts or the tab is closed
 - **Font size**: 50% / 75% / 100% / 125% for message and file text only
 - **Archived history**: finished or unreachable sessions stop cluttering the board — registry-based archiving (history page lazy-loads 1/3/7 days), tap a card for a read-only detail view with one-tap reactivation; board cards can be closed/archived (CLI sessions stop their process, APP sessions get a true "close")
 
@@ -95,10 +95,10 @@ Not just looking — you can **act**: send messages, approve tool calls, answer 
 2. **The quick tunnel address changes every time it is toggled** — each time you enable the quick tunnel a new public address is generated (the old link / QR code dies immediately), so don't treat it as a long-term entry point; for a fixed address use "Own domain" or "External domain (no domain needed)". Toggling other settings does not affect this channel.
 3. **The phone URL must end with `/m`** — a full address looks like `http://192.168.x.x:9420/m`; scanning the QR code is recommended (**the link already contains the PIN, filled in automatically**), and typing it without `/m` gives you an empty 404 page.
 4. **Access from this computer needs the PIN too** — "This machine" is no longer a channel card: opening the board in this machine's own browser is treated exactly like a remote device (enter the PIN once), using the address shown on the "LAN" card, and **that switch must be on** (the address is unreachable when the server only listens on loopback); on your phone use the "LAN" card or a tunnel address.
-5. **Firewall** — on Windows the first listen triggers an "allow access" prompt; if it was dismissed, inbound traffic is blocked: Windows Security → Firewall & network protection → Allow an app through firewall → tick MultiAgents Manager (both Private and Public).
+5. **Firewall** — on Windows the first listen triggers an "allow access" prompt; if it was dismissed, inbound traffic is blocked: Windows Security → Firewall & network protection → Allow an app through firewall → tick Tuvis (both Private and Public).
 6. **The TLS confirmation dialog** — a direct LAN connection is plain HTTP; ticking the box means "I understand / I have a TLS reverse proxy in front"; for a home LAN just tick it — you don't need to actually set up a reverse proxy.
 7. **"Own domain" shows running but the domain won't open** — check whether **Public Hostname** is configured on the Cloudflare side (subdomain + domain + Service `HTTP://localhost:9420`); without that step the tunnel may look Healthy while the domain has no DNS record and won't open (the in-app "tutorial" has the step-by-step).
-8. **The "External domain (no domain needed)" card keeps saying "taking effect"** — after the first setup the public DNS record takes about 5–6 minutes to be published: direct access from this machine works right away while outside access has to wait for the record, so the card withholding the address is **honest reporting, not a malfunction**; if it stays that way for long, use "open the wizard to retry" inside the card — MAM also resets and re-enables Funnel to self-heal. If you see "recovering" after a boot, the Tailscale backend is reconnecting (usually 1–2 minutes): the configuration and the address are unchanged and nothing is required from you.
+8. **The "External domain (no domain needed)" card keeps saying "taking effect"** — after the first setup the public DNS record takes about 5–6 minutes to be published: direct access from this machine works right away while outside access has to wait for the record, so the card withholding the address is **honest reporting, not a malfunction**; if it stays that way for long, use "open the wizard to retry" inside the card — Tuvis also resets and re-enables Funnel to self-heal. If you see "recovering" after a boot, the Tailscale backend is reconnecting (usually 1–2 minutes): the configuration and the address are unchanged and nothing is required from you.
 
 ### Foxbell Desktop Pet
 
@@ -126,7 +126,7 @@ Token usage from seven tools (Claude Code / Codex / Kimi Code / OpenCode / ZCode
 for in one ledger: the app collects once shortly after startup, and `usage_collect` lets the frontend trigger a
 collection on demand (single-flight mutex + a default minimum interval of 10 minutes);
 **collection runs on its own on-demand path and never enters the 3-second session polling loop**. The ledger
-lives in 4 tables in `~/.mam/mam.db` (hourly detail, permanently kept daily aggregates, collection cursors,
+lives in 4 tables in `~/.tuvis/tuvis.db` (hourly detail, permanently kept daily aggregates, collection cursors,
 session dimension); detail is kept for 90 days by default (configurable), and after expiry only the daily
 aggregates remain.
 
@@ -188,7 +188,7 @@ Click a session card to instantly focus the corresponding terminal tab:
 | tmux         | ✅ pane selection + terminal focus |
 | Wayland      | ❌ Graceful fallback message       |
 
-Terminal tools (Claude Code / Codex CLI / OpenCode / Kimi Code) resolve through process-tree and window-content disambiguation; **same-project dual-open jumps land directly**: for Kimi / OpenCode, the window title is matched against the session title (kimi `state.json` title / OpenCode DB title) after normalization — a unique hit locks onto the window, so dual terminals no longer raise a picker. On Windows, resolution also stamps a one-shot identity marker onto the target terminal title (` — MAM:xxxxxxxxxxxx`, cleared automatically after focus) for positive locking; markers never stack, and when the card↔terminal pairing is uncertain (same-project multi-open) the app **raises a picker rather than risking the wrong window**, and focus refusals surface an explicit error instead of failing silently.
+Terminal tools (Claude Code / Codex CLI / OpenCode / Kimi Code) resolve through process-tree and window-content disambiguation; **same-project dual-open jumps land directly**: for Kimi / OpenCode, the window title is matched against the session title (kimi `state.json` title / OpenCode DB title) after normalization — a unique hit locks onto the window, so dual terminals no longer raise a picker. On Windows, resolution also stamps a one-shot identity marker onto the target terminal title (` — Tuvis:xxxxxxxxxxxx`, cleared automatically after focus) for positive locking; markers never stack, and when the card↔terminal pairing is uncertain (same-project multi-open) the app **raises a picker rather than risking the wrong window**, and focus refusals surface an explicit error instead of failing silently.
 
 Desktop APP tools (Codex APP, WorkBuddy) support deep-link jumps: `codex://threads/<id>`, `workbuddy://chat/<id>` (session-level). The handler is verified before dispatch and foregrounding is verified after; on failure it falls back to APP-level focus (macOS AppleScript / Windows nearest-ancestor) without marking the session read. ZCode is a single-window multi-tab app — its jump simply focuses the unique window (cards carry the host pid, zero ambiguity). dsh's jump focuses (or opens) the dsh web tab in your browser.
 
@@ -200,7 +200,7 @@ Unified repository for Skills, MCP servers, and Plugins across tools:
 - **MCP Servers**: Auto-format conversion — JSON (Claude / Kimi / WorkBuddy) / TOML (Codex) / JSONC (OpenCode) / nested JSON subtree (ZCode: `mcp.servers`; read-modify-write touches only that subtree, preserving unknown keys and original key order)
 - **Plugins**: File/config hybrid management
 - Auto-import existing skills on first launch (from per-tool directories such as `~/.claude/skills/`, `~/.codex/skills/`, `~/.config/opencode/skills/`, plus the shared directory `~/.agents/skills/`)
-- `~/.agents/skills/` is a **read-only shared import source** (source label `agents-shared`): MAM only scans it into the repository (no tool attribution, no linking); tools that follow the open standard, such as codex / zcode, read this directory directly
+- `~/.agents/skills/` is a **read-only shared import source** (source label `agents-shared`): Tuvis only scans it into the repository (no tool attribution, no linking); tools that follow the open standard, such as codex / zcode, read this directory directly
 - Rescan button for discovering newly installed skills
 
 ### Preset Groups
@@ -221,7 +221,7 @@ For multi-agent tools (Hermes, OpenCode, etc.), allocate resource subsets to sub
 
 ### Tool Toggle Management
 
-A dedicated settings section to decide which tools MAM monitors and manages:
+A dedicated settings section to decide which tools Tuvis monitors and manages:
 
 - Row-style toggle list: icon + name + installed badge; changes are staged locally and batch-saved, with a confirmation dialog listing restore/rollback items and an unsaved-changes leave guard
 - Unchecking = full restore: symlinks become real files, MCP entries are removed from tool configs, unread cards are cleared; the SSOT repository and DB assignments are kept, and re-checking rebuilds everything per the original assignments (partial failures auto-rollback — re-saving retries idempotently)
@@ -348,8 +348,8 @@ src/
 
 ```bash
 # Clone the repository
-git clone https://github.com/jarvislee90s-dot/MultiAgents-Manager.git
-cd MultiAgents-Manager
+git clone https://github.com/jarvislee90s-dot/tuvis.git
+cd tuvis
 
 # Install frontend dependencies
 pnpm install
@@ -378,15 +378,15 @@ pnpm lint:fix     # ESLint auto-fix
 
 ## Configuration
 
-The app stores its data in `~/.mam/`:
+The app stores its data in `~/.tuvis/`:
 
 | Path                          | Purpose                                                        |
 | ----------------------------- | -------------------------------------------------------------- |
-| `~/.mam/mam.db`               | SQLite database (settings, extensions, presets, session cache) |
-| `~/.mam/skills/`              | Global skill repository                                        |
-| `~/.mam/mcp/`                 | Global MCP server configs                                      |
-| `~/.mam/hooks/status-hook.sh` | Shared Hook script for status events                           |
-| `~/.mam/events/`              | Hook event files (auto-cleaned, 30s TTL)                       |
+| `~/.tuvis/tuvis.db`               | SQLite database (settings, extensions, presets, session cache) |
+| `~/.tuvis/skills/`              | Global skill repository                                        |
+| `~/.tuvis/mcp/`                 | Global MCP server configs                                      |
+| `~/.tuvis/hooks/status-hook.sh` | Shared Hook script for status events                           |
+| `~/.tuvis/events/`              | Hook event files (auto-cleaned, 30s TTL)                       |
 
 ### Supported Tool Configs
 
@@ -401,7 +401,7 @@ The app stores its data in `~/.mam/`:
 | ZCode       | `~/.zcode/skills/`           | `~/.zcode/cli/config.json`         | JSON (nested `mcp.servers` subtree) | ❌ (status derived from SQLite message-stream tail)      |
 | dsh         | `~/.dsh/skills/`             | N/A (probed unsupported)           | N/A                                 | ❌ (status derived from lock cross-check + event stream) |
 
-> Note: `~/.agents/skills/` is the cross-tool shared directory of the Agent Skills open standard (read directly by codex / zcode and other compliant tools). MAM's skill activation directory for codex is the private `~/.codex/skills/`; `.agents` serves only as a read-only shared import source (source label `agents-shared`) — MAM scans it into the repository, with no tool attribution, no linking, and never writes to it (sole exception: one-time migration of MAM-created legacy links).
+> Note: `~/.agents/skills/` is the cross-tool shared directory of the Agent Skills open standard (read directly by codex / zcode and other compliant tools). Tuvis's skill activation directory for codex is the private `~/.codex/skills/`; `.agents` serves only as a read-only shared import source (source label `agents-shared`) — Tuvis scans it into the repository, with no tool attribution, no linking, and never writes to it (sole exception: one-time migration of Tuvis-created legacy links).
 
 ---
 
@@ -458,7 +458,7 @@ This project is licensed under the MIT License — see the [LICENSE](LICENSE) fi
 
 ## Trademarks & Non-Affiliation
 
-MultiAgents-Manager is an independent, open-source project. It is not affiliated with, endorsed by, or sponsored by Anthropic (Claude / Claude Code), OpenAI (Codex / ChatGPT), OpenCode, OpenClaw, Moonshot AI (Kimi Code), WorkBuddy, ZCode, dsh, or any other company or product mentioned in this repository. All product names, logos, and brands are the property of their respective owners; they are used here solely to describe compatibility (nominative fair use). Icons in this app are original designs; some color schemes are used only to help identify the corresponding tool and do not imply any official status.
+Tuvis is an independent, open-source project. It is not affiliated with, endorsed by, or sponsored by Anthropic (Claude / Claude Code), OpenAI (Codex / ChatGPT), OpenCode, OpenClaw, Moonshot AI (Kimi Code), WorkBuddy, ZCode, dsh, or any other company or product mentioned in this repository. All product names, logos, and brands are the property of their respective owners; they are used here solely to describe compatibility (nominative fair use). Icons in this app are original designs; some color schemes are used only to help identify the corresponding tool and do not imply any official status.
 
 ## Official Channels
 

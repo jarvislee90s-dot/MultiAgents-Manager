@@ -186,11 +186,13 @@ fn find_processes_by_names(
 }
 
 /// 发现 Claude Code 进程
+// 自身排除名单双名过渡：升级重启瞬间新旧两代进程（multi-agents-manager.exe /
+// tuvis.exe）可能共存，两个名字都要识别，旧名随下个 stabilized 版本移除
 pub fn find_claude_processes(system: &System) -> Vec<AgentProcess> {
     find_processes_by_names(
         system,
         &["claude"],
-        &["multi-agents-manager", "agent-sessions"],
+        &["multi-agents-manager", "tuvis", "agent-sessions"],
     )
 }
 
@@ -212,22 +214,22 @@ pub fn codex_process_names() -> &'static [&'static str] {
 
 /// 发现 Codex CLI + 桌面 APP 进程
 pub fn find_codex_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, codex_process_names(), &["multi-agents-manager"])
+    find_processes_by_names(system, codex_process_names(), &["multi-agents-manager", "tuvis"])
 }
 
 /// 发现 OpenCode 进程
 pub fn find_opencode_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, &["opencode"], &["multi-agents-manager"])
+    find_processes_by_names(system, &["opencode"], &["multi-agents-manager", "tuvis"])
 }
 
 /// 发现 OpenClaw 进程
 pub fn find_openclaw_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, &["openclaw"], &["multi-agents-manager"])
+    find_processes_by_names(system, &["openclaw"], &["multi-agents-manager", "tuvis"])
 }
 
 /// 发现 Kimi Code 进程（主进程 kimi；kimi-code-worker 等子进程经父链过滤剔除）
 pub fn find_kimi_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, &["kimi"], &["multi-agents-manager"])
+    find_processes_by_names(system, &["kimi"], &["multi-agents-manager", "tuvis"])
 }
 // WorkBuddy 不在此处做进程名发现（P0-1）：会话进程发现已改为心跳目录驱动，
 // 见 workbuddy_parser::discover_workbuddy_processes——Windows 上会话宿主与主进程同名

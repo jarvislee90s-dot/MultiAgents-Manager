@@ -51,7 +51,7 @@ impl AgentAdapter for ZCodeAdapter {
     fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
         // Plan A：官方文档声明的用户级 skill 目录 ~/.zcode/skills（首装时创建，
         // 实测尚不存在——是否被真实读取未经确认，不确定性与备选方案见
-        // IMPLEMENTATION_NOTES；跨工具共享目录 ~/.agents/skills 与 MAM
+        // IMPLEMENTATION_NOTES；跨工具共享目录 ~/.agents/skills 与 兔维斯
         // 「每工具独立激活」模型冲突，不采用）
         super::primary_skill_dir("zcode")
             .map(|dir| vec![dir])

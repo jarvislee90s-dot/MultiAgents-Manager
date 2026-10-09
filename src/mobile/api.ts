@@ -50,7 +50,7 @@ export async function fetchSessions<T>(): Promise<T | null> {
 
 // host 载荷（GET /m/api/v1/host）：host 部分对应 Rust host_payload 的 "host" 键；
 // enabledTools 为 P8d 受管工具 id 列表（Task 3 chips 过滤的数据源）；
-// bootId 为 MAM 进程生命周期标识（书签等「随进程消失」的客户端态的恢复守卫）
+// bootId 为 兔维斯 进程生命周期标识（书签等「随进程消失」的客户端态的恢复守卫）
 export interface HostInfo {
   name: string;
   platform: "macos" | "windows" | "linux";
@@ -492,7 +492,7 @@ export async function sessionSend(
 }
 
 /** 上传附件（2026-09-20）：原始字节 POST 到 /session-attachment——服务端落盘到
- *  **用户项目目录** .mam-attachments/<会话>/，返回绝对路径供消息内联标记
+ *  **用户项目目录** .tuvis-attachments/<会话>/，返回绝对路径供消息内联标记
  *  （<image|file path>，文件池既有约定）引用。
  *  **上行走 XHR 而非 fetch（Task 10 §C5）**：fetch 规范不暴露上传进度事件
  *  （2026-10-07 全仓核查原零 XMLHttpRequest），大文件在 1–2 Mbps 受限通道上
@@ -989,7 +989,7 @@ export async function sessionQuestionAnswer(
 // ==== 批次丙 T6：模式切换 ====
 
 /** 统一模式档（与 Rust `inject::mode::MamMode` 的 wire 词一一对应，勿漂移）。
- *  对齐 happy 的 8 值收敛为 MAM 5 值（auto/safe-yolo/yolo 合并为 bypass）。 */
+ *  对齐 happy 的 8 值收敛为 兔维斯 5 值（auto/safe-yolo/yolo 合并为 bypass）。 */
 export type MamMode = "plan" | "default" | "acceptEdits" | "bypass" | "readOnly";
 
 // 注（T4 复评 M4）：批次丙 T6 的 `MAM_MODE_LABELS` 通用档名表已删除——丁T4 起
@@ -1001,7 +1001,7 @@ export type MamMode = "plan" | "default" | "acceptEdits" | "bypass" | "readOnly"
 export type ModeGroupId = "mode" | "permission";
 
 /** 单档（GET 载荷 `groups[].tiers[]`）：屏显标签来自**工具自己的词表**（§2.6
- *  「档位（屏显标签）」列）——kimi 权限组是「总是询问/按需询问/永不询问」，不是 MAM
+ *  「档位（屏显标签）」列）——kimi 权限组是「总是询问/按需询问/永不询问」，不是 兔维斯
  *  通用名（用户看到的是终端上的词，对不上号等于没回显）。
  *  `selectable=false` → 不渲染为可点按钮（`reason` 是后端给出的如实原因）。 */
 export interface ModeTierView {
@@ -1024,7 +1024,7 @@ export interface ModeLegacyView {
  *  循环键——codex 模式组「计划 ⇄ 操作」= shift+tab，目标档由前端按当前档翻转）；
  *  缺省/`"tiers"` = 逐档按钮；`"picker"` = **单选面板**（codex 权限组，2026-09-23 用户
  *  方案）：单钮「切换权限」→ 后端读回**终端菜单的选项表**（编号 = 屏上实读值）→ 用户
- *  点选哪项，MAM 就敲哪个数字键——前端**不再硬编码「哪档对应哪个数字」**。 */
+ *  点选哪项，兔维斯 就敲哪个数字键——前端**不再硬编码「哪档对应哪个数字」**。 */
 export interface ModeGroupView {
   id: ModeGroupId;
   label: string;
@@ -1126,7 +1126,7 @@ export async function sessionModeSwitch(
 
 // ==== 2026-09-23：codex 权限组的「终端菜单单选题」（用户方案）====
 
-/** 终端菜单里的一项。`number` = **屏上实读的编号**（用户点它 → MAM 敲同一个数字键）；
+/** 终端菜单里的一项。`number` = **屏上实读的编号**（用户点它 → 兔维斯 敲同一个数字键）；
  *  `label` = 屏上原文（原样展示，供用户与终端核对）；`highlighted` = 终端当前高亮项。 */
 export interface ModeMenuOption {
   number: number;
@@ -1371,7 +1371,7 @@ export async function fetchCreateProjects(days = 7): Promise<CreateProjectsPaylo
 }
 
 /** POST /session-create 成功回执（200）：taskId = 内存任务簿 id（供
- *  /session-create/status 轮询；MAM 重启即失效 → 404）；hasActiveSession = 黄字
+ *  /session-create/status 轮询；兔维斯 重启即失效 → 404）；hasActiveSession = 黄字
  *  信号（同工具同目录已有活跃会话——**不拦截**，C11 据此展示提示） */
 export interface CreateSessionAccepted {
   taskId: number;
@@ -1454,7 +1454,7 @@ export interface CreateStatusPayload {
   spawnedPid: number | null;
 }
 
-/** 任务失效（404 no_task）：MAM 重启丢内存任务簿，或 taskId 非法——C11 文案
+/** 任务失效（404 no_task）：兔维斯 重启丢内存任务簿，或 taskId 非法——C11 文案
  *  「任务已失效（主机可能重启），请重试」 */
 export type CreateStatusError = { kind: "no_task" };
 

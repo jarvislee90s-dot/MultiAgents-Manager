@@ -70,7 +70,7 @@ export default function PairPage({ onPaired, probing = false }: PairPageProps) {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-[var(--pg)] px-6 text-[var(--tx)]">
       <div className="w-full max-w-xs">
-        <h1 className="text-xl font-semibold text-[var(--tx)]">MAM 远程接入</h1>
+        <h1 className="text-xl font-semibold text-[var(--tx)]">兔维斯 远程接入</h1>
         {/* M5 P3-b：探测期（paired===null）渲染连接指示器而非密码表单——区分
             「探测中」与「未配对」，隧道场景探测可达一二十秒；副标题随态切换 */}
         {probing ? (

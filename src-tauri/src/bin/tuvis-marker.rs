@@ -1,8 +1,8 @@
-//! mam-marker — 会话身份窗口标题标记注入 helper（issue #43，仅 Windows）
+//! tuvis-marker — 会话身份窗口标题标记注入 helper（issue #43，仅 Windows）
 //!
-//! 使命：把 `MAM:<session_id 剥连字符前 12 位>` 追加到「目标 CLI 会话所在终端」的
+//! 使命：把 `TUVIS:<session_id 剥连字符前 12 位>` 追加到「目标 CLI 会话所在终端」的
 //! 标题上，使 `window/win32.rs::resolve_and_focus` 的 ① marker 精确匹配层复活。
-//! 调用方是 MAM 主进程按需注入（`window/win32.rs::inject_marker_on_demand`，
+//! 调用方是 兔维斯 主进程按需注入（`window/win32.rs::inject_marker_on_demand`，
 //! spec 2026-09-12 §3.1）：直接 spawn 本 exe 并以 `--pid <目标进程pid> <session_id>`
 //! 指定附加目标（外部进程 AttachConsole(pid) 已用 PowerShell 实证可行）；早期
 //! 「hook 脚本管道 spawn + 父链自走定位」随 hook 周期注入退役一并删除。
@@ -19,8 +19,8 @@
 //!   哪个窗口，放弃 A——该场景由 B 的 tab 级标题覆盖）。
 //!
 //! 标题写入防叠加 + 清痕（round-5，issue #43）：codex 窗口标题静态不自愈，
-//! 不同会话先后跳转同一窗口时 ` — MAM:xxx` 会叠加（实机观测过双 marker）。
-//! 故贴新前先剥旧（`title_with_marker`：仅剥尾部 ` — MAM:<hex>` 形态，防误伤
+//! 不同会话先后跳转同一窗口时 ` — TUVIS:xxx` 会叠加（实机观测过双 marker）。
+//! 故贴新前先剥旧（`title_with_marker`：仅剥尾部 ` — TUVIS:<hex>` 形态，防误伤
 //! 正文）；主进程聚焦成功后以 `--clear` 清痕（按需注入本就是一次性模式，
 //! 清痕不损失信息，标题回到干净态）。
 //!
@@ -30,7 +30,7 @@
 //! 2026-09-08）；12 位不撞。必须先剥连字符——UUID 第 9 位即 '-'。
 //!
 //! 分发：应用启动时仍由 `ensure_hook_script` 把本 exe（与主程序同目录）拷到
-//! `~/.mam/bin/`（复用既有分发通道）；helper 缺失即按需注入整体跳过，跳转链
+//! `~/.tuvis/bin/`（复用既有分发通道）；helper 缺失即按需注入整体跳过，跳转链
 //! 回落既有消歧层（零回归）。
 //!
 //! 构建：本 bin 挂 `required-features = ["marker-helper"]` 门（Cargo.toml）——
@@ -59,7 +59,7 @@ fn main() {
         match parse_marker_args(&args) {
             Some((pid, sid)) => std::process::exit(win::run(pid, sid.as_deref())),
             None => {
-                eprintln!("usage: mam-marker --pid <target-pid> <session_id | --clear>");
+                eprintln!("usage: tuvis-marker --pid <target-pid> <session_id | --clear>");
                 std::process::exit(2)
             }
         }
@@ -70,7 +70,7 @@ fn main() {
         // 显式启用时全 target 可用；CI 的 windows 交叉门禁带该 feature 覆盖本文件的
         // Windows 侧编译，ubuntu 测试步带该 feature 跑本文件的纯函数单测）
         let _ = args;
-        eprintln!("mam-marker is Windows-only（issue #43 窗口标题标记注入）");
+        eprintln!("tuvis-marker is Windows-only（issue #43 窗口标题标记注入）");
         std::process::exit(2);
     }
 }
@@ -96,12 +96,12 @@ fn parse_marker_args(args: &[String]) -> Option<(u32, Option<String>)> {
     }
 }
 
-/// marker 串构造：`MAM:` + 剥连字符后前 12 位（与 commands/session.rs 同口径）。
+/// marker 串构造：`TUVIS:` + 剥连字符后前 12 位（与 commands/session.rs 同口径）。
 /// 仅 windows 路由消费（非 Windows 编译为占位二进制）
 #[cfg_attr(not(windows), allow(dead_code))]
 fn marker_from_session_id(id: &str) -> String {
     format!(
-        "MAM:{}",
+        "TUVIS:{}",
         id.chars()
             .filter(|c| *c != '-')
             .take(12)
@@ -109,14 +109,14 @@ fn marker_from_session_id(id: &str) -> String {
     )
 }
 
-/// 剥掉标题尾部全部 marker 残留（` — MAM:<hex>` 可叠加多层，循环剥净；
-/// 只剥尾部、且仅剥 MAM: 前缀形态，用户标题正文不受影响）
+/// 剥掉标题尾部全部 marker 残留（` — TUVIS:<hex>` 可叠加多层，循环剥净；
+/// 只剥尾部、且仅剥 TUVIS: 前缀形态，用户标题正文不受影响）
 #[cfg_attr(not(windows), allow(dead_code))]
 fn strip_marker_suffix(title: &str) -> String {
     let mut t = title.to_string();
-    while let Some(pos) = t.rfind(" — MAM:") {
-        let tail = &t[pos + " — MAM:".len()..];
-        // 仅当尾部是完整 marker 形态（MAM: + 1..16 个十六进制字符）才剥，防误伤
+    while let Some(pos) = t.rfind(" — TUVIS:") {
+        let tail = &t[pos + " — TUVIS:".len()..];
+        // 仅当尾部是完整 marker 形态（TUVIS: + 1..16 个十六进制字符）才剥，防误伤
         if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_hexdigit()) {
             t.truncate(pos);
             t = t.trim_end().to_string();
@@ -149,17 +149,17 @@ mod tests {
         // UUID 第 9 位是 '-'：不剥连字符取 12 位会切进分隔符（口径回归锁）
         assert_eq!(
             marker_from_session_id("01a08083-5ca0-4948-8276-9a0b8c7d6e5f"),
-            "MAM:01a080835ca0"
+            "TUVIS:01a080835ca0"
         );
         // 短 id 全量保留
-        assert_eq!(marker_from_session_id("abc123"), "MAM:abc123");
+        assert_eq!(marker_from_session_id("abc123"), "TUVIS:abc123");
     }
 
     #[test]
     fn strip_removes_single_marker() {
         // 单 marker 剥净：标题回到正文（含分隔符一并移除）
         assert_eq!(
-            strip_marker_suffix("华为投资 — MAM:01a080835ca0"),
+            strip_marker_suffix("华为投资 — TUVIS:01a080835ca0"),
             "华为投资"
         );
     }
@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn strip_removes_stacked_markers() {
         // 双 marker 叠加（实机缺陷形态）剥净：循环剥到无残留
-        let m = "MAM:01a080835ca0";
+        let m = "TUVIS:01a080835ca0";
         assert_eq!(
             strip_marker_suffix(&format!("华为投资 — {m} — {m}")),
             "华为投资"
@@ -183,17 +183,17 @@ mod tests {
 
     #[test]
     fn strip_keeps_non_hex_tail() {
-        // ` — MAM:` 后非 hex 尾巴（如 "MAM:build" 字样正文）不剥，防误伤
+        // ` — TUVIS:` 后非 hex 尾巴（如 "TUVIS:build" 字样正文）不剥，防误伤
         assert_eq!(
-            strip_marker_suffix("华为投资 — MAM:build"),
-            "华为投资 — MAM:build"
+            strip_marker_suffix("华为投资 — TUVIS:build"),
+            "华为投资 — TUVIS:build"
         );
-        assert_eq!(strip_marker_suffix("华为投资 — MAM:"), "华为投资 — MAM:");
+        assert_eq!(strip_marker_suffix("华为投资 — TUVIS:"), "华为投资 — TUVIS:");
     }
 
     #[test]
     fn title_with_marker_empty_title_uses_marker_alone() {
-        let m = "MAM:01a080835ca0";
+        let m = "TUVIS:01a080835ca0";
         // 空标题/纯空白 + Some → marker 本体
         assert_eq!(title_with_marker("", Some(m)), m.to_string());
         assert_eq!(title_with_marker("   ", Some(m)), m.to_string());
@@ -395,7 +395,7 @@ mod win {
     /// 失败点各不相同，逐条记录便于实机排查。marker=None（--clear）时仅剥旧不贴新
     fn route_b(target_pid: u32, marker: Option<&str>, logs: &mut Vec<String>) -> bool {
         unsafe {
-            // 先脱离（被 MAM spawn 时本无控制台，忽略结果），再直指目标 pid 附加
+            // 先脱离（被 兔维斯 spawn 时本无控制台，忽略结果），再直指目标 pid 附加
             //（外部进程 AttachConsole(pid) 已用 PowerShell 实证可行，spec §3.1）
             let _ = FreeConsole();
             if AttachConsole(target_pid).is_err() {
@@ -475,7 +475,7 @@ mod win {
         let b = route_b(target_pid, marker.as_deref(), &mut logs);
         let a = route_a(target_pid, marker.as_deref(), &snap, &mut logs);
 
-        // 日志恢复：手动调试运行时把输出接回自己的控制台（被 MAM spawn 时无控制台，
+        // 日志恢复：手动调试运行时把输出接回自己的控制台（被 兔维斯 spawn 时无控制台，
         // 这两行天然静默）；恢复失败（原本无控制台）则丢弃日志
         unsafe {
             let _ = AttachConsole(ATTACH_PARENT_PROCESS);

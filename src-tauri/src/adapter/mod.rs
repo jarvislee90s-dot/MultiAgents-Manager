@@ -310,7 +310,7 @@ fn is_plain_notification(event: &crate::monitor::hooks::HookEvent) -> bool {
 /// `q_marks` / `wait_marks` 是状态链本轮的内存镜像（叠加层与端点隔离判据读它们），
 /// 与 DB 双写保持同步：DB 是跨轮持久层，内存是本轮快照。
 ///
-/// 本内核取显式连接（可测缝：测试传内存库，零接触真实 `~/.mam`）；生产入口
+/// 本内核取显式连接（可测缝：测试传内存库，零接触真实 `~/.tuvis`）；生产入口
 /// [`apply_question_entry_mark`] 自取全局锁后调本函数——两处写只锁一次。
 fn apply_question_entry_mark_with(
     conn: &rusqlite::Connection,
@@ -1301,7 +1301,7 @@ mod tests {
         );
     }
 
-    /// F3② 叠加层集成链（DAO 内存库 → 动作 → 叠加层，零接触真实 ~/.mam）：
+    /// F3② 叠加层集成链（DAO 内存库 → 动作 → 叠加层，零接触真实 ~/.tuvis）：
     /// 审批进入事件写标记后强制 Waiting（覆盖文件推导的 Processing）；
     /// 清除事件（kimi PermissionResult，F1 修复点）删标记后回落文件推导状态。
     #[test]
@@ -1564,7 +1564,7 @@ mod tests {
     }
 
     /// T1 (b) 双保险：审批标记已播种（先误标）→ 问答事件生效时审批标记被清、
-    /// 问答标记在场（互斥裁决）。DAO 内存库直测，零接触真实 ~/.mam
+    /// 问答标记在场（互斥裁决）。DAO 内存库直测，零接触真实 ~/.tuvis
     #[test]
     fn question_entry_clears_preexisting_approval_mark() {
         use crate::database::dao::{approval_wait, question_wait};
@@ -1641,7 +1641,7 @@ mod tests {
     /// 问答在场 → 审批端点不可用；审批在场 → 问答端点不可用。判据与
     /// `remote/api.rs`（question_scan_sync 的 approval_marked 早退）及
     /// `remote/server.rs` 的审批端点（question 标记早退）同一谓词，此处以 DAO
-    /// 点查复刻（零接触真实 ~/.mam）
+    /// 点查复刻（零接触真实 ~/.tuvis）
     #[test]
     fn approval_and_question_marks_guard_isolation_both_ways() {
         use crate::database::dao::{approval_wait, question_wait};
@@ -1785,7 +1785,7 @@ mod tests {
     }
 
     /// T8② 硬约束①集成链（DAO 内存库 → 动作 → 叠加层 → 清除族，零接触真实
-    /// ~/.mam）：问题事件写**问题标记**（审批标记表必须保持为空）→ 两表叠加层都
+    /// ~/.tuvis）：问题事件写**问题标记**（审批标记表必须保持为空）→ 两表叠加层都
     /// 强制 Waiting → 清除事件（PostToolUse）**同时清两类标记** → 回落文件推导。
     fn overlay_marks(
         approval: &[(String, String, i64)],
@@ -1967,7 +1967,7 @@ fn unread_pool_action(prev_status: Option<&str>, idle: bool) -> UnreadPoolAction
 }
 
 /// issue #35-1 主修复路径（纯判定，可测）：Insert 边沿是否允许插行。
-/// prev=None（缓存失忆：长间隙跨过缓存 TTL / MAM 重启）且近期已读墓碑在场 =
+/// prev=None（缓存失忆：长间隙跨过缓存 TTL / 兔维斯 重启）且近期已读墓碑在场 =
 /// 已读会话失忆后回板，不得复插已删未读行（复活主洞）；
 /// prev 有值（非绿 → 绿）是真实的新回合状态迁移，墓碑不参与判定——
 /// 已读后会话转黄再转绿的新回合通知不受污染
@@ -2292,7 +2292,7 @@ pub fn skill_dir_for_tool(tool_id: &str, home_dir: &std::path::Path) -> Option<s
     match tool_id {
         "claude" => Some(home_dir.join(".claude").join("skills")),
         // Codex CLI 有双路径：官方用户级 ~/.agents/skills（Agent Skills 开放标准，
-        // 跨工具共享）+ 私有 ~/.codex/skills（spec F1/F2）。MAM 选私有路径作为激活
+        // 跨工具共享）+ 私有 ~/.codex/skills（spec F1/F2）。兔维斯 选私有路径作为激活
         // 目标，使 codex 的启停不影响共享目录的其他消费者（与 zcode「双读目录不作
         // 为激活目标」决策同源对齐，spec 2026-09-09 §4.1）
         "codex" => Some(home_dir.join(".codex").join("skills")),
@@ -2320,7 +2320,7 @@ pub fn primary_skill_dir(tool_id: &str) -> Option<std::path::PathBuf> {
 
 /// 工具内建原生技能静态清单（per-tool 内建目录名表，用户裁决 2026-09-16）：
 /// codex 的 `.system`（系统技能）与 `_shared`（共享资源）由 CLI 自管，
-/// MAM 不接管；其余工具暂无实证内建目录，先空表（发现后在此登记）
+/// 兔维斯 不接管；其余工具暂无实证内建目录，先空表（发现后在此登记）
 pub const BUILTIN_NATIVE_DIRS: &[(&str, &[&str])] = &[("codex", &[".system", "_shared"])];
 
 /// 工具内建原生技能的自管重建标记文件名（codex 实证：内建目录带此标记，

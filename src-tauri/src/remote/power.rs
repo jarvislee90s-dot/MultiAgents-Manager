@@ -4,7 +4,7 @@
 // （PowerReadACValueIndex/PowerWriteACValueIndex，代设前持久化原值——崩溃后下次启动还原）。
 // 可测核 PowerCore 注入式状态机（同 PairingClock 先例）；OS 调用集中在 RealOps。
 //
-// 测试红线：单测只驱动 FakeOps（零网络、零真实 ~/.mam、绝不真起 caffeinate）；
+// 测试红线：单测只驱动 FakeOps（零网络、零真实 ~/.tuvis、绝不真起 caffeinate）；
 // should_acquire 是纯函数。生产 RealOps 只在 start_server / 退出钩子路径触达。
 
 use once_cell::sync::Lazy;

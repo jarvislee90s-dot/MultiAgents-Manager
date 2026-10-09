@@ -1,10 +1,10 @@
 # Resource Management
 
-This guide covers the Resource Management feature of MultiAgents Manager.
+This guide covers the Resource Management feature of Tuvis.
 
 ## Overview
 
-MultiAgents Manager is a unified management platform for AI programming tools, supporting Claude Code, Codex CLI, OpenCode, and OpenClaw.
+Tuvis is a unified management platform for AI programming tools, supporting Claude Code, Codex CLI, OpenCode, and OpenClaw.
 
 ## Installation
 

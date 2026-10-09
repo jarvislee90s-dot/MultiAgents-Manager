@@ -16,7 +16,7 @@
 //! **不加工、不追加**任何内容（不夹带路径、时间戳、元数据），错误信息也只含字节数/静态文案。
 //!
 //! **落盘定位（GC 16 ④）**：复用既有 `commands/resource.rs::ensure_reveal_allowed`
-//! （白名单含 `~/.mam`），**不新写打开逻辑**——定位由前端调既有 `reveal_dir` 完成。
+//! （白名单含 `~/.tuvis`），**不新写打开逻辑**——定位由前端调既有 `reveal_dir` 完成。
 //!
 //! ## ⚠️ 锁序（W-26）
 //! 本层**不取 `DB` 锁、也不调任何采集入口**（`collect()` / `collect_with()` / `run_collection()`）：
@@ -60,9 +60,9 @@ pub fn sanitize_export_name(name: &str) -> Result<String, String> {
     Ok(n.to_string())
 }
 
-/// 导出目录：**系统「下载」文件夹**（2026-10-07 用户裁决 A2 —— 原为 `~/.mam/exports/`）。
+/// 导出目录：**系统「下载」文件夹**（2026-10-07 用户裁决 A2 —— 原为 `~/.tuvis/exports/`）。
 ///
-/// **为什么改**：用户的心智模型是「我导出的东西在下载里」。`~/.mam/exports/` 藏在应用数据目录
+/// **为什么改**：用户的心智模型是「我导出的东西在下载里」。`~/.tuvis/exports/` 藏在应用数据目录
 /// 深处，导出成功后只能靠行内那个「打开所在目录」才找得到；而这个目录在 Finder / 资源管理器里
 /// **不在任何常见入口下**。契约与需求说明书已同步（见 §3 的 2026-10-07 注记）。
 ///
@@ -71,15 +71,15 @@ pub fn sanitize_export_name(name: &str) -> Result<String, String> {
 /// ⇒ 优先用它；取不到（极少见）才回落到 `<home>/Downloads`。
 ///
 /// 与 `database/connection.rs::app_data_home()` 同一条约定——**仅在 debug/test 构建**下认
-/// `MAM_HOME` 重定向（集成测试 `tests/support.rs` 靠它把数据目录指到 tempdir），此时导出目录 =
-/// `$MAM_HOME/Downloads`：**保住测试隔离**，不让 `cargo test` 往开发机真实下载目录写文件。
+/// `TUVIS_HOME` 重定向（集成测试 `tests/support.rs` 靠它把数据目录指到 tempdir），此时导出目录 =
+/// `$TUVIS_HOME/Downloads`：**保住测试隔离**，不让 `cargo test` 往开发机真实下载目录写文件。
 /// release 生产构建一律用真实用户目录，防环境变量误设导致导出落到别处。
 ///
 /// ⚠️ **改这里必须同时看 `commands/resource.rs::reveal_allowed_roots()`**：那个白名单根里就有
 /// 本函数（否则导出成功却点不开「打开所在目录」）。两处由 `export.rs` 的单测钉住同源。
 pub(crate) fn exports_dir() -> std::path::PathBuf {
     if cfg!(debug_assertions) {
-        if let Some(h) = std::env::var_os("MAM_HOME").filter(|h| !h.is_empty()) {
+        if let Some(h) = std::env::var_os("TUVIS_HOME").filter(|h| !h.is_empty()) {
             return std::path::PathBuf::from(h).join("Downloads");
         }
     }
@@ -142,7 +142,7 @@ fn base64_may_exceed_binary_limit(s: &str) -> bool {
 /// `dir` 由调用方给——生产传 `exports_dir()`，单测传 `tempfile::tempdir()`：
 /// **这是为了不让 `cargo test`（lib 单测）往开发机真实导出目录（下载文件夹）写文件**
 /// （§3.2.3 FIX-6 同类）。与全域 `*_conn` 形态同一个思路：依赖显式注入，不做隐式全局。
-/// 为什么不用 `MAM_HOME` 环境变量重定向：env 是**进程级**的，lib 单测并行跑，
+/// 为什么不用 `TUVIS_HOME` 环境变量重定向：env 是**进程级**的，lib 单测并行跑，
 /// 一个用例 set/remove 会踩到同二进制里的其它用例（导出目录只在 `debug_assertions` 下认它）。
 ///
 /// 写入语义：同名文件**覆盖**（`fs::write` 截断重写），不追加——追加会让重试产出两份表头。
@@ -191,7 +191,7 @@ pub fn save_bytes_file(name: &str, bytes: &[u8]) -> Result<String, String> {
 #[tauri::command]
 pub fn export_save_text(name: String, content: String) -> Result<String, String> {
     let path = save_text_file(&name, &content)?;
-    // 复用既有白名单校验（~/.mam 内），失败只 warn——文件已落盘，定位失败不该让导出算失败
+    // 复用既有白名单校验（~/.tuvis 内），失败只 warn——文件已落盘，定位失败不该让导出算失败
     if let Err(e) = ensure_reveal_allowed(&path) {
         log::warn!("export: 落盘路径未通过 reveal 白名单（不该发生）: {}", e);
     }
@@ -404,7 +404,7 @@ mod tests {
     }
 
     /// 落盘端到端：建目录 → 写文件 → 返回**绝对路径**（目录注入版，写 tempdir）。
-    /// **本用例不碰开发机真实 `~/.mam/exports/`**（§3.2.3 FIX-6 同类）：目录由测试注入，
+    /// **本用例不碰开发机真实 `~/.tuvis/exports/`**（§3.2.3 FIX-6 同类）：目录由测试注入，
     /// 断言"目录不存在会自动建 + 返回的是该目录下的绝对路径 + 文件真的在"。
     #[test]
     fn writes_into_injected_dir_and_returns_absolute_path() {
@@ -445,13 +445,13 @@ mod tests {
     /// （契约 §3：返回落盘绝对路径）。**纯路径断言、零 IO**（旧版这条用例真的往导出目录
     /// 写了一个文件再自删，见 §3.2.3 FIX-6 同类）。
     ///
-    /// 2026-10-07 A2：期望值由「以 `.mam/exports` 结尾」改为「以 `Downloads` 结尾」。
+    /// 2026-10-07 A2：期望值由「以 `.tuvis/exports` 结尾」改为「以 `Downloads` 结尾」。
     /// 断言用**后缀**而不是 `dirs::download_dir()` 逐字比对 —— 后者在 Windows 上可能是被
     /// OneDrive 重定向过的路径，而本仓 CI 只跑 ubuntu + Windows 交叉**编译**（不跑 Windows 测试）
     /// ⇒ 拿本机 `download_dir()` 当期望值等于把「本机恰好没重定向」写成契约。
     ///
     /// **本用例故意不调 `ensure_reveal_allowed`**（旧版调了）：它对不存在的路径 `canonicalize`
-    /// 会报「路径不存在」，而 lib 单测里那目录未必存在（`MAM_HOME` 下的 tempdir）。
+    /// 会报「路径不存在」，而 lib 单测里那目录未必存在（`TUVIS_HOME` 下的 tempdir）。
     /// 「落盘路径能过 reveal 白名单」这条不变量改由下面 `reveal_whitelist_contains_exports_dir`
     /// **结构性**钉住（白名单根里就有本函数），零 IO、零环境变量副作用。
     #[test]
@@ -471,10 +471,10 @@ mod tests {
 
     /// **A2 的配套不变量（2026-10-07）**：`reveal_dir` 的白名单根必须**包含导出目录本身**。
     ///
-    /// 为什么单独钉一条：导出目录从 `~/.mam/exports/` 改到系统下载目录后，**最容易漏的就是白名单**
+    /// 为什么单独钉一条：导出目录从 `~/.tuvis/exports/` 改到系统下载目录后，**最容易漏的就是白名单**
     /// ——落盘成功、行内提示「已保存：…」，用户点「打开所在目录」却报「路径不在允许打开的范围」。
     /// 这条不变量是**同一函数**的两处引用（白名单根 ↔ 导出目录），故零 IO、不依赖目录是否已存在、
-    /// 也不受 `MAM_HOME` 是否设置影响，任何平台都稳定。
+    /// 也不受 `TUVIS_HOME` 是否设置影响，任何平台都稳定。
     #[test]
     fn reveal_whitelist_contains_exports_dir() {
         let roots = crate::commands::resource::reveal_allowed_roots();

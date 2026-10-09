@@ -49,7 +49,7 @@ pub fn toggle_mcp(mcp_name: &str, tool_id: &str, enabled: bool) -> Result<(), St
     if enabled {
         let repo = dirs::home_dir()
             .unwrap_or_default()
-            .join(".mam")
+            .join(".tuvis")
             .join("mcp");
         let config_path = repo.join(format!("{}.json", mcp_name));
         if !config_path.exists() {

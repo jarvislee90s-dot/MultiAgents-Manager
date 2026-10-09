@@ -66,7 +66,7 @@ jobs:
             fi
           else
             echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set. Disabling updater artifacts for this build."
-            echo "::warning::Generate one with: pnpm tauri signer generate -w ~/.tauri/multiagents-manager.key"
+            echo "::warning::Generate one with: pnpm tauri signer generate -w ~/.tauri/tuvis.key"
             echo "::warning::Then add the private key to GitHub Secrets as TAURI_SIGNING_PRIVATE_KEY."
             jq '.bundle.createUpdaterArtifacts = false' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
             mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json
@@ -82,7 +82,7 @@ jobs:
       - name: Build Tauri App (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        # --features marker-helper：mam-marker helper 仅 Windows 发布构建打包
+        # --features marker-helper：tuvis-marker helper 仅 Windows 发布构建打包
         # （macOS universal 只对主二进制 lipo，额外 bin 会令打包失败，见 Cargo.toml 注释）
         run: pnpm tauri build --bundles nsis --features marker-helper
 
@@ -99,11 +99,11 @@ jobs:
             echo "::error::No macOS DMG found" >&2
             exit 1
           fi
-          cp "$DMG" "release-assets/MultiAgents-Manager-${VERSION}-macOS.dmg"
-          [ -f "${DMG}.sig" ] && cp "${DMG}.sig" "release-assets/MultiAgents-Manager-${VERSION}-macOS.dmg.sig" || true
+          cp "$DMG" "release-assets/Tuvis-${VERSION}-macOS.dmg"
+          [ -f "${DMG}.sig" ] && cp "${DMG}.sig" "release-assets/Tuvis-${VERSION}-macOS.dmg.sig" || true
           if [ -n "$TAR" ]; then
-            cp "$TAR" "release-assets/MultiAgents-Manager-${VERSION}-macOS.tar.gz"
-            [ -f "${TAR}.sig" ] && cp "${TAR}.sig" "release-assets/MultiAgents-Manager-${VERSION}-macOS.tar.gz.sig" || true
+            cp "$TAR" "release-assets/Tuvis-${VERSION}-macOS.tar.gz"
+            [ -f "${TAR}.sig" ] && cp "${TAR}.sig" "release-assets/Tuvis-${VERSION}-macOS.tar.gz.sig" || true
           fi
           ls -la release-assets/
 
@@ -116,9 +116,9 @@ jobs:
           $VERSION = $env:GITHUB_REF_NAME.Substring(1)
           $setup = Get-ChildItem -Path 'src-tauri/target/release/bundle/nsis' -Recurse -Include *.exe -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($null -eq $setup) { throw 'No NSIS setup.exe found' }
-          Copy-Item $setup.FullName "release-assets/MultiAgents-Manager-$VERSION-Windows-x64-setup.exe"
+          Copy-Item $setup.FullName "release-assets/Tuvis-$VERSION-Windows-x64-setup.exe"
           if (Test-Path "$($setup.FullName).sig") {
-            Copy-Item "$($setup.FullName).sig" "release-assets/MultiAgents-Manager-$VERSION-Windows-x64-setup.exe.sig"
+            Copy-Item "$($setup.FullName).sig" "release-assets/Tuvis-$VERSION-Windows-x64-setup.exe.sig"
           }
           Get-ChildItem release-assets | Format-Table Name, Length
 
@@ -155,13 +155,13 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           BODY="$RUNNER_TEMP/body.md"
           {
-            echo "## MultiAgents Manager ${GITHUB_REF_NAME}"
+            echo "## Tuvis ${GITHUB_REF_NAME}"
             echo ""
             echo "### 下载"
             echo ""
-            echo "- **macOS**: \`MultiAgents-Manager-${VERSION}-macOS.dmg\`"
-            echo "- **macOS (updater)**: \`MultiAgents-Manager-${VERSION}-macOS.tar.gz\`（自动更新专用，无需手动下载）"
-            echo "- **Windows (x86_64)**: \`MultiAgents-Manager-${VERSION}-Windows-x64-setup.exe\`"
+            echo "- **macOS**: \`Tuvis-${VERSION}-macOS.dmg\`"
+            echo "- **macOS (updater)**: \`Tuvis-${VERSION}-macOS.tar.gz\`（自动更新专用，无需手动下载）"
+            echo "- **Windows (x86_64)**: \`Tuvis-${VERSION}-Windows-x64-setup.exe\`"
             echo ""
             echo "---"
             echo ""

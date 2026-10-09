@@ -1,7 +1,7 @@
 // tests/settings/tailscaleWizard.test.tsx — §C2 Task 6 + §C3 Task 7：Tailscale 首次
 // 配置引导向导（src/components/settings/TailscaleWizard.tsx）。覆盖：九步渲染与三态 /
 // 需要人的步骤动作文案 / 卡住显示 blocked_reason（不许只转圈）/ Windows 未实机校验
-// 弱提示 / login「去登录」链接（MAM 不代登录）/ run_step 触发与回执后重探 /
+// 弱提示 / login「去登录」链接（兔维斯 不代登录）/ run_step 触发与回执后重探 /
 // funnel 批准链接展示 / verify §C3 可达性校验（尚未生效 + 重试）/ 动作失败落步骤行
 //（不再零反馈）/ 头部看板地址按校验态门控 / tailscale 卡展开区集成（Task 9 收敛：
 // 向导挂进 RemoteSection 的 tailscale 卡详情区，独立入口行已撤）/ i18n zh-en
@@ -129,12 +129,12 @@ describe("TailscaleWizard 步骤渲染与三态（§C2）", () => {
     expect(screen.getByText(/approve it once in your browser/i)).toBeTruthy();
   });
 
-  // ---- 2026-10-08：安装路径两道提示（用户实测缺口：装到非默认路径 ⇒ MAM 找不到 CLI）----
-  // MAM 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权给用户。缺口是
-  // MAM 原先只在 `C:\Program Files\Tailscale` 找 CLI：装到 `D:\软件\Tailscale` 就判「没装」，
+  // ---- 2026-10-08：安装路径两道提示（用户实测缺口：装到非默认路径 ⇒ 兔维斯 找不到 CLI）----
+  // 兔维斯 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权给用户。缺口是
+  // 兔维斯 原先只在 `C:\Program Files\Tailscale` 找 CLI：装到 `D:\软件\Tailscale` 就判「没装」，
   // 向导又下载又安装、装完还是找不到。治本是后端补「服务登记 ImagePath」第二来源；
   // 前端这两条是**提示**：① Windows 安装步的动作文案（后端 actAdminWinMsi 下发）点明
-  // 路径可自选、默认最省事；② 安装行常驻弱提示，说清 MAM 的**两个查找位置**并给出
+  // 路径可自选、默认最省事；② 安装行常驻弱提示，说清 兔维斯 的**两个查找位置**并给出
   // 「装完点刷新状态」的动作（重探时机 = 挂载/动作后，不点就一直显示旧结论）。
   it("Windows 安装行常驻「查找位置」弱提示 + 动作文案点明路径可自选", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {
@@ -182,7 +182,7 @@ describe("TailscaleWizard 步骤渲染与三态（§C2）", () => {
             state("sys_ext", true),
             state("login", false),
             state("shields_up", false),
-            state("funnel", false, "Funnel 已被其他 serve 配置占用（非 MAM）"),
+            state("funnel", false, "Funnel 已被其他 serve 配置占用（非 兔维斯）"),
             state("verify", false),
             state("autostart", true),
           ],
@@ -445,11 +445,11 @@ describe("TailscaleWizard ④下载步「在走动」反馈（不确定进度，
 // ⑤ 登录步必须**可点**（2026-10-07 用户实测：登录那一步没有可点的东西，只能自己去客户端
 // 手动登录）。诊断（读码 + 注入缝复现）：新装机器上 `status --json` 是
 // `NeedsLogin ∧ AuthURL=""`——授权链接由尾网在**发起一次交互式登录**时才生成（tailscale
-// login / GUI 的「Log in」按钮），而 MAM 此前从不发起（全仓 run_cli 调用点无 up/login）；
+// login / GUI 的「Log in」按钮），而 兔维斯 此前从不发起（全仓 run_cli 调用点无 up/login）；
 // 前端又只在 `probe.authUrl` 非空时才渲染链接 ⇒ 登录行里有"需要你操作：去浏览器登录"的
-// 文案，却没有任何可点的东西。修法：MAM **主动取链接**（后端后台发起 + 有界轮询，见 Rust
+// 文案，却没有任何可点的东西。修法：兔维斯 **主动取链接**（后端后台发起 + 有界轮询，见 Rust
 // `login_step_with`），前端把链接做成按钮、拿不到时给明确的下一步。
-// 合规红线不变：MAM **只递链接，不代登录、不持凭据**（登录始终在浏览器由用户完成）。
+// 合规红线不变：兔维斯 **只递链接，不代登录、不持凭据**（登录始终在浏览器由用户完成）。
 describe("TailscaleWizard ⑤登录步可点（新装 AuthURL 为空不再是死胡同）", () => {
   const noLinkProbe = () => macProbe({ authUrl: "" });
 
@@ -471,7 +471,7 @@ describe("TailscaleWizard ⑤登录步可点（新装 AuthURL 为空不再是死
     expect(invokeMock.mock.calls.filter((c) => c[0] === "remote_ts_run_step").length).toBe(0);
   });
 
-  it("点按钮 → remote_ts_run_step(login)（MAM 只递链接不代登录）；回执链接在探测落地前立即上墙", async () => {
+  it("点按钮 → remote_ts_run_step(login)（兔维斯 只递链接不代登录）；回执链接在探测落地前立即上墙", async () => {
     // **M4（2026-10-08 架构评审）**：回执是**过渡态**（"点了立刻上墙"），权威源仍是探测。
     // 本用例把动作后的那次重探**挂住**，模拟"探测在途"的真实窗口 ⇒ 回执的链接必须先上墙
     // （否则用户点了没反应）；随后释放探测，断言上墙的换成**探测那条**（回执让位）。
@@ -567,7 +567,7 @@ describe("TailscaleWizard ⑤登录步可点（新装 AuthURL 为空不再是死
     expect(action.textContent).toContain(signIn.textContent!);
   });
 
-  it("点按钮在途期间也给走动反馈（后端最长 9.5s 取链接，同样要看得见 MAM 去要了）", async () => {
+  it("点按钮在途期间也给走动反馈（后端最长 9.5s 取链接，同样要看得见 兔维斯 去要了）", async () => {
     let release: (v: unknown) => void = () => {};
     invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
       if (cmd === "remote_ts_probe") return noLinkProbe();
@@ -782,7 +782,7 @@ describe("TailscaleWizard 单步触发（remote_ts_run_step）", () => {
     });
   });
 
-  it("detect / autostart 不出执行按钮（只读探针 / MAM 自身行为）；verify 走专属重试钮", async () => {
+  it("detect / autostart 不出执行按钮（只读探针 / 兔维斯 自身行为）；verify 走专属重试钮", async () => {
     render(<TailscaleWizard />);
     await screen.findByText("Detect Tailscale");
     for (const id of ["detect", "autostart"]) {
@@ -792,7 +792,7 @@ describe("TailscaleWizard 单步触发（remote_ts_run_step）", () => {
     expect(within(stepRow("verify")).getByTestId("ts-verify-retry")).toBeTruthy();
   });
 
-  it("login 步：MAM 不代登录——「去登录」为 authUrl 链接（href 原样透传）", async () => {
+  it("login 步：兔维斯 不代登录——「去登录」为 authUrl 链接（href 原样透传）", async () => {
     render(<TailscaleWizard />);
     await screen.findByText("Detect Tailscale");
     const link = within(stepRow("login")).getByTestId("ts-auth-link") as HTMLAnchorElement;
@@ -803,7 +803,7 @@ describe("TailscaleWizard 单步触发（remote_ts_run_step）", () => {
     ).toBe(0);
   });
 
-  it("funnel 回执带批准链接 → 展示批准提示与链接（MAM 只递不代点）", async () => {
+  it("funnel 回执带批准链接 → 展示批准提示与链接（兔维斯 只递不代点）", async () => {
     invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
       if (cmd === "remote_ts_probe") return macProbe();
       if (cmd === "remote_ts_run_step" && args?.step === "funnel")
@@ -1000,7 +1000,7 @@ describe("TailscaleWizard verify §C3（尚未生效 + 重试，Task 7）", () =
     invokeMock.mockImplementation(async (cmd: string, args?: { step?: string }) => {
       if (cmd === "remote_ts_probe") return macProbe();
       if (cmd === "remote_ts_run_step" && args?.step === "funnel")
-        throw "检测到非 MAM 的 Tailscale serve/Funnel 配置，为避免覆盖已中止开通";
+        throw "检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止开通";
       return null;
     });
     render(<TailscaleWizard />);
@@ -1008,7 +1008,7 @@ describe("TailscaleWizard verify §C3（尚未生效 + 重试，Task 7）", () =
     fireEvent.click(within(stepRow("funnel")).getByRole("button", { name: /run/i }));
     const err = await within(stepRow("funnel")).findByTestId("ts-step-error");
     expect(err.textContent).toContain("Action failed");
-    expect(err.textContent).toContain("检测到非 MAM");
+    expect(err.textContent).toContain("检测到非 兔维斯");
   });
 });
 

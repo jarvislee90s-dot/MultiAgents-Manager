@@ -48,6 +48,6 @@ impl AgentAdapter for WorkBuddyAdapter {
             .unwrap_or_else(|| vec![self.base_dir().join("skills")])
     }
 
-    // WorkBuddy 插件为市场化版本化管理，不纳入 MAM（spec W3）；无 hook 机制、
+    // WorkBuddy 插件为市场化版本化管理，不纳入 兔维斯（spec W3）；无 hook 机制、
     // 无独立子 agent 目录 —— 均沿用 trait 默认实现（空 / false / None）
 }

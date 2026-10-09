@@ -25,7 +25,7 @@
 //! ## 测试隔离（GC 19 / GC 21 + Task 17 / Task 20 的实测教训）
 //! * 本文件所有用例都碰进程级全局量（全局 `DB`、env、`COLLECT_CALLS`）→ 每条用例持
 //!   `serial()` 串行锁；文末 `every_test_in_this_file_takes_the_serial_lock` 是机械锁。
-//! * `support::setup()` **只重定向 HOME / MAM_HOME**，不覆盖 `DSH_HOME` / `KIMI_CODE_HOME`；
+//! * `support::setup()` **只重定向 HOME / TUVIS_HOME**，不覆盖 `DSH_HOME` / `KIMI_CODE_HOME`；
 //!   而 dsh 采集器的根是 `DSH_HOME` 优先、kimi 是 `KIMI_CODE_HOME` → 不摘就会**真的扫真实家目录**
 //!   （Task 20 首跑实测：11.9 s + 脏数据；摘掉后 0.03 s）。`serial()` 里一并摘掉。
 

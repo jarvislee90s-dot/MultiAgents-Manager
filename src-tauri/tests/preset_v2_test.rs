@@ -57,7 +57,7 @@ use std::sync::{Mutex, OnceLock};
 /// 区分；基底快照与工具 skill 目录同为共享态），并行跑会互相踩踏 —— 用互斥锁强制串行
 static PRESET_V2_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
-/// 暂存往返：真目录移入 ~/.mam/stash/<tool>/skills 再移回；账本同步
+/// 暂存往返：真目录移入 ~/.tuvis/stash/<tool>/skills 再移回；账本同步
 #[test]
 fn stash_and_restore_roundtrip() {
     let _ledger = PRESET_V2_TEST_LOCK
@@ -131,7 +131,7 @@ fn stash_restore_conflict_keeps_stash() {
         .all(|e| e.skill_name != "v2m1-native-b"));
 }
 
-/// 状态扫描：MAM 启用项 + 原生真目录都要进基底；链接不重复计为原生
+/// 状态扫描：兔维斯 启用项 + 原生真目录都要进基底；链接不重复计为原生
 #[test]
 fn scan_tool_state_captures_mam_and_native() {
     let _guard = PRESET_V2_TEST_LOCK
@@ -143,8 +143,8 @@ fn scan_tool_state_captures_mam_and_native() {
     use multi_agents_manager_lib::services::preset::snapshot;
     use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
 
-    // SSOT 造一个 MAM skill 并为 claude 启用（建链接）
-    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-scan-a");
+    // SSOT 造一个 兔维斯 skill 并为 claude 启用（建链接）
+    let ssot = dirs::home_dir().unwrap().join(".tuvis/skills/v2m1-scan-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -173,7 +173,7 @@ fn scan_tool_state_captures_mam_and_native() {
     .unwrap();
 
     // claude 目录再放一个原生真目录（登记线，用户裁决 2026-09-16：原生目录须
-    // 经 MAM 导入登记 is_native=1 AND source_tool 才参与快照/暂存）
+    // 经 兔维斯 导入登记 is_native=1 AND source_tool 才参与快照/暂存）
     let claude_dir = dirs::home_dir().unwrap().join(".claude/skills");
     std::fs::create_dir_all(claude_dir.join("v2m1-scan-native")).unwrap();
     std::fs::write(claude_dir.join("v2m1-scan-native/SKILL.md"), "y").unwrap();
@@ -198,7 +198,7 @@ fn scan_tool_state_captures_mam_and_native() {
     let state = snapshot::scan_tool_state("claude");
     let find = |id: &str| state.iter().find(|i| i.extension_id == id);
 
-    let mam = find("skill-v2m1-scan-a").expect("MAM 启用项应入基底");
+    let mam = find("skill-v2m1-scan-a").expect("兔维斯 启用项应入基底");
     assert_eq!(mam.origin, "mam");
     assert_eq!(mam.kind, "skill");
     assert_eq!(
@@ -230,7 +230,7 @@ fn scan_tool_state_captures_mam_and_native() {
     database::destroy_base_snapshot("claude").unwrap();
 }
 
-/// 清扫差集：预设外的 MAM skill 停用、原生真目录暂存；常驻豁免两项都不动
+/// 清扫差集：预设外的 兔维斯 skill 停用、原生真目录暂存；常驻豁免两项都不动
 #[test]
 fn sweep_stashes_native_and_disables_mam_except_resident() {
     let _ledger = PRESET_V2_TEST_LOCK
@@ -242,9 +242,9 @@ fn sweep_stashes_native_and_disables_mam_except_resident() {
     use multi_agents_manager_lib::services::preset::sweep;
     use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
 
-    // MAM skill A（预设内）+ MAM skill B（预设外）为 claude 启用
+    // 兔维斯 skill A（预设内）+ 兔维斯 skill B（预设外）为 claude 启用
     for name in ["v2m1-sw-a", "v2m1-sw-b"] {
-        let ssot = dirs::home_dir().unwrap().join(".mam/skills").join(name);
+        let ssot = dirs::home_dir().unwrap().join(".tuvis/skills").join(name);
         std::fs::create_dir_all(&ssot).unwrap();
         std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
         database::insert_extension(&database::ExtensionRecord {
@@ -264,7 +264,7 @@ fn sweep_stashes_native_and_disables_mam_except_resident() {
         enable_skill_for_tool(name, "claude").unwrap();
     }
     // 原生真目录 C（预设外）与 D（常驻）——登记线（2026-09-16 裁决）：原生目录
-    // 须经 MAM 登记才参与快照/暂存，未登记即视为常驻
+    // 须经 兔维斯 登记才参与快照/暂存，未登记即视为常驻
     let claude_dir = dirs::home_dir().unwrap().join(".claude/skills");
     for name in ["v2m1-sw-c", "v2m1-sw-d"] {
         std::fs::create_dir_all(claude_dir.join(name)).unwrap();
@@ -330,11 +330,11 @@ fn apply_switch_restore_full_lifecycle() {
     let home = dirs::home_dir().unwrap();
     let claude_dir = home.join(".claude/skills");
 
-    // 基底现场：MAM skill base-1 已启用（含一条子 Agent 分配行）+ 原生真目录 native-1
+    // 基底现场：兔维斯 skill base-1 已启用（含一条子 Agent 分配行）+ 原生真目录 native-1
     //（保留单元素 for：与多资源场景的 setup 写法同构，便于扩展）
     #[allow(clippy::single_element_loop)]
     for name in ["v2m1-lc-base1"] {
-        let ssot = dirs::home_dir().unwrap().join(".mam/skills").join(name);
+        let ssot = dirs::home_dir().unwrap().join(".tuvis/skills").join(name);
         std::fs::create_dir_all(&ssot).unwrap();
         std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
         database::insert_extension(&database::ExtensionRecord {
@@ -386,7 +386,7 @@ fn apply_switch_restore_full_lifecycle() {
 
     // 预设 A：skill-a
     let mk = |name: &str| {
-        let ssot = home.join(".mam/skills").join(name);
+        let ssot = home.join(".tuvis/skills").join(name);
         std::fs::create_dir_all(&ssot).unwrap();
         std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
         database::insert_extension(&database::ExtensionRecord {
@@ -457,7 +457,7 @@ fn apply_switch_restore_full_lifecycle() {
     let rr = restore_tool("claude").unwrap();
     assert!(
         claude_dir.join("v2m1-lc-base1").exists(),
-        "MAM 基底项应重建"
+        "兔维斯 基底项应重建"
     );
     assert!(
         claude_dir.join("v2m1-lc-native1").exists(),
@@ -514,7 +514,7 @@ fn apply_filters_incompatible_items() {
     use multi_agents_manager_lib::services::preset::apply_preset;
 
     let home = dirs::home_dir().unwrap();
-    let ssot = home.join(".mam/skills/v2m1-filt-a");
+    let ssot = home.join(".tuvis/skills/v2m1-filt-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -565,7 +565,7 @@ fn delete_rejects_active_preset() {
     use multi_agents_manager_lib::services::preset::apply_preset;
 
     let home = dirs::home_dir().unwrap();
-    let ssot = home.join(".mam/skills/v2m1-del-a");
+    let ssot = home.join(".tuvis/skills/v2m1-del-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -628,7 +628,7 @@ fn preview_is_dryrun_and_active_preset_queryable() {
         is_native: true,
     })
     .unwrap();
-    let ssot = home.join(".mam/skills/v2m1-pv-a");
+    let ssot = home.join(".tuvis/skills/v2m1-pv-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -674,13 +674,13 @@ fn mcp_import_and_backfill_register_rows() {
     use multi_agents_manager_lib::services::resource::backfill_registry;
 
     // 手工放一个 MCP 配置文件（历史上 toggle_mcp 只写 assignment 不写表）
-    let repo = dirs::home_dir().unwrap().join(".mam/mcp");
+    let repo = dirs::home_dir().unwrap().join(".tuvis/mcp");
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::write(repo.join("v2m1-backfill-mcp.json"), r#"{"command":"x"}"#).unwrap();
     // 手工放一个无行的 skill 目录（历史残留/手工放置）
     let skill = dirs::home_dir()
         .unwrap()
-        .join(".mam/skills/v2m1-backfill-skill");
+        .join(".tuvis/skills/v2m1-backfill-skill");
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "x").unwrap();
 
@@ -739,12 +739,12 @@ fn backfill_registry_covers_nested_suite_skills() {
     use multi_agents_manager_lib::services::resource::backfill_registry;
 
     // 平铺技能（顶层直接含 SKILL.md）与嵌套套件技能（suite/inner/SKILL.md）
-    let flat = dirs::home_dir().unwrap().join(".mam/skills/v2m2-flat-x");
+    let flat = dirs::home_dir().unwrap().join(".tuvis/skills/v2m2-flat-x");
     std::fs::create_dir_all(&flat).unwrap();
     std::fs::write(flat.join("SKILL.md"), "x").unwrap();
     let inner = dirs::home_dir()
         .unwrap()
-        .join(".mam/skills/v2m2-suite-x/inner");
+        .join(".tuvis/skills/v2m2-suite-x/inner");
     std::fs::create_dir_all(&inner).unwrap();
     std::fs::write(inner.join("SKILL.md"), "y").unwrap();
 
@@ -768,7 +768,7 @@ fn backfill_registry_covers_nested_suite_skills() {
     assert!(!nested.is_native);
     assert!(nested
         .source_path
-        .ends_with(".mam/skills/v2m2-suite-x/inner"));
+        .ends_with(".tuvis/skills/v2m2-suite-x/inner"));
 
     // 套件目录本身（无 SKILL.md）不得被误登记为名为 v2m2-suite-x 的技能
     assert!(
@@ -964,8 +964,8 @@ fn apply_tool_changes_keeps_tool_enabled_when_preset_restore_fails() {
     };
     use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
 
-    // 现场：MAM skill 已启用（有链接可被清理），工具启用中
-    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-w5-a");
+    // 现场：兔维斯 skill 已启用（有链接可被清理），工具启用中
+    let ssot = dirs::home_dir().unwrap().join(".tuvis/skills/v2m1-w5-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -1006,7 +1006,7 @@ fn apply_tool_changes_keeps_tool_enabled_when_preset_restore_fails() {
         "skipped_kept 应含精确文案: {:?}",
         result.skipped_kept
     );
-    // W5 清理未执行：工具目录里仍是 MAM 链接（未被还原/未被动过）
+    // W5 清理未执行：工具目录里仍是 兔维斯 链接（未被还原/未被动过）
     let link_meta = std::fs::symlink_metadata(&claude_link).expect("链接应仍在场");
     assert!(
         link_meta.file_type().is_symlink(),
@@ -1041,7 +1041,7 @@ fn apply_tool_changes_disables_tool_when_preset_restore_succeeds() {
         disable_skill_for_tool, enable_skill_for_tool, tool_settings,
     };
 
-    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-w5-b");
+    let ssot = dirs::home_dir().unwrap().join(".tuvis/skills/v2m1-w5-b");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -1070,12 +1070,12 @@ fn apply_tool_changes_disables_tool_when_preset_restore_succeeds() {
         !database::get_tool_enabled("claude"),
         "恢复 Ok 时应照常落 disabled"
     );
-    // W5 清理语义：链接被还原为真实内容（内容保留、MAM 接管解除），而非删除
+    // W5 清理语义：链接被还原为真实内容（内容保留、兔维斯 接管解除），而非删除
     let w5_path = dirs::home_dir().unwrap().join(".claude/skills/v2m1-w5-b");
     let w5_meta = std::fs::symlink_metadata(&w5_path).expect("W5 还原后原位应有真实内容");
     assert!(
         !w5_meta.file_type().is_symlink(),
-        "MAM 链接应已解除（还原为真实目录）"
+        "兔维斯 链接应已解除（还原为真实目录）"
     );
     assert!(w5_path.join("SKILL.md").exists(), "SSOT 内容应落回原位");
     assert!(
@@ -1139,7 +1139,7 @@ fn save_mcp_config_preserves_user_metadata() {
 }
 
 /// Patch 5 修改 1（设计裁决：磁盘实况优先）：账本 enabled 但磁盘为真目录的
-/// 漂移态，拍基底不再 UNIQUE 崩——剔除 MAM 条目、按 native 记录恰一条，
+/// 漂移态，拍基底不再 UNIQUE 崩——剔除 兔维斯 条目、按 native 记录恰一条，
 /// sweep 对它的处置走「暂存」而非「停用」
 #[test]
 fn scan_tool_state_dedups_drifted_ledger_entry_to_native() {
@@ -1155,7 +1155,7 @@ fn scan_tool_state_dedups_drifted_ledger_entry_to_native() {
     // 漂移现场：账本 enabled + 同名真目录（W5 还原内容后名册未销的形态）。
     // 登记线（2026-09-16 裁决）：行须为登记原生（is_native=1 AND source_tool），
     // 真目录才参与快照/暂存判定
-    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-drift-x");
+    let ssot = dirs::home_dir().unwrap().join(".tuvis/skills/v2m1-drift-x");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -1180,7 +1180,7 @@ fn scan_tool_state_dedups_drifted_ledger_entry_to_native() {
     std::fs::create_dir_all(&drift).unwrap();
     std::fs::write(drift.join("SKILL.md"), "real").unwrap();
 
-    // 当前实现：MAM 条目 + 原生条目同 ext_id → 拍基底 UNIQUE 崩（红）
+    // 当前实现：兔维斯 条目 + 原生条目同 ext_id → 拍基底 UNIQUE 崩（红）
     snapshot::capture_base_snapshot("claude").unwrap();
     let (_, items) = database::get_base_snapshot("claude").unwrap();
     let hits: Vec<_> = items
@@ -1264,7 +1264,7 @@ fn restore_roundtrip_preserves_drifted_real_dir() {
 
     // 漂移现场：skill-v2m1-dl-x 账本 enabled + 同名真目录（有内容）。
     // 登记线（2026-09-16 裁决）：行须为登记原生，真目录才参与快照/暂存判定
-    let ssot = dirs::home_dir().unwrap().join(".mam/skills/v2m1-dl-x");
+    let ssot = dirs::home_dir().unwrap().join(".tuvis/skills/v2m1-dl-x");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -1288,7 +1288,7 @@ fn restore_roundtrip_preserves_drifted_real_dir() {
     std::fs::write(drift_dir.join("SKILL.md"), "用户的真实内容").unwrap();
 
     // 预设只含另一项（不含漂移项）→ 漂移项按 native 暂存
-    let ssot_a = dirs::home_dir().unwrap().join(".mam/skills/v2m1-dl-a");
+    let ssot_a = dirs::home_dir().unwrap().join(".tuvis/skills/v2m1-dl-a");
     std::fs::create_dir_all(&ssot_a).unwrap();
     std::fs::write(ssot_a.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -1435,7 +1435,7 @@ fn mcp_sweep_restore_roundtrip() {
     // 清场
     let _ = toggle_mcp("v2m2-mcp-a", "claude", false);
     let _ = database::delete_extension("mcp-v2m2-mcp-a");
-    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".mam/mcp/v2m2-mcp-a.json"));
+    let _ = std::fs::remove_file(dirs::home_dir().unwrap().join(".tuvis/mcp/v2m2-mcp-a.json"));
 }
 
 /// M2 开工前置回归锁（裁决 2 / plan Task 1）：file 型插件独占往返——
@@ -1453,7 +1453,7 @@ fn plugin_file_sweep_restore_v2m2_plug() {
 
     let home = dirs::home_dir().unwrap();
     // SSOT 仓库放真目录 + 注册表行（与生产扫描登记 file 型插件同形态：tags=Some("file")）
-    let ssot = home.join(".mam/plugins/v2m2-plug-a");
+    let ssot = home.join(".tuvis/plugins/v2m2-plug-a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("plugin.json"), "{}").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -1540,7 +1540,7 @@ fn plugin_config_sweep_restore_v2m2_plugcfg() {
 
     let home = dirs::home_dir().unwrap();
     // config 型插件的 SSOT 是仓库内的 .json 条目文件（toggle 从中读 entries）
-    let repo_json = home.join(".mam/plugins/v2m2-plug-cfg.json");
+    let repo_json = home.join(".tuvis/plugins/v2m2-plug-cfg.json");
     std::fs::write(&repo_json, r#"{"source":"v2m2"}"#).unwrap();
     database::insert_extension(&database::ExtensionRecord {
         id: "plugin-v2m2-plug-cfg".into(),
@@ -1702,7 +1702,7 @@ fn builtin_and_unregistered_native_dirs_never_enter_snapshot_v2m2() {
     // ① 内建 .system：静态清单 + marker 双证据
     std::fs::create_dir_all(codex_dir.join(".system")).unwrap();
     std::fs::write(codex_dir.join(".system/.codex-system-skills.marker"), "").unwrap();
-    // ② 未登记普通目录（用户手装、MAM 无账）
+    // ② 未登记普通目录（用户手装、兔维斯 无账）
     std::fs::create_dir_all(codex_dir.join("v2m2-plain-x")).unwrap();
     std::fs::write(codex_dir.join("v2m2-plain-x/SKILL.md"), "plain").unwrap();
     // ③ 登记目录（导入登记的标准形态：is_native=1 AND source_tool=codex）
@@ -1763,7 +1763,7 @@ fn nested_skill_dispatches_flat_links() {
 
     let home = dirs::home_dir().unwrap();
     // SSOT 嵌套套件技能（仓库层级不动）+ extensions 登记（嵌套规范名）
-    let inner = home.join(".mam/skills/v2m2-suite9/inner");
+    let inner = home.join(".tuvis/skills/v2m2-suite9/inner");
     std::fs::create_dir_all(&inner).unwrap();
     std::fs::write(inner.join("SKILL.md"), "x").unwrap();
     database::ensure_extension(&database::ExtensionRecord {
@@ -1800,13 +1800,13 @@ fn nested_skill_dispatches_flat_links() {
         "不得在工具目录建嵌套套件目录"
     );
     // Layer2：同为拍平名链接
-    let layer2_link = home.join(".mam/active/claude/v2m2-suite9-inner");
+    let layer2_link = home.join(".tuvis/active/claude/v2m2-suite9-inner");
     assert!(
         layer2_link.is_symlink(),
         "Layer2 应为拍平名链接: {}",
         layer2_link.display()
     );
-    assert!(!home.join(".mam/active/claude/v2m2-suite9").exists());
+    assert!(!home.join(".tuvis/active/claude/v2m2-suite9").exists());
     // 账本身份：assignment 行 extension_id 仍是嵌套规范名
     let asg = database::list_assignments("claude")
         .into_iter()
@@ -1835,7 +1835,7 @@ fn nested_skill_disable_removes_flat_links() {
     use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
 
     let home = dirs::home_dir().unwrap();
-    let inner = home.join(".mam/skills/v2m2-suite9/inner");
+    let inner = home.join(".tuvis/skills/v2m2-suite9/inner");
     std::fs::create_dir_all(&inner).unwrap();
     std::fs::write(inner.join("SKILL.md"), "x").unwrap();
     database::ensure_extension(&database::ExtensionRecord {
@@ -1854,7 +1854,7 @@ fn nested_skill_disable_removes_flat_links() {
     .unwrap();
     enable_skill_for_tool("v2m2-suite9/inner", "claude").unwrap();
     let claude_dir = home.join(".claude/skills");
-    let layer2_dir = home.join(".mam/active/claude");
+    let layer2_dir = home.join(".tuvis/active/claude");
     assert!(
         claude_dir.join("v2m2-suite9-inner").is_symlink(),
         "前置：工具目录拍平链接在场"
@@ -1900,10 +1900,10 @@ fn nested_dispatch_collision_guard_rejects_flat_namesake() {
 
     let home = dirs::home_dir().unwrap();
     // 嵌套技能 v2m2-flat-c/skill 与字面同名平铺技能 v2m2-flat-c-skill 并存
-    let nested = home.join(".mam/skills/v2m2-flat-c/skill");
+    let nested = home.join(".tuvis/skills/v2m2-flat-c/skill");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(nested.join("SKILL.md"), "nested").unwrap();
-    let namesake = home.join(".mam/skills/v2m2-flat-c-skill");
+    let namesake = home.join(".tuvis/skills/v2m2-flat-c-skill");
     std::fs::create_dir_all(&namesake).unwrap();
     std::fs::write(namesake.join("SKILL.md"), "flat").unwrap();
 
@@ -1913,7 +1913,7 @@ fn nested_dispatch_collision_guard_rejects_flat_namesake() {
     let claude_dir = home.join(".claude/skills");
     assert!(!claude_dir.join("v2m2-flat-c-skill").exists());
     assert!(!claude_dir.join("v2m2-flat-c").exists());
-    assert!(!home.join(".mam/active/claude/v2m2-flat-c-skill").exists());
+    assert!(!home.join(".tuvis/active/claude/v2m2-flat-c-skill").exists());
     // SSOT 双方原样保留
     assert!(nested.join("SKILL.md").exists() && namesake.join("SKILL.md").exists());
 
@@ -1957,17 +1957,17 @@ fn flat_namesake_enable_rejected_while_nested_flat_link_present_v2m2() {
     };
 
     // ① 先启用嵌套技能 v2m2-flat2/a → 工具目录与 Layer2 产生拍平链接 v2m2-flat2-a
-    let nested = home.join(".mam/skills/v2m2-flat2/a");
+    let nested = home.join(".tuvis/skills/v2m2-flat2/a");
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(nested.join("SKILL.md"), "nested").unwrap();
     mk_ext("skill-v2m2-flat2/a", &nested);
     enable_skill_for_tool("v2m2-flat2/a", "claude").unwrap();
     let flat_link = claude_dir.join("v2m2-flat2-a");
-    let layer2_link = home.join(".mam/active/claude/v2m2-flat2-a");
+    let layer2_link = home.join(".tuvis/active/claude/v2m2-flat2-a");
     assert!(flat_link.is_symlink(), "前置：嵌套技能的拍平链接在场");
 
     // ② 再造平铺技能 v2m2-flat2-a（SSOT）并启用 → 拒绝（拍平名冲突）
-    let flat = home.join(".mam/skills/v2m2-flat2-a");
+    let flat = home.join(".tuvis/skills/v2m2-flat2-a");
     std::fs::create_dir_all(&flat).unwrap();
     std::fs::write(flat.join("SKILL.md"), "flat").unwrap();
     mk_ext("skill-v2m2-flat2-a", &flat);
@@ -2037,7 +2037,7 @@ fn resident_guard_rejects_manual_disable_v2m2() {
     let home = dirs::home_dir().unwrap();
 
     // ---- skill：SSOT 真目录 + 登记行，启用后开常驻 ----
-    let ssot = home.join(".mam/skills/v2m2-res-skill");
+    let ssot = home.join(".tuvis/skills/v2m2-res-skill");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -2089,7 +2089,7 @@ fn resident_guard_rejects_manual_disable_v2m2() {
     toggle_mcp("v2m2-res-mcp", "claude", false).unwrap();
 
     // ---- plugin（file 型，照既有 plugin 测试惯例）----
-    let plug_ssot = home.join(".mam/plugins/v2m2-res-plug");
+    let plug_ssot = home.join(".tuvis/plugins/v2m2-res-plug");
     std::fs::create_dir_all(&plug_ssot).unwrap();
     std::fs::write(plug_ssot.join("plugin.json"), "{}").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -2121,7 +2121,7 @@ fn resident_guard_rejects_manual_disable_v2m2() {
     let _ = database::delete_extension("mcp-v2m2-res-mcp");
     let _ = database::delete_extension("plugin-v2m2-res-plug");
     let _ = std::fs::remove_dir_all(&ssot);
-    let _ = std::fs::remove_file(home.join(".mam/mcp/v2m2-res-mcp.json"));
+    let _ = std::fs::remove_file(home.join(".tuvis/mcp/v2m2-res-mcp.json"));
     let _ = std::fs::remove_dir_all(&plug_ssot);
 }
 
@@ -2137,7 +2137,7 @@ fn resident_guard_allows_enable_direction_v2m2() {
     use multi_agents_manager_lib::services::{disable_skill_for_tool, enable_skill_for_tool};
 
     let home = dirs::home_dir().unwrap();
-    let ssot = home.join(".mam/skills/v2m2-res-en");
+    let ssot = home.join(".tuvis/skills/v2m2-res-en");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -2170,7 +2170,7 @@ fn resident_guard_allows_enable_direction_v2m2() {
 }
 
 /// 启停守卫（用户裁决 2026-09-16）：enable 目标命中工具内建原生技能 →
-/// 拒绝且目录原样保留（识别即保护，MAM 不得接管/替换/删除）
+/// 拒绝且目录原样保留（识别即保护，兔维斯 不得接管/替换/删除）
 #[test]
 fn enable_skill_rejects_builtin_native_dir_v2m2() {
     let _guard = PRESET_V2_TEST_LOCK
@@ -2234,7 +2234,7 @@ fn disable_skill_rejects_builtin_native_dir_v2m2() {
     let _ = std::fs::remove_dir_all(&sys);
 }
 
-/// reveal_dir 白名单校验（wave33 Item 4）：canonicalize 后必须以 ~/.mam 或
+/// reveal_dir 白名单校验（wave33 Item 4）：canonicalize 后必须以 ~/.tuvis 或
 /// ~/.agents 为前缀；越界拒绝、不存在拒绝、白名单内放行（纯校验核，
 /// 不触发系统打开动作）
 #[test]
@@ -2247,8 +2247,8 @@ fn reveal_dir_whitelist_validation_v2m2() {
     use multi_agents_manager_lib::commands::resource::ensure_reveal_allowed;
 
     let home = dirs::home_dir().unwrap();
-    // 白名单内：fake HOME 的 ~/.mam（support::setup 已建目录树）→ 放行
-    let allowed = home.join(".mam/skills").to_string_lossy().to_string();
+    // 白名单内：fake HOME 的 ~/.tuvis（support::setup 已建目录树）→ 放行
+    let allowed = home.join(".tuvis/skills").to_string_lossy().to_string();
     let ok = ensure_reveal_allowed(&allowed);
     assert!(ok.is_ok(), "白名单内路径应放行: {:?}", ok.err());
 
@@ -2262,7 +2262,7 @@ fn reveal_dir_whitelist_validation_v2m2() {
 
     // 白名单内但不存在 → 拒绝（路径不存在）
     let missing = home
-        .join(".mam/v2m2-reveal-nonexistent")
+        .join(".tuvis/v2m2-reveal-nonexistent")
         .to_string_lossy()
         .to_string();
     let err = ensure_reveal_allowed(&missing).unwrap_err();
@@ -2309,9 +2309,9 @@ fn backfill_prunes_stale_rows_with_dead_source_paths() {
     database::upsert_resource_binding("skill-v2m2-prune-dead", "claude", Some("陈旧")).unwrap();
 
     // 死行 B：symlink 死链（路径项存在但链接目标已消失）
-    let dangling = home.join(".mam/skills/v2m2-prune-dangling");
+    let dangling = home.join(".tuvis/skills/v2m2-prune-dangling");
     #[cfg(unix)]
-    std::os::unix::fs::symlink(home.join(".mam/skills/v2m2-prune-nowhere"), &dangling).unwrap();
+    std::os::unix::fs::symlink(home.join(".tuvis/skills/v2m2-prune-nowhere"), &dangling).unwrap();
     database::insert_extension(&database::ExtensionRecord {
         id: "skill-v2m2-prune-dangling".into(),
         kind: "skill".into(),
@@ -2328,7 +2328,7 @@ fn backfill_prunes_stale_rows_with_dead_source_paths() {
     .unwrap();
 
     // 在场技能行：SSOT 真目录 + SKILL.md → 不得被修剪
-    let live = home.join(".mam/skills/v2m2-prune-live");
+    let live = home.join(".tuvis/skills/v2m2-prune-live");
     std::fs::create_dir_all(&live).unwrap();
     std::fs::write(live.join("SKILL.md"), "x").unwrap();
 
@@ -2388,7 +2388,7 @@ fn uninstall_cascades_resident_rows_v2m2() {
 
     let home = dirs::home_dir().unwrap();
     // 造 skill：SSOT 真目录 + 登记行 + 为 claude 启用 + 开常驻
-    let ssot = home.join(".mam/skills/v2m2-uni-res");
+    let ssot = home.join(".tuvis/skills/v2m2-uni-res");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
     database::insert_extension(&database::ExtensionRecord {
@@ -2456,7 +2456,7 @@ fn restore_exempts_post_snapshot_resident_v2m2() {
     let home = dirs::home_dir().unwrap();
     // 预设项 A + 会话中途才启用的资源 X（此刻都未启用 → 都不在基底）
     for name in ["v2m2-rx-a", "v2m2-rx-x"] {
-        let ssot = home.join(".mam/skills").join(name);
+        let ssot = home.join(".tuvis/skills").join(name);
         std::fs::create_dir_all(&ssot).unwrap();
         std::fs::write(ssot.join("SKILL.md"), "x").unwrap();
         database::insert_extension(&database::ExtensionRecord {
@@ -2511,6 +2511,6 @@ fn restore_exempts_post_snapshot_resident_v2m2() {
     let _ = disable_skill_for_tool("v2m2-rx-a", "claude");
     let _ = database::delete_extension("skill-v2m2-rx-a");
     let _ = database::delete_extension("skill-v2m2-rx-x");
-    let _ = std::fs::remove_dir_all(home.join(".mam/skills/v2m2-rx-a"));
-    let _ = std::fs::remove_dir_all(home.join(".mam/skills/v2m2-rx-x"));
+    let _ = std::fs::remove_dir_all(home.join(".tuvis/skills/v2m2-rx-a"));
+    let _ = std::fs::remove_dir_all(home.join(".tuvis/skills/v2m2-rx-x"));
 }

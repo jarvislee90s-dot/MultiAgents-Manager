@@ -39,7 +39,7 @@ impl AgentAdapter for CodexAdapter {
     // 2026-09-19-审批事件钩子通道调研.md §3.2/§3.3。读侧 mod.rs 消费 "Stop"|"stop"
     // 双口径，事件名归 PascalCase 后与 claude 同形态，读侧零改动。
     // 存量 hooks.json 重写语义：register_all_hooks 每次启动重跑（lib.rs），旧
-    // camelCase 键由 register_hooks_for_tool 的 F3 迁移步移除（仅 MAM 自写条目）。
+    // camelCase 键由 register_hooks_for_tool 的 F3 迁移步移除（仅 兔维斯 自写条目）。
     fn hook_event_case(&self) -> HookEventCase {
         HookEventCase::PascalCase
     }
@@ -76,8 +76,8 @@ impl AgentAdapter for CodexAdapter {
     }
 
     fn skill_dirs(&self) -> Vec<std::path::PathBuf> {
-        // MAM 激活目标为 codex 私有目录 ~/.codex/skills（spec 2026-09-09 §4.1；
-        // ~/.agents/skills 已降级为只读共享导入源，MAM 不再写入）
+        // 兔维斯 激活目标为 codex 私有目录 ~/.codex/skills（spec 2026-09-09 §4.1；
+        // ~/.agents/skills 已降级为只读共享导入源，兔维斯 不再写入）
         super::primary_skill_dir("codex")
             .map(|dir| vec![dir])
             .unwrap_or_else(|| vec![self.base_dir().join("skills")])

@@ -64,7 +64,7 @@ pub struct CollectStats {
 
 /// lib 单测构建的默认规则注入 = **空规则**（内存注入，零 DB、零全局 override）。
 /// 理由（§3.2.3 FIX-6）：采集器的 `collect()` 需要供应商规则；若在 lib 单测里经
-/// `settings::load()` 取，① 会读并在首次创建开发机真实 `~/.mam/mam.db`；
+/// `settings::load()` 取，① 会读并在首次创建开发机真实 `~/.tuvis/tuvis.db`；
 /// ② 与 Task 10 那几个改全局 override 的用例在同一个测试二进制里并行跑时互相踩
 /// （谁都不知道读到谁的值）。需要规则的单测用 `CollectContext::with_provider_rules(...)` 显式给。
 #[cfg(test)]
@@ -73,7 +73,7 @@ fn default_rules_override() -> Option<Vec<ProviderRule>> {
 }
 
 /// 生产/集成测试构建的默认 = `None`（走 `settings::load()`）：`collect_source` 的正常路径；
-/// 集成测试先 `support::setup()` 重定向 `HOME`/`MAM_HOME`，读到的也是临时库（GC 19）。
+/// 集成测试先 `support::setup()` 重定向 `HOME`/`TUVIS_HOME`，读到的也是临时库（GC 19）。
 #[cfg(not(test))]
 fn default_rules_override() -> Option<Vec<ProviderRule>> {
     None
@@ -134,7 +134,7 @@ impl<'a> CollectContext<'a> {
 
     /// **供应商规则的唯一读取口**：显式注入优先，否则读全局设置（生产路径）。
     /// 采集器**不得**自己调 `settings::load()`——那会让 lib 单测去读/建开发机真实
-    /// `~/.mam/mam.db`，并与同二进制的其它用例抢全局 override（§3.2.3 FIX-6）。
+    /// `~/.tuvis/tuvis.db`，并与同二进制的其它用例抢全局 override（§3.2.3 FIX-6）。
     pub fn provider_rules(&self) -> Vec<ProviderRule> {
         match &self.rules_override {
             Some(r) => r.clone(),
@@ -323,7 +323,7 @@ pub fn run_collection(now_ms: i64) -> UsageCollectResult {
     // ── Task 16 Step 3：lib 单测构建下的**采集拒绝闸**（写在生产函数体内）──────────────
     // 事故事实（唯一需要记住的因果）：lib 测试是**独立 crate**、不经 `tests/support.rs::setup()`
     // ⇒ 本函数既用 `dirs::home_dir()` 解析**真实**扫描根，又会经 `load_cursors` / `apply_delta`
-    // 取**进程级 `DB`**（那时也绑在真实 `~/.mam/mam.db`）。`MAM_HOME=$(mktemp -d)` **只保账本、
+    // 取**进程级 `DB`**（那时也绑在真实 `~/.tuvis/tuvis.db`）。`TUVIS_HOME=$(mktemp -d)` **只保账本、
     // 不保读源** ⇒ 2026-10-03 00:11 一轮真实采集落进用户账本（四表被写入、游标含真实路径）。
     //
     // 判据：`cfg(test)` 下**未显式设置 fixture 根（源目录覆盖）**时**响亮拒绝**——
@@ -345,7 +345,7 @@ pub fn run_collection(now_ms: i64) -> UsageCollectResult {
     let started = std::time::Instant::now();
     let settings = super::settings::load();
     // 扫描根：生产一半逐字不变（`dirs::home_dir()`）；lib 单测一半只认 fixture 根
-    // ——`MAM_HOME` 保账本，fixture 根保**读源**，两半都要在。
+    // ——`TUVIS_HOME` 保账本，fixture 根保**读源**，两半都要在。
     #[cfg(test)]
     let home = tests::fixture_home().expect("上面那道拒绝闸已断言 fixture 根存在");
     #[cfg(not(test))]
@@ -548,7 +548,7 @@ mod tests {
 
     /// **用例独立性（评审 C5）**：本模块有三个用例共享全局 `COLLECT_STATE`（单飞 / 最小间隔 /
     /// 总开关），必须 ① 串行化、② 每个用例开头复位状态、③ **完全不碰数据库**
-    /// （旧版 `crate::database::init()` + `save(...)` 写的是开发机真实 `~/.mam/mam.db`，
+    /// （旧版 `crate::database::init()` + `save(...)` 写的是开发机真实 `~/.tuvis/tuvis.db`，
     /// 与本文件 `settings::load_from_conn` 那条纪律直接矛盾）。
     /// 现在设置走 `settings::set_override_for_test`（内存注入，不落库、不读库）——
     /// 于是这些用例既不会互相串味，也不会污染真实库。
@@ -774,7 +774,7 @@ mod tests {
     /// 两序相对即 ABBA——`std::sync::Mutex` 无超时，而 `DB` 是**全库唯一连接锁**。
     ///
     /// **为什么用「DB 替身」而不是真的 `DB`**：在 lib 单测里锁 `DB` 会初始化并读写开发机真实
-    /// `~/.mam/mam.db`（D-07 已登记的泄漏），而本模块的用例必须零 DB（GC 19 / C5）。
+    /// `~/.tuvis/tuvis.db`（D-07 已登记的泄漏），而本模块的用例必须零 DB（GC 19 / C5）。
     /// ABBA 的成立条件**只取决于「另一把锁的持锁者会不会去等 `cached_result()`」**，
     /// 与那把锁是不是 `DB` 无关——所以替身足以**确定性地**复现整条环路，且零 DB。
     /// 旧实现下本用例会在 `recv_timeout` 超时处红；修复后立即返回绿。
@@ -1153,7 +1153,7 @@ mod tests {
 
     /// **FIX-6 锁（§3.2.3）**：lib 单测构建里 `CollectContext::new` 必须**内存注入空规则**。
     /// 若采集器侧回落到 `settings::load()`，lib 单测就会 ① 读/首次创建开发机真实
-    /// `~/.mam/mam.db`，② 与本模块改全局 override 的用例在同二进制并行时互相踩。
+    /// `~/.tuvis/tuvis.db`，② 与本模块改全局 override 的用例在同二进制并行时互相踩。
     /// 手法：先塞一份**带规则**的 override（真读库的路径必然命中它），再断言新建 ctx 拿到的
     /// 仍是空表 —— 实现一旦退化成"总是读设置"，这里立刻红（这是本条的编译外运行期锁）。
     #[test]
