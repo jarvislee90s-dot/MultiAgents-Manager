@@ -144,6 +144,19 @@ function findQuestionByHeading(questions: QuestionView[], heading: string): numb
   return null; // 0 个或多个匹配 → 不猜
 }
 
+/** codex 回执快照的**附带勾选/TS 通道守卫**（评审 F4.3）：codex 面板形状无
+ *  checked/freeText 通道（快照只携带题号头计数与焦点），直读 questionIdx 对位
+ *  后不调 writeSnapshotState；仅当 heading 恰好唯一命中 dest（防御：其他工具
+ *  形状夹带 questionIdx 的字段膨胀）才走 writeSnapshotState 回填勾选/TS 行。 */
+function landedCodexHeadingMatches(
+  info: QuestionInfoView,
+  dest: number,
+  heading: string | undefined
+): boolean {
+  if (heading == null) return false;
+  return findQuestionByHeading(info.questions, heading) === dest;
+}
+
 /** 确认卡摘要查询（2026-10-07 权威源切换）：题干归一键 → 终端 Review 页答案。
  *  精确键优先，长度 ≥4 的包含关系兜底（与 findQuestionByHeading 的 exact/partial
  *  纪律同构——折行归并后的键对不上精确键时仍可命中）；查不到 → undefined，
@@ -311,6 +324,8 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const [freeText, setFreeText] = useState("");
   // E4-E6 多题交互：当前作答到第几题（0 起；answer 成功且非末题时 +1）
   const [mqIndex, setMqIndex] = useState(0);
+  // codex 面板快照的未答数（2026-10-09 设计 §3.1）——0/null 不显示
+  const [unansweredHint, setUnansweredHint] = useState<number | null>(null);
 
   // 拉取（挂载一次 + 状态跃迁重拉，丁T1 复评 F-1）：deps 含 `session.status`——
   // 详情页停留期间 Board 数据通道把活会话 status 对齐进 selected（App.tsx
@@ -325,6 +340,17 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const [confirmSummary, setConfirmSummary] = useState<Record<string, string>>({});
   const applyScreenSync = useCallback((v: QuestionInfoView) => {
     if (!v.available || !v.screen) return;
+    // codex 题号对位（2026-10-09 设计 §3.1）：questionIdx 直读对位——不依赖
+    // 题干文本匹配（codex 题干区可能带状态栏杂讯）。unanswered 驱动进度提示。
+    // 不调 writeSnapshotState：codex 快照形状不同（无 checked/freeText）——
+    // 题号对位即可，选中态维持本地乐观显示（与 kimi mqSelected 同口径，
+    // 设计 §5.3 明示的边界）
+    if (typeof v.screen.questionIdx === "number") {
+      const qi = Math.min(v.screen.questionIdx, v.questions.length - 1);
+      setMqIndex(qi);
+      setUnansweredHint(v.screen.unanswered ?? null);
+      return;
+    }
     if (v.screen.review) {
       // **确认卡摘要权威源切换**（2026-10-07）：summary = Review 页屏读解析的
       // 逐题（题干, 答案）——覆盖本地缓存记录（终端真值优先；终端没答的题如实
@@ -524,6 +550,18 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               // 已在 Review 屏（零按键）→ 前端直接进确认卡（评审 C1 前端面）
               setInProgress(null);
               if (info !== null) setMqIndex(info.questions.length);
+            } else if (res.screen && typeof res.screen.questionIdx === "number" && info !== null) {
+              // **codex 回执直读对位**（2026-10-09 评审 F3）：codex 面板形状快照的
+              // 题号对位主键是 questionIdx（题干区可能带状态栏杂讯，heading 归属
+              // 校验不适用）——直读 + Math.min clamp（末题 ▶ 回执 questionIdx=0
+              // = 环形回首题，自然覆盖）。unanswered 随回执更新（评审 F6）。
+              const dest = Math.min(res.screen.questionIdx, info.questions.length - 1);
+              setMqIndex(dest);
+              if (typeof res.screen.unanswered === "number") {
+                setUnansweredHint(res.screen.unanswered);
+              }
+              // codex 快照无 checked/freeText 通道——选中态维持本地乐观显示
+              //（设计 §5.3 明示的边界，与 GET 路径的 questionIdx 分支同口径）
             } else {
               // **目的地计算 + 屏读快照纠偏**（2026-10-03 屏读为准）：prev echo 确认
               // = 退回上一题；next 沿用既有推进/回绕；快照随回执到达 → 新题的勾选/
@@ -551,6 +589,11 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               });
               const snapCheckedLen = (res.screen?.checked ?? []).length;
               const headingOnly = res.screen?.heading != null && snapCheckedLen === 0;
+              // **unanswered 随回执更新**（评审 F6）：快照带未答计数（codex 面板
+              // 形状扩展面）→ 直读刷新进度提示
+              if (typeof res.screen?.unanswered === "number") {
+                setUnansweredHint(res.screen.unanswered);
+              }
               if (
                 res.screen &&
                 res.screen.heading &&
@@ -585,13 +628,39 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             setMqIndex(questionIndex + 1);
             // **交互后屏读核对**（2026-10-03 屏读为准）：select 回执带发后快照——
             // TS 行内容回填当前题的 mqFreeText（卡面「已写入」态以屏读为准）
-            if (res.screen) {
+            if (res.screen && typeof res.screen.questionIdx === "number") {
+              // **codex 回执直读对位**（2026-10-09 评审 F4.3）：codex 面板形状的
+              // questionIdx 是题号对位主键——跳过 findQuestionByHeading（codex
+              // 题干区带状态栏杂讯，heading 对位不成立）。unanswered 随回执更新
+              //（评审 F6）。
+              const dest = Math.min(res.screen.questionIdx, info.questions.length - 1);
+              if (typeof res.screen.unanswered === "number") {
+                setUnansweredHint(res.screen.unanswered);
+              }
+              if (landedCodexHeadingMatches(info, dest, res.screen.heading)) {
+                // heading 恰好唯一命中 dest（claude/opencode 形状夹带 questionIdx
+                // 的防御分支）→ 勾选/TS 行照旧走 writeSnapshotState
+                writeSnapshotState(
+                  res.screen,
+                  dest,
+                  info.questions.length === 1,
+                  { setChecked, setMqChecked, setMqFreeText, setMqSelected },
+                  info.questions[dest]?.multiSelect ?? true
+                );
+              }
+              // 选中态维持本地乐观显示（下方 setMqSelected 已按点击记录，不动）
+              setMqIndex(dest);
+            } else if (res.screen) {
               // **屏读归属按 heading 对位**（2026-10-06 修复）：快照拍的是发键后
               // **到达页**——推进工具 landed=qi+1；**停留工具**（opencode 2.0.22
               // 单选选中不推进，✓ 标记在原页，2026-10-06 活体定案）landed=qi。
               // 旧实现盲目归属 questionIndex 且无条件 mqIndex+1——到达题的占位态
               // 写进本题（清掉已存文字）、停留被误当推进（卡面漂移到确认卡）。
               // 对位失败（无 heading/多义）→ 维持旧归属（不猜纪律）。
+              // **unanswered 随回执更新**（评审 F6）：快照带未答计数 → 直读刷新
+              if (typeof res.screen.unanswered === "number") {
+                setUnansweredHint(res.screen.unanswered);
+              }
               const landed =
                 res.screen.heading != null
                   ? findQuestionByHeading(info.questions, res.screen.heading)
@@ -1061,6 +1130,16 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             </span>
           )}
         </p>
+        {/* codex 未答进度提示（2026-10-09 设计 §3.1）：GET/回执快照的 unanswered
+            直读——0/null 不显示（全答完不制造噪音）；非 codex 快照恒 null 不渲染 */}
+        {unansweredHint !== null && unansweredHint > 0 && (
+          <p
+            data-testid="question-unanswered-hint"
+            className="mt-1 text-xs text-amber-700 dark:text-amber-400"
+          >
+            {unansweredHint} 题未答
+          </p>
+        )}
         <div className="mt-1.5 space-y-1">
           {q.options.map((o, i) => {
             // 多选题的勾选高亮：按题记忆（mqChecked），仅在 toggle 成功回执后变化；

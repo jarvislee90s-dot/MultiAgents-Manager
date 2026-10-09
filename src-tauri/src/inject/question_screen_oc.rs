@@ -343,6 +343,222 @@ pub fn kimi_question_screen_snapshot(lines: &[String]) -> Option<QuestionScreenS
     })
 }
 
+// ===== codex 0.160.0 问答面板快照解析器（2026-10-09 取证批 Task 4）=====
+// 底料 `docs/superpowers/specs/2026-10-08-codex-160-question-屏读底料.md` §2；
+// 夹具 = `question::live_fixtures::codex_*`（活体逐字取证，F 证据根
+// `%USERPROFILE%\mam-probe-m6r\evidence\`）。屏形事实（取证定案）：
+//
+// ```text
+//   Question 1/2 (2 unanswered)          ← 题号头：未答 `Question i/N (M unanswered)`
+//   Which DB?                            ← 题干（可折行）
+//                                         ← 空行（面板定形）
+//   › 1. Postgres           使用 PostgreSQL 作为数据库。   ← ›=焦点行前缀
+//     2. SQLite             使用 SQLite 作为数据库。
+//   [  deepseek-... · ...  Plan mode      ← 状态栏行（活体变体，S2/S3）
+//   tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt
+// ```
+//
+// - 归零词形：`Question 2/2`（计数段整个消失）= 全答完；
+// - 摘要屏头 `• Questions 2/2 answered`（复数 Questions + answered）**不是面板**
+//   → None（header 解析天然不匹配：strip_prefix("Question ") 后 `s 2/2...` 解析失败）；
+// - `›` 前缀行 = 焦点行；无 `›` → focused=None 不猜；
+// - 长 label 单行加宽不折行，desc 列浮动右移 → 按 ≥2 连续空格截断；
+// - 滚回残留 → **last-pair-wins**：取最后一个「题号头 + 配对成立」的块。
+//
+// **配对判据（纯账本锚，2026-10-09 裁决收口）**：账本 footer 三槽位任一命中
+// （`anchor_ledger::detect`，权威锚），唯一判据。footer 恒在场（活体定案）；
+// 单题三段 footer 无 navigate 段，故三槽（Q_FOOTER_NAVIGATE / Q_FOOTER_SUBMIT_ANSWER
+// / Q_FOOTER_SUBMIT_ALL）任一命中即配对成立。单独的题号头残留（无 footer 锚）
+// 必须拒绝——防正文编号列表误报。曾经的「空行定形」兜底已撤（无谓的误报面扩大：
+// 真机上 footer 恒在场，锚词配对即设计 §2.2 的「上下界锚」意图）。
+
+/// codex 问答面板快照（设计 §3.1 wire 契约，camelCase）。
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexQuestionSnapshot {
+    /// 当前题号（0 起）
+    pub question_idx: usize,
+    /// 总题数
+    pub question_total: usize,
+    /// 未答数（计数段消失 = 0，底料定案 #2）
+    pub unanswered: usize,
+    /// 当前题是否末题（i == n）
+    pub is_last: bool,
+    /// 题干（剥前导空白；折行简单拼接）
+    pub heading: String,
+    /// 选项 label（剥 (Recommended) 尾缀与描述列）
+    pub options: Vec<String>,
+    /// 焦点选项（0 起；`›` 行读不到 = None，不猜）
+    pub focused: Option<usize>,
+}
+
+/// 焦点标记 `›`（U+203A）——codex 面板焦点行前缀。注意与 claude 的 `❯`
+/// （U+276F）不同，不能复用 `strip` 的剥前缀表。
+const CODEX_FOCUS_MARK: char = '\u{203A}';
+
+/// 解析题号头：`Question {i}/{n}` | `Question {i}/{n} ({k} unanswered)`
+/// → `Some((i, n, Some(k) | None))`。
+///
+/// - 归零词形 `Question 2/2`（计数段整个消失）→ k = None；
+/// - 摘要屏头 `Questions 3/3 answered`（复数 + answered）天然不匹配：
+///   strip_prefix("Question ") 后剩 `s 3/3 answered`，`split_once(' ')` 得
+///   ratio = "s" 解析失败 → None；
+/// - i/n 为 0 或 i > n → None（防御）。
+///
+/// `pub(crate)`：`question::live_probe_tests::codex_question_live_probe` 的
+/// None 成因诊断复用生产词形（不重造判据）。
+pub(crate) fn parse_codex_question_header(line: &str) -> Option<(usize, usize, Option<usize>)> {
+    let rest = line.trim().strip_prefix("Question ")?;
+    // ratio = "i/n"（计数段若有，由首个空格分开）
+    let (ratio, counter) = match rest.split_once(' ') {
+        Some((r, c)) => (r, Some(c)),
+        None => (rest, None),
+    };
+    let (i, n) = ratio.split_once('/')?;
+    let i: usize = i.parse().ok()?;
+    let n: usize = n.parse().ok()?;
+    if i == 0 || n == 0 || i > n {
+        return None;
+    }
+    // 计数段 `(k unanswered)`；归零词形 k=None → 0（调用方 unwrap_or(0)）
+    let k = counter.and_then(|c| {
+        let c = c.trim().strip_prefix('(')?.strip_suffix(')')?;
+        let k = c.trim().strip_suffix("unanswered")?.trim().parse().ok()?;
+        Some(k)
+    });
+    Some((i, n, k))
+}
+
+/// 解析选项行：`{空白}(› )?{N}. label{≥2 空格}描述` → `Some((N, label, focused))`。
+///
+/// - 行首 2 空格缩进 + `›`（如 `  › 1. Postgres`）：trim_start 后判 `›`；
+/// - label 剥 `(Recommended)` 尾缀（取证未见，设计 §2.1 有——防御性保留）与
+///   描述列（连续 ≥2 空格截断；长 label 单行加宽时 desc 列浮动右移，同判据）；
+/// - 编号单数字也多数字均可（防御性）。
+fn parse_codex_option_row(line: &str) -> Option<(usize, String, bool)> {
+    let t = line.trim_start();
+    let focused = t.starts_with(CODEX_FOCUS_MARK);
+    // `›` 是多字节字符（U+203A，3 字节）——按 len_utf8 切，不得按字节 1 切
+    let t = if focused {
+        t[CODEX_FOCUS_MARK.len_utf8()..].trim_start()
+    } else {
+        t
+    };
+    // 编号 + `. `
+    let dot = t.find('.')?;
+    let n: usize = t[..dot].trim().parse().ok()?;
+    if n == 0 {
+        return None;
+    }
+    let mut label = t[dot + 1..].trim_start();
+    // 剥 (Recommended) 尾缀（先剥描述列后剥尾缀均可；尾缀也可能被描述列截断
+    // 逻辑带走——顺序：先截描述列，再剥尾缀，最后 trim_end）
+    if let Some(pos) = label.find("  ") {
+        label = &label[..pos];
+    }
+    let label = label
+        .trim_end()
+        .strip_suffix("(Recommended)")
+        .map(str::trim_end)
+        .unwrap_or_else(|| label.trim_end());
+    if label.is_empty() {
+        return None;
+    }
+    Some((n, label.to_string(), focused))
+}
+
+/// codex 问答面板快照解析主入口：**last-pair-wins**——从后往前找题号头，其下方
+/// **至屏尾**的窗内账本三 footer 槽位（Q_FOOTER_NAVIGATE / Q_FOOTER_SUBMIT_ANSWER
+/// / Q_FOOTER_SUBMIT_ALL）任一命中即配对成功并从该题号头向下解析（唯一判据，见
+/// 模块注释「配对判据」）。单独的题号头残留（无 footer 锚）不算。
+///
+/// 配对窗扩至屏尾（评审 P2-5）：原 ~12 行固定窗会把「长选项/折行题干 + footer
+/// 被挤出窗」的面板误判为「无 footer 配对」→ 回退错配到更早的残留旧面板——
+/// 屏高固定而面板行数浮动，固定窗无证据支撑；屏尾就是活体 footer 所在的唯一
+/// 有界承诺。
+///
+/// 非面板（普通屏 / 摘要屏 / 确认屏无题号头）→ None，调用方按「读不到快照」
+/// 保守降级。
+pub fn codex_question_screen_snapshot(lines: &[String]) -> Option<CodexQuestionSnapshot> {
+    let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+    let ledger_slot_hit = |start: usize, end: usize| -> bool {
+        let window = &lowered[start..end.min(lowered.len())];
+        [
+            crate::inject::anchor_ledger::slot::Q_FOOTER_NAVIGATE,
+            crate::inject::anchor_ledger::slot::Q_FOOTER_SUBMIT_ANSWER,
+            crate::inject::anchor_ledger::slot::Q_FOOTER_SUBMIT_ALL,
+        ]
+        .iter()
+        .any(|slot| {
+            crate::inject::anchor_ledger::detect(
+                window,
+                "codex",
+                crate::inject::anchor_ledger::scenario::QUESTION,
+                slot,
+            )
+            .is_some()
+        })
+    };
+    // last-pair-wins：从后往前扫题号头，首个配对成立者即当前面板
+    for (hi, line) in lines.iter().enumerate().rev() {
+        let (idx, total, unanswered) = match parse_codex_question_header(line) {
+            Some(h) => h,
+            None => continue,
+        };
+        // 配对窗 = 题号头下方**至屏尾**（评审 P2-5：防长选项/折行题干把 footer
+        // 挤出固定窗、防窗尾裁切后回退错配旧面板）
+        if !ledger_slot_hit(hi + 1, lines.len()) {
+            continue; // 单独题号头残留（无 footer 锚）——不算
+        }
+        // 从题号头向下解析面板内容
+        let mut heading_parts: Vec<String> = Vec::new();
+        let mut options: Vec<String> = Vec::new();
+        let mut focused: Option<usize> = None;
+        let mut expect_next = 1usize; // 编号连续性：1..=m，跳变即断
+        for l in lines[hi + 1..].iter() {
+            let t = l.trim();
+            if let Some((n, label, is_focus)) = parse_codex_option_row(t) {
+                if n != expect_next {
+                    break; // 编号跳变 = 面板选项区结束/形态异常
+                }
+                if is_focus {
+                    focused = Some(n - 1);
+                }
+                options.push(label);
+                expect_next += 1;
+                continue;
+            }
+            if options.is_empty() {
+                // 题干区：header 与选项区之间的非空行（跳过含 unanswered 的
+                // 行防计数头折行重复；空行不进 heading）
+                if t.is_empty() {
+                    continue;
+                }
+                if t.contains("unanswered") {
+                    continue;
+                }
+                heading_parts.push(t.to_string());
+                continue;
+            }
+            // 选项区已开始：空行 / 状态栏行 / footer / 其他行 = 块终点
+            break;
+        }
+        if options.is_empty() {
+            continue; // 无选项行（形态异常）——继续向前找更早的配对块
+        }
+        return Some(CodexQuestionSnapshot {
+            question_idx: idx - 1,
+            question_total: total,
+            unanswered: unanswered.unwrap_or(0),
+            is_last: idx == total,
+            heading: heading_parts.join(" "),
+            options,
+            focused,
+        });
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +766,150 @@ mod tests {
             "⇆ tab  enter submit  esc dismiss".to_string(),
         ];
         assert_eq!(opencode_question_screen_snapshot(&confirm), None);
+    }
+
+    /// codex 0.160.0 问答面板快照解析器（2026-10-09 取证批 Task 4，底料
+    /// `docs/superpowers/specs/2026-10-08-codex-160-question-屏读底料.md` §2）。
+    /// 夹具 = `question::live_fixtures::codex_*`（活体逐字取证，不得改夹具）。
+    mod codex_snapshot_tests {
+        use super::*;
+        use crate::inject::question::live_fixtures;
+
+        #[test]
+        fn parses_s1_q1_fixture() {
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s1_q1())
+                .expect("S1-Q1 面板必解析");
+            assert_eq!(s.question_idx, 0);
+            assert_eq!(s.question_total, 2);
+            assert_eq!(s.unanswered, 2);
+            assert!(!s.is_last);
+            assert_eq!(s.focused, Some(0));
+            assert_eq!(s.options, vec!["Postgres", "SQLite", "None of the above"]);
+            assert_eq!(s.heading, "Which DB?");
+        }
+
+        #[test]
+        fn parses_s1_q2_four_options_with_all_footer() {
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s1_q2()).unwrap();
+            assert_eq!(s.question_idx, 1);
+            assert!(s.is_last);
+            assert_eq!(s.unanswered, 1);
+            assert_eq!(
+                s.options,
+                vec!["Redis", "Memcached", "None needed", "None of the above"]
+            );
+        }
+
+        #[test]
+        fn parses_zero_counter_wording() {
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s1_q2_zero()).unwrap();
+            assert_eq!(s.unanswered, 0);
+            assert!(s.is_last);
+            assert_eq!(s.focused, Some(1)); // › 2. Memcached
+        }
+
+        #[test]
+        fn parses_answered_q1_no_counter() {
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s1_q1_answered()).unwrap();
+            assert_eq!(s.unanswered, 0);
+            assert!(!s.is_last);
+            assert_eq!(s.focused, Some(0));
+        }
+
+        #[test]
+        fn parses_unanswered_reselect_state() {
+            let s =
+                codex_question_screen_snapshot(&live_fixtures::codex_s1_q1_unanswered()).unwrap();
+            assert_eq!(s.unanswered, 1);
+            assert_eq!(s.focused, Some(1));
+        }
+
+        #[test]
+        fn parses_s2_with_status_bar_variant() {
+            // 状态栏行插在选项区和 footer 之间（活体变体）——仍须解析
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s2_q1()).unwrap();
+            assert_eq!(s.question_total, 3);
+            assert_eq!(s.options.len(), 3);
+        }
+
+        #[test]
+        fn parses_s3_single_three_segment_footer() {
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s3_single()).unwrap();
+            assert_eq!(s.question_total, 1);
+            assert!(s.is_last);
+            assert_eq!(s.unanswered, 1);
+        }
+
+        #[test]
+        fn parses_s3_zero() {
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s3_zero()).unwrap();
+            assert_eq!(s.unanswered, 0);
+        }
+
+        #[test]
+        fn parses_long_label_single_line() {
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_e_wrap()).unwrap();
+            assert_eq!(
+                s.options[0],
+                "Amazon Elastic Kubernetes Service with multi-region fleet"
+            );
+        }
+
+        #[test]
+        fn answered_summary_is_not_panel() {
+            assert!(
+                codex_question_screen_snapshot(&live_fixtures::codex_answered_summary()).is_none()
+            );
+            assert!(
+                codex_question_screen_snapshot(&live_fixtures::codex_answered_summary3()).is_none()
+            );
+        }
+
+        #[test]
+        fn notes_open_still_parses_as_panel() {
+            // notes 态字符层与面板同形（题号头+选项区+footer 都在）——可解析
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s4_notes_open()).unwrap();
+            assert_eq!(s.focused, Some(2));
+        }
+
+        #[test]
+        fn plain_screen_is_not_panel() {
+            // 无题号头无 footer 的普通屏 → None
+            let lines: Vec<String> = vec!["› Ask Codex to do anything".to_string(), "".to_string()];
+            assert!(codex_question_screen_snapshot(&lines).is_none());
+        }
+
+        #[test]
+        fn scrolled_back_residual_takes_last_pair() {
+            // 构造：旧面板（残留题号头+footer）+ 新面板——取最后一对（新面板）
+            let mut lines = live_fixtures::codex_s1_q1();
+            lines.push("".to_string());
+            lines.extend(live_fixtures::codex_s3_single().iter().cloned());
+            let s = codex_question_screen_snapshot(&lines).unwrap();
+            assert_eq!(s.question_total, 1); // 落在新面板（S3 单题）
+            assert_eq!(s.heading, "Which DB?");
+            assert_eq!(s.unanswered, 1);
+        }
+
+        #[test]
+        fn header_without_footer_pair_is_not_panel() {
+            // 题号头在场但下方无 footer 配对 → None（防正文编号列表误报）
+            let lines: Vec<String> = vec![
+                "  Question 1/2 (2 unanswered)".to_string(),
+                "  Which DB?".to_string(),
+                "  › 1. Postgres".to_string(),
+                "    2. SQLite".to_string(),
+            ];
+            assert!(codex_question_screen_snapshot(&lines).is_none());
+        }
+
+        #[test]
+        fn parses_s4_tab_ensure_fixture() {
+            // S4 tab ensure 帧（Azure/AWS）：字符层仍是面板定形
+            let s = codex_question_screen_snapshot(&live_fixtures::codex_s4_tab_ensure()).unwrap();
+            assert_eq!(s.question_total, 1);
+            assert_eq!(s.options, vec!["Azure", "AWS", "None of the above"]);
+            assert_eq!(s.focused, Some(0));
+        }
     }
 }

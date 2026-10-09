@@ -1354,12 +1354,29 @@ pub fn codex_answered_anchor() -> &'static str {
     .unwrap_or("answered")
 }
 
-/// codex 终态在场判定（小写 contains；「answered」是摘要头专属词——弹窗进行中显示
-/// `Question 1/2 (N unanswered)`，语义相反不冲突）
+/// codex 终态在场判定（**评审 P2-3 收窄后的权威谓词** [`codex_receipt_present`]）。
 pub fn codex_answered_present(lines: &[String]) -> bool {
-    lines
-        .iter()
-        .any(|l| l.to_lowercase().contains(codex_answered_anchor()))
+    codex_receipt_present(lines)
+}
+
+/// codex 问答终态回执**双词组合谓词**（评审 P2-3 特异锚收窄）：单行同时含
+/// `questions` + `answered` 才判终态——摘要头专属词形 `Questions n/n answered`。
+///
+/// - 为什么不是裸词 `answered`（账本 0.155.1 旧行）：contains 语义下正文任何
+///   answered 单词（含模型复述行）都会误命中——「已回答」中文不中但英文复述会中；
+/// - 为什么题号头 `Question 1/2 (N unanswered)` 不冲突：题号头是**单数** Question
+///   且无 answered 词；摘要头才是**复数** Questions + answered（底料 §7 词形表）；
+/// - **已知残余**（如实登记）：正文复述若恰好同行齐备两词（如
+///   `I have answered your questions`）仍会命中——比裸单词锚收窄一个量级，
+///   硬断言面（题号头/任意 answered 单词）已消除；
+/// - 账本两行（`answered` / `questions`，append-only）只作词形登记与
+///   candidates 诊断清单供料；**判定用本谓词**——账本 candidates 全集试匹配的
+///   泛化语义（任一行任一词命中）对 codex RECEIPT 槽过宽，旧行不删除。
+pub fn codex_receipt_present(lines: &[String]) -> bool {
+    lines.iter().any(|l| {
+        let t = l.to_lowercase();
+        t.contains("questions") && t.contains("answered")
+    })
 }
 
 /// codex **备注自由作答阶段机**：Tab 切备注态 → 打字（字符通道）→ Enter 一次提交
@@ -1375,6 +1392,12 @@ pub fn codex_answered_present(lines: &[String]) -> bool {
 /// 3. **Enter 提交**（唯一回车点：高亮默认在选项 1，净效果 = 默认项+备注）；
 /// 4. **终态段**：轮询 [`codex_answered_present`]——未见不是失败（`Some(false)`，
 ///    如实请人工核对；落账侧以 rollout `user_note:` 对账为准）。
+///
+/// **2026-10-09 取证回填：本编排已从 dispatch 停用**（0.160.0 实测 notes 文本不随卷
+/// 提交，回车把焦点行提交为答案、用户文本静默丢失——底料
+/// `2026-10-08-codex-160-question-屏读底料.md` §5；路由侧改为具名中止
+/// `StagePlan::CodexFreeTextRetired`，见 remote/api.rs）。函数保留备用（未来版本若
+/// 恢复 notes 落卷，重接前须按该技能工作流复验注入与屏读规格）。
 pub fn run_codex_notes_stages<Rd, Q, T>(
     text: &str,
     overwrite: bool,
@@ -1476,6 +1499,623 @@ pub fn codex_user_note_from_output(output: &str) -> Option<String> {
         }
     }
     None
+}
+
+// ============================================================
+// Task 5：codex 单选 select 阶段机（设计 §3.2 非末题 / §3.3 末题与单题）
+// 取证依据：2026-10-09 底料 `docs/superpowers/specs/2026-10-08-codex-160-question-
+// 屏读底料.md` §1 定案总表（A–H）。**关键通道更正（底料 §1）：codex 0.160.0 问答
+// 面板对 VT 箭头（ESC[B/A/C/D）与真 VK 箭头全部免疫——走位必须用 vim j/k（j=下移
+// k=上移，双向环绕），切题用 vim h/l（本阶段机不切题，注释留档防误引箭头键）。
+// ============================================================
+
+/// codex 单选阶段机的成功回执（设计 §3.2/§3.3 输出契约的键序 + 两面旗标）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexSelectOutcome {
+    /// 实际发送的键（记录法：数字记字符 `"1"`；走位记 `"j"`/`"k"`；空格记
+    /// `"space"`；回车记 `"enter"`——语义名与字符自洽，测试同款）
+    pub sent_keys: Vec<String>,
+    /// 非末题改答分支：题号推进而计数未减（进闸前已答，§3.2 漂移分支）
+    pub reanswered: bool,
+    /// 末题双条件闸读到面板消失且未发提交键（如 notes 回车连带交卷，§3.3 步 6 分叉）
+    pub already_submitted: bool,
+}
+
+/// codex **单选 select 阶段机**：非末题「数字直选 + 基线变化轮询 + 重投前复核」+
+/// 末题「j/k 走位 → 空格 → 归零有界轮询 → 双条件闸 → enter 提交」闭环
+/// （设计 §3.2/§3.3；评审 P0-1/P2-9/P2-10 修法）。
+///
+/// # 取证定案（2026-10-09 底料，编号 §1 定案总表）
+/// 1. **数字 = 选中 + 自动推进原子**（定案 A）：未答题发数字后题号头自动 i→i+1
+///    且未答计数 −1；**末题上数字 = 选中 + 整卷提交**（故末题禁数字）。
+/// 2. **走位通道 = vim j/k**（底料 §1 更正）：VT 箭头与 VK 箭头对 codex 面板全部
+///    无效；j=下移 k=上移，上下均环绕；**每步发键后复读**（不批量盲发）。
+/// 3. **空格 = 仅选中焦点行**（不推进）；对已答项再按 = 反选（计数 +1）；
+///    选中不改高亮位（`›` 跟焦点走，选中态只在属性层）。
+/// 4. **切题通道 = vim h/l**（h=上一题 l=下一题）——本阶段机不切题；**不是箭头键**
+///    （底料 §1：真 VK_LEFT 复验不切题）。
+/// 5. **回车 = 提交**：末题回车整卷提交（全答完无确认）；notes 态回车 = 提交焦点项。
+/// 6. **归零词形**：全答完时题号头计数段整个消失（`Question 2/2`），
+///    [`codex_question_screen_snapshot`] 解析 unanswered = 0。
+/// 7. **数字被吞推断**（定案 A 推论）：题号未变 ⟹ 数字被吞 ⟹ 该题未答——重发
+///    数字一次（**不得补 l**，l 是切题键，会把未答题跳过去）。**重投前必须复核**
+///    （评审 P0-1）：单拍轮询读到未重绘旧屏不等于被吞——盲目重投可能落在下一题/
+///    末题上（末题数字 = 整卷提交红线）。
+///
+/// # 参数
+/// `expected_total`——手机卡载荷的题数（评审 P2-10 交叉核对：与屏上题号头总数
+/// 不一致 = 错卷，零键中止）。
+/// `poll()`——`Ok(Some(屏行))` = 动作后屏已就绪；`Ok(None)` = 轮询窗尽未见目标；
+/// `Err` = 读屏失败。
+pub fn run_codex_select_stages<T: MenuTerminal>(
+    q_idx: usize,
+    expected_total: usize,
+    index: usize,
+    poll: impl Fn() -> Result<Option<Vec<String>>, String>,
+    terminal: &mut T,
+) -> Result<CodexSelectOutcome, StageAbort> {
+    use crate::inject::anchor_ledger::{self, scenario, slot};
+    use crate::inject::question_screen_oc::codex_question_screen_snapshot;
+
+    let mut sent_keys: Vec<String> = Vec::new();
+
+    // ---------- 入口闸 ----------
+    // 1. 读首屏；读不到 = 零键中止（屏读为准：动手前必须见到面板）
+    // 2. 解析面板（确认屏与「解析不出」分开点名——用户要做的处置不同，§3.6）
+    // 3. 身份闸：屏上题号必须与手机卡对位（错位发数字 = 打错题，§3.2 步 1）+
+    //    题数交叉核对（评审 P2-10：终端问卷题数 ≠ 载荷题数 = 错卷，零键中止）
+    let first = terminal
+        .read()
+        .ok_or_else(|| StageAbort::screen("codex：读不到屏——已中止，未发任何键；请人工核对终端"))?;
+    let snap = match codex_question_screen_snapshot(&first) {
+        Some(s) => s,
+        None => {
+            // 确认屏与「解析不出」分开点名——用户要做的处置不同（§3.6）
+            let lowered: Vec<String> = first.iter().map(|l| l.to_lowercase()).collect();
+            if anchor_ledger::detect(&lowered, "codex", scenario::QUESTION_REVIEW, slot::TITLE)
+                .is_some()
+            {
+                return Err(StageAbort::screen(
+                    "codex：屏上是未答完确认屏（Submit with unanswered questions?）——前序动作已错位，MAM 不代答；请到终端人工处置",
+                ));
+            }
+            return Err(StageAbort::screen(
+                "codex：屏上解析不出问答面板（题号头/footer 锚不成立）——已中止，未发任何键；请人工核对终端",
+            ));
+        }
+    };
+    // 3a. 身份闸：屏上题号必须与手机卡对位（错位发数字 = 打错题，§3.2 步 1）
+    if snap.question_idx != q_idx {
+        return Err(StageAbort::screen(format!(
+            "codex 身份闸：屏上第 {} 题与手机卡第 {} 题不一致——已中止，未发任何键；请核对终端当前题",
+            snap.question_idx + 1,
+            q_idx + 1
+        )));
+    }
+    // 3b. 题数交叉核对（评审 P2-10）：终端问卷总数与手机卡载荷题数不一致 =
+    //     屏上停的是另一份问卷（错卷发键 = 打错题）——零键中止
+    if snap.question_total != expected_total {
+        return Err(StageAbort::screen(format!(
+            "codex 身份闸：终端问卷共 {} 题与手机卡 {} 题不一致——已中止，未发任何键；请核对终端",
+            snap.question_total, expected_total
+        )));
+    }
+
+    // ---------- 非末题分支：数字直选（禁走到末题上——末题数字 = 整卷提交，定案 A）----------
+    if !snap.is_last {
+        return run_codex_select_nonfinal(
+            q_idx,
+            index,
+            snap,
+            &first,
+            poll,
+            terminal,
+            &mut sent_keys,
+        );
+    }
+
+    // ---------- 末题分支（§3.3：禁数字、禁回车做选中）----------
+    run_codex_select_final(q_idx, index, snap, poll, terminal, &mut sent_keys)
+}
+
+/// 非末题分支（§3.2）：发数字 → **基线变化轮询**（评审 P0-1：单拍读到未重绘旧屏
+/// 不判未变，窗尽才判）→ 重投前复核仍在本题才重发（末题数字 = 整卷提交红线旁路
+/// 的防线）。
+///
+/// 轮询语义（每拍 `poll()`）：
+/// - `Ok(Some(lines))` 解析出 `question_idx == q_idx+1` → 推进成功（迟到位落地同样算）；
+/// - `Ok(Some(lines))` 屏面 ≠ 基线但题号未推进 → **形态异常中止**（屏在动却没切题
+///   ——数字可能被吃进别处，重投有打错题风险）；
+/// - `Ok(Some(lines))` 屏面原样 == 基线 → 继续下一拍（TUI 未重绘，不能下结论）；
+/// - `Ok(None)`（窗尽）→ 跳出循环进入重投前复核；
+/// - `Err` → 读屏失败中止。
+fn run_codex_select_nonfinal<T: MenuTerminal>(
+    q_idx: usize,
+    index: usize,
+    entry: crate::inject::question_screen_oc::CodexQuestionSnapshot,
+    baseline_lines: &[String],
+    poll: impl Fn() -> Result<Option<Vec<String>>, String>,
+    terminal: &mut T,
+    sent_keys: &mut Vec<String>,
+) -> Result<CodexSelectOutcome, StageAbort> {
+    use crate::inject::question_screen_oc::codex_question_screen_snapshot;
+    // poll 闭包按引用复用（基线变化轮询与重投后的第二轮询共用同一编排闭包）
+    let poll = &poll;
+    // k_base = 入口闸的未答基线（改答判定：落点计数未减 = 进闸前已答）
+    let k_base = entry.unanswered;
+    // 目标越界卫语句（评审 P2-4）：index 来自手机卡载荷——载荷与屏上选项数不符
+    // 时数字会打在无效序号上（codex 面板对无效数字静默忽略 → 只剩双投中止的
+    // 兜底，行为不精确）。发键前零键中止，报载荷与面板不同步。
+    let m = entry.options.len();
+    if index >= m {
+        return Err(StageAbort::screen(format!(
+            "codex 单选：目标选项序号 {index} 越界（屏上面板共 {m} 项）——已中止，未发任何键；载荷与终端面板可能不同步，请刷新后重试",
+        )));
+    }
+    // 基线 = 入口屏原文（评审 P0-1：变化轮询的比较基线——逐行原样比较，
+    // TUI 未重绘 = 与基线逐字相同）
+    let baseline = baseline_lines.to_vec();
+    let digit = (index + 1).to_string();
+    // 发数字（send → 记账 → settle，与既有阶段机同款三步）
+    terminal
+        .send(&digit)
+        .map_err(|e| StageAbort::delivery(format!("数字投递失败（{e}）")))?;
+    sent_keys.push(digit);
+    terminal.settle();
+
+    // ---- 基线变化轮询（有界 4 拍；窗尽才判未变，评审 P0-1）----
+    match poll_changed_until_window(q_idx, &baseline, poll)? {
+        ChangedPoll::Advanced(s) => {
+            return Ok(CodexSelectOutcome {
+                sent_keys: sent_keys.clone(),
+                reanswered: s.unanswered == k_base,
+                already_submitted: false,
+            });
+        }
+        ChangedPoll::ChangedNotAdvanced => {
+            return Err(StageAbort::screen(
+                "codex 单选：屏已变化但题号未推进（形态异常）——已中止；请核对终端",
+            ));
+        }
+        ChangedPoll::WindowExhausted => { /* 原样窗尽 → 重投前复核 */ }
+    }
+
+    // ---- 重投前复核（评审 P0-1：重投必须确认屏上仍是本题非末题）----
+    // `terminal.read()` 再读一屏：迟到位重绘可能此刻才落地——推进了就不重投
+    let Some(recheck) = terminal.read() else {
+        return Err(StageAbort::screen(
+            "codex 单选：重投前复核读不到屏——已中止，未重投；请人工核对终端",
+        ));
+    };
+    match codex_question_screen_snapshot(&recheck) {
+        // 迟到位落地：题号已推进（不重投，直接成功）
+        Some(s) if s.question_idx == q_idx + 1 => Ok(CodexSelectOutcome {
+            sent_keys: sent_keys.clone(),
+            reanswered: s.unanswered == k_base,
+            already_submitted: false,
+        }),
+        // 仍是本题（且非末题——入口闸后未变）→ 才重发数字，再走一遍变化轮询
+        Some(s) if s.question_idx == q_idx && !s.is_last => {
+            codex_select_resend_digit(q_idx, index, k_base, &baseline, poll, terminal, sent_keys)
+        }
+        // 屏上已是末题/其他题（重投将打错题/触碰末题禁数字红线）→ 中止不重投
+        Some(_) => Err(StageAbort::screen(
+            "codex 单选：屏上已不是本题（重投将打错题/触碰末题禁数字红线）——已中止，未重投；请核对终端",
+        )),
+        // 复核读到了屏但解析不出面板（形态异常）→ 同样不重投
+        None => Err(StageAbort::screen(
+            "codex 单选：重投前复核解析不出问答面板——已中止，未重投；请核对终端",
+        )),
+    }
+}
+
+/// 非末题数字**重投**（定案 A 推论：数字被吞该题未答，重发不补 l）——
+/// 仅在「重投前复核」确认屏上仍是本题（非末题）后调用（评审 P0-1）。
+/// 重发后再走一遍基线变化轮询：仍不推进 → 中止「两投」。
+fn codex_select_resend_digit<T: MenuTerminal>(
+    q_idx: usize,
+    index: usize,
+    k_base: usize,
+    baseline: &[String],
+    poll: impl Fn() -> Result<Option<Vec<String>>, String>,
+    terminal: &mut T,
+    sent_keys: &mut Vec<String>,
+) -> Result<CodexSelectOutcome, StageAbort> {
+    // 重投键 = 首投同数字（index+1——重投的语义是「同一个数字再发一遍」，
+    // 不是别的题的编号）
+    let digit = (index + 1).to_string();
+    terminal
+        .send(&digit)
+        .map_err(|e| StageAbort::delivery(format!("重投数字投递失败（{e}）")))?;
+    sent_keys.push(digit);
+    terminal.settle();
+    // 重投后同款基线变化轮询（窗尽/原样 → 两投中止）
+    match poll_changed_until_window(q_idx, baseline, poll)? {
+        ChangedPoll::Advanced(s) => Ok(CodexSelectOutcome {
+            sent_keys: sent_keys.clone(),
+            reanswered: s.unanswered == k_base,
+            already_submitted: false,
+        }),
+        ChangedPoll::ChangedNotAdvanced | ChangedPoll::WindowExhausted => Err(StageAbort::screen(
+            "codex 单选：数字两投后题号仍未推进——已中止；请核对终端（选项可能已选中，勿重复点选）",
+        )),
+    }
+}
+
+/// 基线变化轮询的**单拍三态**（评审 P0-1 内部产物）。
+enum ChangedPoll {
+    /// 题号已推进到 q_idx+1（带落点快照）
+    Advanced(crate::inject::question_screen_oc::CodexQuestionSnapshot),
+    /// 屏面变了但题号未推进（形态异常）
+    ChangedNotAdvanced,
+    /// 窗尽（Ok(None)）或各拍屏面一直与基线原样相同
+    WindowExhausted,
+}
+
+/// **基线变化轮询**（评审 P0-1）：有界 4 拍调 `poll()`——
+/// - 任一拍解析出 `question_idx == q_idx+1` → [`ChangedPoll::Advanced`]；
+/// - 任一拍屏面 ≠ 基线但题号未推进 → [`ChangedPoll::ChangedNotAdvanced`]；
+/// - `Ok(None)`（窗尽）或 4 拍全原样 → [`ChangedPoll::WindowExhausted`]；
+/// - `Err` → 屏读失败中止（原样透传文案）。
+fn poll_changed_until_window(
+    q_idx: usize,
+    baseline: &[String],
+    poll: impl Fn() -> Result<Option<Vec<String>>, String>,
+) -> Result<ChangedPoll, StageAbort> {
+    use crate::inject::question_screen_oc::codex_question_screen_snapshot;
+    const CHANGE_POLL_ROUNDS: usize = 4;
+    for _ in 0..CHANGE_POLL_ROUNDS {
+        match poll().map_err(StageAbort::screen)? {
+            Some(lines) => {
+                if let Some(s) =
+                    codex_question_screen_snapshot(&lines).filter(|s| s.question_idx == q_idx + 1)
+                {
+                    return Ok(ChangedPoll::Advanced(s));
+                }
+                if lines != baseline {
+                    // 屏变了但题号没推进——形态异常（数字可能被吃进别处）
+                    return Ok(ChangedPoll::ChangedNotAdvanced);
+                }
+                // 原样 == 基线：TUI 未重绘，不能下结论 → 继续下一拍
+            }
+            None => return Ok(ChangedPoll::WindowExhausted), // 窗尽
+        }
+    }
+    // 有界耗尽且每拍都原样——等价于「窗内未见变化」
+    Ok(ChangedPoll::WindowExhausted)
+}
+
+/// 末题分支（§3.3）：焦点走位（j/k 最短环绕，每步复读）→ 空格 → 归零闸（双验）→
+/// 双条件闸 → enter。**禁数字**（末题数字 = 整卷提交，定案 A）。
+///
+/// `q_idx`——入口闸已验证的题号（评审 P1-1：提交闸复读快照必须与它对位，
+/// 防等待窗口内用户 h/l 切题后 enter 落非末题）。
+fn run_codex_select_final<T: MenuTerminal>(
+    q_idx: usize,
+    index: usize,
+    entry: crate::inject::question_screen_oc::CodexQuestionSnapshot,
+    poll: impl Fn() -> Result<Option<Vec<String>>, String>,
+    terminal: &mut T,
+    sent_keys: &mut Vec<String>,
+) -> Result<CodexSelectOutcome, StageAbort> {
+    use crate::inject::anchor_ledger;
+    use crate::inject::question_screen_oc::codex_question_screen_snapshot;
+    let target = index;
+    let m = entry.options.len();
+
+    // 1. 焦点起点：读不到 › = 不猜（选中态打在错误的行上不可逆——末题回车就交卷）
+    let f0 = entry.focused.ok_or_else(|| {
+        StageAbort::screen(
+            "codex 末题：读不到焦点行（› 缺席）——不猜起点，已中止，未发任何键；请核对终端",
+        )
+    })?;
+
+    // 1a. 已答改答不同项·如实中止（评审 P1-2，按底料 §3 #5 dump 直接证据——
+    //     须在走位**之前**判：此形态一旦走位，发出去的 j/k 都是在为「换选」
+    //     铺路，而 0.160.0 实测已答题上空格 = 先反选旧答案（计数 +1）、新项
+    //     未选中——「换选」需要「空格选新 → 空格……」多拍编排且旧答案已被动过，
+    //     中途失败会留下「旧答案被清掉」的半程态。MAM 不冒进，请终端人工换选）。
+    //     改答同项（焦点=目标）与未答主路径不受影响。
+    if entry.unanswered == 0 && f0 != target {
+        return Err(StageAbort::screen(
+            "codex 末题：本题已作答且焦点不在已选项——0.160.0 实测此形态下空格=反选旧答案而非换选（底料 §3 #5），远程代答会先破坏旧答案；已中止，未发任何键；请到终端人工换选",
+        ));
+    }
+
+    // 1b. 目标越界卫语句（评审 P2-4）：target 来自手机卡载荷 index——载荷与屏上
+    //     选项数不符（GET 后用户终端面板变化等）时，走位取模算术会静默算出错误
+    //     步数，半程键已发才发现走错行。发键前零键中止。
+    if target >= m {
+        return Err(StageAbort::screen(format!(
+            "codex 末题：目标选项序号 {target} 越界（屏上面板共 {m} 项）——已中止，未发任何键；载荷与终端面板可能不同步，请刷新后重试",
+        )));
+    }
+
+    // 2. 最短环绕走位：down=(target+m-f0)%m，up=(f0+m-target)%m（m 选项数，双向环绕；
+    //    相等取 j——底料未给「等距偏好」证据，j 是面板默认推进方向）
+    let down = (target + m - f0) % m;
+    let up = (f0 + m - target) % m;
+    let walk_key = if up < down { "k" } else { "j" };
+    let steps = down.min(up);
+    let mut focused = f0;
+    for _ in 0..steps {
+        terminal
+            .send(walk_key)
+            .map_err(|e| StageAbort::delivery(format!("走位键 {walk_key} 投递失败（{e}）")))?;
+        sent_keys.push(walk_key.to_string());
+        terminal.settle();
+        // 每步复读核验到位（不批量盲发——§3.3 步 2：选中态若错，归零闸发现不了选错了谁）
+        match terminal.read() {
+            Some(lines) => match codex_question_screen_snapshot(&lines) {
+                Some(s) => match s.focused {
+                    Some(f) if f == target => {
+                        focused = f;
+                        break;
+                    }
+                    _ => {
+                        focused = s.focused.unwrap_or(focused);
+                        // 焦点未到目标——继续走（有界耗尽由外层 for + 下面的终判兜）
+                    }
+                },
+                None => {
+                    return Err(StageAbort::screen(
+                        "codex 末题：走位中读屏失败或面板形态崩——已中止；请核对终端",
+                    ))
+                }
+            },
+            None => {
+                return Err(StageAbort::screen(
+                    "codex 末题：走位中读屏失败或面板形态崩——已中止；请核对终端",
+                ))
+            }
+        }
+    }
+    if focused != target {
+        // 有界（m+2）耗尽仍未到目标行——不猜不硬走
+        return Err(StageAbort::screen(
+            "codex 末题：走位有界耗尽仍未到目标行——已中止；请核对终端",
+        ));
+    }
+
+    // 3. 已答特判收尾（评审 P1-2 的跳空格分支）：入场已归零 ∧ 焦点即目标（改答
+    //    同项）→ 跳过空格（再按 = 反选，定案 3）；未答（k>0）主路径 → 发空格选中
+    //    （改答不同项的分支已在 1a 中止，走不到这里）。
+    let already_on_target_zero = entry.unanswered == 0 && f0 == target;
+    if !already_on_target_zero {
+        // 键名 "space" 走注入通道的既有映射（与 run_toggle_stages 同款；通道侧
+        // 按 codex 底料 §2.3 落成字符形态 `-Char ' '`），记账用同一语义名
+        terminal
+            .send("space")
+            .map_err(|e| StageAbort::delivery(format!("空格投递失败（{e}）")))?;
+        sent_keys.push("space".to_string());
+        terminal.settle();
+    }
+
+    // 4. 归零闸（双验·有界轮询，评审 P2-9 同款修法）：单拍读屏可能落在未重绘旧帧
+    //    ——不能一拍定生死。有界 4 拍：任一拍计数段消失（unanswered==0）**且**焦点
+    //    仍在目标行（选中不改高亮位——若焦点漂了 = 可能反选了已选项，如实中止不发
+    //    提交键）→ 过；窗尽或各拍全不符 → 原中止。
+    let mut zero_ok = false;
+    for _ in 0..4 {
+        match poll().map_err(StageAbort::screen)? {
+            Some(lines) => {
+                if codex_question_screen_snapshot(&lines)
+                    .is_some_and(|s| s.unanswered == 0 && s.focused == Some(target))
+                {
+                    zero_ok = true;
+                    break;
+                }
+                // 未归零/焦点漂——下一拍再验（TUI 重绘竞态窗口）
+            }
+            None => break, // 窗尽
+        }
+    }
+    if !zero_ok {
+        return Err(StageAbort::screen(
+            "codex 末题：空格后未归零或焦点漂移（可能反选了已选项）——已中止，未发提交键；请核对终端",
+        ));
+    }
+
+    // 5. 双条件闸（提交，§3.3 步 6）：再读一屏——
+    //    - 读不到屏（None）= 面板大概率已滚出/消失——保守按「形态不符」中止，不冒充
+    //      已交卷（already_submitted 只留给「读到了屏且确认面板不在」的实证形态）；
+    let second = terminal.read();
+    let Some(lines) = second else {
+        return Err(StageAbort::screen(
+            "codex 末题：提交闸读不到屏——已中止，未发提交键；请人工核对终端",
+        ));
+    };
+    let snap2 = codex_question_screen_snapshot(&lines);
+    let Some(s2) = snap2 else {
+        // 解析不到面板（评审 P1-2 三分派）：该分支拿到的是 lines（读到了屏）——
+        // 「面板消失」的结论必须带终态证据，不能拿「读到屏但形态怪」冒充已交卷：
+        // 1. 摘要头锚（QUESTION/RECEIPT，`• Questions n/n answered`）在场 →
+        //    **已交卷实证**（外部提交如 notes 回车连带）→ already_submitted=true；
+        // 2. 确认屏标题锚（QUESTION_REVIEW/TITLE）在场 → 前序动作已错位——
+        //    中止引导人工（不代答不提交）；
+        // 3. 两者皆无 → 面板异常消失——中止不发提交键（红色红线：不确定屏上
+        //    是什么都发 enter = 可能整卷提交/误触别的对话框）。
+        // sent_keys 原样返回（如实记账——若此前发过走位/空格，审计必须留痕）。
+        // 摘要头判定用双词谓词（评审 P2-3：裸词 detect 对本槽过宽——正文任何
+        // answered 单词都会误命中）。
+        let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+        if codex_receipt_present(&lines) {
+            return Ok(CodexSelectOutcome {
+                sent_keys: sent_keys.clone(),
+                reanswered: false,
+                already_submitted: true,
+            });
+        }
+        if anchor_ledger::detect(
+            &lowered,
+            "codex",
+            anchor_ledger::scenario::QUESTION_REVIEW,
+            anchor_ledger::slot::TITLE,
+        )
+        .is_some()
+        {
+            return Err(StageAbort::screen(
+                "codex：屏上是未答完确认屏——前序动作已错位，MAM 不代答；请到终端人工处置",
+            ));
+        }
+        return Err(StageAbort::screen(
+            "codex 末题：提交闸读不到问答面板且未见提交摘要（面板异常消失）——已中止，未发提交键；请人工核对终端",
+        ));
+    };
+    //    - 提交闸谓词 = 归零闸四条件全验（评审 P1-1）：题号未漂移 ∧ 仍是末题 ∧
+    //      计数段消失 ∧ 焦点仍在目标行。窗口期内用户 h/l 切走（k=0 在任何题都
+    //      成立——只验归零挡不住切题）时 enter 会落在非末题上 = 选中+推进，
+    //      绝不发键。
+    if s2.question_idx != q_idx || !s2.is_last {
+        return Err(StageAbort::screen(
+            "codex 末题：提交闸发现屏上已切离本题/末题（等待窗口内终端被操作）——已中止，未发提交键；请核对终端",
+        ));
+    }
+    if s2.unanswered != 0 || s2.focused != Some(target) {
+        return Err(StageAbort::screen(
+            "codex 末题：归零后计数又变化或焦点漂移——中止，未发提交键；请核对终端",
+        ));
+    }
+    //    - 面板在场 ∧ 计数段消失 → 发回车显式提交整卷（全答完无确认，定案 5）
+    terminal
+        .send("enter")
+        .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
+    sent_keys.push("enter".to_string());
+    terminal.settle();
+
+    // 6. 终态正向锚尽力核验（摘要头 `Questions n/n answered`）：命中与否只记
+    //    debug 不翻供——摘要屏可能被后续输出刷出可见窗，读屏三态都不改变成功结论。
+    //    判定用双词谓词（评审 P2-3：裸词 detect 对本槽过宽）。
+    match poll() {
+        Ok(Some(lines)) => {
+            let hit = codex_receipt_present(&lines);
+            log::debug!("codex select 终态锚核验：hit={hit}");
+        }
+        Ok(None) => {
+            log::debug!("codex select 终态锚核验：窗尽未见摘要头（不翻供）");
+        }
+        Err(_) => {
+            log::debug!("codex select 终态锚核验：读屏失败（不翻供）");
+        }
+    }
+    Ok(CodexSelectOutcome {
+        sent_keys: sent_keys.clone(),
+        reanswered: false,
+        already_submitted: false,
+    })
+}
+
+// ============================================================
+// Task 6：codex 切题 advance 阶段机（设计 §3.5）
+// 取证依据：2026-10-09 底料 `docs/superpowers/specs/2026-10-08-codex-160-question-
+// 屏读底料.md` §1 定案总表。**键序更正（底料 §1）：切题通道 = vim h/l（h=上一题
+// l=下一题）——VT 箭头与真 VK 箭头对 codex 面板全部无效（S2 上真 VK_LEFT 未切题
+// 实证）。切题环形（末→首、首→末）；单题上 h/l 无任何效果（S3 footer 无导航段，
+// VK 左右零变化实证——h/l 同理）。切题后焦点落已选项、答案保留。
+// ============================================================
+
+/// codex 切题阶段机的结果（设计 §3.5 输出契约）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexAdvanceOutcome {
+    /// 屏读核验题号已变（i → i'，含环形到达末题 l 回首题 i: n→1）——到达。
+    Arrived,
+    /// 题号未变（单题/窗内无效）或窗尽未见变化——如实未生效（dispatch 层转
+    /// Failed「未生效，可重试」；不猜不中止，键已发出由用户决定是否重试）。
+    NoEffect,
+}
+
+/// codex **切题 advance 阶段机**：发 h/l → 屏读核验题号变化（设计 §3.5）。
+///
+/// # 取证定案（2026-10-09 底料，实现注释留档）
+/// 1. **切题通道 = vim h/l**（底料 §1 键序更正）：h=上一题、l=下一题——**不是
+///    箭头键**（VT 箭头与真 VK 箭头对 codex 面板全部无效：S2 上真 VK_LEFT 发出
+///    后屏零变化实证）。
+/// 2. **切题环形**（底料 §1）：末题 l 回首题、首题 h 回末题——本函数**不裁剪**
+///    方向，环形语义透传；到达判据 = question_idx 变化（`!=` before），故末题
+///    l 回首题（i: n→1，即 1→0）同样被检测为 Arrived。
+/// 3. **单题无导航**（底料 S3）：单题面板 footer 无 `←/→ to navigate questions`
+///    导航段，h/l 无任何效果（S3 上 VK 左右零变化实证——h/l 同理）→ 屏解析成功
+///    但 idx 未变 = NoEffect（如实未生效）。
+/// 4. **切题后焦点落已选项、答案保留**——切题不产生作答副作用，无需计数闸。
+///
+/// # 流程（设计 §3.5 + 评审 P2-2 基线轮询）
+/// 1. `terminal.read()` 首屏 → 解析面板存 baseline（`before` = 题号基线）；
+///    读不到 = **零键中止**；
+/// 2. 发键（Prev→"h" / Next→"l"，send → 记账 → settle，与既有阶段机同款三步）；
+/// 3. **有界 4 拍变化轮询**（评审 P2-2：单拍判定可能落在未重绘陈旧帧上，同
+///    select 侧 P0-1 反模式）：任一拍 idx != before → `Arrived`；屏 ≠ baseline
+///    但 idx 未变（h/l 被吞但屏滚动了）→ 下一拍再看（窗内 idx 变了仍 Arrived，
+///    全窗尽未变 → `NoEffect`）；屏原样 → 下一拍；`Ok(None)` 窗尽 → `NoEffect`
+///    （现有语义）；解析不出面板 → 中止（形态崩）；`Err(e)` → 中止（读屏失败）。
+///
+/// # 参数
+/// `poll()`——`Ok(Some(屏行))` = 动作后屏已就绪；`Ok(None)` = 轮询窗尽未见变化；
+/// `Err` = 读屏失败。
+pub fn run_codex_advance_stages<T: MenuTerminal>(
+    direction: crate::inject::question::NavDirection,
+    poll: impl Fn() -> Result<Option<Vec<String>>, String>,
+    terminal: &mut T,
+) -> Result<CodexAdvanceOutcome, StageAbort> {
+    use crate::inject::question_screen_oc::codex_question_screen_snapshot;
+
+    // ---------- 1. 入口闸：读首屏，解析面板 ----------
+    // 读不到 = 零键中止（屏读为准：动手前必须见到面板）
+    let first = terminal.read().ok_or_else(|| {
+        StageAbort::screen("codex 切题：读不到面板——已中止，未发任何键；请核对终端")
+    })?;
+    let before = codex_question_screen_snapshot(&first)
+        .ok_or_else(|| {
+            StageAbort::screen("codex 切题：读不到面板——已中止，未发任何键；请核对终端")
+        })?
+        .question_idx;
+
+    // ---------- 2. 发键：h=上一题 / l=下一题（底料 §1 键序更正，非箭头键）----------
+    let key = match direction {
+        crate::inject::question::NavDirection::Prev => "h",
+        crate::inject::question::NavDirection::Next => "l",
+    };
+    terminal
+        .send(key)
+        .map_err(|e| StageAbort::delivery(format!("{key} 投递失败（{e}）")))?;
+    terminal.settle();
+
+    // ---------- 3. 核验：有界变化轮询（评审 P2-2，同 select 侧 P0-1 修法）----------
+    // 单拍判定可能落在未重绘的陈旧帧上（屏还是 baseline）——一拍 NoEffect 会把
+    // 迟到位的切题误报「未生效」。有界 4 拍：
+    // - 任一拍解析出 question_idx != before → Arrived（到达即返，含环形）；
+    // - 屏面 ≠ baseline 但 idx 未变（变化却没切题——h/l 被吞但屏滚动了）→ 下一拍
+    //   再看（4 拍内 idx 变了仍 Arrived；全窗尽 idx 未变 → NoEffect）；
+    // - 屏面原样 == baseline → 下一拍（TUI 未重绘，不能下结论）；
+    // - Ok(None)（窗尽）→ NoEffect（现有语义）；
+    // - Err → 读屏失败中止；解析不出面板 → 形态崩中止（h/l 已发出，如实留痕）。
+    const ADVANCE_POLL_ROUNDS: usize = 4;
+    for _ in 0..ADVANCE_POLL_ROUNDS {
+        match poll().map_err(StageAbort::screen)? {
+            Some(lines) => {
+                if let Some(s) = codex_question_screen_snapshot(&lines) {
+                    // 屏解析成功且题号变了（含环形：末题 l 回首题）→ 到达
+                    if s.question_idx != before {
+                        return Ok(CodexAdvanceOutcome::Arrived);
+                    }
+                    if lines == first {
+                        // 原样 == 基线：TUI 未重绘，不能下结论 → 下一拍
+                        continue;
+                    }
+                    // 屏变了但题号没变（h/l 被吞但屏滚动了）→ 下一拍再看：
+                    // 剩余拍内 idx 变了仍 Arrived，全窗尽未变 → 循环外 NoEffect
+                    continue;
+                }
+                // 切题后面板形态崩（解析不出面板——屏上既无题号头也无 footer 锚）
+                return Err(StageAbort::screen(format!(
+                    "codex 切题：切题后面板形态崩（解析不出）——已中止（{key} 已发出）；请核对终端"
+                )));
+            }
+            // 窗尽：窗内未见题号变化——如实未生效（不猜不冒充到达，也不中止）
+            None => return Ok(CodexAdvanceOutcome::NoEffect),
+        }
+    }
+    // 有界耗尽且每拍题号都未变——如实未生效（键已发出由用户决定是否重试）
+    Ok(CodexAdvanceOutcome::NoEffect)
 }
 
 // ============================================================
@@ -4530,15 +5170,20 @@ where
 
 /// 自由作答的**工具支持面**（v1 只对 claude 放行，§2.4）：
 /// - claude：K4–K7 实机定案（数字定位 → 文本 → 回车）；
-/// - 其余工具的自由作答序列**未定案**（§2.4 列的 codex `tab notes` / opencode
-///   `own answer` / kimi `Other` 均未实机取证）→ 端点按 §2.8 降级：前端渲染
-///   「请在终端作答」，**不假装能发**。
+/// - 其余工具的自由作答序列**未定案**（§2.4 列的 opencode
+///   `own answer` / kimi `Other` 之外——codex 见下方取证回填）→ 端点按 §2.8 降级：
+///   前端渲染「请在终端作答」，**不假装能发**。
 pub fn free_text_supported(tool: &str) -> bool {
-    // 批次戊 E4/E5 更新：kimi（Other 行，戊探B E-B8 全链）与 codex（Tab 备注，
-    // 戊探C 全链：Tab → 打字 → Enter=提交当前高亮项+备注）均已实机定案；
-    // 形态门仍只放单选（codex 多选形态未取证 / kimi 多选 Other 无编号）——
-    // 见 [`free_text_shape_supported`]。opencode 走 E6 的 own answer 形态，另行升格。
-    matches!(tool, "claude" | "kimi" | "codex" | "opencode")
+    // 批次戊 E4/E6 更新：kimi（Other 行，戊探B E-B8 全链）与 opencode（own answer
+    // 形态）均已实机定案；形态门仍只放单选（kimi 多选 Other 无编号）——
+    // 见 [`free_text_shape_supported`]。
+    //
+    // **codex 0.160.0 取证回填（2026-10-09）移除**：notes 文本不随卷提交——notes 态
+    // 打字后回车，实测摘要屏 `answer` 落在焦点行，用户备注被静默丢弃（底料
+    // `2026-10-08-codex-160-question-屏读底料.md` §5）。Tab→打字→Enter 链的净效果 =
+    // 把焦点行提交为答案，违反「屏读为准 / 不假装能发」——远程自由作答停用，
+    // 路由侧具名中止（[`StagePlan::CodexFreeTextRetired`]，见 remote/api.rs）。
+    matches!(tool, "claude" | "kimi" | "opencode")
 }
 
 /// 自由作答的**题目形态支持面**（复评 F6-3：多选卡不提供自由作答）。
@@ -4657,6 +5302,11 @@ pub fn action_supported(
         // kimi 多题切题（2026-10-06，2.1.1 活体定案）：`→`/tab 前向、`←` 后向
         // （Review 页 `←` = 返回修改）——走 KimiAdvance 臂（屏读到达验证），门放行
         AnswerAction::Advance if tool == "kimi" => Ok(()),
+        // codex 多题切题（2026-10-09 屏读底料定案）：vim h/l 环形切题（h=上一题
+        // l=下一题；箭头族对 codex 面板无效——VT 与真 VK 箭头零变化实证）——走
+        // CodexAdvance 臂（屏读到达验证），门放行（同 kimi 先例：键在臂内参数化，
+        // `answer_key_sequence_for` 的 codex Advance 拒绝臂保持不动作纵深防御）
+        AnswerAction::Advance if tool == "codex" => Ok(()),
         // claude 的多题切题（2026-09-24 起）：走阶段机（走位到 Next + 回车 + 分类）。
         // 其余工具维持既有档（opencode=tab 单键；codex 未实测 → 拒）
         AnswerAction::Advance => match question_key_profile(tool) {
@@ -4722,8 +5372,9 @@ pub fn action_supported(
             //   编辑 + 勾选自动置上 + 回车会取消勾选——ClaudeMultiFreeText 闭环）；
             // - opencode：own answer 方言单/多选皆可（戊探A E-A2/E-A3 双形态实测 +
             //   2026-10-04 用户活体双段 toggle 语义定案——OpencodeOwnAnswer 编排）；
-            // - codex：Space 选中 + Tab notes 在多选题全链实证（探测批 C 定案——
-            //   CodexNotes 编排，footer 锚定位与题型无关）；
+            // - codex：**已移除**（2026-10-09 取证回填，0.160.0 notes 不落卷——
+            //   `free_text_supported` 已拒，codex 在上方检查即返回 ToolUnverified，
+            //   本豁免名单若仍留 codex 会误导后来者以为可用）；
             // - kimi：2026-10-06 用户指令点亮（推翻探测批 K「多选不接入」裁决，
             //   multiFreeText 旗标同批点亮）：走 KimiFreeText 阶段机——Other 行
             //   编号**按屏自适应**（显示编号 `[N]` 优先；多选无编号形态按 checkbox
@@ -4731,7 +5382,7 @@ pub fn action_supported(
             //   **不代发确认键**（单题 E-B8 的「保存即确认」语义在多题流会把未答
             //   题一并提交——17:00 用户实录事故）。可达性与形态把守都在阶段机
             //   内（屏读定位失败 = 如实中止），门不再一刀切。
-            if matches!(tool, "claude" | "opencode" | "codex" | "kimi") {
+            if matches!(tool, "claude" | "opencode" | "kimi") {
                 let _ = &q; // 多选形态由编排屏读判定（free-row 解析不出即中止）
             } else if !free_text_shape_supported(q) {
                 return Err(ActionRefusal::ToolUnverified(
@@ -4781,6 +5432,70 @@ pub fn multi_question_submit_supported(tool: &str) -> Result<(), ActionRefusal> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **新增（评审 P2-3）RECEIPT 双词谓词收窄锁**：
+    /// - 摘要头 `• Questions 2/2 answered` → **true**（唯一真词形）；
+    /// - 题号头 `Question 1/2 (2 unanswered)` → **false（硬断言）**——题号头是
+    ///   单数 Question 且无 answered 词，裸词锚语义下这行不中但正文任意
+    ///   answered 单词会中；双词组合后题号头/裸单词面归零；
+    /// - 正文复述双词齐活（`I have answered your questions`）→ true（**已知残余**，
+    ///   注释登记：比裸单词锚收窄一个量级即可，不追求零误报）；
+    /// - 裸 answered 单词行（`esc to interrupt answered` 造形）→ false。
+    #[test]
+    fn codex_receipt_present_narrowed() {
+        use live_fixtures as f;
+        // 摘要头（活体夹具）→ true
+        assert!(
+            codex_receipt_present(&f::codex_answered_summary()),
+            "摘要头 Questions n/n answered 必须命中"
+        );
+        assert!(
+            codex_receipt_present(&f::codex_answered_summary3()),
+            "N=3 摘要头必须命中"
+        );
+        // 题号头（单数 Question + unanswered）→ false（硬断言）
+        assert!(
+            !codex_receipt_present(&f::codex_s1_q1()),
+            "题号头 Question 1/2 (2 unanswered) 不得命中 RECEIPT"
+        );
+        assert!(
+            !codex_receipt_present(&f::codex_s1_q2()),
+            "题号头 Question 2/2 (1 unanswered) 不得命中 RECEIPT"
+        );
+        // 任意 answered 裸单词（无 questions 同行）→ false
+        let bare = lines(&["esc to interrupt answered"]);
+        assert!(
+            !codex_receipt_present(&bare),
+            "裸 answered 单词不得命中（双词组合收窄）"
+        );
+        // 已知残余：正文复述双词齐活 → true（登记为可接受，比裸词收窄一个量级）
+        let recap = lines(&["I have answered your questions"]);
+        assert!(
+            codex_receipt_present(&recap),
+            "正文双词齐活仍命中——已知残余（注释登记），非回归"
+        );
+    }
+
+    /// **新增（评审 P2-3）账本两行登记 + 谓词与账本词形源一致性**：
+    /// candidates 全集（旧行 `answered` + 新行 `questions`）顺序稳定（账本序）；
+    /// 旧行保留作向后兼容（append-only），判定不回归到裸词。
+    #[test]
+    fn codex_receipt_ledger_rows_kept_as_wordform_registry() {
+        let rows = crate::inject::anchor_ledger::candidates(
+            "codex",
+            crate::inject::anchor_ledger::scenario::QUESTION,
+            crate::inject::anchor_ledger::slot::RECEIPT,
+        );
+        assert_eq!(rows.len(), 2, "codex RECEIPT 槽两行（旧行不删 + 新特异行）");
+        assert_eq!(rows[0].text, "answered", "旧行原样保留（append-only）");
+        assert_eq!(rows[1].text, "questions", "特异行已追加");
+        assert_eq!(rows[1].observed_version, "0.160.0");
+        // 谓词对摘要头词形的判定与账本特异行词形一致（questions 在场才可能命中）
+        assert!(codex_answered_present(
+            &live_fixtures::codex_answered_summary()
+        ));
+        assert!(!codex_answered_present(&live_fixtures::codex_s1_q1()));
+    }
 
     /// 探测档案 §3 单选真实夹具（缩录）——结构往返
     const SINGLE_JSON: &str = r#"{"questions":[{"header":"Next step","multiSelect":false,"options":[{"description":"Explain how AskUserQuestion works and when it's used.","label":"Tool demo"},{"description":"Start a coding or file task in this directory.","label":"Start a task"},{"description":"You have no further request for now.","label":"Nothing yet"}],"question":"This is a demo question — what would you like to do next?"}]}"#;
@@ -5321,21 +6036,25 @@ mod tests {
         assert!(answer_key_sequence_for("claude", AnswerAction::Advance, None, &q).is_err());
     }
 
-    /// **2026-09-23 接线回归锁 + 2026-09-24 claude 接入改写**：可用性门——opencode
-    /// 与 claude 的 advance 放行（各自阶段机）；codex 同档（SingleDigitSubmit）但
-    /// advance/多选 submit 不放行；单选题 submit 防呆保持；多题 submit 专用门不看
+    /// **2026-09-23 接线回归锁 + 2026-09-24 claude 接入改写 + 2026-10-09 codex 接入改写**：
+    /// 可用性门——opencode 与 claude 的 advance 放行（各自阶段机）；codex advance
+    /// 2026-10-09 起放行（h/l 环形切题底料定案——走 CodexAdvance 阶段机，键在臂内
+    /// 参数化）；多选 submit 不放行；单选题 submit 防呆保持；多题 submit 专用门不看
     /// 题目形态（第 1 题是单选的问卷也放行 kimi/opencode/claude）。
     #[test]
     fn action_gates_for_opencode_multi_question_line() {
         let m = multi();
         let s = single();
         // advance：opencode 放行（tab 纯导航）；claude 放行（2026-09-24 起走
-        // run_advance_stages 阶段机）；codex 拒（未实测）
+        // run_advance_stages 阶段机）；codex 放行（2026-10-09 h/l 底料定案——走
+        // CodexAdvance 阶段机，同 kimi 先例的门臂分工）
         assert!(action_supported("opencode", AnswerAction::Advance, None, &m).is_ok());
         assert!(action_supported("claude", AnswerAction::Advance, None, &m).is_ok());
-        assert!(action_supported("codex", AnswerAction::Advance, None, &m).is_err());
-        // 静态序列层：claude 的 advance 仍 Err（必须经阶段机——盲发防线）
+        assert!(action_supported("codex", AnswerAction::Advance, None, &m).is_ok());
+        // 静态序列层：claude/codex 的 advance 仍 Err（必须经阶段机——盲发防线；
+        // codex 的内核拒绝臂保持不动是纵深防御，不经端点分派的调用方仍被拒绝）
         assert!(answer_key_sequence_for("claude", AnswerAction::Advance, None, &m).is_err());
+        assert!(answer_key_sequence_for("codex", AnswerAction::Advance, None, &m).is_err());
         // opencode 多选 submit：接线后放行（走 run_opencode_submit_stages）
         assert!(action_supported("opencode", AnswerAction::Submit, None, &m).is_ok());
         // codex 多选 submit 仍拒（多选未实测）
@@ -5351,12 +6070,13 @@ mod tests {
     }
 
     /// **2026-10-05 实机回归锁**：多选自由作答的形态门豁免面必须与 GET 能力位
-    /// `multiFreeText`（claude|opencode|codex）同面——opencode（own answer 方言）
-    /// 与 codex（Tab notes，探测批 C）多选放行；kimi（探测批 K 不接入）多选仍拒。
-    /// 此前豁免面漏了 opencode/codex：GET 渲染输入框、POST 必撞 409 tool_readonly
-    /// （用户实机撞线：输入框打字点发送 →「该工具的远程作答尚未实测」）。
-    /// **codex 多选切勾接线锁**（2026-10-05 探测批 C 定案 C2 接线）：多选
-    /// Toggle = ↓×(index) 前向走位 + Space（选中不前进，作用于高亮行）；
+    /// `multiFreeText` 同面——opencode（own answer 方言）多选放行；kimi（2026-10-06
+    /// 点亮）多选放行。此前豁免面漏了 opencode/codex：GET 渲染输入框、POST 必撞
+    /// 409 tool_readonly（用户实机撞线：输入框打字点发送 →「该工具的远程作答尚未
+    /// 实测」）。**codex 2026-10-09 取证回填移除**：0.160.0 notes 不落卷（底料 §5）
+    /// ——`free_text_supported` 已拒，单/多选两形态都须 409（回执文案引导终端作答，
+    /// 不是静默失败）。**codex 多选切勾接线锁**（2026-10-05 探测批 C 定案 C2 接线）：
+    /// 多选 Toggle = ↓×(index) 前向走位 + Space（选中不前进，作用于高亮行）；
     /// index 越界拒绝；单选不经过此路径（toggle 仅多选题）。
     #[test]
     fn codex_multi_toggle_downs_plus_space() {
@@ -5378,18 +6098,25 @@ mod tests {
         let m = multi();
         assert!(action_supported("claude", AnswerAction::FreeText, None, &m).is_ok());
         assert!(action_supported("opencode", AnswerAction::FreeText, None, &m).is_ok());
-        assert!(action_supported("codex", AnswerAction::FreeText, None, &m).is_ok());
-        // kimi 2026-10-06 点亮（用户指令，推翻探测批 K「多选不接入」裁决）——门与
+        // codex 2026-10-09 取证回填：free_text_supported 已拒 → 门在 FreeText 首查
+        // 即 ToolUnverified（单/多选同拒）——路由侧具名中止 CodexFreeTextRetired
+        assert!(
+            action_supported("codex", AnswerAction::FreeText, None, &m).is_err(),
+            "codex 自由作答停用（notes 不落卷）后门必须先拒"
+        );
         // GET multiFreeText 旗标**同面**是本测试的存在意义：旗标开而门拒 = 用户
         // 必撞 409（2026-10-05 实机回归即此形态）
         assert!(
             action_supported("kimi", AnswerAction::FreeText, None, &m).is_ok(),
             "kimi 多选 freeText 与 multiFreeText 旗标同面放行（可达性由阶段机屏读把守）"
         );
-        // 单选面零变化（各家单选自由作答的既有定案维持放行）
+        // 单选面（codex 同步收口；其余各家单选自由作答的既有定案维持放行）
         let s = single();
         assert!(action_supported("kimi", AnswerAction::FreeText, None, &s).is_ok());
-        assert!(action_supported("codex", AnswerAction::FreeText, None, &s).is_ok());
+        assert!(
+            action_supported("codex", AnswerAction::FreeText, None, &s).is_err(),
+            "codex 单选自由作答同样停用（具名中止，引导终端作答）"
+        );
         assert!(action_supported("opencode", AnswerAction::FreeText, None, &s).is_ok());
         assert!(action_supported("claude", AnswerAction::FreeText, None, &s).is_ok());
     }
@@ -7504,8 +8231,9 @@ mod tests {
             shape.submit_key, "enter",
             "文本之后唯一按键是回车（不带数字不带 Esc）"
         );
-        // E4/E5/E6：kimi（Other 行）/codex（Tab 备注）/opencode（own answer）均已
-        // 升格为支持；仍未定案的只剩黑盒/无头家
+        // E4/E6：kimi（Other 行）/opencode（own answer）已升格为支持；
+        // codex 2026-10-09 取证回填回撤（notes 不落卷，底料 §5）；仍未定案的只剩
+        // 黑盒/无头家
         for tool in ["zcode", "dsh", "workbuddy", ""] {
             let err =
                 free_text_shape(tool).expect_err(&format!("{tool} 的自由作答序列未定案，必须拒绝"));
@@ -7519,6 +8247,21 @@ mod tests {
         let spec = free_text_family_spec();
         assert_eq!(spec.family, crate::inject::families::TuiFamily::RawVt);
         assert_eq!(spec.verified_with, "2.1.251");
+    }
+
+    /// **codex 自由作答停用锁**（2026-10-09 取证回填，0.160.0 notes 不落卷——底料
+    /// `2026-10-08-codex-160-question-屏读底料.md` §5）：Tab→打字→Enter 的净效果 =
+    /// 提交焦点行、用户文本静默丢失——违反「屏读为准 / 不假装能发」，从支持面移除。
+    /// 还原动作：把 `"codex"` 加回 `free_text_supported` 名单 → 本用例先红。
+    #[test]
+    fn codex_free_text_no_longer_supported() {
+        assert!(
+            !free_text_supported("codex"),
+            "codex 0.160.0 实测 notes 文本不随卷提交——远程自由作答必须停用"
+        );
+        // 形态描述同步拒绝（端点据此降级，不假装能发）
+        let err = free_text_shape("codex").expect_err("停用后 free_text_shape 必须拒绝");
+        assert!(err.contains("codex"), "拒绝原因带工具名：{err}");
     }
 
     /// wire ↔ 动作：`freeText` 可解析（camelCase）+ 审计摘要只记动作名（**不记正文**）。
@@ -7813,6 +8556,661 @@ mod tests {
             direction,
         );
         (result, sent.into_inner())
+    }
+
+    // ===== Task 5：codex 单选 select 阶段机（设计 §3.2/§3.3；底料定案 A–H）=====
+
+    /// codex select 脚本驱动器：screens 逐屏出队；send 记录键；poll 消费下一屏
+    /// （队空 = Ok(None) 窗尽）；terminal.read() 同样出队（队空 = None）。
+    /// 注意：send 后 settle 不推进屏——屏推进由驱动器脚本序列显式编排，
+    /// terminal.read() 与 poll() 共用同一游标（send/settle 只是记录）。
+    /// `expected_total` = 手机卡载荷题数（F10 交叉核对入参；s1 系列 = 2 / s3 = 1）。
+    fn run_codex_select_script(
+        q_idx: usize,
+        expected_total: usize,
+        index: usize,
+        screens: Vec<Vec<String>>,
+    ) -> (
+        Result<crate::inject::question::CodexSelectOutcome, StageAbort>,
+        Vec<String>,
+    ) {
+        use std::cell::RefCell;
+        let screens = RefCell::new(std::collections::VecDeque::from(screens));
+        let sent = RefCell::new(Vec::<String>::new());
+        let mut terminal = crate::inject::mode::Closures {
+            read: || screens.borrow_mut().pop_front(),
+            send: |k: &str| {
+                sent.borrow_mut().push(k.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let poll = || Ok(screens.borrow_mut().pop_front());
+        (
+            run_codex_select_stages(q_idx, expected_total, index, poll, &mut terminal),
+            sent.into_inner(),
+        )
+    }
+
+    /// **非末题数字直选·自动推进**（底料定案 A）：Q1 发 `1` → 屏推到 Q2 → 成功零旗标。
+    /// F1 语义：poll#1 即读到变化且推进的屏（首拍命中）。
+    #[test]
+    fn codex_select_nonfinal_digit_auto_advances() {
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![live_fixtures::codex_s1_q1(), live_fixtures::codex_s1_q2()],
+        );
+        let out = r.expect("数字推进必须成功");
+        assert_eq!(out.sent_keys, vec!["1".to_string()], "{sent:?}");
+        assert!(!out.reanswered, "计数 2→1 已减 = 新答");
+        assert!(!out.already_submitted);
+    }
+
+    /// **数字被吞重投**（定案 A 推论 + 评审 P0-1 复核链）：发数字 → 3 拍原样
+    /// （变化轮询耗尽）→ 复核 read 仍是本题非末题 → 重投 → 重投轮询后复核 read
+    /// = Q2（推进）→ 成功。键序 = ["1","1"]。
+    #[test]
+    fn codex_select_nonfinal_digit_retry_on_lost_key() {
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![
+                live_fixtures::codex_s1_q1(), // 入场基线
+                live_fixtures::codex_s1_q1(), // 变化轮询拍 1：原样
+                live_fixtures::codex_s1_q1(), // 变化轮询拍 2：原样
+                live_fixtures::codex_s1_q1(), // 变化轮询拍 3：原样（耗尽）
+                live_fixtures::codex_s1_q1(), // 重投前复核 read：仍 Q1 非末题
+                live_fixtures::codex_s1_q1(), // 重投后轮询拍 1：原样
+                live_fixtures::codex_s1_q1(), // 重投后轮询拍 2：原样
+                live_fixtures::codex_s1_q1(), // 重投后轮询拍 3：原样（耗尽）
+                live_fixtures::codex_s1_q2(), // 重投后复核 read：Q2 迟到落地
+            ],
+        );
+        let out = r.expect("重投后必须成功");
+        assert_eq!(
+            out.sent_keys,
+            vec!["1".to_string(), "1".to_string()],
+            "{sent:?}"
+        );
+        assert!(!out.reanswered);
+    }
+
+    /// **两投仍不推进 = 中止**：两轮变化轮询全原样 + 两轮复核都停在本题 →
+    /// Err 含「两投」，共发 2 个数字。
+    #[test]
+    fn codex_select_nonfinal_digit_two_miss_aborts() {
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![
+                live_fixtures::codex_s1_q1(), // 入场基线
+                live_fixtures::codex_s1_q1(), // 首投轮询 1
+                live_fixtures::codex_s1_q1(), // 首投轮询 2
+                live_fixtures::codex_s1_q1(), // 首投轮询 3（耗尽）
+                live_fixtures::codex_s1_q1(), // 重投前复核：仍本题
+                live_fixtures::codex_s1_q1(), // 重投轮询 1
+                live_fixtures::codex_s1_q1(), // 重投轮询 2
+                live_fixtures::codex_s1_q1(), // 重投轮询 3（耗尽）
+                live_fixtures::codex_s1_q1(), // 重投后复核：仍本题非末 → 两投中止
+            ],
+        );
+        let err = r.expect_err("两投不推进必须中止");
+        assert!(err.message.contains("两投"), "{err}");
+        assert_eq!(sent.len(), 2, "数字恰好两投：{sent:?}");
+    }
+
+    /// **新增（评审 P0-1 核心行为锁）**：首投 3 拍原样 → 复核 read = Q2（迟到位
+    /// 重绘落地）→ **单投成功**（不重投——旧实现会在此重投，数字落在 Q2 上）。
+    #[test]
+    fn codex_select_nonfinal_stale_read_recovery_without_resend() {
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![
+                live_fixtures::codex_s1_q1(), // 入场基线
+                live_fixtures::codex_s1_q1(), // 变化轮询拍 1：原样
+                live_fixtures::codex_s1_q1(), // 变化轮询拍 2：原样
+                live_fixtures::codex_s1_q2(), // 重投前复核 read：Q2 迟到落地
+            ],
+        );
+        let out = r.expect("迟到位重绘必须单投成功");
+        assert_eq!(
+            out.sent_keys,
+            vec!["1".to_string()],
+            "未重投（sent 恰 1 个数字）：{sent:?}"
+        );
+        assert!(!out.reanswered);
+    }
+
+    /// **新增（评审 P0-1 末题红线锁）**：首投轮询耗尽 + 复核 read 解析出**另一份
+    /// 问卷的末题面板**（codex_s3_single：Question 1/1，idx 既非本题也非本题+1）
+    /// → Err「未重投」（重投数字 = 打错题/触碰末题禁数字红线），sent 只含首投
+    /// 1 个数字。注：不能用 codex_s1_q2 造「离题」——它 idx=1==q_idx+1，走的是
+    /// 迟到位落地成功分支（`stale_read_recovery_without_resend` 锁的就是它）。
+    #[test]
+    fn codex_select_nonfinal_resend_refuses_when_screen_left_question() {
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![
+                live_fixtures::codex_s1_q1(),     // 入场基线（Q1 非末题）
+                live_fixtures::codex_s1_q1(),     // 变化轮询拍 1：原样
+                live_fixtures::codex_s1_q1(),     // 变化轮询拍 2：原样
+                live_fixtures::codex_s1_q1(),     // 变化轮询拍 3：原样
+                live_fixtures::codex_s1_q1(),     // 变化轮询拍 4：原样（耗尽）
+                live_fixtures::codex_s3_single(), // 重投前复核：屏已是别卷末题面板
+            ],
+        );
+        let err = r.expect_err("复核发现离题必须拒绝重投");
+        assert!(
+            err.message.contains("未重投") && err.message.contains("末题"),
+            "{err}"
+        );
+        assert_eq!(
+            sent,
+            vec!["1".to_string()],
+            "只有首投 1 个数字，未重投：{sent:?}"
+        );
+    }
+
+    /// **新增（评审 P0-1 形态异常锁）**：发数字后 poll 读到**屏已变化但题号未推进**
+    /// （同夹具加一行空行造差异）→ Err「形态异常」，未进入重投。
+    #[test]
+    fn codex_select_nonfinal_screen_changed_but_not_advanced_aborts() {
+        let mut variant = live_fixtures::codex_s1_q1();
+        variant.insert(0, String::new()); // 屏变化（多一空行）但题号仍 Q1
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![
+                live_fixtures::codex_s1_q1(), // 入场基线
+                variant,                      // poll#1：屏变 ≠ 基线，题号未推进
+            ],
+        );
+        let err = r.expect_err("屏变不推进必须中止");
+        assert!(err.message.contains("形态异常"), "{err}");
+        assert_eq!(sent, vec!["1".to_string()], "形态异常不重投：{sent:?}");
+    }
+
+    /// **改答旗标**（§3.2 漂移分支）：进闸前该题已被手答（k_base=0，计数段消失）→
+    /// 数字推进后落点屏计数仍 0（== k_base）→ reanswered=true。
+    /// 还原动作（变异）：删掉 reanswered 判定 → 本用例先红。
+    #[test]
+    fn codex_select_reanswered_flag_when_counter_unchanged() {
+        let (r, _sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![
+                live_fixtures::codex_s1_q1_answered(), // k_base = 0（已答）
+                live_fixtures::codex_s1_q2_zero(),     // 落点 Q2 k=0（计数未减）
+            ],
+        );
+        let out = r.expect("改答推进必须成功");
+        assert_eq!(out.sent_keys, vec!["1".to_string()]);
+        assert!(out.reanswered, "计数未减（0==0）= 改答");
+    }
+
+    /// **末题全链**（§3.3）：走位 j 一发（down=(1+4-0)%4=1）→ 空格 → 归零闸 →
+    /// 双条件闸 → enter → 回执屏。键序 = ["j","space","enter"]。
+    #[test]
+    fn codex_select_final_walks_then_space_zero_gate_enter() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2(),               // 入场：k=1 焦点 0
+                live_fixtures::codex_s1_q2_focused(1),      // 走位复读：焦点 1 停
+                live_fixtures::codex_s1_q2_zero_focused(1), // 空格后：归零闸
+                live_fixtures::codex_s1_q2_zero_focused(1), // 双条件闸：k=0
+                live_fixtures::codex_answered_summary(),    // enter 后 poll 回执
+            ],
+        );
+        let out = r.expect("末题全链必须成功");
+        assert_eq!(
+            out.sent_keys,
+            vec!["j".to_string(), "space".to_string(), "enter".to_string()],
+            "{sent:?}"
+        );
+        assert!(!out.already_submitted);
+        assert!(!out.reanswered);
+    }
+
+    /// **最短环绕方向**：入场未答（k=1、焦点 1），目标 0 →
+    /// down=(0+4-1)%4=3 vs up=(1+4-0)%4=1 → 取 "k"（up 更短）→ 空格 → 归零 →
+    /// enter。**F2 适配（评审 P1-2）**：旧构造用已答归零屏（k=0 焦点≠目标）——
+    /// 该形态现在如实中止（已答换选先反选旧答案），测最短环绕须改未答形态
+    /// （k>0 主路径），「测 up<down 取 k」的意图不变。
+    #[test]
+    fn codex_select_final_walk_uses_shortest_wrap_direction() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            0,
+            vec![
+                live_fixtures::codex_s1_q2_focused(1),      // 入场：k=1 焦点 1
+                live_fixtures::codex_s1_q2_focused(0),      // k 复读：焦点 0 停
+                live_fixtures::codex_s1_q2_zero_focused(0), // 空格后：归零闸
+                live_fixtures::codex_s1_q2_zero_focused(0), // 双条件闸：k=0
+                live_fixtures::codex_answered_summary(),
+            ],
+        );
+        let out = r.expect("最短环绕走位必须成功");
+        assert_eq!(
+            out.sent_keys,
+            vec!["k".to_string(), "space".to_string(), "enter".to_string()],
+            "up 更短 → 首键 k：{sent:?}"
+        );
+    }
+
+    /// **已答特判跳空格**（§3.3 步 3）：入场已归零且焦点即目标 → 无 j/k 无 space，
+    /// 归零闸直过 → enter。
+    #[test]
+    fn codex_select_final_already_answered_skips_space() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2_zero_focused(1), // 入场：k=0 焦点 1=目标
+                live_fixtures::codex_s1_q2_zero_focused(1), // 归零闸
+                live_fixtures::codex_s1_q2_zero_focused(1), // 双条件闸
+                live_fixtures::codex_answered_summary(),
+            ],
+        );
+        let out = r.expect("已答同项必须跳空格");
+        assert_eq!(out.sent_keys, vec!["enter".to_string()], "{sent:?}");
+    }
+
+    /// **双条件闸读到面板消失 = 已交卷**（§3.3 步 6 分叉，如 notes 回车连带）：零发键。
+    #[test]
+    fn codex_select_submit_gate_panel_gone_means_already_submitted() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2_zero_focused(1), // 入场
+                live_fixtures::codex_s1_q2_zero_focused(1), // 归零闸
+                live_fixtures::codex_answered_summary(),    // 双条件闸：面板消失
+            ],
+        );
+        let out = r.expect("面板消失 = 已交卷（成功返回）");
+        assert!(out.already_submitted, "零发键交卷分支");
+        assert!(sent.is_empty(), "未发提交键：{sent:?}");
+    }
+
+    /// **归零闸焦点漂移**：归零屏焦点 ≠ 目标 → 中止（可能反选了已选项），无 enter。
+    #[test]
+    fn codex_select_zero_gate_fails_on_focus_drift() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2_zero_focused(1), // 入场：焦点 1=目标
+                live_fixtures::codex_s1_q2_zero_focused(0), // 归零闸：焦点漂到 0
+            ],
+        );
+        let err = r.expect_err("焦点漂移必须中止");
+        assert!(err.message.contains("焦点"), "{err}");
+        assert!(!sent.contains(&"enter".to_string()), "{sent:?}");
+    }
+
+    /// **空格后窗尽 = 中止**：走位完成后归零闸 poll 队空（Ok(None)）→ Err「未归零」，
+    /// 已发 j+space 无 enter。
+    #[test]
+    fn codex_select_zero_gate_fail_aborts_after_space() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2(), // 入场：k=1 焦点 0
+                live_fixtures::codex_s1_q2_focused(1), // 走位复读
+                                              // 归零闸 poll 队空 = 窗尽
+            ],
+        );
+        let err = r.expect_err("窗尽未归零必须中止");
+        assert!(err.message.contains("未归零"), "{err}");
+        assert!(sent.contains(&"j".to_string()), "{sent:?}");
+        assert!(sent.contains(&"space".to_string()), "{sent:?}");
+        assert!(!sent.contains(&"enter".to_string()));
+    }
+
+    /// **身份闸**：屏上 Q2 vs 卡面第 1 题 → 零按键中止。
+    #[test]
+    fn codex_select_identity_gate_aborts_zero_keys() {
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![live_fixtures::codex_s1_q2()], // 屏上是第 2 题
+        );
+        let err = r.expect_err("题号不一致必须中止");
+        assert!(err.message.contains("不一致"), "{err}");
+        assert!(sent.is_empty(), "身份闸零按键：{sent:?}");
+    }
+
+    /// **确认屏中止**（§3.6 闸门矩阵）：`Submit with unanswered questions?` 在场
+    /// → 零按键中止不代答。
+    #[test]
+    fn codex_select_aborts_with_named_cause_on_confirm_screen() {
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![lines(&["  Submit with unanswered questions?"])], // 构造词形（账本在档）
+        );
+        let err = r.expect_err("确认屏必须中止");
+        assert!(err.message.contains("未答完确认屏"), "{err}");
+        assert!(sent.is_empty());
+    }
+
+    /// **末题焦点缺席中止**：剥掉 › 行（派生）→ 读不到焦点 → 不猜起点零键中止。
+    #[test]
+    fn codex_select_final_no_focus_aborts() {
+        let no_focus: Vec<String> = live_fixtures::codex_s1_q2_zero()
+            .into_iter()
+            .map(|l| l.replace("› ", "  "))
+            .collect();
+        let (r, sent) = run_codex_select_script(1, 2, 1, vec![no_focus]);
+        let err = r.expect_err("焦点缺席必须中止");
+        assert!(err.message.contains("焦点"), "{err}");
+        assert!(sent.is_empty());
+    }
+
+    /// **双条件闸计数又变化**：归零闸过了但提交闸屏 k≠0 → 中止未发 enter。
+    #[test]
+    fn codex_select_submit_gate_counter_changed_aborts() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2_zero_focused(1), // 入场
+                live_fixtures::codex_s1_q2_zero_focused(1), // 归零闸
+                live_fixtures::codex_s1_q2_focused(1),      // 提交闸：k=1 又变化
+            ],
+        );
+        let err = r.expect_err("计数回涨必须中止");
+        assert!(err.message.contains("又变化"), "{err}");
+        assert!(!sent.contains(&"enter".to_string()), "{sent:?}");
+    }
+
+    /// **新增（评审 P1-2）双条件闸面板消失但无终态证据**：提交闸读到屏（有行）却
+    /// 解析不出面板、且屏上既无摘要头（QUESTION/RECEIPT）也无确认屏标题——
+    /// 「已交卷」的结论必须带终态证据，此处 → Err「面板异常消失」，未发提交键。
+    #[test]
+    fn codex_select_submit_gate_panel_gone_without_receipt_aborts() {
+        // 无锚行集：普通正文行（无题号头无 footer 锚无摘要头无确认屏标题）
+        let plain: Vec<String> = vec![
+            "some transcript line".to_string(),
+            "› Ask Codex to do anything".to_string(),
+        ];
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2_zero_focused(1), // 入场
+                live_fixtures::codex_s1_q2_zero_focused(1), // 归零闸
+                plain,                                      // 提交闸：读到屏但无面板无摘要
+            ],
+        );
+        let err = r.expect_err("无证据的面板消失必须中止");
+        assert!(err.message.contains("面板异常消失"), "{err}");
+        assert!(!sent.contains(&"enter".to_string()), "{sent:?}");
+    }
+
+    /// **新增（评审 P2-10）身份闸题数交叉核对**：屏上问卷 3 题（S2 夹具）vs
+    /// 手机卡载荷 2 题 → 零按键中止（错卷发键 = 打错题）。
+    #[test]
+    fn codex_select_identity_gate_total_mismatch_aborts_zero_keys() {
+        let (r, sent) = run_codex_select_script(
+            0,
+            2,
+            0,
+            vec![live_fixtures::codex_s2_q1()], // 屏上 Question 1/3 vs 载荷 2 题
+        );
+        let err = r.expect_err("题数不一致必须中止");
+        assert!(
+            err.message.contains("不一致") && err.message.contains("题"),
+            "{err}"
+        );
+        assert!(sent.is_empty(), "身份闸零按键：{sent:?}");
+    }
+
+    /// **新增（评审 P1-1）提交闸四条件·切题旁路锁**：归零闸过闸后、发 enter 前，
+    /// 等待窗口内用户 h/l 切到非末题（全卷已答时 k=0 在任何题都成立，旧闸只验
+    /// `unanswered != 0` 挡不住）→ 提交闸必须验题号对位 + 末题 → Err「已切离」，
+    /// sent 无 enter。构造：入场末题归零焦点即目标（跳空格）→ 归零闸 → 提交闸
+    /// 屏已是非末题已答题（codex_s1_q1_answered：Question 1/2 无计数段）。
+    #[test]
+    fn codex_select_submit_gate_aborts_when_switched_to_nonfinal() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2_zero_focused(1), // 入场：k=0 焦点 1=目标
+                live_fixtures::codex_s1_q2_zero_focused(1), // 归零闸
+                live_fixtures::codex_s1_q1_answered(),      // 提交闸：屏已被切到 Q1 非末题
+            ],
+        );
+        let err = r.expect_err("提交闸发现切题必须中止");
+        assert!(err.message.contains("已切离"), "{err}");
+        assert!(
+            !sent.contains(&"enter".to_string()),
+            "绝不发提交键：{sent:?}"
+        );
+    }
+
+    /// **新增（评审 P1-1）提交闸四条件·焦点漂移锁**：提交闸屏仍是本题末题且
+    /// 已归零，但焦点已漂离目标 → Err「焦点漂移」，sent 无 enter。
+    #[test]
+    fn codex_select_submit_gate_aborts_when_focus_drifted_at_gate() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            1,
+            vec![
+                live_fixtures::codex_s1_q2_zero_focused(1), // 入场：k=0 焦点 1=目标
+                live_fixtures::codex_s1_q2_zero_focused(1), // 归零闸
+                live_fixtures::codex_s1_q2_zero_focused(0), // 提交闸：焦点漂到 0
+            ],
+        );
+        let err = r.expect_err("提交闸发现焦点漂移必须中止");
+        assert!(err.message.contains("焦点漂移"), "{err}");
+        assert!(!sent.contains(&"enter".to_string()), "{sent:?}");
+    }
+
+    /// **新增（评审 P1-2）已答改答不同项·如实中止**：入场已归零（k=0）且焦点
+    /// ≠目标——0.160.0 实测此形态下空格 = 反选旧答案而非换选（底料 §3 #5），
+    /// 远程代答会先破坏旧答案 → Err「反选旧答案」，**sent 为空**（未发任何键）。
+    #[test]
+    fn codex_select_final_answered_other_target_aborts_preserving_answer() {
+        let (r, sent) = run_codex_select_script(
+            1,
+            2,
+            0, // 目标 Redis，焦点在 Memcached（已选项）
+            vec![live_fixtures::codex_s1_q2_zero_focused(1)], // k=0 焦点 1
+        );
+        let err = r.expect_err("已答换选必须如实中止");
+        assert!(err.message.contains("反选旧答案"), "{err}");
+        assert!(sent.is_empty(), "未发任何键：{sent:?}");
+    }
+
+    /// **新增（评审 P2-4）末题目标越界·零键中止**：载荷 index ≥ 屏上选项数
+    /// （载荷与终端面板不同步）→ 走位取模算术会静默算错步数 → 发键前卫语句
+    /// 中止，Err 含「越界」，sent 空。
+    #[test]
+    fn codex_select_final_target_out_of_range_aborts_zero_keys() {
+        let (r, sent) = run_codex_select_script(1, 2, 5, vec![live_fixtures::codex_s1_q2()]);
+        let err = r.expect_err("末题越界必须零键中止");
+        assert!(err.message.contains("越界"), "{err}");
+        assert!(sent.is_empty(), "未发任何键：{sent:?}");
+    }
+
+    /// **新增（评审 P2-4）非末题目标越界·零键中止**：数字 = index+1 直接发，
+    /// 越界时 codex 面板对无效数字静默忽略（只剩双投兜底）——发键前卫语句中止。
+    #[test]
+    fn codex_select_nonfinal_target_out_of_range_aborts_zero_keys() {
+        let (r, sent) = run_codex_select_script(0, 2, 5, vec![live_fixtures::codex_s1_q1()]);
+        let err = r.expect_err("非末题越界必须零键中止");
+        assert!(err.message.contains("越界"), "{err}");
+        assert!(sent.is_empty(), "未发任何键：{sent:?}");
+    }
+
+    // ===== Task 6：codex 切题 advance 阶段机（设计 §3.5；底料 §1 键序更正 h/l）=====
+
+    /// codex advance 脚本驱动器（同 `run_codex_select_script`）：screens 逐屏出队；
+    /// send 记录键；poll 消费下一屏（队空 = Ok(None) 窗尽）；terminal.read() 同样
+    /// 出队（队空 = None）。send/settle 不推进屏——屏推进由脚本序列显式编排。
+    fn run_codex_advance_script(
+        direction: NavDirection,
+        screens: Vec<Vec<String>>,
+    ) -> (
+        Result<crate::inject::question::CodexAdvanceOutcome, StageAbort>,
+        Vec<String>,
+    ) {
+        use std::cell::RefCell;
+        let screens = RefCell::new(std::collections::VecDeque::from(screens));
+        let sent = RefCell::new(Vec::<String>::new());
+        let mut terminal = crate::inject::mode::Closures {
+            read: || screens.borrow_mut().pop_front(),
+            send: |k: &str| {
+                sent.borrow_mut().push(k.to_string());
+                Ok(())
+            },
+            settle: || {},
+        };
+        let poll = || Ok(screens.borrow_mut().pop_front());
+        (
+            run_codex_advance_stages(direction, poll, &mut terminal),
+            sent.into_inner(),
+        )
+    }
+
+    /// **Next 切题到位**（设计 §3.5）：Q1 屏发 `l` → 屏到 Q2（idx 0→1）→ Arrived。
+    #[test]
+    fn codex_advance_next_lands_next_question() {
+        let (r, sent) = run_codex_advance_script(
+            NavDirection::Next,
+            vec![live_fixtures::codex_s1_q1(), live_fixtures::codex_s1_q2()],
+        );
+        let out = r.expect("切题必须成功");
+        assert_eq!(out, CodexAdvanceOutcome::Arrived);
+        assert_eq!(sent, vec!["l".to_string()], "{sent:?}");
+    }
+
+    /// **Prev 切回上一题**：Q2 屏发 `h` → 屏回 Q1（idx 1→0）→ Arrived。
+    #[test]
+    fn codex_advance_prev_lands_prev_question() {
+        let (r, sent) = run_codex_advance_script(
+            NavDirection::Prev,
+            vec![live_fixtures::codex_s1_q2(), live_fixtures::codex_s1_q1()],
+        );
+        let out = r.expect("切回上一题必须成功");
+        assert_eq!(out, CodexAdvanceOutcome::Arrived);
+        assert_eq!(sent, vec!["h".to_string()], "{sent:?}");
+    }
+
+    /// **单题 h/l 无效**（底料 S3：footer 无导航段 + VK 左右零变化实证）：屏解析
+    /// 成功但 idx 未变 → NoEffect（如实未生效，不中止——dispatch 层转「未生效，可重试」）。
+    #[test]
+    fn codex_advance_single_question_no_effect() {
+        let (r, sent) = run_codex_advance_script(
+            NavDirection::Next,
+            vec![
+                live_fixtures::codex_s3_single(),
+                live_fixtures::codex_s3_single(), // 屏未动：idx 仍 0
+            ],
+        );
+        let out = r.expect("单题切题必须如实返回未生效");
+        assert_eq!(out, CodexAdvanceOutcome::NoEffect);
+        assert_eq!(sent, vec!["l".to_string()], "{sent:?}");
+    }
+
+    /// **窗尽 = 如实未生效**：发键后 poll 队空（Ok(None)）——窗内未见题号变化 →
+    /// NoEffect（不猜：不冒充到达也不中止；键已发出，效果未知，用户可重试）。
+    #[test]
+    fn codex_advance_window_exhausted_no_effect() {
+        let (r, sent) = run_codex_advance_script(
+            NavDirection::Next,
+            vec![live_fixtures::codex_s1_q1()], // 发键后队空 = 窗尽
+        );
+        let out = r.expect("窗尽必须如实返回未生效");
+        assert_eq!(out, CodexAdvanceOutcome::NoEffect);
+        assert_eq!(sent, vec!["l".to_string()], "{sent:?}");
+    }
+
+    /// **切题后面板形态崩**：发键后屏变摘要（面板不在场且解析不出）→ 中止引导人工。
+    #[test]
+    fn codex_advance_panel_gone_after_key_aborts() {
+        let (r, sent) = run_codex_advance_script(
+            NavDirection::Next,
+            vec![
+                live_fixtures::codex_s1_q1(),
+                live_fixtures::codex_answered_summary(), // 发键后屏变摘要 = 形态异常
+            ],
+        );
+        let err = r.expect_err("形态崩必须中止");
+        assert!(
+            err.message.contains("形态崩") || err.message.contains("解析不出"),
+            "{err}"
+        );
+        assert_eq!(sent, vec!["l".to_string()], "{sent:?}");
+    }
+
+    /// **首屏读不到 = 零键中止**：screens 空（terminal.read() = None）→
+    /// Err 含「读不到面板」，sent 空。
+    #[test]
+    fn codex_advance_read_fail_aborts() {
+        let (r, sent) = run_codex_advance_script(NavDirection::Next, vec![]);
+        let err = r.expect_err("读不到面板必须中止");
+        assert!(err.message.contains("读不到面板"), "{err}");
+        assert!(sent.is_empty(), "零按键中止：{sent:?}");
+    }
+
+    /// **环形到达被检测**（底料 §1：切题环形，末→首）：末题（idx=1）发 `l` 回
+    /// 首题（idx=0）——到达判据 = i 变化（!= before），环形语义透传被覆盖 → Arrived。
+    #[test]
+    fn codex_advance_wrap_around_detected() {
+        let (r, sent) = run_codex_advance_script(
+            NavDirection::Next,
+            vec![live_fixtures::codex_s1_q2(), live_fixtures::codex_s1_q1()],
+        );
+        let out = r.expect("环形到达必须被检测为成功");
+        assert_eq!(out, CodexAdvanceOutcome::Arrived);
+        assert_eq!(sent, vec!["l".to_string()], "{sent:?}");
+    }
+
+    /// **新增（评审 P2-2）单拍陈旧帧仍到达**：发键后前两拍 poll 读到的都是与
+    /// baseline 逐字相同的未重绘帧（单拍判定会误报 NoEffect）→ 有界轮询继续
+    /// 等下一拍，第 3 拍 idx 变化 → Arrived，sent == ["l"]。
+    #[test]
+    fn codex_advance_stale_first_frame_still_arrives() {
+        let (r, sent) = run_codex_advance_script(
+            NavDirection::Next,
+            vec![
+                live_fixtures::codex_s1_q1(), // baseline（Q1）
+                live_fixtures::codex_s1_q1(), // 拍 1：陈旧原样帧
+                live_fixtures::codex_s1_q1(), // 拍 2：陈旧原样帧
+                live_fixtures::codex_s1_q2(), // 拍 3：Q2 落地 → Arrived
+            ],
+        );
+        let out = r.expect("陈旧帧后的迟到切题必须被检为到达");
+        assert_eq!(out, CodexAdvanceOutcome::Arrived);
+        assert_eq!(sent, vec!["l".to_string()], "{sent:?}");
     }
 
     /// 夹具屏的题干原文（multi()/MULTI_JSON 的 question 与屏面第 2 行同文）——
@@ -9193,6 +10591,114 @@ mod live_probe_tests {
         );
     }
 
+    /// **codex 问答屏只读活体探针（#[ignore]，零注入——四闸门①工具/体检表）**：
+    /// 对 `MAM_PROBE_PID` 指定的 codex 进程跑生产同款 `read_screen_window` +
+    /// codex 面板解析器全产物（逐行 FIXTURE dump + codex_question_screen_snapshot
+    /// 七字段 + 账本 footer 三槽/确认屏 TITLE/RECEIPT 的 detect 命中清单）。
+    /// 跑法：`MAM_PROBE_PID=<pid> cargo test --lib codex_question_live_probe -- --ignored --nocapture`
+    /// 红线：只读，不碰 CONIN$、不发任何键；pid 由调用方显式给定。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "实机只读探针：codex 问答面板活体 dump（前置=MAM_PROBE_PID=<codex pid>）"]
+    fn codex_question_live_probe() {
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（红线：只碰显式指定的进程）");
+            return;
+        };
+        let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) else {
+            eprintln!("pid={pid} 屏读失败（无控制台/权限不足）");
+            return;
+        };
+        eprintln!("==== pid={pid} 可见窗 {} 行 ====", lines.len());
+        for (i, l) in lines.iter().enumerate() {
+            eprintln!("FIXTURE|{i:02}|{l}");
+        }
+        eprintln!("---- codex_question_screen_snapshot ----");
+        match crate::inject::question_screen_oc::codex_question_screen_snapshot(&lines) {
+            Some(s) => eprintln!(
+                "Some(question_idx={} question_total={} unanswered={} is_last={} \
+                 focused={:?} heading={:?} options={:?})",
+                s.question_idx,
+                s.question_total,
+                s.unanswered,
+                s.is_last,
+                s.focused,
+                s.heading,
+                s.options
+            ),
+            None => eprintln!("None（非面板 / 摘要屏 / 配对不成立——见下方锚命中清单）"),
+        }
+        // 账本锚命中清单（footer 三槽 + 确认屏 TITLE + 终态 RECEIPT）——None 时
+        // 据此读「题号头在、footer 锚不在（配对窗不够/词形漂移）」还是「锚都在、
+        // 头解析失败」还是「整屏无锚（非面板）」，形态与 claude 版诊断一致。
+        eprintln!("---- anchor_ledger detect 命中清单（codex / QUESTION / QUESTION_REVIEW）----");
+        let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+        let scenarios: &[(&str, &[&str])] = &[
+            (
+                crate::inject::anchor_ledger::scenario::QUESTION,
+                &[
+                    crate::inject::anchor_ledger::slot::Q_FOOTER_NAVIGATE,
+                    crate::inject::anchor_ledger::slot::Q_FOOTER_SUBMIT_ANSWER,
+                    crate::inject::anchor_ledger::slot::Q_FOOTER_SUBMIT_ALL,
+                    crate::inject::anchor_ledger::slot::RECEIPT,
+                ],
+            ),
+            (
+                crate::inject::anchor_ledger::scenario::QUESTION_REVIEW,
+                &[crate::inject::anchor_ledger::slot::TITLE],
+            ),
+        ];
+        for (scenario, slots) in scenarios {
+            for slot in *slots {
+                match crate::inject::anchor_ledger::detect(&lowered, "codex", scenario, slot) {
+                    Some(hit) => eprintln!(
+                        "HIT {scenario}/{slot} @行{} 文案={:?} 版本={} 证据={}",
+                        hit.line_index, hit.row.text, hit.row.observed_version, hit.row.evidence
+                    ),
+                    None => eprintln!("MISS {scenario}/{slot}"),
+                }
+            }
+        }
+        // None 成因诊断：题号头在场吗？footer 锚在吗？（照 claude 版「None 时打
+        // 失败成因」的形态——两个锚哪个不成立逐项点名。footer 判定只含三个
+        // Q_FOOTER 槽——RECEIPT 是终态回执锚，在场 = 摘要屏（非面板，正常 None），
+        // 不得混入「footer 配对」诊断误导。）
+        if crate::inject::question_screen_oc::codex_question_screen_snapshot(&lines).is_none() {
+            let header_seen = lines.iter().any(|l| {
+                crate::inject::question_screen_oc::parse_codex_question_header(l).is_some()
+            });
+            let footer_slots = [
+                crate::inject::anchor_ledger::slot::Q_FOOTER_NAVIGATE,
+                crate::inject::anchor_ledger::slot::Q_FOOTER_SUBMIT_ANSWER,
+                crate::inject::anchor_ledger::slot::Q_FOOTER_SUBMIT_ALL,
+            ];
+            let footer_seen = footer_slots.iter().any(|slot| {
+                crate::inject::anchor_ledger::detect(
+                    &lowered,
+                    "codex",
+                    crate::inject::anchor_ledger::scenario::QUESTION,
+                    slot,
+                )
+                .is_some()
+            });
+            eprintln!(
+                "---- None 成因诊断：题号头={}（{}）、footer 锚={}——{}",
+                if header_seen { "在场" } else { "不在场" },
+                if header_seen { "疑无 footer 配对/配对窗不足或形态异常" } else { "非面板屏" },
+                if footer_seen { "在场" } else { "不在场（词形漂移→按账本 miss_report 处置）" },
+                match (header_seen, footer_seen) {
+                    (true, true) => "两者都在仍 None = 配对窗（header 下方 ~12 行）不足或选项区解析断——检查面板行距/状态栏行位置",
+                    (true, false) => "题号头在场但 footer 锚不成立——账本词形漂移或 footer 未渲染",
+                    (false, true) => "footer 锚在场但题号头解析失败——头词形漂移（对照 FIXTURE 行抄录）",
+                    (false, false) => "整屏无 Q_FOOTER 锚——非面板屏（普通屏正常 None；若 RECEIPT 命中则属摘要屏，分派正确）",
+                }
+            );
+        }
+    }
+
     /// **opencode 屏读活体探针（#[ignore]，零注入——四闸门①样本门槛的标准工具）**：
     /// 对 `MAM_PROBE_PID` 指定的 opencode TUI 进程跑**生产同款** `read_screen_window`
     /// + 全套 opencode 问答解析器，逐行 dump（带行号）+ 各解析器产物——用于「读得到屏
@@ -9813,6 +11319,248 @@ pub(crate) mod live_fixtures {
             "",
             "Enter to select ·↑/ to navigate ·Esc to cancel",
         ])
+    }
+
+    // ===== codex 0.160.0 问答面板活体夹具（2026-10-09 取证批，Task 1 底料
+    // `docs/superpowers/specs/2026-10-08-codex-160-question-屏读底料.md` §9 点名；
+    // 证据根 `%USERPROFILE%\mam-probe-m6r\evidence\`，FIXTURE 行程序化提取生成）=====
+    // 形态总纲：`›` = 焦点（非选中，选中态只在属性层 0x0030 族，字符层无标记）；
+    // 题号头词形 未答 `Question i/N (M unanswered)` / 全答 `Question i/N`（计数段整个消失）；
+    // footer 四段（多题）`tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt`、
+    // 三段（单题）无导航段且 `submit all`↔`submit answer` 随全卷未答切换；
+    // 确认屏（`Submit with unanswered questions?`）与 `?` 首帧形本轮取证不可达——无夹具，不得伪造。
+
+    /// 证据 `codex-q-20261009-s1-q1.txt` FIXTURE 20–28：S1 两题面板首屏（Q1，3 选项）：题号头 `Question 1/2 (2 unanswered)` + footer 四段。
+    pub(crate) fn codex_s1_q1() -> Vec<String> {
+        lines(&[
+            "",
+            "  Question 1/2 (2 unanswered)",
+            "  Which DB?",
+            "",
+            "  › 1. Postgres           使用 PostgreSQL 作为数据库。",
+            "    2. SQLite             使用 SQLite 作为数据库。",
+            "    3. None of the above  Optionally, add details in notes (tab)",
+            "",
+            "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s1-q1-after-digit.txt` FIXTURE 20–29：S1 数字推进后的 Q2 屏（4 选项 Redis/Memcached/None needed/None of the above）：题号头 `Question 2/2 (1 unanswered)`，footer 已见 `enter to submit all` 四段——兼作「多题面板 4 选项」夹具（footer 读取抖动帧已按底料 §7 多帧还原）。
+    pub(crate) fn codex_s1_q2() -> Vec<String> {
+        lines(&[
+            "  Question 2/2 (1 unanswered)",
+            "  Which cache?",
+            "",
+            "  › 1. Redis              使用 Redis 作为缓存。",
+            "    2. Memcached          使用 Memcached 作为缓存。",
+            "    3. None needed        不需要缓存。",
+            "    4. None of the above  Optionally, add details in notes (tab)",
+            "",
+            "  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt",
+            "",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s1-q2-zero.txt` FIXTURE 20–28：S1 Q2 归零词形：题号头只剩 `Question 2/2`，`(N unanswered)` 计数段整个消失，焦点 Memcached 行 `› 2.`；含 FIXTURE 27 空行 + 28 footer（`enter to submit all` 干净，navigate/esc 段有抖动帧已按底料 §7 多帧还原）。
+    pub(crate) fn codex_s1_q2_zero() -> Vec<String> {
+        lines(&[
+            "  Question 2/2",
+            "  Which cache?",
+            "",
+            "    1. Redis              使用 Redis 作为缓存。",
+            "  › 2. Memcached          使用 Memcached 作为缓存。",
+            "    3. None needed        不需要缓存。",
+            "    4. None of the above  Optionally, add details in notes (tab)",
+            "",
+            "  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s1-back-to-q1-h.txt` FIXTURE 21–28：S1 h 键切回 Q1 已答态：`Question 1/2` 无计数段，焦点落已选项 Postgres 行（选中态只在属性层，字符层无标记）；含 FIXTURE 27 空行 + 28 footer（`enter to submit answer` 干净，navigate/esc 段有抖动帧已按底料 §7 多帧还原）。
+    pub(crate) fn codex_s1_q1_answered() -> Vec<String> {
+        lines(&[
+            "  Question 1/2",
+            "  Which DB?",
+            "",
+            "  › 1. Postgres           使用 PostgreSQL 作为数据库。",
+            "    2. SQLite             使用 SQLite 作为数据库。",
+            "    3. None of the above  Optionally, add details in notes (tab)",
+            "",
+            "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s1-q1-unanswered.txt` FIXTURE 21–28：S1 空格反选态：计数段重现 `(1 unanswered)`，焦点 SQLite 行——未答计数随选中态实时增减实证；含 FIXTURE 27 空行 + 28 footer（`enter to submit answer` 干净，navigate/esc 段有抖动帧已按底料 §7 多帧还原）。
+    pub(crate) fn codex_s1_q1_unanswered() -> Vec<String> {
+        lines(&[
+            "  Question 1/2 (1 unanswered)",
+            "  Which DB?",
+            "",
+            "    1. Postgres           使用 PostgreSQL 作为数据库。",
+            "  › 2. SQLite             使用 SQLite 作为数据库。",
+            "    3. None of the above  Optionally, add details in notes (tab)",
+            "",
+            "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s2-q1.txt` FIXTURE 21–29：S2 三题面板 Q1：含状态栏行插入变体（`deepseek...Plan mode` 行插在选项区和 footer 之间）。
+    pub(crate) fn codex_s2_q1() -> Vec<String> {
+        lines(&[
+            "  Question 1/3 (3 unanswered)",
+            "  Which DB?",
+            "",
+            "  › 1. Postgres           使用 PostgreSQL 作为数据库。",
+            "    2. SQLite             使用 SQLite 作为数据库。",
+            "    3. None of the above  Optionally, add details in notes (tab)",
+            "  deepseek-v4.1-flash medium · ~\\AppData\\Local\\Temp\\probe-codex-q-20261008 · 看 D:/Program Files/Git/plan  Plan mode",
+            "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt",
+            "",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s3-single.txt` FIXTURE 21–29：S3 单题面板：footer 三段无 `←/→ to navigate questions`（单题不渲染导航段），题号头仍带 `(1 unanswered)`。
+    pub(crate) fn codex_s3_single() -> Vec<String> {
+        lines(&[
+            "  Question 1/1 (1 unanswered)",
+            "  Which DB?",
+            "",
+            "  › 1. Postgres           使用 PostgreSQL 作为数据库。",
+            "    2. SQLite             使用 SQLite 作为数据库。",
+            "    3. None of the above  Optionally, add details in notes (tab)",
+            "  deepseek-v4.1-flash medium · ~\\AppData\\Local\\Temp\\probe-codex-q-20261008 · 看 D:/Program Files/Git/plan  Plan mode",
+            "  tab to add notes | enter to submit answer | esc to interrupt",
+            "",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s3-zero.txt` FIXTURE 21–29：S3 单题归零词形：`Question 1/1` 计数段消失，焦点 SQLite 行。
+    pub(crate) fn codex_s3_zero() -> Vec<String> {
+        lines(&[
+            "  Question 1/1",
+            "  Which DB?",
+            "",
+            "    1. Postgres           使用 PostgreSQL 作为数据库。",
+            "  › 2. SQLite             使用 SQLite 作为数据库。",
+            "    3. None of the above  Optionally, add details in notes (tab)",
+            "  deepseek-v4.1-flash medium · ~\\AppData\\Local\\Temp\\probe-codex-q-20261008 · 看 D:/Program Files/Git/plan  Plan mode",
+            "  tab to add notes | enter to submit answer | esc to interrupt",
+            "",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s4-notes-open.txt` FIXTURE 21–28：S4 tab 直开 notes 态字符层：焦点在 `› 3. None of the above`，字符层与按 tab 前几乎同形（Other 选中+输入态只在属性层可见）。
+    pub(crate) fn codex_s4_notes_open() -> Vec<String> {
+        lines(&[
+            "  Question 1/1 (1 unanswered)",
+            "  Which database do you want for a hello-world script?",
+            "",
+            "    1. Oracle RAC         使用 Oracle RAC 作为数据库。",
+            "    2. DB2                使用 DB2 作为数据库。",
+            "  › 3. None of the above  Optionally, add details in notes (tab)",
+            "  deepseek-v4.1-flash medium · ~\\AppData\\Local\\Temp\\probe-codex-q-20261008 · 看 D:/Program Files/Git/plan  Plan mode",
+            "  tab to add notes | enter to submit answer | esc to interrupt",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s4-tab-ensure.txt` FIXTURE 21–29：S4 非 Other 行 tab ensure 帧（Azure/AWS）：tab = 选中焦点行 + 开 notes 输入态的复合键，字符层计数段仍显示 `(1 unanswered)`（选中态落账滞后一帧）。
+    pub(crate) fn codex_s4_tab_ensure() -> Vec<String> {
+        lines(&[
+            "  Question 1/1 (1 unanswered)",
+            "  Which cloud?",
+            "",
+            "  › 1. Azure              使用 Azure 作为云平台。",
+            "    2. AWS                使用 AWS 作为云平台。",
+            "    3. None of the above  Optionally, add details in notes (tab)",
+            "  deepseek-v4.1-flash medium · ~\\AppData\\Local\\Temp\\probe-codex-q-20261008 · 看 D:/Program Files/Git/plan  Plan mode",
+            "  tab to add notes | enter to submit answer | esc to interrupt",
+            "",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s1-summary-recap.txt` FIXTURE 12–16：S1 交卷后摘要屏（N=2）：头 `Questions 2/2 answered` + `answer: <选项文本>` 行（FIXTURE 15/16 为读取抖动帧，已按底料 §2 多帧还原词形；该帧属 §0 方法备注 1 管道瞬态）。
+    pub(crate) fn codex_answered_summary() -> Vec<String> {
+        lines(&[
+            "• Questions 2/2 answered",
+            "  • Which DB?",
+            "    answer: SQLite",
+            "  • Which cache?",
+            "    answer: Memcached",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-s2-summary-recap.txt` FIXTURE 09–15：S2 交卷后摘要屏（N=3）：头 `Questions 3/3 answered` + 三组 answer 行。
+    pub(crate) fn codex_answered_summary3() -> Vec<String> {
+        lines(&[
+            "• Questions 3/3 answered",
+            "  • Which DB?",
+            "    answer: Postgres",
+            "  • Which cache?",
+            "    answer: Redis",
+            "  • Which language?",
+            "    answer: Rust",
+        ])
+    }
+
+    /// 证据 `codex-q-20261009-e-wrap.txt` FIXTURE 21–29：E 长 label 单行形态：63 字符 label 不折行，desc 列右移（对齐到最长 label 后两格）。
+    pub(crate) fn codex_e_wrap() -> Vec<String> {
+        lines(&[
+            "  Question 1/1 (1 unanswered)",
+            "  Which deployment target?",
+            "",
+            "  › 1. Amazon Elastic Kubernetes Service with multi-region fleet  使用 Amazon EKS 多区域集群部署。",
+            "    2. Plain Docker Compose on a single VM                        在单台虚拟机上使用 Docker Compose 部署。",
+            "    3. None of the above                                          Optionally, add details in notes (tab)",
+            "  deepseek-v4.1-flash medium · ~\\AppData\\Local\\Temp\\probe-codex-q-20261008 · 看 D:/Program Files/Git/plan  Plan mode",
+            "  tab to add notes | enter to submit answer | esc to interrupt",
+            "",
+        ])
+    }
+
+    /// codex 焦点位移派生（共享实现）：把基底屏里 `›` 所在选项行的焦点标记移到
+    /// `option_lines[idx]` 指向的选项行（基底 idx 即原样返回）。行号按各基底屏
+    /// 的选项区布局点名——codex 屏取段不含滚回区，行号即段内索引。
+    /// 派生焦点行 `› ` 后带三空格与活体两空格缩进微差——解析器 trim 宽容，不影响判据。
+    fn codex_move_focus(base: &[String], option_lines: &[usize], idx: usize) -> Vec<String> {
+        let mut out = base.to_vec();
+        let from = out
+            .iter()
+            .position(|l| l.contains('›'))
+            .expect("codex 基底屏必有焦点行");
+        out[from] = out[from].replacen("› ", "  ", 1);
+        let to = option_lines[idx];
+        out[to] = out[to].replacen("  ", "› ", 1);
+        out
+    }
+
+    /// S1-Q1 面板焦点派生：idx=0 即基底；1=SQLite 2=None of the above。
+    /// （当前无消费点——非末题走数字直选；保留给未来「非末题走位」类场景，避免
+    /// 下轮要用时重写。`#[allow(dead_code)]` 显式登记而非删函数。）
+    #[allow(dead_code)]
+    pub(crate) fn codex_s1_q1_focused(idx: usize) -> Vec<String> {
+        const OPTION_LINES: [usize; 3] = [4, 5, 6];
+        if idx == 0 {
+            return codex_s1_q1();
+        }
+        codex_move_focus(&codex_s1_q1(), &OPTION_LINES, idx)
+    }
+
+    /// S1-Q2 面板（4 选项屏）焦点派生：idx=0 即基底；1=Memcached 2=None needed 3=None of the above。
+    pub(crate) fn codex_s1_q2_focused(idx: usize) -> Vec<String> {
+        const OPTION_LINES: [usize; 4] = [3, 4, 5, 6];
+        if idx == 0 {
+            return codex_s1_q2();
+        }
+        codex_move_focus(&codex_s1_q2(), &OPTION_LINES, idx)
+    }
+
+    /// S1-Q2 归零屏焦点派生：idx=0 即基底；0=Redis 1=Memcached（基底焦点）2=None needed 3=None of the above。
+    pub(crate) fn codex_s1_q2_zero_focused(idx: usize) -> Vec<String> {
+        const OPTION_LINES: [usize; 4] = [3, 4, 5, 6];
+        if idx == 1 {
+            return codex_s1_q2_zero();
+        }
+        codex_move_focus(&codex_s1_q2_zero(), &OPTION_LINES, idx)
     }
 }
 
