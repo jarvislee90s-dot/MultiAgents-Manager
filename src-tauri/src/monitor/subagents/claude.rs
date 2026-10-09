@@ -25,7 +25,8 @@ use std::sync::Arc;
 /// （`projects/<项目>/<sid>/subagents/`）。两处齐备才算命中：无 subagents/ 的
 /// 目录（旧平铺布局 / 无子 agent 会话）天然空态。父 jsonl 文件缺失不阻断发现
 /// （read_increment 对缺失文件返回空行 → 无事件 = spawn 态，残留口径 §8.2 申报）。
-fn locate(projects_root: &Path, session_id: &str) -> Option<(PathBuf, PathBuf)> {
+/// T4 起 `remote::content` 的子 agent 详情读取复用本发现（同一 projects 扫描）。
+pub(crate) fn locate(projects_root: &Path, session_id: &str) -> Option<(PathBuf, PathBuf)> {
     // 信任边界（review 修复，与 kimi.rs collect_with 的 sessions 根校验对称）：
     // session_id 是 UUID，路径分隔符或 ".." 只可能来自恶意构造的查询——入口拒绝，
     // 防 ../ 逃逸把发现层引出 projects 根。（join 后 starts_with 对含 .. 分量的

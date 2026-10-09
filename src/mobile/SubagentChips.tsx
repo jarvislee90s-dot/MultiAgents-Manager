@@ -1,45 +1,23 @@
 import { useEffect, useState } from "react";
 import { fmtTokens } from "@/lib/usage/format";
-import type { Session } from "@/types/session";
-import { fetchSessionSubagents, type SubagentView } from "./api";
+import type { SubagentView } from "./api";
 
-/** 运行中子 agent chip 区（spec §6）：ModeBar 兄弟节点，同一行 flex-wrap。
- *
- * - 拉取随 SessionDetail 的 refreshTick（DETAIL_REFRESH_MS 轮询——免费继承
- *   hidden 暂停/恢复补刷）独立拉取；空列表 = 端点权威，不渲染；
- * - 时长自走：tick 状态收在本组件（1s interval），不拖整页每秒重渲染；
- *   下轮拉取用服务端 spawnTs 校正；
- * - 失败静默**保留上一份成功数据**（不闪断、不报错——「静默不渲染」指无错误
- *   UI；首拉失败 → null 不渲染）；成功载荷（含空）即覆盖；
- * - 会话 finished 不拉取（挂载门在 SessionDetail；idle 不拦——claude 后台
- *   agent 可在主会话 idle 时仍在跑）。 */
+/** 运行中子 agent chip 区（v1 自拉 → 观察台 T5 改纯展示：list 由 SessionDetail
+ * 单一数据源下发——chip/面板卡区/详情三处一致）。
+ * - 只渲染 status==="running"（「完成即消失」= 前端过滤；全量名单在 FilePanel 卡区）；
+ * - 时长自走：tick 收在本组件（1s interval）；点击 chip 直达该子 agent 的
+ *   实时预览对话框（观察台 §二.4，不经过清单）。 */
 export default function SubagentChips({
-  session,
-  refreshTick,
+  list,
+  onOpenDetail,
 }: {
-  session: Session;
-  refreshTick: number;
+  list: SubagentView[] | null;
+  onOpenDetail: (id: string) => void;
 }) {
-  const [list, setList] = useState<SubagentView[] | null>(null);
   // 时长自走 tick（仅本组件重渲染）。now 收在 state 里由 effect/interval 更新——
   // render 期不得调 Date.now()（仓内 eslint react-hooks/purity 红线）；挂载即对齐，
   // 首帧前 now=null 不显时长（一帧，无感）
   const [now, setNow] = useState<number | null>(null);
-
-  useEffect(() => {
-    if (session.status === "finished") return;
-    let alive = true;
-    fetchSessionSubagents(session.agentType, session.id)
-      .then((v) => {
-        if (alive) setList(v);
-      })
-      .catch(() => {
-        /* 静默：保留上一份（不闪断）；首拉失败维持 null 不渲染 */
-      });
-    return () => {
-      alive = false;
-    };
-  }, [session.agentType, session.id, session.status, refreshTick]);
 
   useEffect(() => {
     const update = () => setNow(Date.now());
@@ -48,28 +26,41 @@ export default function SubagentChips({
     return () => clearInterval(t);
   }, []);
 
-  if (list === null || list.length === 0) return null;
+  const running = (list ?? []).filter((s) => s.status === "running");
+  if (running.length === 0) return null;
   return (
     <div data-testid="subagent-chips" className="flex flex-wrap items-center gap-x-2 gap-y-1">
-      {list.map((s) => {
-        const elapsed =
-          now !== null && s.spawnTs !== null && !Number.isNaN(Date.parse(s.spawnTs))
-            ? formatElapsed(now - Date.parse(s.spawnTs))
-            : null;
+      {running.map((s) => {
+        const ms = now !== null ? subagentElapsedMs(s, now) : null;
         return (
-          <span
+          <button
+            type="button"
             key={s.id}
             data-testid={`subagent-chip-${s.id}`}
             title={s.description ?? undefined}
+            onClick={() => onOpenDetail(s.id)}
             className="rounded-full bg-[var(--cb)]/60 px-2 py-0.5 text-[11px] text-[var(--tx)]"
           >
             ◉ {s.name}
-            {elapsed !== null ? ` ${elapsed}` : ""} · {chipTokenText(s.tokens)}
-          </span>
+            {ms !== null ? ` ${formatElapsed(ms)}` : ""} · {chipTokenText(s.tokens)}
+          </button>
         );
       })}
     </div>
   );
+}
+
+/** 子 agent 运行时长毫秒（chip 与清单卡共享口径，观察台 §二.3）：
+ *  running（endTs=null）→ now − spawnTs 持续走字；idle → endTs − spawnTs 冻结
+ *  （续跑转回 running 后自然回到 now 锚——时长从首次派发连续累计不归零）。
+ *  spawnTs 缺失/不可解析 → null（只显 token，v1 §8.2 口径） */
+export function subagentElapsedMs(
+  s: Pick<SubagentView, "spawnTs" | "endTs">,
+  now: number
+): number | null {
+  if (s.spawnTs === null || Number.isNaN(Date.parse(s.spawnTs))) return null;
+  const end = s.endTs !== null && !Number.isNaN(Date.parse(s.endTs)) ? Date.parse(s.endTs) : now;
+  return Math.max(0, end - Date.parse(s.spawnTs));
 }
 
 /** 运行时长格式（纯函数）：M:SS；≥1h → H:MM:SS */

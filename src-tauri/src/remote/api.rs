@@ -587,17 +587,12 @@ pub async fn session_files(
         .into_response())
 }
 
-/// GET /m/api/v1/session-subagents?agent_type=&session_id=（spec §5.2）
-/// `{subagents: [{id, name, description, spawnTs, tokens{input,cacheRead,cacheCreation,output}}]}`
-/// - 只含运行中条目（判据在各 source，spec §4）；按 spawnTs 升序（None 排尾）；
-/// - **端点是空态唯一权威**：前端不另特判；会话不存在/未知 agent_type/source
-///   未装配 → `subagents: []`（不给探测面）。「非活跃 → []」**不做端点侧活跃度
-///   判定**（不查会话快照——省一次 sysinfo 全量扫描，取舍如实申报）：已结束会话
-///   的空态由前端 finished 卸载实现（spec §6 挂载门）；其余状态的裁决交给各
-///   source 判据（判据空 = 空列表）；
-/// - 缺参（agent_type / session_id）或空白 → 400 BAD_REQUEST；
-/// - 响应带 Cache-Control: no-store（门禁下私有数据，sessions 同规）；
-/// - source 是文件/DB IO（同步阻塞），`spawn_blocking` 包裹（sessions handler 同先例）。
+/// GET /m/api/v1/session-subagents?agent_type=&session_id=（spec §5.2 + 观察台 §二）
+/// `{subagents: [{id, name, description, spawnTs, tokens{…}, status, endTs}]}`
+/// - **全量名单**（2026-10-09 T3）：含终态条目（status=idle）——运行过滤移交前端
+///   chip 层（清单卡区消费全量）；按 spawnTs 升序（None 排尾）= 派发序（新派发附末尾）；
+/// - 端点是空态唯一权威（会话不存在/未知 agent_type/source 未装配 → []）；
+/// - 缺参/空白 → 400；Cache-Control: no-store；IO 全 spawn_blocking（既有不变）。
 pub async fn session_subagents(
     State(st): State<Arc<RemoteState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -635,6 +630,79 @@ pub async fn session_subagents(
         Json(serde_json::json!({ "subagents": subagents })),
     )
         .into_response())
+}
+
+/// GET /m/api/v1/session-subagent-messages?agent_type=&session_id=&subagent_id=&limit=
+/// （观察台 §三）`{messages: SessionMessage[], truncated: bool, supported: bool}`
+/// - 载荷与 /session-messages 同形（SessionMessage 逐字段同构）+ supported 标志
+///   ——前端消息渲染器零适配；
+/// - source 未装配（opencode/kimi/codex）→ 200 `{messages:[], truncated:false,
+///   supported:false}`（「暂不支持查看详情」是正常态不是错误，不给 404）；
+/// - claude 读取失败（会话/转写不存在）→ 404（session_messages 同映射：细节只进日志）；
+/// - 缺参/空白 → 400；subagent_id 含 `/`、`\`、`..`、`\0` → 400（该 id 直接拼
+///   `subagents/agent-<id>.jsonl` 文件名——content.rs 会话守卫同款）；
+/// - limit 缺省 200（clamp [1,1000] 在注入核 `read_claude_subagent_messages_with`
+///   入口——本端点不经 session-messages 的派发核，评审 P1-2）；no-store；spawn_blocking。
+pub async fn session_subagent_messages(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let need = |k: &str| {
+        params
+            .get(k)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    let Some(agent) = need("agent_type") else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(sid) = need("session_id") else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(sub) = need("subagent_id") else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    if sub.contains(['/', '\\', '\0']) || sub.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let limit = params
+        .get("limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(200);
+    let st = st.clone();
+    let agent_for_log = agent.clone(); // 闭包 move 后日志仍可用
+    let result = tokio::task::spawn_blocking(move || {
+        match st.subagent_message_source.get(agent.as_str()) {
+            Some(f) => f(sid.as_str(), sub.as_str(), limit).map(|pg| (pg, true)), // supported=true（装配即支持）
+            None => Ok((
+                crate::remote::content::MessagesPage {
+                    messages: Vec::new(),
+                    truncated: false,
+                },
+                false,
+            )),
+        }
+    })
+    .await
+    .map_err(|e| {
+        log::error!("子 agent 详情查询任务异常: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    match result {
+        Ok((pg, supported)) => Ok((
+            [(axum::http::header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({
+                "messages": pg.messages,
+                "truncated": pg.truncated,
+                "supported": supported,
+            })),
+        )
+            .into_response()),
+        Err(e) => {
+            log::warn!("session-subagent-messages 读取失败（agent={agent_for_log}）: {e}");
+            Err(StatusCode::NOT_FOUND)
+        }
+    }
 }
 
 /// file 端点的读取结果三分（403/404 语义分流在 handler 尾部，读取全程在阻塞线程池）：

@@ -406,6 +406,15 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         ]
         .into_iter()
         .collect(),
+        // 2026-10-09 观察台 §三：详情源仅 claude（其余工具 supported=false；
+        // 转写格式普查后另批补，spec §五）
+        subagent_message_source: [(
+            "claude",
+            Box::new(crate::remote::content::read_claude_subagent_messages)
+                as Box<server::SubagentMessageSourceFn>,
+        )]
+        .into_iter()
+        .collect(),
         // M3 Task 5：跃迁事件通道与扫描循环同源（watcher::event_sender 与
         // SessionWatcher::start 共用全进程唯一通道；Task 6 的 SSE 只订阅此 tx）
         watcher_tx: watcher::event_sender(),

@@ -7,8 +7,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { FileText, Image as ImageIcon, X } from "lucide-react";
 import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
+import SubagentList from "./SubagentList";
 import { formatRelativeTime } from "./board-logic";
-import { fetchChannel, type ChannelInfo, type SessionFileEntry } from "./api";
+import { fetchChannel, type ChannelInfo, type SessionFileEntry, type SubagentView } from "./api";
 
 /** 带宽耗时预估的参考附件大小（§C5，MB）：面板只知路径不知大小，按线稿口径用
  *  20 MB 参考量给出「量级感受」（20MB×8bit / 1.8Mbps ≈ 1.5 分钟 / ÷0.8 ≈ 3.3 分钟） */
@@ -88,6 +89,10 @@ export function fileDirPrefix(path: string): string {
 }
 
 interface FilePanelProps {
+  /** 子 Agent 全量名单（观察台 §二）：空/undefined → 卡区整体不渲染 */
+  subagents?: SubagentView[] | null;
+  /** 卡片点击 → 详情（活跃实时预览 / 不活跃定格快照） */
+  onOpenSubagent?: (id: string) => void;
   /** 已按 lastSeq 降序（后端契约，本组件不再排序） */
   entries: SessionFileEntry[];
   /** 该档位下还有更早文件未纳入（档位提示依据） */
@@ -107,6 +112,8 @@ interface FilePanelProps {
 }
 
 export default function FilePanel({
+  subagents = null,
+  onOpenSubagent,
   entries,
   truncated,
   scope,
@@ -306,6 +313,9 @@ export default function FilePanel({
         data-font-scale={fontScale}
         className="min-h-0 flex-1 overflow-y-auto px-3 py-2"
       >
+        {/* 子 Agent 卡区（观察台 §二）：派发序单一列表，绿点走字/灰点冻结原位；
+            名单为空时卡区整体不渲染，不影响下方文件列表 */}
+        <SubagentList list={subagents ?? null} onOpen={onOpenSubagent ?? (() => {})} />
         {visible.length === 0 && !loading && (
           <p data-testid="panel-empty" className="py-12 text-center text-sm text-[var(--mut)]">
             {activeSearch || origin !== "all" ? "无匹配文件" : "该范围内未发现文件"}

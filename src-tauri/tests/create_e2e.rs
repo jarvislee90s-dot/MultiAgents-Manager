@@ -920,6 +920,7 @@ async fn e2e_create_http_full_chain() {
         pairing_counter: Box::new(c9_running_projects),
         ui_config_source: Box::new(|| None),
         subagent_source: std::collections::HashMap::new(),
+        subagent_message_source: std::collections::HashMap::new(),
         store: DeviceStore::memory(),
         injector: Arc::new(RealInjector),
         resume_spawner: Arc::new(multi_agents_manager_lib::inject::resume::spawn_terminal),

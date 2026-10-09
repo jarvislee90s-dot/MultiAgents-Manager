@@ -1476,17 +1476,22 @@ export async function fetchCreateStatus(
 
 /** GET /session-subagents 载荷单条（与 Rust monitor::subagents::SubagentView 的
  *  camelCase 序列化逐字段对应，勿漂移）。spawnTs=null：首条时间戳未落盘（spawn
- *  竞态，下轮自愈）——前端不显示时长只显 token。 */
+ *  竞态，下轮自愈）——前端不显示时长只显 token。
+ *  2026-10-09 观察台：**全量名单**（含终态）——status=running → chip 活跃区；
+ *  idle → 清单卡灰点冻结（endTs = 冻结锚，elapsed = (endTs ?? now) − spawnTs）。 */
 export interface SubagentView {
   id: string;
   name: string;
   description: string | null;
   spawnTs: string | null;
   tokens: { input: number; cacheRead: number; cacheCreation: number; output: number };
+  status: "running" | "idle";
+  endTs: string | null;
 }
 
-/** 拉取会话的运行中子 agent（空列表 = 无运行中，端点是空态唯一权威——前端不
- *  另特判）。非 2xx / 网络异常 → 抛 ApiError（调用方静默，ModeBar 同惯例） */
+/** 拉取会话的子 agent 全量名单（含终态；运行过滤在 chip 层）。空列表 = 该会话
+ *  无子 agent——端点是空态唯一权威（前端不另特判）。非 2xx / 网络异常 → 抛
+ *  ApiError（调用方静默，ModeBar 同惯例） */
 export async function fetchSessionSubagents(
   agentType: string,
   sessionId: string
@@ -1501,4 +1506,39 @@ export async function fetchSessionSubagents(
   if (!r.ok) throw new ApiError(r.status, `session-subagents ${r.status}`);
   const data = (await r.json()) as { subagents: SubagentView[] };
   return data.subagents;
+}
+
+// ==== 2026-10-09 观察台 §三：子 agent 详情（/session-subagent-messages）====
+
+/** 详情载荷：messages/truncated 与 /session-messages 同形（渲染器零适配）；
+ *  supported=false = 该工具暂不支持查看详情（opencode/kimi/codex——spec §三.6，
+ *  如实申报不空白页不假数据），前端显示明确提示态 */
+export interface SubagentMessagesPage {
+  messages: SessionMessage[];
+  truncated: boolean;
+  supported: boolean;
+}
+
+/** 拉取子 agent 执行过程（claude）。404（会话/转写不存在）与非 2xx → ApiError；
+ *  supported=false 是 200 正常载荷不是错误 */
+export async function fetchSubagentMessages(
+  agentType: string,
+  sessionId: string,
+  subagentId: string,
+  limit = 200
+): Promise<SubagentMessagesPage> {
+  const q = new URLSearchParams({
+    agent_type: agentType,
+    session_id: sessionId,
+    subagent_id: subagentId,
+    limit: String(limit),
+  });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-subagent-messages?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-subagent-messages 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-subagent-messages ${r.status}`);
+  return (await r.json()) as SubagentMessagesPage;
 }

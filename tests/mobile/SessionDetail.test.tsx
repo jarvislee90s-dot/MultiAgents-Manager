@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "@/mobile/App";
 import SessionDetail, { isPlanPending } from "@/mobile/SessionDetail";
-import type { SessionFileEntry, SessionMessage } from "@/mobile/api";
+import type { SessionFileEntry, SessionMessage, SubagentView } from "@/mobile/api";
 import { BOOKMARK_COLORS, clearBookmarks, messageAnchor } from "@/mobile/bookmarks";
 import { MockEventSource } from "./eventSourceMock";
 import type { Session } from "@/types/session";
@@ -91,6 +91,9 @@ interface Routes {
   questionInfo?: { available: boolean; questions: unknown[]; source?: string };
   /** 问答应答 POST 回执（F2-1 用例需要 key_sent 终态；缺省 key_sent） */
   questionAnswer?: { status: string; error?: string };
+  /** 子 agent 全量名单（观察台 T5：SessionDetail 挂载即拉；缺省 [] = 无子 agent，
+   *  卡区/chip 不渲染——既有用例行为不变） */
+  subagents?: SubagentView[];
 }
 
 let routes: Routes;
@@ -210,7 +213,17 @@ function installFetch() {
       );
     }
     if (url.includes("/session-subagents")) {
-      return new Response(JSON.stringify({ subagents: [] }), { status: 200 });
+      // 观察台 T5：SessionDetail 挂载即拉全量名单——读 routes.subagents（缺省 []
+      // 与旧桩同形，既有用例行为不变）
+      return new Response(JSON.stringify({ subagents: routes.subagents ?? [] }), { status: 200 });
+    }
+    if (url.includes("/session-subagent-messages")) {
+      // 观察台 T6：SubagentDetail 详情载荷桩（本页既有用例不开详情对话框，
+      // 缺省空载荷即可——防御 SubagentDetail 挂载时的意外请求）
+      return new Response(
+        JSON.stringify({ messages: [], truncated: false, supported: true }),
+        { status: 200 }
+      );
     }
     throw new Error(`unexpected fetch: ${url}`);
   });
@@ -1189,7 +1202,15 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
         return new Response(JSON.stringify({ files: [], truncated: false }), { status: 200 });
       }
       if (url.includes("/session-subagents")) {
-        return new Response(JSON.stringify({ subagents: [] }), { status: 200 });
+        // 观察台 T5：与 installFetch 同口径读 routes.subagents（缺省 []）
+        return new Response(JSON.stringify({ subagents: routes.subagents ?? [] }), { status: 200 });
+      }
+      if (url.includes("/session-subagent-messages")) {
+        // 观察台 T6：详情载荷桩（同 installFetch，缺省空载荷）
+        return new Response(
+          JSON.stringify({ messages: [], truncated: false, supported: true }),
+          { status: 200 }
+        );
       }
       throw new Error(`unexpected fetch: ${url}`);
     });
@@ -1935,7 +1956,17 @@ describe("SessionDetail：活状态流（T1）", () => {
           });
         }
         if (url.includes("/session-subagents")) {
-          return new Response(JSON.stringify({ subagents: [] }), { status: 200 });
+          // 观察台 T5：与 installFetch 同口径读 routes.subagents（缺省 []）
+          return new Response(JSON.stringify({ subagents: routes.subagents ?? [] }), {
+            status: 200,
+          });
+        }
+        if (url.includes("/session-subagent-messages")) {
+          // 观察台 T6：详情载荷桩（同 installFetch，缺省空载荷）
+          return new Response(
+            JSON.stringify({ messages: [], truncated: false, supported: true }),
+            { status: 200 }
+          );
         }
         throw new Error(`unexpected fetch: ${url}`);
       })
@@ -2590,5 +2621,44 @@ describe("丁T2 N2：isPlanPending 与后端判据的跨语言共享夹具锁", 
     // 但若那 60 条里有用户消息紧跟在计划之后（真实消费信号），前端也判 false
     const consumed = [...longHistory, m("user")];
     expect(isPlanPending(consumed, "codex")).toBe(false);
+  });
+});
+
+// ==== 子 Agent 观察台 T5：清单拉取上提 SessionDetail（单一数据源）+ 点击跳转 ====
+// 拉取行为细节（轮询/失败静默/finished 冻结）由组件层用例覆盖，此处锁集成面：
+// 面板卡区全量名单（绿灰同列）与「点击卡片 → 预览区切 subagent 视图」。
+describe("SessionDetail：子 Agent 清单与跳转（观察台 §二）", () => {
+  it("FilePanel 打开 → 卡区渲染全量名单（绿灰同列）；点击卡片 → 预览区切 subagent 视图", async () => {
+    installFetch();
+    routes.subagents = [
+      {
+        id: "a1",
+        name: "Plan",
+        description: "设计新方案",
+        spawnTs: "2026-10-08T07:31:07Z",
+        tokens: { input: 1, cacheRead: 0, cacheCreation: 0, output: 0 },
+        status: "running",
+        endTs: null,
+      },
+      {
+        id: "b1",
+        name: "Explore",
+        description: null,
+        spawnTs: "2026-10-08T07:00:00Z",
+        tokens: { input: 1, cacheRead: 0, cacheCreation: 0, output: 0 },
+        status: "idle",
+        endTs: "2026-10-08T07:30:00Z",
+      },
+    ];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    // jsdom 无 matchMedia → 窄屏语义，面板默认 fullscreen 浮层
+    fireEvent.click(await screen.findByTestId("file-panel-button"));
+    expect(await screen.findByTestId("subagent-card-a1")).toBeTruthy();
+    expect(screen.getByTestId("subagent-dot-b1").className).toContain("bg-gray-400");
+    fireEvent.click(screen.getByTestId("subagent-card-a1"));
+    // T6 前占位断言：预览区进入 subagent 视图（data-view 由渲染分支写入）
+    await vi.waitFor(() =>
+      expect(document.querySelector('[data-view="subagent"]')).toBeTruthy()
+    );
   });
 });
