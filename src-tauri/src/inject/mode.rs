@@ -1300,9 +1300,7 @@ pub(crate) fn latest_new_permission_receipt(
     lines
         .iter()
         .rev()
-        .find(|l| {
-            parse_codex_permission_event_line(l).is_some() && event_line_is_new(baseline, l)
-        })
+        .find(|l| parse_codex_permission_event_line(l).is_some() && event_line_is_new(baseline, l))
         .cloned()
 }
 

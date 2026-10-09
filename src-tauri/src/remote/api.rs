@@ -11159,7 +11159,7 @@ mod tests {
                 "select",
             ),
             (
-                "codex：屏上是未答完确认屏（Submit with unanswered questions?）——前序动作已错位，MAM 不代答；请到终端人工处置",
+                "codex：屏上是未答完确认屏（Submit with unanswered questions?）——前序动作已错位，兔维斯 不代答；请到终端人工处置",
                 "select",
             ),
             (

@@ -41,7 +41,8 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub fn open_ledger_db(tag: &str) -> Connection {
     let home = unique_home(tag);
-    let conn = Connection::open(home.join(".tuvis").join("tuvis.db")).expect("打开用例私有账本库失败");
+    let conn =
+        Connection::open(home.join(".tuvis").join("tuvis.db")).expect("打开用例私有账本库失败");
     // 与生产启动路径同款：schema::init 建齐（含 Task 2 追加的 4 张用量账本表）
     multi_agents_manager_lib::database::schema::init(&conn);
     conn

@@ -1576,7 +1576,7 @@ pub fn run_codex_select_stages<T: MenuTerminal>(
                 .is_some()
             {
                 return Err(StageAbort::screen(
-                    "codex：屏上是未答完确认屏（Submit with unanswered questions?）——前序动作已错位，MAM 不代答；请到终端人工处置",
+                    "codex：屏上是未答完确认屏（Submit with unanswered questions?）——前序动作已错位，兔维斯 不代答；请到终端人工处置",
                 ));
             }
             return Err(StageAbort::screen(
@@ -1814,7 +1814,7 @@ fn run_codex_select_final<T: MenuTerminal>(
     //     须在走位**之前**判：此形态一旦走位，发出去的 j/k 都是在为「换选」
     //     铺路，而 0.160.0 实测已答题上空格 = 先反选旧答案（计数 +1）、新项
     //     未选中——「换选」需要「空格选新 → 空格……」多拍编排且旧答案已被动过，
-    //     中途失败会留下「旧答案被清掉」的半程态。MAM 不冒进，请终端人工换选）。
+    //     中途失败会留下「旧答案被清掉」的半程态。兔维斯 不冒进，请终端人工换选）。
     //     改答同项（焦点=目标）与未答主路径不受影响。
     if entry.unanswered == 0 && f0 != target {
         return Err(StageAbort::screen(
@@ -1955,7 +1955,7 @@ fn run_codex_select_final<T: MenuTerminal>(
         .is_some()
         {
             return Err(StageAbort::screen(
-                "codex：屏上是未答完确认屏——前序动作已错位，MAM 不代答；请到终端人工处置",
+                "codex：屏上是未答完确认屏——前序动作已错位，兔维斯 不代答；请到终端人工处置",
             ));
         }
         return Err(StageAbort::screen(

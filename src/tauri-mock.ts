@@ -785,7 +785,10 @@ if (!isTauri) {
       case "list_repo_skills":
         return Promise.resolve([
           { name: "brainstorming", path: "/Users/jarvis/.tuvis/skills/brainstorming" },
-          { name: "systematic-debugging", path: "/Users/jarvis/.tuvis/skills/systematic-debugging" },
+          {
+            name: "systematic-debugging",
+            path: "/Users/jarvis/.tuvis/skills/systematic-debugging",
+          },
         ]);
 
       // CompatibilityReport（serde camelCase）：条目为 {id, name, kind} / {id, name, kind, reason}
@@ -838,8 +841,7 @@ if (!isTauri) {
               prerelease: true,
               notes:
                 "## v0.5.0-beta.1 更新\n\n> 预发布：远程操控试验性开放。\n\n- **手机远程操控**：发消息/排队/撤回\n- **远程审批与问答**：屏读为准实时同步\n\n| 功能 | 状态 |\n| --- | --- |\n| 发消息 | ✅ |\n| 审批 | ✅ |\n",
-              htmlUrl:
-                "https://github.com/jarvislee90s-dot/tuvis/releases/tag/v0.5.0-beta.1",
+              htmlUrl: "https://github.com/jarvislee90s-dot/tuvis/releases/tag/v0.5.0-beta.1",
               publishedAt: "2026-09-23T15:18:19Z",
               tag: "v0.5.0-beta.1",
               latestJsonUrl:

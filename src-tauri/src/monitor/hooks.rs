@@ -1160,7 +1160,9 @@ pub fn codex_hooks_all_ours(home: &std::path::Path) -> bool {
     let mut markers = Vec::new();
     for p in [
         home.join(".tuvis").join("hooks").join("status-hook.sh"),
-        home.join(".tuvis").join("bin").join("tuvis-hook-listener.exe"),
+        home.join(".tuvis")
+            .join("bin")
+            .join("tuvis-hook-listener.exe"),
         home.join(".tuvis").join("bin").join("tuvis-hook-listener"),
     ] {
         let s = p.to_string_lossy().to_string();

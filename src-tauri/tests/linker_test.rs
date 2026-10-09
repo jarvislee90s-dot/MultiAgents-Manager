@@ -204,7 +204,10 @@ fn test_install_to_repo_existing_with_overwrite_replaces() {
     std::fs::create_dir_all(&source).unwrap();
     std::fs::write(source.join("SKILL.md"), "# new").unwrap();
 
-    let dest = home.join(".tuvis").join("skills").join("demo-skill-clobber");
+    let dest = home
+        .join(".tuvis")
+        .join("skills")
+        .join("demo-skill-clobber");
     std::fs::create_dir_all(&dest).unwrap();
     std::fs::write(dest.join("SKILL.md"), "# old").unwrap();
 
