@@ -19,6 +19,9 @@ export interface Session {
   status: SessionStatus;
   lastMessage: string | null;
   lastMessageRole: string | null;
+  /** lastMessage 是否为「子 agent 回报」触发（观察台 §四 提醒开关判定信号；
+   *  后端判据层打标，claude 专属、其余工具恒 false = 未区分） */
+  lastMessageSubagentReport: boolean;
   lastActivityAt: string;
   pid: number;
   cpuUsage: number;

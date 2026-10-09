@@ -507,6 +507,7 @@ fn build_one_session(
         status,
         last_message,
         last_message_role,
+        last_message_subagent_report: false,
         last_activity_at: chrono::DateTime::from_timestamp_millis(row.time_updated)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_default(),

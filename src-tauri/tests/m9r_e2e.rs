@@ -1012,6 +1012,7 @@ async fn e2e_http_full_chain() {
         status: multi_agents_manager_lib::session::SessionStatus::Waiting,
         last_message: None,
         last_message_role: None,
+        last_message_subagent_report: false,
         last_activity_at: chrono::Utc::now().to_rfc3339(),
         pid: proc.target,
         cpu_usage: 0.0,

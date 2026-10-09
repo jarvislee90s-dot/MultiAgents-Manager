@@ -226,6 +226,18 @@ pub(crate) fn update_entry<R>(
     f: impl FnOnce(Option<CacheBox>) -> (CacheBox, R),
 ) -> R {
     let mut map = registry().lock().unwrap_or_else(|e| e.into_inner());
+    update_entry_locked(&mut map, tool, session_id, f)
+}
+
+/// 锁内核心（终审修复：CAP 检查/读改写语义的唯一定义点——update_entry 只做取锁
+/// 转调，测试持锁直调本核即守住真函数，不再在测试里手工复刻锁/CAP/读改写语义）。
+/// 调用方必须已持 registry 锁且锁内不得再调 update_entry（Mutex 不可重入）。
+fn update_entry_locked<R>(
+    map: &mut std::collections::HashMap<(&'static str, String), CacheBox>,
+    tool: &'static str,
+    session_id: &str,
+    f: impl FnOnce(Option<CacheBox>) -> (CacheBox, R),
+) -> R {
     if map.len() >= SUBAGENT_CACHE_CAP {
         map.clear(); // EVICT_HARD_CAP 同语义：整段清空
     }
@@ -314,36 +326,39 @@ mod tests {
     /// 会话级缓存：读改写往返 + 硬上限整段清空（EVICT_HARD_CAP 模式）。
     /// 并行竞态修复（T2 批次实测抓获）：registry 是进程级单例，其余 collect 测试的
     /// reset_cache_for_tests() 若插在本用例两次写条目之间，会击穿「二次进入拿到上次
-    /// 条目」断言（约 1/8 复现率）——故整个用例**持 registry 锁**串行执行；锁内直接
-    /// 操作 map（update_entry 要重入同一把锁，会死锁）。断言语义与 update_entry
-    /// 路径逐一对应：读改写往返 / len>=CAP 先 clear 再 insert。
+    /// 条目」断言（约 1/8 复现率）——故整个用例**持 registry 锁**串行执行。
+    /// 终审修复：锁内直调**真核 update_entry_locked**（update_entry 要重入同一把锁，
+    /// 会死锁）——CAP 检查/读改写语义不再在测试里手工复刻，真函数恢复直接守护；
+    /// 断言语义与 v1 原版一致（闭包内断言 + 返回值管道）。
     #[test]
     fn cache_update_and_hard_cap() {
+        reset_cache_for_tests();
         let mut map = registry().lock().unwrap_or_else(|e| e.into_inner());
-        map.clear();
-        // 首次进入：条目缺失
-        assert!(!map.contains_key(&("t-cap", "s1".to_string())));
-        map.insert(("t-cap", "s1".to_string()), Arc::new(7u32) as CacheBox);
+        // 首次进入：闭包收到的条目缺失（读改写管道：返回值透传）
+        let v = update_entry_locked(&mut map, "t-cap", "s1", |cur| {
+            assert!(cur.is_none());
+            (Arc::new(7u32) as CacheBox, 1u8)
+        });
+        assert_eq!(v, 1);
         // 二次进入：拿到上次条目（读改写往返）
-        let old = map
-            .remove(&("t-cap", "s1".to_string()))
-            .and_then(|b| b.downcast::<u32>().ok())
-            .map(|a| *a);
-        assert_eq!(old, Some(7), "二次进入拿到上次条目");
-        map.insert(("t-cap", "s1".to_string()), Arc::new(8u32) as CacheBox);
-        // 硬上限：len >= CAP → 先整段清空再插入（update_entry 同款语义）
+        let v = update_entry_locked(&mut map, "t-cap", "s1", |cur| {
+            let old = cur.and_then(|b| b.downcast::<u32>().ok()).map(|a| *a);
+            (Arc::new(old.unwrap_or(0) + 1) as CacheBox, old)
+        });
+        assert_eq!(v, Some(7), "二次进入拿到上次条目");
+        // 硬上限：len >= CAP → 先整段清空再插入（0..=CAP 共 CAP+1 次触发清空）
         for i in 0..=SUBAGENT_CACHE_CAP {
-            if map.len() >= SUBAGENT_CACHE_CAP {
-                map.clear();
-            }
-            map.insert(("t-cap", format!("fill-{i}")), Arc::new(0u32) as CacheBox);
+            update_entry_locked(&mut map, "t-cap", &format!("fill-{i}"), |_| {
+                (Arc::new(0u32) as CacheBox, ())
+            });
         }
-        // 超限后整段清空 → s1 条目不复存在
-        assert!(
-            !map.contains_key(&("t-cap", "s1".to_string())),
-            "条目超上限 → 整段清空（宁可重建也不吃内存）"
-        );
-        map.clear();
+        // 超限后整段清空 → s1 条目不复存在（闭包视角的「缺失」断言）
+        let gone = update_entry_locked(&mut map, "t-cap", "s1", |cur| {
+            (Arc::new(0u32) as CacheBox, cur.is_none())
+        });
+        assert!(gone, "条目超上限 → 整段清空（宁可重建也不吃内存）");
+        drop(map); // 先放锁再清场（reset 重入同一把锁会死锁）
+        reset_cache_for_tests();
     }
 
     /// 活跃窗口边界（spec §4.2/§4.3 共用取值）：恰好 90s 视为已过期

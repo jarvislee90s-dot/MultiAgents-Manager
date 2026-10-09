@@ -392,12 +392,10 @@ pub(crate) fn teammate_idle_from(text: &str) -> Option<&str> {
     teammate_id_in(text)
 }
 
-/// lastMessage 是否为「子 agent 回报」（观察台 §四 提醒开关的打标谓词，T7 消费）。
+/// lastMessage 是否为「子 agent 回报」（观察台 §四 提醒开关的打标谓词，
+/// 生产消费点 = claude_parser digest 打标 → Session.last_message_subagent_report）。
 /// 与判据同一套信号原语（task_id_in + teammate-message 标记）——spec §四.3
 /// 「判定与修复项同源，不靠文案匹配」的落点：前端只看后端打出的布尔。
-/// 本批（T1）仅测试消费，生产消费点在 T7 接线——同 `LastEvent::Spawn` 的
-/// 「契约先行」allow 先例，T7 接线后可移除。
-#[allow(dead_code)]
 pub(crate) fn is_subagent_report_text(text: &str) -> bool {
     task_id_in(text).is_some() || text.contains("<teammate-message")
 }

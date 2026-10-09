@@ -123,6 +123,8 @@ struct ClaudeFileDigest {
     last_is_user_input: bool,
     is_compacting: bool,
     last_message: Option<String>,
+    /// T7：末条预览消息是否为子 agent 回报（提醒开关打标；谓词与判据同源）
+    last_is_subagent_report: bool,
     last_role: Option<String>,
 }
 
@@ -217,6 +219,13 @@ fn read_claude_digest(jsonl_path: &Path) -> ClaudeFileDigest {
         }
     }
 
+    // T7 打标：判原文（截断可能切掉尾部标记）；谓词复用判据层信号原语（同源，
+    // spec §四.3——前端只消费布尔，永不匹配文案）
+    let last_is_subagent_report = last_message
+        .as_deref()
+        .map(crate::monitor::subagents::claude::is_subagent_report_text)
+        .unwrap_or(false);
+
     let last_message = last_message.map(|m| {
         if m.chars().count() > 100 {
             format!("{}...", m.chars().take(100).collect::<String>())
@@ -238,6 +247,7 @@ fn read_claude_digest(jsonl_path: &Path) -> ClaudeFileDigest {
         last_is_user_input,
         is_compacting,
         last_message,
+        last_is_subagent_report,
         last_role,
     }
 }
@@ -290,6 +300,7 @@ fn parse_claude_jsonl(
         status,
         last_message: digest.last_message.clone(),
         last_message_role: digest.last_role.clone(),
+        last_message_subagent_report: digest.last_is_subagent_report,
         last_activity_at: digest
             .last_timestamp
             .clone()
@@ -373,5 +384,34 @@ mod title_tests {
         let session =
             parse_claude_jsonl(&jsonl, "/work/demo", &fake_process(1)).expect("应解析出会话");
         assert_eq!(session.status, crate::session::SessionStatus::Idle);
+    }
+
+    // ==== 2026-10-09 观察台 T7：lastMessage 子 agent 回报打标（同源谓词）====
+
+    /// teammate 报告 / task-notification → true；普通文本 → false（乙.3.4 实证形态）
+    #[test]
+    fn digest_marks_subagent_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("parent.jsonl");
+        std::fs::write(
+            &p,
+            concat!(
+                r#"{"type":"user","timestamp":"2026-10-08T15:02:26Z","message":{"role":"user","content":"Another Claude session sent a message: <teammate-message teammate_id=\"bg\">任务完成</teammate-message>"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let d = read_claude_digest(&p);
+        assert!(d.last_is_subagent_report);
+        std::fs::write(
+            &p,
+            r#"{"type":"user","timestamp":"2026-10-08T15:09:43Z","message":{"role":"user","content":"主 agent 自己的回执复述"}}"#,
+        )
+        .unwrap();
+        let d = read_claude_digest(&p);
+        assert!(
+            !d.last_is_subagent_report,
+            "主会话自身动作不打标（乙.3.4 23:09:43 案例）"
+        );
     }
 }

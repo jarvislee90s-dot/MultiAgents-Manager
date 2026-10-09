@@ -214,6 +214,7 @@ mod tests {
             status,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
             last_activity_at: String::new(),
             pid: 1,
             cpu_usage: 0.0,

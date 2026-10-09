@@ -78,6 +78,10 @@ pub struct Session {
     pub status: SessionStatus,
     pub last_message: Option<String>,
     pub last_message_role: Option<String>,
+    /// lastMessage 是否为「子 agent 回报」触发（观察台 §四 提醒开关的判定信号；
+    /// claude 判据层同源打标——teammate-message / task-notification，其余工具
+    /// 恒 false = 「未区分」如实申报，spec §四.4）
+    pub last_message_subagent_report: bool,
     pub last_activity_at: String,
     pub pid: u32,
     pub cpu_usage: f32,

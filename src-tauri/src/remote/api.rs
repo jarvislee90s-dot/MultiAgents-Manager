@@ -612,6 +612,8 @@ pub async fn session_subagents(
         return Err(StatusCode::BAD_REQUEST);
     };
     let st = st.clone();
+    // 观测日志用副本（agent/sid 已 move 进阻塞闭包——T4 同款 use-after-move 规避）
+    let (agent_for_log, sid_for_log) = (agent.clone(), sid.clone());
     let mut subagents = tokio::task::spawn_blocking(move || {
         match st.subagent_source.get(agent.as_str()) {
             Some(f) => f(agent.as_str(), sid.as_str()),
@@ -625,6 +627,18 @@ pub async fn session_subagents(
     })?;
     // 端点统一排序（source 只管判据，序是端点契约的一部分）
     crate::monitor::subagents::sort_views(&mut subagents);
+    // 观察台 §六 真机验收辅助：每拍一条 debug（10s 轮询低噪声）——验收时
+    // `pnpm tauri:dev` 控制台 grep "subagents" 即可对账「完成即消失（running 数
+    // 下降）/ 续跑即复现」与「灰点冻结（endTs 不变）」
+    let running = subagents
+        .iter()
+        .filter(|s| s.status == crate::monitor::subagents::SubagentStatus::Running)
+        .count();
+    log::debug!(
+        "subagents {agent_for_log}/{sid_for_log}: {} running / {} total",
+        running,
+        subagents.len()
+    );
     Ok((
         [(axum::http::header::CACHE_CONTROL, "no-store")],
         Json(serde_json::json!({ "subagents": subagents })),
@@ -6731,6 +6745,7 @@ pub async fn session_open(
                         status: crate::session::SessionStatus::Waiting,
                         last_message: None,
                         last_message_role: None,
+                        last_message_subagent_report: false,
                         last_activity_at: row.last_seen.clone(),
                         pid: 0,
                         cpu_usage: 0.0,

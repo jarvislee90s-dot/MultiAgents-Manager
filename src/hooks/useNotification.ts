@@ -79,6 +79,8 @@ export function useNotification() {
   const greenTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const permissionGranted = useRef(false);
   const notificationsEnabled = useRef(true);
+  // 子 Agent 回报提醒开关（观察台 §四）：与 notificationsEnabled 同模式，每拍刷新
+  const subagentReportEnabled = useRef(true);
 
   // 卸载时清掉所有未到点的稳定窗定时器（应用生命周期内本 hook 不卸载，防御性收尾）
   useEffect(() => {
@@ -175,6 +177,19 @@ export function useNotification() {
           // 忽略错误
         }
         if (!notificationsEnabled.current) return;
+
+        // 子 Agent 回报提醒开关（观察台 §四）：仅滤「子 agent 回报导致」的提醒；
+        // 判定信号 = 后端判据层打标（Session.lastMessageSubagentReport 布尔），
+        // 与修复项完成识别同源——不在此处匹配 lastMessage 文案（§四.3）
+        try {
+          const v = await invoke<string | null>("get_setting", {
+            key: "notify_subagent_report",
+          });
+          subagentReportEnabled.current = v !== "false"; // 缺省/读取失败 = 开
+        } catch {
+          subagentReportEnabled.current = true;
+        }
+        if (!subagentReportEnabled.current && session.lastMessageSubagentReport) return;
 
         const currColor = statusToColor(session.status);
 

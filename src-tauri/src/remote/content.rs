@@ -2786,6 +2786,31 @@ mod tests {
         );
     }
 
+    /// 终审修复回归锁：入口 clamp(1,1000)（评审 P1-2）——limit=0 若不夹取，
+    /// finalize(·, 0) 会产出空消息表；夹取后返回末 1 条（非空）。clamp 无此测试
+    /// 则被删不会红
+    #[test]
+    fn claude_subagent_messages_limit_zero_is_clamped_to_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp
+            .path()
+            .join(".claude/projects/-Users-x-demo/s1/subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent-abg-clamp-1111.jsonl"),
+            concat!(
+                r#"{"type":"user","timestamp":"2026-10-08T14:55:56.488Z","message":{"role":"user","content":"任务原文"}}"#, "\n",
+                r#"{"type":"assistant","timestamp":"2026-10-08T14:56:10Z","message":{"role":"assistant","content":"步骤 1"}}"#, "\n",
+                r#"{"type":"assistant","timestamp":"2026-10-08T14:56:40Z","message":{"role":"assistant","content":"步骤 2"}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        let pg = read_claude_subagent_messages_with(tmp.path(), "s1", "abg-clamp-1111", 0).unwrap();
+        assert_eq!(pg.messages.len(), 1, "limit=0 → 夹取为 1 → 恰返回末 1 条");
+        assert_eq!(pg.messages[0].seq, 0, "finalize 重新编 seq（单条恒 0）");
+        assert!(!pg.truncated);
+    }
+
     // ==== 计划形态升格（T1 一等卡片，按形态不按工具名）====
 
     /// ① claude JSONL：tool_use(input.plan=非空 markdown) → kind="plan" 一等消息

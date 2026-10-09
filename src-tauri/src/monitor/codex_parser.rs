@@ -691,6 +691,7 @@ fn session_from_digest(
         status,
         last_message: digest.last_message.clone(),
         last_message_role: digest.last_role.clone(),
+        last_message_subagent_report: false,
         last_activity_at: digest
             .last_timestamp
             .clone()

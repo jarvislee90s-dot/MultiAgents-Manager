@@ -241,6 +241,7 @@ const SETTINGS_BLOCKS: {
 
 export default function SettingsPage() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [subagentReportEnabled, setSubagentReportEnabled] = useState(true);
   const [soundConfig, setSoundConfig] = useState<SoundConfig>(() => getSoundConfig());
   // 一级导航状态 = 当前**块**。块内所有卡片同时渲染（用户裁决的形态），故不再有
   // 「当前分区」这一层状态 —— 删掉 `activeSection` 是刻意的：留着一个不参与渲染的旧状态，
@@ -299,6 +300,17 @@ export default function SettingsPage() {
       }
     };
     loadNotificationSetting();
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const v = await invoke<string | null>("get_setting", { key: "notify_subagent_report" });
+        setSubagentReportEnabled(v !== "false");
+      } catch {
+        /* 缺省开 */
+      }
+    })();
   }, []);
 
   useEffect(
@@ -464,6 +476,17 @@ export default function SettingsPage() {
     );
   };
 
+  const toggleSubagentReport = async () => {
+    const newValue = !subagentReportEnabled;
+    setSubagentReportEnabled(newValue);
+    await invoke("set_setting", { key: "notify_subagent_report", value: String(newValue) });
+    toast.success(
+      newValue
+        ? t("settings.notifications.subagentReportOnToast")
+        : t("settings.notifications.subagentReportOffToast")
+    );
+  };
+
   // 桌宠显隐：写 localStorage + 同步 Rust 端窗口创建/销毁
   const onPetVisibleChange = async (v: boolean) => {
     saveVisible(v);
@@ -621,6 +644,26 @@ export default function SettingsPage() {
                     onClick={toggleNotifications}
                   >
                     {notificationsEnabled
+                      ? t("settings.notifications.on")
+                      : t("settings.notifications.off")}
+                  </Button>
+                </div>
+                <div className="border-t" />
+                <div className="flex items-center justify-between py-2.5">
+                  <div className="flex-1">
+                    <label className={SETTINGS_FIELD}>
+                      {t("settings.notifications.subagentReport")}
+                    </label>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {t("settings.notifications.subagentReportDesc")}
+                    </p>
+                  </div>
+                  <Button
+                    variant={subagentReportEnabled ? "default" : "outline"}
+                    size="sm"
+                    onClick={toggleSubagentReport}
+                  >
+                    {subagentReportEnabled
                       ? t("settings.notifications.on")
                       : t("settings.notifications.off")}
                   </Button>
