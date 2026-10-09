@@ -40,13 +40,14 @@ fn app_data_home_with(mam_home: Option<std::ffi::OsString>) -> std::path::PathBu
         // 集成测试（`src-tauri/tests/*.rs`）链接的是**非 test** 构建 ⇒ 本分支在那边不存在，
         // 它们照旧走 `setup()` 的 `TUVIS_HOME` 重定向。
         #[cfg(test)]
-        return std::env::temp_dir().join(format!("mam-test-{}", std::process::id()));
+        return std::env::temp_dir().join(format!("tuvis-test-{}", std::process::id()));
     }
     dirs::home_dir().unwrap_or_default()
 }
 
 /// 全局数据库连接（从 store.rs 搬移，保持原有模式）
 pub static DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
+    migrate_legacy_data_home();
     let db_dir = app_data_home().join(".tuvis");
     let _ = std::fs::create_dir_all(&db_dir);
     let db_path = db_dir.join("tuvis.db");
@@ -54,6 +55,42 @@ pub static DB: Lazy<Mutex<Connection>> = Lazy::new(|| {
     crate::database::schema::init(&conn);
     Mutex::new(conn)
 });
+
+/// 品牌更名的一次性数据迁移（2026-10，issue #76）：`~/.mam` → `~/.tuvis`
+/// （含 `mam.db` → `tuvis.db`）。触发条件：旧目录存在**且**新目录不存在——
+/// 新目录已存在 = 已迁移或已在用，绝不动它。失败（旧版进程占用/权限）只记
+/// 日志不 panic：旧数据原地保留，用户关掉旧版后下次启动自动重试。
+/// `TUVIS_HOME` 重定向与 `cfg(test)` 下不迁移（hermetic 纪律：测试不得搬真实 home）。
+pub fn migrate_legacy_data_home() {
+    if cfg!(test) || std::env::var_os("TUVIS_HOME").is_some() {
+        return;
+    }
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    migrate_legacy_data_home_at(&home.join(".mam"), &home.join(".tuvis"));
+}
+
+/// 迁移内核（路径注入便于测试）：搬目录 + 改账本文件名，均可重入。
+fn migrate_legacy_data_home_at(legacy: &std::path::Path, new: &std::path::Path) {
+    if !legacy.is_dir() || new.exists() {
+        return;
+    }
+    if let Err(e) = std::fs::rename(legacy, new) {
+        log::warn!(
+            "数据目录迁移 ~/.mam → ~/.tuvis 失败（{e}）；本版将以空目录启动，旧数据原地保留在 ~/.mam"
+        );
+        return;
+    }
+    log::info!("数据目录已迁移：~/.mam → ~/.tuvis");
+    let old_db = new.join("mam.db");
+    let new_db = new.join("tuvis.db");
+    if old_db.exists() && !new_db.exists() {
+        if let Err(e) = std::fs::rename(&old_db, &new_db) {
+            log::warn!("mam.db → tuvis.db 改名失败（{e}）");
+        }
+    }
+}
 
 /// 初始化数据库（在应用启动时调用）
 pub fn init() {
@@ -84,7 +121,7 @@ mod tests {
     #[test]
     fn tests_never_resolve_the_real_users_home_when_mam_home_is_unset() {
         let real_home = dirs::home_dir().expect("真实 home 必须可解析（本用例的对照物）");
-        let expected = std::env::temp_dir().join(format!("mam-test-{}", std::process::id()));
+        let expected = std::env::temp_dir().join(format!("tuvis-test-{}", std::process::id()));
 
         for (case, input) in [
             ("未设置", None),
@@ -135,5 +172,26 @@ mod tests {
             resolved.display(),
             real_home.display()
         );
+    }
+
+    /// 改名迁移内核：搬目录 + 改账本名一次性完成，且对新目录已存在的重入免疫。
+    #[test]
+    fn migrates_legacy_home_once_and_renames_db() {
+        let base = tempfile::tempdir().unwrap();
+        let legacy = base.path().join("home").join(".mam");
+        let new = base.path().join("home").join(".tuvis");
+        std::fs::create_dir_all(legacy.join("skills")).unwrap();
+        std::fs::write(legacy.join("mam.db"), "db").unwrap();
+
+        migrate_legacy_data_home_at(&legacy, &new);
+
+        assert!(!legacy.exists(), "旧目录应已被搬走");
+        assert!(new.join("tuvis.db").exists(), "账本应改名为 tuvis.db");
+        assert!(new.join("skills").exists(), "子目录应整体随迁");
+
+        // 幂等：新目录已存在时再执行不得触碰
+        std::fs::write(new.join("tuvis.db"), "db2").unwrap();
+        migrate_legacy_data_home_at(&legacy, &new);
+        assert_eq!(std::fs::read_to_string(new.join("tuvis.db")).unwrap(), "db2");
     }
 }
