@@ -1471,3 +1471,34 @@ export async function fetchCreateStatus(
   if (!r.ok) throw new ApiError(r.status, `session-create/status ${r.status}`);
   return (await r.json()) as CreateStatusPayload;
 }
+
+// ==== 2026-10-08 子 agent 运行 chip（spec 2026-10-08-mobile-subagent-chips §5.2/§6）====
+
+/** GET /session-subagents 载荷单条（与 Rust monitor::subagents::SubagentView 的
+ *  camelCase 序列化逐字段对应，勿漂移）。spawnTs=null：首条时间戳未落盘（spawn
+ *  竞态，下轮自愈）——前端不显示时长只显 token。 */
+export interface SubagentView {
+  id: string;
+  name: string;
+  description: string | null;
+  spawnTs: string | null;
+  tokens: { input: number; cacheRead: number; cacheCreation: number; output: number };
+}
+
+/** 拉取会话的运行中子 agent（空列表 = 无运行中，端点是空态唯一权威——前端不
+ *  另特判）。非 2xx / 网络异常 → 抛 ApiError（调用方静默，ModeBar 同惯例） */
+export async function fetchSessionSubagents(
+  agentType: string,
+  sessionId: string
+): Promise<SubagentView[]> {
+  const q = new URLSearchParams({ agent_type: agentType, session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-subagents?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-subagents 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-subagents ${r.status}`);
+  const data = (await r.json()) as { subagents: SubagentView[] };
+  return data.subagents;
+}

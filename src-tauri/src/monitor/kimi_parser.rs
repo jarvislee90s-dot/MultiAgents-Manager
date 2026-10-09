@@ -60,6 +60,8 @@ pub(crate) fn kimi_home_with(user_home: &Path) -> PathBuf {
 /// 选定的 Kimi 数据根：session_index.jsonl 所在的 home 与 sessions/ 目录必须同源，
 /// 否则会出现"sessions 取自 A、索引取自 B"的混搭（原 legacy 回退断裂的根源）。
 /// M3 Task 7 起供 remote::content 复用（pub(crate)：同一 crate 的内容读取层）
+/// Clone：monitor::subagents::kimi 会话级缓存闭包需按值多次传递（2026-10-08 子 agent chip）
+#[derive(Clone)]
 pub(crate) struct KimiDataRoot {
     pub(crate) home: PathBuf,
     pub(crate) sessions: PathBuf,
@@ -93,7 +95,8 @@ pub(crate) fn resolve_data_root(env_home: Option<&str>, user_home: &Path) -> Opt
     })
 }
 
-fn kimi_data_root() -> Option<KimiDataRoot> {
+/// pub(crate)：monitor::subagents::kimi 复用数据根判定单点，不内联第二份 env/home 逻辑
+pub(crate) fn kimi_data_root() -> Option<KimiDataRoot> {
     let env_home = std::env::var("KIMI_CODE_HOME").ok();
     resolve_data_root(env_home.as_deref(), &dirs::home_dir().unwrap_or_default())
 }

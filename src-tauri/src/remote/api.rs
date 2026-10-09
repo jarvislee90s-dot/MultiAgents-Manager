@@ -587,6 +587,56 @@ pub async fn session_files(
         .into_response())
 }
 
+/// GET /m/api/v1/session-subagents?agent_type=&session_id=（spec §5.2）
+/// `{subagents: [{id, name, description, spawnTs, tokens{input,cacheRead,cacheCreation,output}}]}`
+/// - 只含运行中条目（判据在各 source，spec §4）；按 spawnTs 升序（None 排尾）；
+/// - **端点是空态唯一权威**：前端不另特判；会话不存在/未知 agent_type/source
+///   未装配 → `subagents: []`（不给探测面）。「非活跃 → []」**不做端点侧活跃度
+///   判定**（不查会话快照——省一次 sysinfo 全量扫描，取舍如实申报）：已结束会话
+///   的空态由前端 finished 卸载实现（spec §6 挂载门）；其余状态的裁决交给各
+///   source 判据（判据空 = 空列表）；
+/// - 缺参（agent_type / session_id）或空白 → 400 BAD_REQUEST；
+/// - 响应带 Cache-Control: no-store（门禁下私有数据，sessions 同规）；
+/// - source 是文件/DB IO（同步阻塞），`spawn_blocking` 包裹（sessions handler 同先例）。
+pub async fn session_subagents(
+    State(st): State<Arc<RemoteState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, StatusCode> {
+    let Some(agent) = params
+        .get("agent_type")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let Some(sid) = params
+        .get("session_id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(StatusCode::BAD_REQUEST);
+    };
+    let st = st.clone();
+    let mut subagents = tokio::task::spawn_blocking(move || {
+        match st.subagent_source.get(agent.as_str()) {
+            Some(f) => f(agent.as_str(), sid.as_str()),
+            None => Vec::new(), // 未知工具/未装配：空态唯一权威
+        }
+    })
+    .await
+    .map_err(|e| {
+        log::error!("子 agent 查询任务异常: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    // 端点统一排序（source 只管判据，序是端点契约的一部分）
+    crate::monitor::subagents::sort_views(&mut subagents);
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({ "subagents": subagents })),
+    )
+        .into_response())
+}
+
 /// file 端点的读取结果三分（403/404 语义分流在 handler 尾部，读取全程在阻塞线程池）：
 /// - Found：cwd 内常规文件（字节 + mime）；
 /// - NoSession：session_id 不在会话快照中 → 404；

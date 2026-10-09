@@ -1103,6 +1103,7 @@ mod tests {
     ) -> crate::remote::server::RemoteState {
         crate::remote::server::RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
                 total_count: sessions.len(),

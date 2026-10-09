@@ -380,6 +380,32 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // M3 Task 8：文件路径源同源直调（files::extract_file_paths 内部复用 content
         // 层读取，注入缝供端点测试）
         path_source: Box::new(files::extract_file_paths),
+        // 2026-10-08 子 agent chip（spec §5.2）：四工具 source 直调 monitor::subagents
+        // 各 collect（判据/缓存在那层；本缝只做接线）。空表键 = 未知工具空态。
+        subagent_source: [
+            (
+                "claude",
+                Box::new(|_a: &str, sid: &str| crate::monitor::subagents::claude::collect(sid))
+                    as Box<server::SubagentSourceFn>,
+            ),
+            (
+                "opencode",
+                Box::new(|_a: &str, sid: &str| crate::monitor::subagents::opencode::collect(sid))
+                    as Box<server::SubagentSourceFn>,
+            ),
+            (
+                "kimi",
+                Box::new(|_a: &str, sid: &str| crate::monitor::subagents::kimi::collect(sid))
+                    as Box<server::SubagentSourceFn>,
+            ),
+            (
+                "codex",
+                Box::new(|_a: &str, sid: &str| crate::monitor::subagents::codex::collect(sid))
+                    as Box<server::SubagentSourceFn>,
+            ),
+        ]
+        .into_iter()
+        .collect(),
         // M3 Task 5：跃迁事件通道与扫描循环同源（watcher::event_sender 与
         // SessionWatcher::start 共用全进程唯一通道；Task 6 的 SSE 只订阅此 tx）
         watcher_tx: watcher::event_sender(),

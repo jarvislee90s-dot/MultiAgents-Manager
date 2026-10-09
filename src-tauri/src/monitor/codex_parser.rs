@@ -23,7 +23,8 @@ use std::time::SystemTime;
 const CODEX_SCAN: SessionFileScan = SessionFileScan::new("codex-digest");
 
 /// rollout 文件命名判据（collect 的 accept 闭包）
-fn is_rollout_file(p: &Path) -> bool {
+/// pub(crate)：monitor::subagents::codex 倒排索引复用同一 rollout 文件判定单点
+pub(crate) fn is_rollout_file(p: &Path) -> bool {
     p.file_name()
         .and_then(|n| n.to_str())
         .map(|n| n.starts_with("rollout") && n.ends_with(".jsonl"))

@@ -209,6 +209,9 @@ function installFetch() {
         { status: 200 }
       );
     }
+    if (url.includes("/session-subagents")) {
+      return new Response(JSON.stringify({ subagents: [] }), { status: 200 });
+    }
     throw new Error(`unexpected fetch: ${url}`);
   });
   vi.stubGlobal("fetch", fetchMock);
@@ -1185,6 +1188,9 @@ describe("书签跨加载窗口跳转（M5 P3-c）", () => {
       if (url.includes("/session-files")) {
         return new Response(JSON.stringify({ files: [], truncated: false }), { status: 200 });
       }
+      if (url.includes("/session-subagents")) {
+        return new Response(JSON.stringify({ subagents: [] }), { status: 200 });
+      }
       throw new Error(`unexpected fetch: ${url}`);
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -1927,6 +1933,9 @@ describe("SessionDetail：活状态流（T1）", () => {
           return new Response(JSON.stringify({ sessions: [], totalCount: 0, waitingCount: 0 }), {
             status: 200,
           });
+        }
+        if (url.includes("/session-subagents")) {
+          return new Response(JSON.stringify({ subagents: [] }), { status: 200 });
         }
         throw new Error(`unexpected fetch: ${url}`);
       })

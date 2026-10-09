@@ -20,6 +20,7 @@ pub mod project;
 pub mod session_scan;
 pub mod sqlite;
 pub mod status;
+pub mod subagents;
 pub mod workbuddy_parser;
 pub mod zcode_parser;
 

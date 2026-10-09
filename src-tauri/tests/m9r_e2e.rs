@@ -1024,6 +1024,7 @@ async fn e2e_http_full_chain() {
     let total = sessions.len();
     let state = Arc::new(RemoteState {
         ui_config_source: Box::new(|| None),
+        subagent_source: std::collections::HashMap::new(),
         capability_table: multi_agents_manager_lib::inject::capability::new_table(),
         session_source: Box::new(
             move || multi_agents_manager_lib::session::SessionsResponse {

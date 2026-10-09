@@ -32,6 +32,7 @@ import ApproveCard from "./ApproveCard";
 import PlanFeedbackBar from "./PlanFeedbackBar";
 import { collapsedLabel, isProcessKind } from "./message-fold";
 import ModeBar from "./ModeBar";
+import SubagentChips from "./SubagentChips";
 import QuestionCard from "./QuestionCard";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
@@ -1066,7 +1067,20 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         />
       )}
       {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
-      <ModeBar key={`mode-${session.id}`} session={session} />
+      {/* 2026-10-08 子 agent chip：与 ModeBar 同一行（flex-wrap 兄弟），生命周期
+          解耦——mode 视图失败/unsupported 时 chip 仍活，反之亦然（spec §6）。
+          finished 不挂载（idle 不拦：claude 后台 agent 可在主会话 idle 时仍在跑）；
+          其余状态的空态裁决交给端点（空态唯一权威）。 */}
+      <div data-testid="status-row" className="flex flex-wrap items-center gap-2">
+        <ModeBar key={`mode-${session.id}`} session={session} />
+        {session.status !== "finished" && (
+          <SubagentChips
+            key={`subagents-${session.id}`}
+            session={session}
+            refreshTick={refreshTick}
+          />
+        )}
+      </div>
     </div>
   );
 
