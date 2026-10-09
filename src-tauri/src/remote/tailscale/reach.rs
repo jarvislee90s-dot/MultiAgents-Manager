@@ -534,7 +534,9 @@ pub(super) fn mam_response_ok(status: u16, marker: Option<&str>) -> Result<(), S
         Some(other) => Err(format!(
             "响应特征头为 {other:?}，不是 兔维斯 服务答的（疑似链路上的拦截页）"
         )),
-        None => Err("响应缺少 兔维斯 特征标记，不是 兔维斯 服务答的（疑似链路上的拦截/错误页）".into()),
+        None => {
+            Err("响应缺少 兔维斯 特征标记，不是 兔维斯 服务答的（疑似链路上的拦截/错误页）".into())
+        }
     }
 }
 

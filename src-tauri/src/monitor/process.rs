@@ -214,7 +214,11 @@ pub fn codex_process_names() -> &'static [&'static str] {
 
 /// 发现 Codex CLI + 桌面 APP 进程
 pub fn find_codex_processes(system: &System) -> Vec<AgentProcess> {
-    find_processes_by_names(system, codex_process_names(), &["multi-agents-manager", "tuvis"])
+    find_processes_by_names(
+        system,
+        codex_process_names(),
+        &["multi-agents-manager", "tuvis"],
+    )
 }
 
 /// 发现 OpenCode 进程

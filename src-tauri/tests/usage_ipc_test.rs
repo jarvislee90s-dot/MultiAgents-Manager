@@ -546,7 +546,9 @@ fn master_switch_off_yields_empty_state_with_zero_collected_at() {
 fn set_settings_reports_persist_failure_instead_of_success() {
     let _g = serial();
     let mam_home = std::env::var("TUVIS_HOME").expect("support::setup() 必须设置 TUVIS_HOME");
-    let db_path = std::path::Path::new(&mam_home).join(".tuvis").join("tuvis.db");
+    let db_path = std::path::Path::new(&mam_home)
+        .join(".tuvis")
+        .join("tuvis.db");
     assert!(
         db_path.exists(),
         "前提：全局 DB 文件必须在（{}）——否则本用例打不到真实写路径",
