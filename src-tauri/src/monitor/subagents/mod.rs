@@ -38,8 +38,21 @@ impl TokenUsage {
     }
 }
 
-/// 端点载荷单条（spec §5.2）。spawnTs=None：首条时间戳尚未落盘（spawn 竞态，下轮自愈，
-/// 前端不显示时长只显 token——spec §8.2）
+/// 子 agent 运行状态（观察台 §二.3 清单卡绿/灰点）：running=活跃（时长/token 走字）、
+/// idle=不活跃（已完成/已停止——数据冻结原位）
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SubagentStatus {
+    Running,
+    Idle,
+}
+
+/// 端点载荷单条（spec §5.2 + 观察台 §二）。spawnTs=None：首条时间戳尚未落盘
+/// （spawn 竞态，下轮自愈，前端不显示时长只显 token）。
+/// 2026-10-09 T2：**全量名单**（含终态）——运行过滤移交前端 chip 层；
+/// endTs = 终态锚（ISO）：运行中恒 None；不活跃 = 最后已知活动/完成时刻
+/// （claude=子转写末行 ts / opencode=time_updated / kimi=wire mtime /
+/// codex=task_complete 行 ts）——前端冻结时长锚：elapsed = (endTs ?? now) − spawnTs。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentView {
@@ -48,6 +61,8 @@ pub struct SubagentView {
     pub description: Option<String>,
     pub spawn_ts: Option<String>,
     pub tokens: TokenUsage,
+    pub status: SubagentStatus,
+    pub end_ts: Option<String>,
 }
 
 /// 活跃窗口（opencode §4.2 / kimi §4.3 共用取值：详情轮询 10s 的 9 倍冗余，
@@ -296,31 +311,39 @@ mod tests {
         );
     }
 
-    /// 会话级缓存：读改写往返 + 硬上限整段清空（EVICT_HARD_CAP 模式）
+    /// 会话级缓存：读改写往返 + 硬上限整段清空（EVICT_HARD_CAP 模式）。
+    /// 并行竞态修复（T2 批次实测抓获）：registry 是进程级单例，其余 collect 测试的
+    /// reset_cache_for_tests() 若插在本用例两次写条目之间，会击穿「二次进入拿到上次
+    /// 条目」断言（约 1/8 复现率）——故整个用例**持 registry 锁**串行执行；锁内直接
+    /// 操作 map（update_entry 要重入同一把锁，会死锁）。断言语义与 update_entry
+    /// 路径逐一对应：读改写往返 / len>=CAP 先 clear 再 insert。
     #[test]
     fn cache_update_and_hard_cap() {
-        reset_cache_for_tests();
-        let v = update_entry("t-cap", "s1", |cur| {
-            assert!(cur.is_none());
-            (Arc::new(7u32) as CacheBox, 1u8)
-        });
-        assert_eq!(v, 1);
-        let v = update_entry("t-cap", "s1", |cur| {
-            let old = cur.and_then(|b| b.downcast::<u32>().ok()).map(|a| *a);
-            (Arc::new(old.unwrap_or(0) + 1) as CacheBox, old)
-        });
-        assert_eq!(v, Some(7), "二次进入拿到上次条目");
+        let mut map = registry().lock().unwrap_or_else(|e| e.into_inner());
+        map.clear();
+        // 首次进入：条目缺失
+        assert!(!map.contains_key(&("t-cap", "s1".to_string())));
+        map.insert(("t-cap", "s1".to_string()), Arc::new(7u32) as CacheBox);
+        // 二次进入：拿到上次条目（读改写往返）
+        let old = map
+            .remove(&("t-cap", "s1".to_string()))
+            .and_then(|b| b.downcast::<u32>().ok())
+            .map(|a| *a);
+        assert_eq!(old, Some(7), "二次进入拿到上次条目");
+        map.insert(("t-cap", "s1".to_string()), Arc::new(8u32) as CacheBox);
+        // 硬上限：len >= CAP → 先整段清空再插入（update_entry 同款语义）
         for i in 0..=SUBAGENT_CACHE_CAP {
-            update_entry("t-cap", &format!("fill-{i}"), |_| {
-                (Arc::new(0u32) as CacheBox, ())
-            });
+            if map.len() >= SUBAGENT_CACHE_CAP {
+                map.clear();
+            }
+            map.insert(("t-cap", format!("fill-{i}")), Arc::new(0u32) as CacheBox);
         }
         // 超限后整段清空 → s1 条目不复存在
-        let v = update_entry("t-cap", "s1", |cur| {
-            (Arc::new(0u32) as CacheBox, cur.is_none())
-        });
-        assert!(v, "条目超上限 → 整段清空（宁可重建也不吃内存）");
-        reset_cache_for_tests();
+        assert!(
+            !map.contains_key(&("t-cap", "s1".to_string())),
+            "条目超上限 → 整段清空（宁可重建也不吃内存）"
+        );
+        map.clear();
     }
 
     /// 活跃窗口边界（spec §4.2/§4.3 共用取值）：恰好 90s 视为已过期
@@ -353,5 +376,18 @@ mod tests {
             output: 0,
         };
         assert_eq!(t.total(), u64::MAX, "四桶合计饱和加法，不 panic");
+    }
+
+    /// SubagentStatus 序列化为小写单词（端点载荷契约，T3 契约矩阵的单元层锁）
+    #[test]
+    fn subagent_status_serializes_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&SubagentStatus::Running).unwrap(),
+            "\"running\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SubagentStatus::Idle).unwrap(),
+            "\"idle\""
+        );
     }
 }

@@ -14441,6 +14441,8 @@ mod tests {
                             cache_creation: 0,
                             output: 9312,
                         },
+                        status: crate::monitor::subagents::SubagentStatus::Running,
+                        end_ts: None,
                     },
                     crate::monitor::subagents::SubagentView {
                         id: format!("early-{sid}"),
@@ -14448,6 +14450,8 @@ mod tests {
                         description: None,
                         spawn_ts: None, // spawn 竞态：无时长
                         tokens: crate::monitor::subagents::TokenUsage::default(),
+                        status: crate::monitor::subagents::SubagentStatus::Running,
+                        end_ts: None,
                     },
                 ]
             }),

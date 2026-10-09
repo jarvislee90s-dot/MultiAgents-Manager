@@ -1,18 +1,28 @@
 //! Kimi 子 agent source（spec §4.3：活跃度判据 + 两点待实机校准）。
-//! 子 agent = agents/<dir>/wire.jsonl 存在 ∧ dir != "main"；运行中 = mtime 距
-//! now < 90s（与 opencode §4.2 同取值）。会话目录定位**复用 kimi_parser 会话注册表**
-//! （session_index.jsonl + resolve_session_dir），不另写路径推导。
-//! v1 名称显示目录名（agent-N）；实机校准后换真名（§十 C1，校准只改本文件）。
+//! 子 agent = agents/<dir>/wire.jsonl 存在 ∧ dir != "main"；mtime 距 now < 90s
+//! 视为活跃（与 opencode §4.2 同取值）。T2（观察台 §二.3）：90s 窗从「过滤出板」
+//! 变为「status 分诊」——超窗转 Idle 在板，endTs = wire mtime。会话目录定位
+//! **复用 kimi_parser 会话注册表**（session_index.jsonl + resolve_session_dir），
+//! 不另写路径推导。v1 名称显示目录名（agent-N）；实机校准后换真名（§十 C1，
+//! 校准只改本文件）。
 
 use super::{
     active_within, json_time_to_iso, read_increment, sort_views, update_entry, CacheBox, IncrRead,
-    IncrState, SubagentView, TokenUsage,
+    IncrState, SubagentStatus, SubagentView, TokenUsage,
 };
 use crate::monitor::kimi_parser::{parse_session_index, resolve_session_dir, KimiDataRoot};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
+
+/// SystemTime → ISO（kimi endTs 用；mtime 无完成事件语义，长静默转灰时锚在静默起点——
+/// 与 90s 窗口径一致，如实申报）
+fn systemtime_to_iso(t: SystemTime) -> Option<String> {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| super::ms_to_iso(d.as_millis() as i64))
+}
 
 /// wire.jsonl 单行累计（纯函数）：usage.record 四桶 + 首行 metadata.created_at
 pub(crate) fn accumulate_wire_line(line: &str, acc: &mut TokenUsage, created: &mut Option<String>) {
@@ -79,7 +89,8 @@ pub(crate) fn collect_with(
     if !dir.starts_with(&root.sessions) {
         return Vec::new();
     }
-    // ② agents/ 扫描：dir != main ∧ wire.jsonl 存在 ∧ mtime 活跃
+    // ② agents/ 扫描：dir != main ∧ wire.jsonl 存在——T2：去掉 active_within 门控
+    //（v1「超窗隐藏」→「status 分诊」，mtime 留作 endTs 锚）
     let agents_dir = dir.join("agents");
     let mut candidates: Vec<(String, PathBuf, SystemTime)> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&agents_dir) {
@@ -95,9 +106,7 @@ pub(crate) fn collect_with(
             let Ok(mtime) = meta.modified() else {
                 continue;
             };
-            if active_within(mtime, now) {
-                candidates.push((name, wire, mtime));
-            }
+            candidates.push((name, wire, mtime));
         }
     }
     candidates.sort_by(|a, b| a.0.cmp(&b.0)); // 注册序稳定
@@ -108,7 +117,7 @@ pub(crate) fn collect_with(
             .map(|a| Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()))
             .unwrap_or_default();
         let mut views = Vec::new();
-        for (name, wire, _mtime) in &candidates {
+        for (name, wire, mtime) in &candidates {
             let track = st.agents.entry(name.clone()).or_default();
             match read_increment(wire, &mut track.incr) {
                 IncrRead::Unchanged => {}
@@ -122,12 +131,24 @@ pub(crate) fn collect_with(
                     }
                 }
             }
+            // 活跃分诊（T2）：窗内 Running；超窗转 Idle 在板，endTs = wire mtime
+            let active = active_within(*mtime, now);
             views.push(SubagentView {
                 id: name.clone(),
                 name: name.clone(), // v1：目录名（§4.3；C1 校准后换真名）
                 description: None,
                 spawn_ts: track.created.clone(),
                 tokens: track.tokens,
+                status: if active {
+                    SubagentStatus::Running
+                } else {
+                    SubagentStatus::Idle
+                },
+                end_ts: if active {
+                    None
+                } else {
+                    systemtime_to_iso(*mtime)
+                },
             });
         }
         sort_views(&mut views);
@@ -225,13 +246,25 @@ mod tests {
             }
         );
         assert_eq!(v[0].spawn_ts, ms_to_iso(1_760_000_000_000));
-        // mtime 超 90s → 隐藏（§8.4 长静默如实口径）
+        assert_eq!(v[0].status, SubagentStatus::Running, "mtime 在窗内 → 活跃");
+        assert_eq!(v[0].end_ts, None, "运行中 endTs 恒空");
+        // mtime 超 90s → 不再隐藏，转 Idle 冻结在板（观察台 §二.3 全量名单）
         let v = collect_with(
             root.clone(),
             "ks-1",
             mtime + std::time::Duration::from_secs(91),
         );
-        assert!(v.is_empty());
+        assert_eq!(
+            v.len(),
+            2,
+            "超窗不隐藏：agent-0/agent-1 均留原位（agent-1 同为有 wire 的候选）"
+        );
+        assert!(v.iter().all(|s| s.status == SubagentStatus::Idle));
+        assert_eq!(
+            v[0].end_ts.as_deref(),
+            Some(systemtime_to_iso(mtime).unwrap().as_str()),
+            "endTs = wire mtime（长静默锚在静默起点，§8.4 口径如实申报）"
+        );
         super::super::reset_cache_for_tests();
     }
 

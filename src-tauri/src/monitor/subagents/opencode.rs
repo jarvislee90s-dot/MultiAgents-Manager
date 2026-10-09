@@ -1,11 +1,13 @@
 //! OpenCode 子 agent source（spec §4.2：活跃度判据，数据模型最优）。
-//! `session_v2.parent_id` 非空即子 agent 会话；运行中 = time_updated 距 now < 90s
+//! `session_v2.parent_id` 非空即子 agent 会话；time_updated 距 now < 90s 视为活跃
 //! （「停止」即活跃度自然过期，无显式终止事件；time_idle 不用于判据——已完成会话
 //! 亦为 NULL，spec §2.2）。SQLite 查询即最新：**无缓存**（豁免 L2/L3 预算纪律）。
+//! T2（观察台 §二.3）：活跃窗从「过滤出板」变为「status 分诊」——超窗转 Idle 在板，
+//! endTs = time_updated（最后已知活动时刻，非精确完成时刻——如实申报）。
 //! 桶位映射：tokens_input→input、cache_read→cacheRead、cache_write→cacheCreation、
 //! output→output；tokens_reasoning 不计入展示合计（§4.2）。
 
-use super::{ms_to_iso, sort_views, SubagentView, TokenUsage, ACTIVE_SECS};
+use super::{ms_to_iso, sort_views, SubagentStatus, SubagentView, TokenUsage, ACTIVE_SECS};
 use std::path::Path;
 
 /// 生产入口
@@ -52,10 +54,8 @@ pub(crate) fn collect_with(db_path: &Path, session_id: &str, now_ms: i64) -> Vec
     if let Ok(rows) = rows {
         for r in rows.flatten() {
             let (id, agent, tin, tcr, tcw, tout, created, updated) = r;
-            // 活跃过滤（毫秒域严格小于；§4.2）
-            if now_ms.saturating_sub(updated) >= (ACTIVE_SECS as i64) * 1000 {
-                continue;
-            }
+            // 活跃分诊（毫秒域严格小于；§4.2）——T2：过期不再隐藏，转 Idle 冻结在板
+            let active = now_ms.saturating_sub(updated) < (ACTIVE_SECS as i64) * 1000;
             views.push(SubagentView {
                 name: agent.unwrap_or_else(|| id.chars().take(8).collect()),
                 id,
@@ -67,6 +67,12 @@ pub(crate) fn collect_with(db_path: &Path, session_id: &str, now_ms: i64) -> Vec
                     cache_creation: tcw.max(0) as u64,
                     output: tout.max(0) as u64,
                 },
+                status: if active {
+                    SubagentStatus::Running
+                } else {
+                    SubagentStatus::Idle
+                },
+                end_ts: if active { None } else { ms_to_iso(updated) },
             });
         }
     }
@@ -190,6 +196,7 @@ mod tests {
 
     /// 活跃度边界（spec §4.2 严格小于）：恰好 90s → 过期；89.999s → 活跃。
     /// 「停止」即活跃度自然过期，无需显式终止事件。
+    /// T2：过期不再隐藏——转 Idle 冻结在板（全量名单）。
     #[test]
     fn active_boundary_expires_at_90s() {
         let td = tempfile::tempdir().unwrap();
@@ -217,17 +224,26 @@ mod tests {
             0,
             0,
             0,
-            now - 100_000,
+            now - 101_000, // created 比 c90 早：time_created 升序输出序确定（评审 P2-2）
             now - 89_999,
         );
         drop(conn);
         let v = collect_with(&db, "m", now);
-        assert_eq!(v.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["c89"]);
+        assert_eq!(
+            v.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["c89", "c90"],
+            "全量名单：c90 从被过滤变在板 Idle（time_created 升序）"
+        );
+        assert_eq!(v[0].status, SubagentStatus::Running, "89.999s 仍活跃");
+        assert_eq!(v[0].end_ts, None);
+        assert_eq!(v[1].status, SubagentStatus::Idle, "恰好 90s → 过期转灰");
+        assert_eq!(v[1].end_ts, ms_to_iso(now - 90_000), "endTs = time_updated");
     }
 
-    /// 长静默子 agent 暂时隐藏（spec §8.3 如实口径）+ v1 库（无 session_v2）空态 + 库缺失空态
+    /// 长静默子 agent 转 Idle 冻结在板（观察台 §二.3；v1「超窗隐藏」语义已解除）
+    /// + v1 库（无 session_v2）空态 + 库缺失空态
     #[test]
-    fn stale_child_hidden_v1_and_missing_db_empty() {
+    fn stale_child_marks_idle_v1_and_missing_db_empty() {
         let td = tempfile::tempdir().unwrap();
         let db = td.path().join("opencode.db");
         let conn = make_db(&db);
@@ -245,7 +261,14 @@ mod tests {
             now - 200_000,
         );
         drop(conn);
-        assert!(collect_with(&db, "m", now).is_empty(), "超窗隐藏");
+        let v = collect_with(&db, "m", now);
+        assert_eq!(v.len(), 1, "超窗不隐藏：留在名单原位");
+        assert_eq!(v[0].status, SubagentStatus::Idle);
+        assert_eq!(
+            v[0].end_ts,
+            ms_to_iso(now - 200_000),
+            "endTs = time_updated（最后已知活动时刻）"
+        );
         // v1：只有 session 表（无 session_v2）
         let v1db = td.path().join("v1.db");
         let c1 = Connection::open(&v1db).unwrap();
@@ -259,6 +282,32 @@ mod tests {
             "1.x 库无 session_v2 → 空态（判据单点 schema_is_v2）"
         );
         assert!(collect_with(&td.path().join("missing.db"), "m", now).is_empty());
+    }
+
+    /// T2：全量名单 + status 分诊（v1「超窗 continue 隐藏」→「转 Idle 冻结在板」）
+    #[test]
+    fn opencode_stale_child_marks_idle_with_end_ts() {
+        let td = tempfile::tempdir().unwrap();
+        let db = td.path().join("opencode.db");
+        let conn = make_db(&db);
+        let now = 2_000_000_000_000i64;
+        ins(
+            &conn,
+            "c1",
+            Some("m"),
+            Some("a"),
+            10,
+            20,
+            30,
+            40,
+            now - 100_000,
+            now - 90_000,
+        );
+        drop(conn);
+        let v = collect_with(&db, "m", now);
+        assert_eq!(v.len(), 1, "超窗不隐藏：留在名单原位");
+        assert_eq!(v[0].status, SubagentStatus::Idle);
+        assert_eq!(v[0].end_ts, ms_to_iso(now - 90_000), "endTs = time_updated");
     }
 
     /// agent 名缺失 → 回落 id 前 8 位；tokens_reasoning 不入四桶（§4.2 申报）

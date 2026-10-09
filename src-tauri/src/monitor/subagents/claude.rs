@@ -11,8 +11,8 @@
 //! **不做 mtime 兜底**（v1 裁决：长静默工具调用会误伤；残留随会话中断整区消失）。
 
 use super::{
-    read_increment, sort_views, update_entry, CacheBox, IncrRead, IncrState, SubagentView,
-    TokenUsage,
+    read_increment, sort_views, update_entry, CacheBox, IncrRead, IncrState, SubagentStatus,
+    SubagentView, TokenUsage,
 };
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -76,6 +76,42 @@ fn registered_agents(subagents_dir: &Path) -> Vec<RegAgent> {
     out
 }
 
+/// 名字→档案 id 别名表（甲.5「名字→编号归一」，Stop/Resume 双向经同一映射）：
+/// - 每个登记 agent 的 id 恒注册（经典机制事件只带 id；teammate 的 to=长 id 同走此键）；
+/// - teammate（meta.taskKind 标记，spec §一.1 机制分派）额外注册 meta.name 别名；
+/// - 键冲突（两个 teammate 同名）后者跳过——按 id 排序的注册序先到先得（申报边界）。
+fn alias_map(reg: &[RegAgent]) -> HashMap<String, String> {
+    let mut m: HashMap<String, String> = HashMap::new();
+    for a in reg {
+        m.entry(a.id.clone()).or_insert_with(|| a.id.clone());
+        if a.meta.task_kind.as_deref() == Some(TASK_KIND_TEAMMATE) {
+            if let Some(name) = a.meta.name.as_deref() {
+                if !name.is_empty() {
+                    m.entry(name.to_string()).or_insert_with(|| a.id.clone());
+                }
+            }
+        }
+    }
+    m
+}
+
+/// 事件键归一：classify 产出的原始键（id 或名字）→ 登记档案 id。
+/// 匹配不到登记集（如父会话向 team-lead 发消息——非本会话子 agent）→ None（忽略）
+fn normalize_event(aliases: &HashMap<String, String>, ev: ParentEvent) -> Option<ParentEvent> {
+    let raw = match &ev {
+        ParentEvent::Stop { agent_id } | ParentEvent::Resume { agent_id } => agent_id,
+    };
+    let canonical = aliases.get(raw)?;
+    Some(match ev {
+        ParentEvent::Stop { .. } => ParentEvent::Stop {
+            agent_id: canonical.clone(),
+        },
+        ParentEvent::Resume { .. } => ParentEvent::Resume {
+            agent_id: canonical.clone(),
+        },
+    })
+}
+
 /// 会话级缓存条目（spec §5.1）
 #[derive(Default, Clone)]
 struct ClaudeCache {
@@ -88,6 +124,12 @@ struct AgentTrack {
     incr: IncrState,
     tokens: TokenUsage,
     first_ts: Option<String>,
+    /// T2：末行 timestamp——idle 终态锚（停写即冻结；resume 后随新行更新但 status
+    /// 转 Running → endTs 不再消费它）
+    last_ts: Option<String>,
+    /// T2（决策 I）：首条 user 原文——meta.description 缺失时的任务摘要回落源
+    /// （spec §二.2 四要素：teammate meta 实测无 description 字段，甲.2）
+    first_user: Option<String>,
 }
 
 /// 倒序分块扫描（重建路径，spec §5.1）：从文件尾向头按 256KB 取块，行序「新→旧」。
@@ -169,7 +211,8 @@ fn step(
     reg: &[RegAgent],
     st: &mut ClaudeCache,
 ) -> Vec<SubagentView> {
-    // ① 父文件事件（增量；reset → 清空状态机后按全量行重放）
+    let aliases = alias_map(reg); // T1：名字→档案归一（经典 id 键恒等映射，行为不变）
+                                  // ① 父文件事件（增量；reset → 清空状态机后按全量行重放）
     match read_increment(parent_jsonl, &mut st.parent) {
         IncrRead::Unchanged => {}
         IncrRead::Lines { lines, reset } => {
@@ -178,7 +221,9 @@ fn step(
             }
             for line in &lines {
                 if let Some(ev) = classify_parent_line(line) {
-                    apply_event(&mut st.last, &ev);
+                    if let Some(ev) = normalize_event(&aliases, ev) {
+                        apply_event(&mut st.last, &ev);
+                    }
                 }
             }
         }
@@ -195,19 +240,28 @@ fn step(
                 if reset {
                     track.tokens = TokenUsage::default();
                     track.first_ts = None;
+                    track.last_ts = None;
+                    track.first_user = None;
                 }
                 for line in &lines {
-                    accumulate_agent_line(line, &mut track.tokens, &mut track.first_ts);
+                    accumulate_agent_line(
+                        line,
+                        &mut track.tokens,
+                        &mut track.first_ts,
+                        &mut track.last_ts,
+                        &mut track.first_user,
+                    );
                 }
             }
         }
     }
-    // ③ 视图：已登记 ∧ 运行中（spawnTs 升序，None 排尾）
+    // ③ 视图：全量名单（T2）——登记即出卡，status 由事件序状态机分诊
+    //（is_running：None/Spawn/Resume → Running，Stop → Idle）
     let mut views: Vec<SubagentView> = reg
         .iter()
-        .filter(|a| is_running(true, st.last.get(&a.id).copied()))
         .map(|a| {
             let t = st.agents.get(&a.id);
+            let running = is_running(true, st.last.get(&a.id).copied());
             SubagentView {
                 id: a.id.clone(),
                 name: a
@@ -215,9 +269,24 @@ fn step(
                     .agent_type
                     .clone()
                     .unwrap_or_else(|| format!("agent-{}", a.id)),
-                description: a.meta.description.clone(),
+                // 任务摘要（决策 I，spec §二.2 四要素）：meta.description 优先；
+                // 缺失（teammate meta 实测无该字段）→ 首条 user 剥壳截断 40 字回落
+                description: a.meta.description.clone().or_else(|| {
+                    t.and_then(|t| t.first_user.as_deref())
+                        .and_then(first_user_summary)
+                }),
                 spawn_ts: t.and_then(|t| t.first_ts.clone()),
                 tokens: t.map(|t| t.tokens).unwrap_or_default(),
+                status: if running {
+                    SubagentStatus::Running
+                } else {
+                    SubagentStatus::Idle
+                },
+                end_ts: if running {
+                    None
+                } else {
+                    t.and_then(|t| t.last_ts.clone())
+                },
             }
         })
         .collect();
@@ -228,16 +297,17 @@ fn step(
 /// 首次进缓存（重建路径）：倒序分块扫父文件收齐登记集事件 + agent 转写全量读
 fn rebuild(parent_jsonl: &Path, reg: &[RegAgent], st: &mut ClaudeCache) {
     let wanted: HashSet<&str> = reg.iter().map(|a| a.id.as_str()).collect();
+    let aliases = alias_map(reg);
     let mut got: HashSet<String> = HashSet::new();
     let tail_partial = scan_parent_rev(parent_jsonl, |line| {
         if let Some(ev) = classify_parent_line(line) {
-            let id = match &ev {
-                ParentEvent::Stop { agent_id } | ParentEvent::Resume { agent_id } => {
-                    agent_id.clone()
-                }
-            };
-            apply_event_rev(&mut st.last, &ev);
-            if wanted.contains(id.as_str()) {
+            if let Some(ev) = normalize_event(&aliases, ev) {
+                let id = match &ev {
+                    ParentEvent::Stop { agent_id } | ParentEvent::Resume { agent_id } => {
+                        agent_id.clone()
+                    }
+                };
+                apply_event_rev(&mut st.last, &ev);
                 got.insert(id);
             }
         }
@@ -295,6 +365,42 @@ fn task_id_in(text: &str) -> Option<&str> {
     Some(&text[start..end])
 }
 
+/// 文本中提取 `<teammate-message teammate_id="名字" …>` 的属性值（甲.4 机制 B）
+fn teammate_id_in(text: &str) -> Option<&str> {
+    const OPEN: &str = "<teammate-message";
+    const ATTR: &str = "teammate_id=\"";
+    let tag = text.find(OPEN)?;
+    let rel = text[tag..].find(ATTR)?;
+    let start = tag + rel + ATTR.len();
+    let end = start + text[start..].find('"')?;
+    Some(&text[start..end])
+}
+
+/// teammate 完成信号（甲.5 主判据）：文本含 `{"type":"idle_notification","from":"<名字>"}`。
+/// 提取顺序：idle 标记之后的 `"from":"…"` 值；from 缺失 → teammate_id 属性辅助
+/// （甲.5 明示可作辅助匹配）。无 idle 标记 → None（普通 teammate-message 不算）。
+pub(crate) fn teammate_idle_from(text: &str) -> Option<&str> {
+    const MARK: &str = "\"idle_notification\"";
+    const FROM: &str = "\"from\":\"";
+    let mark = text.find(MARK)?;
+    if let Some(rel) = text[mark..].find(FROM) {
+        let start = mark + rel + FROM.len();
+        let end = start + text[start..].find('"')?;
+        return Some(&text[start..end]);
+    }
+    teammate_id_in(text)
+}
+
+/// lastMessage 是否为「子 agent 回报」（观察台 §四 提醒开关的打标谓词，T7 消费）。
+/// 与判据同一套信号原语（task_id_in + teammate-message 标记）——spec §四.3
+/// 「判定与修复项同源，不靠文案匹配」的落点：前端只看后端打出的布尔。
+/// 本批（T1）仅测试消费，生产消费点在 T7 接线——同 `LastEvent::Spawn` 的
+/// 「契约先行」allow 先例，T7 接线后可移除。
+#[allow(dead_code)]
+pub(crate) fn is_subagent_report_text(text: &str) -> bool {
+    task_id_in(text).is_some() || text.contains("<teammate-message")
+}
+
 /// 行分类（纯函数）：坏 JSON / 无关行 → None
 pub(crate) fn classify_parent_line(line: &str) -> Option<ParentEvent> {
     let v: serde_json::Value = serde_json::from_str(line).ok()?;
@@ -316,9 +422,19 @@ pub(crate) fn classify_parent_line(line: &str) -> Option<ParentEvent> {
     }
     // stop：任意消息文本含 task-id 通知块
     let text = message_text(&v);
-    task_id_in(&text).map(|id| ParentEvent::Stop {
-        agent_id: id.to_string(),
-    })
+    if let Some(id) = task_id_in(&text) {
+        return Some(ParentEvent::Stop {
+            agent_id: id.to_string(),
+        });
+    }
+    // stop②（观察台 T1，甲.5）：teammate 空闲通告——只有名字没有编号，
+    // 归一到档案 id 由调用方的别名表完成（键在此保持原始形态）
+    if let Some(name) = teammate_idle_from(&text) {
+        return Some(ParentEvent::Stop {
+            agent_id: name.to_string(),
+        });
+    }
+    None
 }
 
 /// 增量路径：文件序应用（后到覆盖——last 语义）
@@ -349,18 +465,77 @@ pub(crate) fn is_running(registered: bool, last: Option<LastEvent>) -> bool {
         )
 }
 
-/// 子 agent jsonl 单行累计（纯函数）：usage 四桶累加 + 首条 timestamp 捕获
+/// 剥 `<teammate-message …>内文</teammate-message>` 壳（乙.3.1 teammate 首条
+/// user 形态）；非包裹/残缺形态原样返回（不猜）。
+/// **两语言两份实现申报（决策 I）**：与前端 SubagentDetail 的 extractTaskText
+/// 同构不同语言（卡片摘要在后端算 / 详情任务原文在前端算），跨 JSON 边界
+/// 各测各的——共享需端点透传首条 user 原文（载荷扩面），不值。
+fn strip_teammate_wrapper(text: &str) -> &str {
+    if !text.starts_with("<teammate-message") {
+        return text;
+    }
+    let Some(open) = text.find('>') else {
+        return text;
+    };
+    let Some(close) = text.rfind("</teammate-message>") else {
+        return text;
+    };
+    if close > open {
+        text[open + 1..close].trim()
+    } else {
+        text
+    }
+}
+
+/// 任务摘要回落（决策 I）：首条 user 剥壳后按字符截断 40 + 省略号；空文本 → None
+fn first_user_summary(text: &str) -> Option<String> {
+    let stripped = strip_teammate_wrapper(text);
+    if stripped.trim().is_empty() {
+        return None;
+    }
+    let chars: Vec<char> = stripped.chars().take(41).collect();
+    Some(if chars.len() > 40 {
+        format!("{}…", chars[..40].iter().collect::<String>())
+    } else {
+        chars.into_iter().collect()
+    })
+}
+
+/// 子 agent jsonl 单行累计（纯函数）：usage 四桶累加 + 首/末 timestamp 捕获 +
+/// 首条 user 原文捕获（任务摘要回落源，决策 I）
 pub(crate) fn accumulate_agent_line(
     line: &str,
     acc: &mut TokenUsage,
     first_ts: &mut Option<String>,
+    last_ts: &mut Option<String>,
+    first_user: &mut Option<String>,
 ) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
         return;
     };
-    if first_ts.is_none() {
-        if let Some(ts) = v["timestamp"].as_str() {
+    if let Some(ts) = v["timestamp"].as_str() {
+        if first_ts.is_none() {
             *first_ts = Some(ts.to_string());
+        }
+        *last_ts = Some(ts.to_string());
+    }
+    if first_user.is_none() && v["type"].as_str() == Some("user") {
+        match &v["message"]["content"] {
+            serde_json::Value::String(s) if !s.trim().is_empty() => {
+                *first_user = Some(s.clone());
+            }
+            serde_json::Value::Array(blocks) => {
+                let joined: String = blocks
+                    .iter()
+                    .filter(|b| b["type"].as_str() == Some("text"))
+                    .filter_map(|b| b["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !joined.trim().is_empty() {
+                    *first_user = Some(joined);
+                }
+            }
+            _ => {}
         }
     }
     let u = &v["message"]["usage"];
@@ -377,12 +552,21 @@ pub(crate) fn accumulate_agent_line(
 /// **不解析 spawnDepth、不区分深度**（口径明示，评审 P3-5）：spec §3 只收一层
 /// 子 agent——claude 的 subagents/ 登记源天然只有一层（深层派生不落此目录），
 /// 其余三工具无深度信息可过滤。
+/// 2026-10-09 观察台 T1（甲.4）：teammate 机制带 taskKind/name——taskKind 是
+/// 机制分派标记（spec §一.1），name 是名字→档案归一的别名源（甲.5）。
 #[derive(Deserialize)]
 pub(crate) struct AgentMeta {
     #[serde(rename = "agentType")]
     pub(crate) agent_type: Option<String>,
     pub(crate) description: Option<String>,
+    #[serde(rename = "taskKind", default)]
+    pub(crate) task_kind: Option<String>,
+    #[serde(default)]
+    pub(crate) name: Option<String>,
 }
+
+/// teammate 机制标记值（甲.4：meta.taskKind == "in_process_teammate"）
+pub(crate) const TASK_KIND_TEAMMATE: &str = "in_process_teammate";
 
 pub(crate) fn parse_meta(text: &str) -> Option<AgentMeta> {
     serde_json::from_str(text).ok()
@@ -473,12 +657,17 @@ mod tests {
                 output: 9512
             }
         );
-        // ② 追加停止通知 → 消失
+        // ② 追加停止通知 → 转 Idle 在板（T2 全量名单：「消失」语义移交前端 chip 层）
         f.append(&f.parent("sess-1"), &(notify("a86f") + "\n"));
-        assert!(collect_with(&f.root, "sess-1").is_empty());
-        // ③ 追加 SendMessage → 复现（增量路径，P0）
+        assert_eq!(
+            collect_with(&f.root, "sess-1")[0].status,
+            SubagentStatus::Idle
+        );
+        // ③ 追加 SendMessage → 复现为 Running（增量路径，P0）
         f.append(&f.parent("sess-1"), &(sendmsg("a86f") + "\n"));
-        assert_eq!(collect_with(&f.root, "sess-1").len(), 1);
+        let v = collect_with(&f.root, "sess-1");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].status, SubagentStatus::Running);
         // ④ token 增量：转写追加一行，四桶只加新增
         f.append(
             &f.session("sess-1")
@@ -514,8 +703,15 @@ mod tests {
         // b1 有停止通知、b2 无事件（→ spawn 态运行中）
         f.append(&f.parent("sess-2"), &(notify("b1") + "\n"));
         let v = collect_with(&f.root, "sess-2");
-        assert_eq!(v.len(), 1, "b1 已停止不上板，b2 无事件 = spawn 态在板");
-        assert_eq!(v[0].id, "b2");
+        assert_eq!(v.len(), 2, "全量名单（T2）：b1 Idle + b2 Running 均在板");
+        assert_eq!(
+            v.iter().find(|s| s.id == "b1").unwrap().status,
+            SubagentStatus::Idle
+        );
+        assert_eq!(
+            v.iter().find(|s| s.id == "b2").unwrap().status,
+            SubagentStatus::Running
+        );
         super::super::reset_cache_for_tests();
     }
 
@@ -534,12 +730,15 @@ mod tests {
         .unwrap();
         // 重建：半行不可解析 → d1 无事件 = spawn 态在板
         assert_eq!(collect_with(&f.root, "sess-6").len(), 1);
-        // 补齐换行：增量路径消费该通知 → 下板
+        // 补齐换行：增量路径消费该通知 → 转 Idle 在板（不下板）
         f.append(&f.parent("sess-6"), "\n");
-        assert!(
-            collect_with(&f.root, "sess-6").is_empty(),
-            "尾半行事件不得被 skip_to 丢弃"
+        let v = collect_with(&f.root, "sess-6");
+        assert_eq!(
+            v.len(),
+            1,
+            "尾半行事件不得被 skip_to 丢弃（T2：停止 = 转灰非消失）"
         );
+        assert_eq!(v[0].status, SubagentStatus::Idle);
         super::super::reset_cache_for_tests();
     }
 
@@ -550,10 +749,13 @@ mod tests {
         let f = claude_fixture("sess-3");
         f.add_agent("sess-3", "c1", r#"{"agentType":"Plan"}"#, "");
         f.append(&f.parent("sess-3"), &(notify("c1") + "\n"));
-        assert!(collect_with(&f.root, "sess-3").is_empty());
+        let v = collect_with(&f.root, "sess-3");
+        assert_eq!(v.len(), 1, "停止 → 转 Idle 在板（T2 全量名单）");
+        assert_eq!(v[0].status, SubagentStatus::Idle);
         std::fs::write(f.parent("sess-3"), "x\n").unwrap(); // 重写变短
         let v = collect_with(&f.root, "sess-3");
         assert_eq!(v.len(), 1, "护栏作废后重建：c1 无事件 → spawn 态在板");
+        assert_eq!(v[0].status, SubagentStatus::Running);
         super::super::reset_cache_for_tests();
     }
 
@@ -725,15 +927,18 @@ mod tests {
         );
     }
 
-    /// usage 四桶累计 + 首条 timestamp 捕获（timestamp 优先于 usage 在场性）
+    /// usage 四桶累计 + 首/末 timestamp 捕获（timestamp 优先于 usage 在场性）
     #[test]
     fn accumulate_usage_and_first_ts() {
         let mut acc = TokenUsage::default();
         let mut first = None;
+        let mut last = None;
         accumulate_agent_line(
             r#"{"timestamp":"2026-10-08T07:36:35.508Z","type":"user","message":{"role":"user","content":"go"}}"#,
             &mut acc,
             &mut first,
+            &mut last,
+            &mut None,
         );
         assert_eq!(
             first.as_deref(),
@@ -744,11 +949,15 @@ mod tests {
             &agent_line("2026-10-08T07:36:40Z", 1000, 2000, 0, 500),
             &mut acc,
             &mut first,
+            &mut last,
+            &mut None,
         );
         accumulate_agent_line(
             &agent_line("2026-10-08T07:37:00Z", 24, 56000, 7, 8812),
             &mut acc,
             &mut first,
+            &mut last,
+            &mut None,
         );
         assert_eq!(
             acc,
@@ -763,6 +972,11 @@ mod tests {
             first.as_deref(),
             Some("2026-10-08T07:36:35.508Z"),
             "首条 timestamp 不被覆盖"
+        );
+        assert_eq!(
+            last.as_deref(),
+            Some("2026-10-08T07:37:00Z"),
+            "末行 ts 持续覆盖"
         );
     }
 
@@ -780,5 +994,247 @@ mod tests {
         );
         assert_eq!(agent_id_from_meta_name("plan.md"), None);
         assert!(parse_meta("broken").is_none());
+    }
+
+    // ==== 2026-10-09 观察台 T1：teammate 机制（甲.4 对照表 · 甲.5 修复立项）====
+
+    /// teammate 登记 meta（甲.4 机制 B 实录字段形态）：taskKind 标记 + 编队名 +
+    /// name 字段 + spawnDepth:0；agentType 与 name 同值
+    fn tm_meta(name: &str) -> String {
+        format!(
+            r#"{{"taskKind":"in_process_teammate","teamName":"session-tm","name":"{name}","agentType":"{name}","spawnDepth":0}}"#
+        )
+    }
+    /// teammate 完成信号（甲.5 主判据）：user 行 content 含 teammate-message 包裹的
+    /// idle_notification——只有名字没有编号（agentId 长串在父转写 0 次）
+    fn tm_idle(name: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"2026-10-08T15:02:38.000Z","message":{{"role":"user","content":"<teammate-message teammate_id=\"{name}\">{{\"type\":\"idle_notification\",\"from\":\"{name}\"}}</teammate-message>"}}}}"#
+        )
+    }
+    /// teammate 完成报告（非 idle 的 teammate-message）：不构成 Stop（甲.5 待议不入本批）
+    fn tm_report(name: &str) -> String {
+        format!(
+            r#"{{"type":"user","timestamp":"2026-10-08T15:02:26.000Z","message":{{"role":"user","content":"<teammate-message teammate_id=\"{name}\">任务已全部完成，结果 355/113</teammate-message>"}}}}"#
+        )
+    }
+    /// SendMessage 续跑（to=名字形态；长 id 形态复用既有 sendmsg(id)）
+    fn sendmsg_to(name: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"2026-10-08T15:08:53.000Z","message":{{"role":"assistant","content":[{{"type":"tool_use","id":"tu2","name":"SendMessage","input":{{"to":"{name}","body":"continue"}}}}]}}}}"#
+        )
+    }
+
+    /// P0 修复锁（spec §一.4/§六.1）：teammate 完成转灰、续跑转绿——全链路
+    /// （T2：v1「完成即消失」语义移交前端 chip 过滤层，后端出全量名单）
+    #[test]
+    fn teammate_source_lifecycle() {
+        super::super::reset_cache_for_tests();
+        let f = claude_fixture("tm-1");
+        // 甲.4：agentId = 名字前缀长串（abg-progress-test-3b76c22694757d64 形态）
+        f.add_agent(
+            "tm-1",
+            "abg-progress-test-3b76c22694757d64",
+            &tm_meta("bg-progress-test"),
+            &(agent_line("2026-10-08T14:55:56.488Z", 100, 200, 0, 50) + "\n"),
+        );
+        // ① 出现（spawn 态，名称 = meta.agentType）
+        let v = collect_with(&f.root, "tm-1");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].name, "bg-progress-test");
+        // ② 完成报告（非 idle）不转灰；空闲通告 → 转 Idle 在板（FAIL 修复主体）
+        f.append(&f.parent("tm-1"), &(tm_report("bg-progress-test") + "\n"));
+        assert_eq!(
+            collect_with(&f.root, "tm-1")[0].status,
+            SubagentStatus::Running,
+            "非 idle 的 teammate-message 不构成 Stop（甲.5 待议）"
+        );
+        f.append(&f.parent("tm-1"), &(tm_idle("bg-progress-test") + "\n"));
+        assert_eq!(
+            collect_with(&f.root, "tm-1")[0].status,
+            SubagentStatus::Idle,
+            "idle_notification → 完成转灰在板（不下板）"
+        );
+        // ③ 续跑：to=名字 → 转回 Running（经同一名字→档案映射）
+        f.append(&f.parent("tm-1"), &(sendmsg_to("bg-progress-test") + "\n"));
+        assert_eq!(
+            collect_with(&f.root, "tm-1")[0].status,
+            SubagentStatus::Running,
+            "续跑即复现"
+        );
+        // ④ 二次完成（甲.2 实录两组 teammate-message/两次 idle）→ 再转灰
+        f.append(&f.parent("tm-1"), &(tm_idle("bg-progress-test") + "\n"));
+        assert_eq!(
+            collect_with(&f.root, "tm-1")[0].status,
+            SubagentStatus::Idle
+        );
+        // ⑤ Resume 双形态：to=长 id（agentId 本体）也命中——别名表 id 恒注册
+        f.append(
+            &f.parent("tm-1"),
+            &(sendmsg("abg-progress-test-3b76c22694757d64") + "\n"),
+        );
+        let v = collect_with(&f.root, "tm-1");
+        assert_eq!(v.len(), 1, "to=长 id 经同一映射复现");
+        assert_eq!(v[0].status, SubagentStatus::Running);
+        super::super::reset_cache_for_tests();
+    }
+
+    /// 纯函数层：idle 行分类为 Stop（键=名字）；报告行 None；from 缺失回落 teammate_id（甲.5 辅助）
+    #[test]
+    fn classify_teammate_idle_line() {
+        assert_eq!(
+            classify_parent_line(&tm_idle("bg-progress-test")),
+            Some(ParentEvent::Stop {
+                agent_id: "bg-progress-test".to_string()
+            })
+        );
+        assert_eq!(classify_parent_line(&tm_report("bg-progress-test")), None);
+        // 辅助形态：无 from 字段、只有 teammate_id 属性 + idle 标记
+        let aux = r#"{"type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"aux-agent\">{\"type\":\"idle_notification\"}</teammate-message>"}}"#;
+        assert_eq!(
+            classify_parent_line(aux),
+            Some(ParentEvent::Stop {
+                agent_id: "aux-agent".to_string()
+            }),
+            "from 缺失 → teammate_id 属性辅助匹配"
+        );
+    }
+
+    /// 混跑（spec §一.4）：同会话经典 + teammate 各一，各自完成/续跑互不干扰
+    /// （T2：完成不再出列，转灰在板——断言从 len 改为 status）
+    #[test]
+    fn teammate_and_classic_mixed() {
+        super::super::reset_cache_for_tests();
+        let f = claude_fixture("tm-2");
+        f.add_agent(
+            "tm-2",
+            "ae78013828b11ec80",
+            r#"{"agentType":"Plan","toolUseId":"tu1","spawnDepth":1}"#,
+            "",
+        );
+        f.add_agent("tm-2", "abg-x-ef2d485433592526", &tm_meta("x-agent"), "");
+        // 经典按 id 通知 → 转 Idle 在板；teammate 无事件仍 Running（名字空间互不污染）
+        f.append(&f.parent("tm-2"), &(notify("ae78013828b11ec80") + "\n"));
+        let v = collect_with(&f.root, "tm-2");
+        assert_eq!(v.len(), 2, "全量名单：经典转灰不消失");
+        assert_eq!(
+            v.iter()
+                .find(|s| s.id == "ae78013828b11ec80")
+                .unwrap()
+                .status,
+            SubagentStatus::Idle
+        );
+        assert_eq!(
+            v.iter()
+                .find(|s| s.id == "abg-x-ef2d485433592526")
+                .unwrap()
+                .status,
+            SubagentStatus::Running
+        );
+        // teammate 按名字 idle → 也转灰；经典不复活（id ≠ 名字）
+        f.append(&f.parent("tm-2"), &(tm_idle("x-agent") + "\n"));
+        let v = collect_with(&f.root, "tm-2");
+        assert_eq!(v.len(), 2);
+        assert!(v.iter().all(|s| s.status == SubagentStatus::Idle));
+        super::super::reset_cache_for_tests();
+    }
+
+    /// 重启重建（缓存缺失）也能归一：父文件已含 idle → 倒序重建后完成态正确判定
+    /// （T2：完成态 = Idle 在板，非消失）
+    #[test]
+    fn teammate_rebuild_after_restart() {
+        super::super::reset_cache_for_tests();
+        let f = claude_fixture("tm-3");
+        f.add_agent("tm-3", "abg-y-111111111111111", &tm_meta("y-agent"), "");
+        f.append(&f.parent("tm-3"), &(tm_idle("y-agent") + "\n"));
+        let v = collect_with(&f.root, "tm-3");
+        assert_eq!(v.len(), 1);
+        assert_eq!(
+            v[0].status,
+            SubagentStatus::Idle,
+            "重建路径同样经归一：名字键命中档案"
+        );
+        super::super::reset_cache_for_tests();
+    }
+
+    /// T7 消费的打标谓词（与判据同一套信号原语）：classic task-notification 与
+    /// teammate-message 都算「子 agent 回报」；普通文本不算
+    #[test]
+    fn is_subagent_report_text_matrix() {
+        assert!(is_subagent_report_text(&notify("a88")));
+        assert!(is_subagent_report_text(&tm_idle("bg-progress-test")));
+        assert!(is_subagent_report_text(&tm_report("bg-progress-test")));
+        assert!(!is_subagent_report_text("用户自己发的消息"));
+        assert!(!is_subagent_report_text(
+            "Another Claude session sent a message: 普通内容"
+        ));
+    }
+
+    // ==== 2026-10-09 观察台 T2：全量名单 + 终态锚 endTs + 摘要回落 ====
+
+    /// T2 任务摘要回落（spec §二.2 四要素）：meta.description 缺失（teammate meta
+    /// 实测无该字段）→ 首条 user 文本截断充当「它在做的任务」摘要；有 description
+    /// 时 meta 优先
+    #[test]
+    fn claude_source_description_falls_back_to_first_user() {
+        super::super::reset_cache_for_tests();
+        let f = claude_fixture("st-2");
+        let first_user = r#"{"timestamp":"2026-10-08T14:55:56.488Z","type":"user","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">设计一个两改动的实现方案并给出取舍</teammate-message>"}}"#;
+        std::fs::write(
+            f.session("st-2").join("subagents").join("agent-at1.jsonl"),
+            format!("{first_user}\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            f.session("st-2")
+                .join("subagents")
+                .join("agent-at1.meta.json"),
+            tm_meta("t1"),
+        )
+        .unwrap();
+        let v = collect_with(&f.root, "st-2");
+        assert!(
+            v[0].description
+                .as_deref()
+                .unwrap_or("")
+                .contains("设计一个两改动的实现方案"),
+            "无 description 的 teammate：摘要回落首条 user（剥壳截断）"
+        );
+        // 有 description 的经典 meta：meta 优先（既有 claude_source_lifecycle 已锁）
+        super::super::reset_cache_for_tests();
+    }
+
+    /// T2 终态锚：idle 的 endTs = 子转写末行 timestamp（停写即冻结）；running 恒 None
+    #[test]
+    fn claude_source_end_ts_is_transcript_last_ts() {
+        super::super::reset_cache_for_tests();
+        let f = claude_fixture("st-1");
+        f.add_agent(
+            "st-1",
+            "a1",
+            r#"{"agentType":"Plan"}"#,
+            &format!(
+                "{}\n{}\n",
+                agent_line("2026-10-08T07:00:00Z", 1, 0, 0, 1),
+                agent_line("2026-10-08T07:05:00Z", 1, 0, 0, 1)
+            ),
+        );
+        // 运行中：全量出卡 + status=Running + endTs=None
+        let v = collect_with(&f.root, "st-1");
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].status, SubagentStatus::Running);
+        assert_eq!(v[0].end_ts, None);
+        // 完成 → status=Idle + endTs=末行 ts（07:05，不是首行）
+        f.append(&f.parent("st-1"), &(notify("a1") + "\n"));
+        let v = collect_with(&f.root, "st-1");
+        assert_eq!(v.len(), 1, "全量名单：完成后仍在板（观察台 §二.3）");
+        assert_eq!(v[0].status, SubagentStatus::Idle);
+        assert_eq!(v[0].end_ts.as_deref(), Some("2026-10-08T07:05:00Z"));
+        // 续跑 → 转回 Running、endTs 清空
+        f.append(&f.parent("st-1"), &(sendmsg("a1") + "\n"));
+        let v = collect_with(&f.root, "st-1");
+        assert_eq!(v[0].status, SubagentStatus::Running);
+        assert_eq!(v[0].end_ts, None);
+        super::super::reset_cache_for_tests();
     }
 }

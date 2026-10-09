@@ -1,7 +1,8 @@
 //! Codex 子 agent source（spec §4.4：线程对判据）。
 //! 子 agent = rollout session_meta 带 parent_thread_id（普通会话无此字段——零歧义）；
 //! 运行中 = 该 rollout 无 task_complete 事件（task_complete_seen 布尔出现即置位
-//! 永不复位，判据查它而非回扫文件）。
+//! 永不复位，判据查它而非回扫文件）。T2（观察台 §二.3）：完成从「不出卡」变
+//! 「status=Idle 在板」，endTs = task_complete 行 timestamp。
 //! 发现层 = 倒排索引（parent_thread_id → rollout 路径）：sessions 目录 249+ 文件，
 //! 不可能每轮全扫首行。首行摘要（session_meta）走 `SessionFileScan::parse`（T =
 //! Option<ChildMeta>）——(mtime,size) 门控与**负缓存**（无 parent_thread_id 的普通
@@ -13,8 +14,8 @@
 //! output = output_tokens；reasoning_output_tokens 不计入展示合计。
 
 use super::{
-    read_increment, sort_views, update_entry, CacheBox, IncrRead, IncrState, SubagentView,
-    TokenUsage,
+    read_increment, sort_views, update_entry, CacheBox, IncrRead, IncrState, SubagentStatus,
+    SubagentView, TokenUsage,
 };
 use crate::monitor::codex_parser::is_rollout_file;
 use crate::monitor::session_scan::{fresh_within, SessionFileScan};
@@ -42,10 +43,13 @@ pub(crate) fn map_codex_usage(
     }
 }
 
-/// 子 rollout 行累计（纯函数）：task_complete 置位（永不复位）+ token_usage_record 直读覆盖
+/// 子 rollout 行累计（纯函数）：task_complete 置位（永不复位）+ 行 ts 终态锚捕获 +
+/// token_usage_record 直读覆盖
 #[derive(Default, Clone)]
 pub(crate) struct RolloutAccum {
     pub(crate) task_complete_seen: bool,
+    /// T2（观察台 endTs 终态锚）：task_complete 行 timestamp（完成后冻结时长用）
+    pub(crate) complete_ts: Option<String>,
     pub(crate) tokens: TokenUsage,
 }
 
@@ -57,6 +61,9 @@ pub(crate) fn apply_rollout_line(line: &str, acc: &mut RolloutAccum) {
         && v["payload"]["type"].as_str() == Some("task_complete")
     {
         acc.task_complete_seen = true;
+        if let Some(ts) = v["timestamp"].as_str() {
+            acc.complete_ts = Some(ts.to_string());
+        }
     }
     if v["type"].as_str() == Some("token_usage_record") {
         let tu = &v["payload"]["total_token_usage"];
@@ -171,15 +178,26 @@ pub(crate) fn collect_with(
                     }
                 }
             }
-            if !track.acc.task_complete_seen {
-                views.push(SubagentView {
-                    id: meta.child_id.clone(),
-                    name: meta.child_id.chars().take(8).collect(), // 无名源（C3 校准点）
-                    description: None,
-                    spawn_ts: meta.spawn_ts.clone(),
-                    tokens: track.acc.tokens,
-                });
-            }
+            // T2（观察台 §二.3）：task_complete 从「不出卡」变「status=Idle 在板」，
+            // endTs = 完成行 timestamp；未完成 = Running，endTs 恒空
+            let done = track.acc.task_complete_seen;
+            views.push(SubagentView {
+                id: meta.child_id.clone(),
+                name: meta.child_id.chars().take(8).collect(), // 无名源（C3 校准点）
+                description: None,
+                spawn_ts: meta.spawn_ts.clone(),
+                tokens: track.acc.tokens,
+                status: if done {
+                    SubagentStatus::Idle
+                } else {
+                    SubagentStatus::Running
+                },
+                end_ts: if done {
+                    track.acc.complete_ts.clone()
+                } else {
+                    None
+                },
+            });
         }
         sort_views(&mut views);
         (Arc::new(st) as CacheBox, views)
@@ -261,6 +279,11 @@ mod tests {
         assert_eq!(acc.tokens, map_codex_usage(100, 60, 10, 30));
         apply_rollout_line(&complete_line("2026-10-08T08:01:00Z"), &mut acc);
         assert!(acc.task_complete_seen);
+        assert_eq!(
+            acc.complete_ts.as_deref(),
+            Some("2026-10-08T08:01:00Z"),
+            "T2：task_complete 行 timestamp 捕获为终态锚 endTs"
+        );
         apply_rollout_line(&token_usage_line(1, 0, 0, 1), &mut acc);
         assert!(acc.task_complete_seen, "永不复位（§4.4）");
     }
@@ -295,8 +318,13 @@ mod tests {
         );
         assert_eq!(v[0].spawn_ts.as_deref(), Some("2026-10-08T08:00:01Z"));
         assert_eq!(v[0].tokens, map_codex_usage(100, 60, 10, 30));
+        assert_eq!(
+            v[0].status,
+            SubagentStatus::Running,
+            "无 task_complete → 运行中"
+        );
         assert!(collect_with(&td.path().join("sessions"), "parent-2", now).is_empty());
-        // 追加 task_complete → 消失（增量：task_complete_seen 置位）
+        // 追加 task_complete → 转 Idle 在板 + endTs=完成行 ts（T2：不再隐藏）
         let child = d.join("rollout-2026-10-08T08-00-01-child-9abc.jsonl");
         use std::io::Write;
         let mut f = std::fs::OpenOptions::new()
@@ -306,7 +334,10 @@ mod tests {
         f.write_all((complete_line("2026-10-08T08:05:00Z") + "\n").as_bytes())
             .unwrap();
         drop(f);
-        assert!(collect_with(&td.path().join("sessions"), "parent-1", now).is_empty());
+        let v = collect_with(&td.path().join("sessions"), "parent-1", now);
+        assert_eq!(v.len(), 1, "完成不隐没：全量名单留在板");
+        assert_eq!(v[0].status, SubagentStatus::Idle);
+        assert_eq!(v[0].end_ts.as_deref(), Some("2026-10-08T08:05:00Z"));
         super::super::reset_cache_for_tests();
     }
 
