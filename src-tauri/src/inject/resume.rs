@@ -116,6 +116,45 @@ pub fn resume_command(tool: &str, session_id: &str) -> Option<String> {
         .map(|(_, tpl)| tpl.replace("{id}", session_id))
 }
 
+/// 未信任预检提醒文案（T3 决策 5，投递面按发起侧：远程 → resume 回执
+/// `trustPromptExpected` / 会话页提示条；桌面 → 桌面侧。文案两处同源）。
+pub const TRUST_PROMPT_REMINDER: &str =
+    "重开的会话所在目录未做信任确认，请在主机终端应答信任提示，否则会话将挂起";
+
+/// T3 重开 cwd 信任归一 + 未信任预检（claude 专属；**只读** `~/.claude.json`
+/// （经 `monitor::claude_config`），MAM 永不写该文件）。原地改写
+/// `session.project_path`：命中已信任条款则复用其**精确 casing**（claude 按 cwd
+/// 精确字符串查信任、键存储对盘符大小写脆弱——实证 `E:`=false / `e:`=true 双条
+/// 并存，照抄记录 cwd 会命中 false 条款弹信任 TUI，手机注入答不了 → 重开挂起）；
+/// 命中全 false → cwd 原样、返回 true（**预检提醒触发条件**）；未命中 / 配置
+/// 不可读 / 非 claude / 无 home / 空白 cwd → 保守 no-op 返回 false（全新目录的
+/// 首次信任属正常流程，不提醒）。
+///
+/// home 注入缝：远程端点经 `RemoteState.home_source`（测试注入 tempdir，零接触
+/// 真实主目录）；桌面命令 = `dirs::home_dir()`。归一在命令处理器层做（此处 cwd
+/// 尚未进 spawn 构造，归一产物同时是 spawn cwd 与提醒判定的唯一来源）。
+pub fn normalize_cwd_for_trust(session: &mut Session, home: Option<&std::path::Path>) -> bool {
+    if session.agent_type.tool_id() != "claude" {
+        return false;
+    }
+    let cwd = session.project_path.trim();
+    if cwd.is_empty() {
+        return false; // no_cwd 哨兵面不碰（核心照原样返回哨兵）
+    }
+    let Some(home) = home else {
+        return false;
+    };
+    // 择优复用真条款 casing（一次读盘）；未复用再判未信任提醒（第二次读盘只在
+    // 全 false / 未命中路径——重开是低频用户动作，可忽略）
+    if let Some(trusted) =
+        crate::monitor::claude_config::trusted_casing_for(home, std::path::Path::new(cwd))
+    {
+        session.project_path = trusted;
+        return false;
+    }
+    crate::monitor::claude_config::is_trusted(home, std::path::Path::new(cwd)) == Some(false)
+}
+
 /// Windows spawn 计划纯构造（**不真 spawn**，跨平台可测；评审 M1：入参为 wt 完整
 /// 路径 Option 而非在场布尔——路径进 spec 由生产 spawner 直 spawn，绕开应用执行
 /// 别名（App Execution Alias）停用/损坏场景）。两分支 `cwd` 字段同设——生产
@@ -828,6 +867,8 @@ mod tests {
             status: crate::session::SessionStatus::Waiting,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-19T00:00:00Z".into(),
             pid: 7,
             cpu_usage: 0.0,
@@ -836,6 +877,73 @@ mod tests {
             jump_supported: false,
             unread: false,
         }
+    }
+
+    /// T3 归一（实证形态，终审发现 B 现场）：会话记录 cwd = 反斜杠 + 大写盘符，
+    /// `~/.claude.json` 双 casing 条款一真一假并存 → 原地改写复用**真条款精确
+    /// casing** 且不提醒；命中全 false → cwd 原样 + 提醒触发（tempdir 假 home，
+    /// 零接触真实 ~/.claude.json）
+    #[test]
+    fn normalize_cwd_for_trust_reuses_trusted_casing_and_flags_untrusted() {
+        // 双 casing 一真一假（实证的挂起形态）→ 改写为真条款 casing、无提醒
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"projects":{"E:/LLMproject/Test2":{"hasTrustDialogAccepted":false},"e:/LLMproject/Test2":{"hasTrustDialogAccepted":true}}}"#,
+        )
+        .unwrap();
+        let mut s = sess(crate::session::AgentType::Claude, r"E:\LLMproject\Test2");
+        assert!(
+            !normalize_cwd_for_trust(&mut s, Some(home.path())),
+            "复用真条款后不再弹窗，不提醒"
+        );
+        assert_eq!(
+            s.project_path, "e:/LLMproject/Test2",
+            "spawn cwd 必须是真条款逐字 casing"
+        );
+
+        // 全 false：cwd 原样（无可复用 casing）+ 提醒触发
+        let home2 = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home2.path().join(".claude.json"),
+            r#"{"projects":{"/tmp/proj-u":{"hasTrustDialogAccepted":false}}}"#,
+        )
+        .unwrap();
+        let mut s2 = sess(crate::session::AgentType::Claude, "/tmp/proj-u");
+        assert!(
+            normalize_cwd_for_trust(&mut s2, Some(home2.path())),
+            "Some(false)=提醒触发"
+        );
+        assert_eq!(s2.project_path, "/tmp/proj-u", "全 false 不得改写 cwd");
+    }
+
+    /// T3 归一 no-op 面（四路保守降级）：非 claude 工具不消费 claude 信任库 /
+    /// 无 home / 全新目录（无条目，首次信任属正常流程）/ 空白 cwd——一律不改写
+    /// 不提醒
+    #[test]
+    fn normalize_cwd_for_trust_noop_surfaces() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"projects":{"/tmp/proj":{"hasTrustDialogAccepted":true}}}"#,
+        )
+        .unwrap();
+        // 非 claude：claude 的信任库对其他工具无语义
+        let mut codex = sess(crate::session::AgentType::Codex, "/tmp/proj");
+        assert!(!normalize_cwd_for_trust(&mut codex, Some(home.path())));
+        assert_eq!(codex.project_path, "/tmp/proj");
+        // 无 home（解析失败）：保守 no-op
+        let mut no_home = sess(crate::session::AgentType::Claude, "/tmp/proj");
+        assert!(!normalize_cwd_for_trust(&mut no_home, None));
+        assert_eq!(no_home.project_path, "/tmp/proj");
+        // 全新目录（无条目）：不提醒、cwd 原样
+        let mut fresh = sess(crate::session::AgentType::Claude, "/tmp/brand-new");
+        assert!(!normalize_cwd_for_trust(&mut fresh, Some(home.path())));
+        assert_eq!(fresh.project_path, "/tmp/brand-new");
+        // 空白 cwd（no_cwd 哨兵面）：不碰
+        let mut blank = sess(crate::session::AgentType::Claude, "   ");
+        assert!(!normalize_cwd_for_trust(&mut blank, Some(home.path())));
+        assert_eq!(blank.project_path, "   ");
     }
 
     /// Step 2 失败测试 ①：命令表按 Step 1 实测断言——四工具命中，未知/未查证工具

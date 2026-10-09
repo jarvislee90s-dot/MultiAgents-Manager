@@ -152,7 +152,7 @@ describe("进度纯函数（board-logic，上下行进度 UI 共用）", () => {
   });
 });
 
-/** FilePanel 渲染助手（FilePanel.test.tsx 同款回调 mock） */
+/** FilePanel 渲染助手（FilePanel.test.tsx 同款回调 mock；mode/onModeChange/onClose 等顶栏收编 props 已删） */
 function renderPanel(entries: SessionFileEntry[]) {
   render(
     <FilePanel
@@ -160,11 +160,8 @@ function renderPanel(entries: SessionFileEntry[]) {
       truncated={false}
       scope={200}
       loading={false}
-      mode="fullscreen"
       onScopeChange={() => {}}
       onOpenFile={() => {}}
-      onModeChange={() => {}}
-      onClose={() => {}}
     />
   );
 }

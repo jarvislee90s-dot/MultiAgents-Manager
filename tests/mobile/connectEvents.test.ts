@@ -22,6 +22,7 @@ function transition(overrides: Partial<TransitionEvent> = {}): TransitionEvent {
     to: "waiting",
     projectName: "proj",
     lastMessage: "needs approval",
+    flapFromSubagentActivity: false,
     ts: 42,
     ...overrides,
   };

@@ -1,7 +1,7 @@
 // 预览形态切换器（需求 1，2026-09-16 用户裁决）：三态互切——
 // 纵向分屏（上对话下文件）/ 横向分屏（左对话右文件）/ 全屏浮层。
-// 页头（SessionDetail）与预览页头（FilePreview）复用同一组件：全屏浮层
-// fixed inset-0 盖住详情页头，预览页头那份是全屏态唯一可达入口。
+// T1 sheet 化后唯一实例在 SessionDetail 顶栏 sheet bar；FilePreview 内部的
+// 切换器仅显式传 onModeChange 的直用场景（独立测试）渲染。
 import { Columns2, Maximize2, Rows2 } from "lucide-react";
 
 /** 预览形态三态：与 SessionDetail.PreviewMode 同源（此文件为避免循环依赖
@@ -11,7 +11,8 @@ export type PreviewMode = "split" | "split-h" | "fullscreen";
 interface PreviewModeSwitcherProps {
   mode: PreviewMode;
   onChange: (mode: PreviewMode) => void;
-  /** testid 前缀：页头用 preview-mode、预览页头用 preview-toggle（互不冲突） */
+  /** testid 前缀：SessionDetail sheet bar 用 preview-toggle；直用场景自定前缀
+   *  （注意：若直用场景与 sheet bar 可能共存于同一棵树，须换前缀防重复 testid） */
   testIdPrefix: string;
 }
 

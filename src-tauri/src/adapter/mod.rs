@@ -138,6 +138,19 @@ fn is_question_entry_event(event: &crate::monitor::hooks::HookEvent) -> bool {
         )
 }
 
+/// PostToolUse 族判定（F2b 打标谓词子项，决策 4）。事件名集合与
+/// [`apply_hook_event_to_session`] 清除族的 PostToolUse 三形态同口径；
+/// kimi 的 PermissionResult 等价物不纳入——teammate 子 agent 活动是 claude 场景，
+/// 谓词从严（漏打标的代价只是一次照常提醒，误打标会吞掉真实提醒）
+fn is_post_tool_use_family(event: &str) -> bool {
+    matches!(event, "PostToolUse" | "postToolUse" | "PostToolUseFailure")
+}
+
+/// 子 agent 活动打标的 hook 事件新鲜度 TTL（秒）：与
+/// `monitor::hooks::read_hook_events` 的读取 TTL（`now - event.ts < 30`）同口径——
+/// 生产路径进来的事件天然新鲜，此闸为纵深防御（超龄事件不作为活动证据）
+const SUBAGENT_FLAP_TAG_TTL_SECS: i64 = 30;
+
 /// 单会话 hook 事件应用（T3 抽取自主循环，行为等价可测）：返回审批等待标记动作
 /// ——Entry=进入（写标记）/Clear=清除（删标记）/None。
 /// 红灯语义退役（计划 T3，用户裁定的「不落红」收窄再修订）：Stop 过期 → **Idle**
@@ -157,6 +170,16 @@ fn apply_hook_event_to_session(
     grace: &mut HashMap<u32, (i64, i64)>,
     now_ts: i64,
 ) -> HookMarkAction {
+    // T4 F2b 打标（终审发现 C / 决策 4）：「子 agent 活动引发的跃迁」谓词 =
+    // Session.active_subagent_count > 0（claude_parser 既有产出）∧ 该会话最新 hook
+    // 事件 ∈ PostToolUse 族 ∧ 事件年龄 < 30s TTL。与完成识别（JSONL 文本判据）不同源
+    // 不同信号，共同点是「后端判定、前端只消费布尔、永不匹配文案」。事件是当前
+    // read_hook_events 放行的该会话最新事件（<30s TTL），TTL 闸在此为纵深防御；
+    // 无 hook 事件的会话由调用侧归 false（无活动证据不猜）。红/等待边不受此打标
+    // 影响（审批/问答族均非 PostToolUse 族，天然不打标）
+    session.flap_from_subagent_activity = session.active_subagent_count > 0
+        && is_post_tool_use_family(&event.event)
+        && now_ts - event.ts < SUBAGENT_FLAP_TAG_TTL_SECS;
     // T8+T1：AskUserQuestion 专属分支（先于 match——通用 PreToolUse 映射产
     // Processing 会覆盖问题等待态；清除族（PostToolUse/Stop/UserPromptSubmit/…）
     // 对该会话照常返回 Clear，状态链据此同时清两类标记）。
@@ -711,6 +734,9 @@ fn get_all_sessions_inner() -> SessionsResponse {
                         grace.remove(&session.pid);
                     }
                 }
+                // F2b：无 hook 事件 = 无子 agent 活动证据，打标归 false（不沿用旧值，
+                // 否则活动停止后打标悬挂、后续跃迁被误静默）
+                session.flap_from_subagent_activity = false;
                 HookMarkAction::None
             }
         };
@@ -936,6 +962,8 @@ mod tests {
             status,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-20T00:00:00Z".into(),
             pid: 77,
             cpu_usage: 0.0,
@@ -1016,6 +1044,77 @@ mod tests {
             apply_hook_event_to_session(&mut s, &hook_ev("Stop", now - 1), &mut grace, now);
         assert_eq!(action, HookMarkAction::Clear);
         assert!(matches!(s.status, SessionStatus::Processing));
+    }
+
+    // ==== T4 F2b：子 agent 活动打标（终审发现 C / 决策 4）====
+
+    /// 打标正例：活跃子 agent 在场 + 最新 hook 事件 ∈ PostToolUse 族 + 新鲜（< 30s TTL）
+    #[test]
+    fn flap_tagged_when_active_subagent_and_fresh_post_tool_use() {
+        let mut grace = HashMap::new();
+        let now = 10_000;
+        // 事件略旧（5s）但在 TTL 内——生产路径 read_hook_events 只放行 <30s 的新鲜事件
+        let mut s = hook_sess(SessionStatus::Processing);
+        s.active_subagent_count = 2;
+        apply_hook_event_to_session(&mut s, &hook_ev("PostToolUse", now - 5), &mut grace, now);
+        assert!(
+            s.flap_from_subagent_activity,
+            "活跃子 agent + 新鲜 PostToolUse 必须打标（决策 4 谓词）"
+        );
+        // 小写 wire 形态（kimi 等工具的事件名）同族同判
+        let mut s2 = hook_sess(SessionStatus::Processing);
+        s2.active_subagent_count = 1;
+        apply_hook_event_to_session(&mut s2, &hook_ev("postToolUse", now), &mut grace, now);
+        assert!(s2.flap_from_subagent_activity);
+        // PostToolUseFailure 属 PostToolUse 族
+        let mut s3 = hook_sess(SessionStatus::Processing);
+        s3.active_subagent_count = 1;
+        apply_hook_event_to_session(
+            &mut s3,
+            &hook_ev("PostToolUseFailure", now),
+            &mut grace,
+            now,
+        );
+        assert!(s3.flap_from_subagent_activity);
+    }
+
+    /// 无活跃子 agent：即使 PostToolUse 新鲜也不打标（谓词第一项不满足）
+    #[test]
+    fn flap_not_tagged_without_active_subagent() {
+        let mut s = hook_sess(SessionStatus::Processing);
+        s.active_subagent_count = 0;
+        let mut grace = HashMap::new();
+        apply_hook_event_to_session(&mut s, &hook_ev("PostToolUse", 10_000), &mut grace, 10_000);
+        assert!(
+            !s.flap_from_subagent_activity,
+            "无活跃子 agent 不得打标（纯主会话活动的提醒不受静默门影响）"
+        );
+    }
+
+    /// 事件超 TTL（>30s）或非 PostToolUse 族：不打标（谓词后两项任一不满足）
+    #[test]
+    fn flap_not_tagged_on_stale_or_non_post_tool_use_event() {
+        let mut grace = HashMap::new();
+        let now = 10_000;
+        // 超 TTL：即使子 agent 在场也不打标（活动证据已过期，不猜）
+        let mut s = hook_sess(SessionStatus::Processing);
+        s.active_subagent_count = 3;
+        apply_hook_event_to_session(&mut s, &hook_ev("PostToolUse", now - 31), &mut grace, now);
+        assert!(
+            !s.flap_from_subagent_activity,
+            "超 30s TTL 的 hook 事件不得打标"
+        );
+        // 非 PostToolUse 族（Stop / UserPromptSubmit / 审批族）：不打标——
+        // 审批/等待提醒永不静默是 F2a 的红/waiting 豁免在打标侧的对偶
+        for name in ["Stop", "UserPromptSubmit", "PermissionRequest"] {
+            let mut s2 = hook_sess(SessionStatus::Processing);
+            s2.active_subagent_count = 3;
+            apply_hook_event_to_session(&mut s2, &hook_ev(name, now), &mut grace, now);
+            assert!(
+                !s2.flap_from_subagent_activity,
+                "{name} 非 PostToolUse 族，不得打标"
+            );
+        }
     }
 
     #[test]
@@ -2009,6 +2108,8 @@ fn build_unread_cards(
             status: SessionStatus::Idle,
             last_message: r.last_message.clone(),
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: chrono::DateTime::from_timestamp_millis(r.turned_green_at_ms)
                 .map(|dt| dt.to_rfc3339())
                 .unwrap_or_default(),
@@ -2106,6 +2207,8 @@ mod host_liveness_filter_tests {
             status: SessionStatus::Idle,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: String::new(),
             pid: 7,
             cpu_usage: 0.0,
@@ -2395,6 +2498,8 @@ mod dedup_tests {
             status: SessionStatus::Idle,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: String::new(),
             pid,
             cpu_usage: 0.0,
@@ -2433,6 +2538,8 @@ mod sort_tests {
             status: SessionStatus::Idle,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: activity.into(),
             pid: 0,
             cpu_usage: 0.0,
@@ -2500,6 +2607,8 @@ mod unread_card_tests {
             status: SessionStatus::Thinking,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: String::new(),
             pid: 42,
             cpu_usage: 0.0,
@@ -2613,6 +2722,8 @@ mod stale_mark_expiry_tests {
             status: SessionStatus::Waiting,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-10-03T00:00:00Z".into(),
             pid,
             cpu_usage: 0.0,

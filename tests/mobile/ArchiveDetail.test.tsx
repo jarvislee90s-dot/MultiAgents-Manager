@@ -1,7 +1,12 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
 import ArchiveDetail from "@/mobile/ArchiveDetail";
 import type { ArchivedSession } from "@/mobile/api";
+
+// T3 未信任预检：toast 走 mock（断言「trustPromptExpected → 提醒被调」；
+// 本文件其余用例不依赖真实 sonner 行为，文件级 mock 无涉）
+vi.mock("sonner", () => ({ toast: vi.fn() }));
 
 const card: ArchivedSession = {
   sessionId: "dead-1", agentType: "codex", projectPath: "/tmp/p1", projectName: "proj-1",
@@ -42,6 +47,7 @@ function installFetch(routes: Record<string, unknown>) {
 
 describe("ArchiveDetail：归档详情与激活", () => {
   beforeEach(() => installFetch({}));
+  beforeEach(() => vi.mocked(toast).mockClear());
   afterEach(() => { vi.unstubAllGlobals(); cleanup(); });
 
   it("渲染历史消息内容 + 在桌面端打开按钮存在", async () => {
@@ -57,6 +63,17 @@ describe("ArchiveDetail：归档详情与激活", () => {
     fireEvent.click(screen.getByTestId("session-open"));
     await screen.findByText("正在电脑上打开终端…");
     expect(activated).toHaveBeenCalled();
+    expect(toast).not.toHaveBeenCalled();
+  });
+
+  it("T3 未信任预检：opening + trustPromptExpected → toast 提醒去主机应答", async () => {
+    installFetch({ sessionOpen: { status: "opening", trustPromptExpected: true } });
+    render(<ArchiveDetail session={card} onBack={() => {}} onActivated={() => {}} />);
+    fireEvent.click(screen.getByTestId("session-open"));
+    await screen.findByText("正在电脑上打开终端…");
+    expect(toast).toHaveBeenCalledWith(
+      "重开的会话所在目录未做信任确认，请在主机终端应答信任提示，否则会话将挂起",
+    );
   });
 
   it("failed 回执 → 错误文案上屏、不回调（可重试）", async () => {

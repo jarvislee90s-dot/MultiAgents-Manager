@@ -1024,6 +1024,47 @@ fn map_claude_lines(lines: &[String]) -> Vec<SessionMessage> {
     out
 }
 
+/// 子 agent 详情（观察台 §三，仅 claude）：会话 subagents/agent-<id>.jsonl 尾窗 →
+/// `map_claude_lines` 复用（与会话消息同一映射——乙.3.1 实证两机制子转写格式一致，
+/// 单一渲染器通吃）。发现层复用 `subagents::claude::locate`（同一 projects 扫描，
+/// 不造第二份路径推导）；预算与 session-messages 同口径（line_budget/byte_budget）。
+pub fn read_claude_subagent_messages(
+    session_id: &str,
+    subagent_id: &str,
+    limit: usize,
+) -> Result<MessagesPage, String> {
+    let home = dirs::home_dir().ok_or_else(|| "无法确定用户主目录".to_string())?;
+    read_claude_subagent_messages_with(&home, session_id, subagent_id, limit)
+}
+
+/// 注入核（测试 tempdir home）。**limit clamp 在本函数入口**（评审 P1-2）：既有
+/// clamp 在 read_session_messages_impl（派发核）内，本新路径不经它——不自带的
+/// 话 limit=0 会产出空消息表；与派发核同口径 [1,1000]。
+pub(crate) fn read_claude_subagent_messages_with(
+    home: &Path,
+    session_id: &str,
+    subagent_id: &str,
+    limit: usize,
+) -> Result<MessagesPage, String> {
+    let limit = limit.clamp(1, 1000);
+    let projects = home.join(".claude").join("projects");
+    let Some((_parent_jsonl, subagents_dir)) =
+        crate::monitor::subagents::claude::locate(&projects, session_id)
+    else {
+        return Err(format!("会话不存在: {session_id}"));
+    };
+    let path = subagents_dir.join(format!("agent-{subagent_id}.jsonl"));
+    if !path.is_file() {
+        return Err(format!("子 agent 转写不存在: {subagent_id}"));
+    }
+    let (lines, truncated) = crate::monitor::jsonl::read_recent_lines_with_budget(
+        &path,
+        line_budget(limit),
+        byte_budget(limit),
+    );
+    Ok(page(map_claude_lines(&lines), limit, truncated))
+}
+
 // ============================================================
 // Codex：rollout JSONL（CLI 线路）→ 未命中回退 thread_history SQLite（APP 线路）
 // ============================================================
@@ -2695,6 +2736,79 @@ mod tests {
             200
         )
         .is_err());
+    }
+
+    // ==== 2026-10-09 观察台 T4：claude 子 agent 详情读取 ====
+
+    /// 子转写 → SessionMessage（map_claude_lines 复用：thinking/tool_use/tool_result
+    /// 全量映射；attachment 行无 message.content 天然跳过——乙.3.1 噪声过滤免费继承）
+    #[test]
+    fn claude_subagent_messages_maps_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp
+            .path()
+            .join(".claude/projects/-Users-x-demo/s1/subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent-abg-test-1111.jsonl"),
+            concat!(
+                r#"{"type":"user","timestamp":"2026-10-08T14:55:56.488Z","message":{"role":"user","content":"<teammate-message teammate_id=\"team-lead\">设计新方案</teammate-message>"}}"#, "\n",
+                r#"{"type":"attachment","timestamp":"2026-10-08T14:55:57Z","attachment":{"path":"x"}} "#, "\n",
+                r#"{"type":"assistant","timestamp":"2026-10-08T14:56:10Z","message":{"role":"assistant","content":[{"type":"thinking","thinking":"先看目录"},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}"#, "\n",
+                r#"{"type":"user","timestamp":"2026-10-08T14:56:12Z","message":{"role":"user","content":[{"type":"tool_result","content":"file-a\nfile-b"}]}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        let pg =
+            read_claude_subagent_messages_with(tmp.path(), "s1", "abg-test-1111", 200).unwrap();
+        let kinds: Vec<&str> = pg.messages.iter().map(|m| m.kind.as_str()).collect();
+        assert_eq!(kinds, ["user", "thinking", "tool-call", "tool-result"]);
+        assert_eq!(
+            pg.messages[0].content,
+            "<teammate-message teammate_id=\"team-lead\">设计新方案</teammate-message>"
+        );
+        assert_eq!(pg.messages[2].tool_name.as_deref(), Some("Bash"));
+        assert!(!pg.truncated);
+    }
+
+    /// 会话/转写不存在 → Err（端点映射 404）；subagent_id 穿越形态由端点 400 拦截
+    #[test]
+    fn claude_subagent_messages_missing_is_err() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(read_claude_subagent_messages_with(tmp.path(), "nope", "x", 200).is_err());
+        let dir = tmp
+            .path()
+            .join(".claude/projects/-Users-x-demo/s2/subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(
+            read_claude_subagent_messages_with(tmp.path(), "s2", "ghost", 200).is_err(),
+            "会话在、转写不在 → Err"
+        );
+    }
+
+    /// 终审修复回归锁：入口 clamp(1,1000)（评审 P1-2）——limit=0 若不夹取，
+    /// finalize(·, 0) 会产出空消息表；夹取后返回末 1 条（非空）。clamp 无此测试
+    /// 则被删不会红
+    #[test]
+    fn claude_subagent_messages_limit_zero_is_clamped_to_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp
+            .path()
+            .join(".claude/projects/-Users-x-demo/s1/subagents");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent-abg-clamp-1111.jsonl"),
+            concat!(
+                r#"{"type":"user","timestamp":"2026-10-08T14:55:56.488Z","message":{"role":"user","content":"任务原文"}}"#, "\n",
+                r#"{"type":"assistant","timestamp":"2026-10-08T14:56:10Z","message":{"role":"assistant","content":"步骤 1"}}"#, "\n",
+                r#"{"type":"assistant","timestamp":"2026-10-08T14:56:40Z","message":{"role":"assistant","content":"步骤 2"}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        let pg = read_claude_subagent_messages_with(tmp.path(), "s1", "abg-clamp-1111", 0).unwrap();
+        assert_eq!(pg.messages.len(), 1, "limit=0 → 夹取为 1 → 恰返回末 1 条");
+        assert_eq!(pg.messages[0].seq, 0, "finalize 重新编 seq（单条恒 0）");
+        assert!(!pg.truncated);
     }
 
     // ==== 计划形态升格（T1 一等卡片，按形态不按工具名）====

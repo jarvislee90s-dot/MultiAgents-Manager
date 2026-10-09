@@ -292,6 +292,8 @@ fn scan_sessions(
                             status: SessionStatus::Idle,
                             last_message: None,
                             last_message_role: None,
+                            last_message_subagent_report: false,
+                            flap_from_subagent_activity: false,
                             last_activity_at: chrono::DateTime::from_timestamp_millis(
                                 digest.log_mtime_ms,
                             )
@@ -354,6 +356,8 @@ fn scan_sessions(
                     status: outcome.status,
                     last_message: text,
                     last_message_role: role,
+                    last_message_subagent_report: false,
+                    flap_from_subagent_activity: false,
                     last_activity_at: chrono::DateTime::from_timestamp_millis(last_activity_ms)
                         .map(|d| d.to_rfc3339())
                         .unwrap_or_default(),
@@ -786,6 +790,8 @@ mod integration_tests {
             status: SessionStatus::Idle,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: String::new(),
             pid: 1,
             cpu_usage: 0.0,

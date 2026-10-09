@@ -1012,6 +1012,8 @@ async fn e2e_http_full_chain() {
         status: multi_agents_manager_lib::session::SessionStatus::Waiting,
         last_message: None,
         last_message_role: None,
+        last_message_subagent_report: false,
+        flap_from_subagent_activity: false,
         last_activity_at: chrono::Utc::now().to_rfc3339(),
         pid: proc.target,
         cpu_usage: 0.0,
@@ -1024,6 +1026,8 @@ async fn e2e_http_full_chain() {
     let total = sessions.len();
     let state = Arc::new(RemoteState {
         ui_config_source: Box::new(|| None),
+        subagent_source: std::collections::HashMap::new(),
+        subagent_message_source: std::collections::HashMap::new(),
         capability_table: multi_agents_manager_lib::inject::capability::new_table(),
         session_source: Box::new(
             move || multi_agents_manager_lib::session::SessionsResponse {

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { ArrowDownToLine, ArrowUpToLine, ChevronDown, ChevronRight } from "lucide-react";
 import {
   ApiError,
@@ -201,6 +202,12 @@ export default function ArchiveDetail({
     try {
       const r = await sessionOpen(session.sessionId);
       if (r.status === "opening") {
+        // T3 未信任预检（评审修复：移动端用户可见承载）：电脑侧命中未信任目录——
+        // claude 将弹终端信任提示，手机注入答不了，须人工去主机应答否则会话挂起。
+        // 文案与 Rust TRUST_PROMPT_REMINDER 同义；移动端口径硬编码中文（无 i18n 契约）
+        if (r.trustPromptExpected) {
+          toast("重开的会话所在目录未做信任确认，请在主机终端应答信任提示，否则会话将挂起");
+        }
         onActivated(); // 乐观回看板：活板 3s 内出卡，归档条目下次拉取自然消失
         return;
       }

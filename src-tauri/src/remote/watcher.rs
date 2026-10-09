@@ -29,6 +29,10 @@ pub struct TransitionEvent {
     pub to: String,
     pub project_name: String,
     pub last_message: Option<String>,
+    /// 「跃迁由子 agent 活动引发」打标（T4 F2b / 决策 4）：取 curr 会话的
+    /// `flap_from_subagent_activity`——移动端 Board 横幅/提示音/振动入口按本字段
+    /// 默认静默（桌面端经 /sessions 快照的同名字段消费，两路同一权威源）
+    pub flap_from_subagent_activity: bool,
     pub ts: i64,
 }
 
@@ -168,6 +172,7 @@ pub fn diff_transitions(prev: &[Session], curr: &[Session], now: i64) -> Vec<Tra
                     to: status_wire(&c.status),
                     project_name: c.project_name.clone(),
                     last_message: c.last_message.clone(),
+                    flap_from_subagent_activity: c.flap_from_subagent_activity,
                     ts: now,
                 })
             } else {
@@ -214,6 +219,8 @@ mod tests {
             status,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: String::new(),
             pid: 1,
             cpu_usage: 0.0,
@@ -232,8 +239,33 @@ mod tests {
             to: "processing".into(),
             project_name: "p".into(),
             last_message: None,
+            flap_from_subagent_activity: false,
             ts: 1,
         }
+    }
+
+    /// T4 F2b：跃迁事件携带当前会话的子 agent 活动打标（取 curr 会话的值）——
+    /// 移动端 Board 的静默门按该字段默认静默（决策 4：后端判定、前端只消费布尔）
+    #[test]
+    fn diff_carries_flap_tag_from_curr_session() {
+        let prev = session("a", SessionStatus::Processing, "p");
+        let mut curr = session("a", SessionStatus::Idle, "p");
+        curr.flap_from_subagent_activity = true;
+        let events = diff_transitions(&[prev], &[curr], 1);
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].flap_from_subagent_activity,
+            "跃迁事件必须携带 curr 会话的打标值"
+        );
+        // wire 键 camelCase（移动端契约，与 Session 同款 rename_all）
+        let v = serde_json::to_value(&events[0]).unwrap();
+        assert_eq!(v["flapFromSubagentActivity"], true);
+        assert!(v.get("flap_from_subagent_activity").is_none());
+        // 未打标会话 → false 原样透传
+        let prev = session("b", SessionStatus::Processing, "p");
+        let curr = session("b", SessionStatus::Idle, "p");
+        let events = diff_transitions(&[prev], &[curr], 1);
+        assert!(!events[0].flap_from_subagent_activity);
     }
 
     /// 控制者裁决（2026-09-15，对简报的修订）：新增会话**不产生**跃迁事件——
@@ -336,11 +368,18 @@ mod tests {
             "lastMessage",
             "from",
             "to",
+            "flapFromSubagentActivity",
             "ts",
         ] {
             assert!(obj.contains_key(k), "缺少 camelCase 键 {k}：{obj:?}");
         }
-        for k in ["session_id", "agent_type", "project_name", "last_message"] {
+        for k in [
+            "session_id",
+            "agent_type",
+            "project_name",
+            "last_message",
+            "flap_from_subagent_activity",
+        ] {
             assert!(
                 !obj.contains_key(k),
                 "不得出现 snake_case 键 {k}（前端契约 camelCase）"

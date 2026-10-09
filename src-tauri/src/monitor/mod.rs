@@ -1,6 +1,7 @@
 // 监控解析层：每个工具一个解析器模块（新增工具只需新增 *_parser.rs + 本处一行），
 // 跨工具公共设施下沉到 cwd/path_codec/git/project/jsonl 五个职责单一的模块
 pub mod app_status;
+pub mod claude_config;
 pub mod claude_parser;
 pub mod codex_parser;
 pub mod codex_thread_parser;
@@ -20,6 +21,7 @@ pub mod project;
 pub mod session_scan;
 pub mod sqlite;
 pub mod status;
+pub mod subagents;
 pub mod workbuddy_parser;
 pub mod zcode_parser;
 
@@ -67,6 +69,8 @@ mod dismissed_filter_tests {
             status,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: String::new(),
             pid: 7,
             cpu_usage: 0.0,

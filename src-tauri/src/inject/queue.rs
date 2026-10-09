@@ -1068,6 +1068,8 @@ mod tests {
             status,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-18T00:00:00Z".into(),
             pid,
             cpu_usage: 0.0,
@@ -1103,6 +1105,8 @@ mod tests {
     ) -> crate::remote::server::RemoteState {
         crate::remote::server::RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
                 total_count: sessions.len(),

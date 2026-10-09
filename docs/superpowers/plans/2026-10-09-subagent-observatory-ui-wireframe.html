@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>子 Agent 观察台 · 预览区 sheet 化线稿 v2</title>
+<style>
+  :root { --bd:#d8d2c4; --cbg:#faf8f2; --bub:#fff; --mut:#8a8578; --tx:#3a362c; --grn:#10b981; --gry:#9ca3af; --acc:#7c5cd6; }
+  * { box-sizing:border-box; margin:0; }
+  body { font-family:"Segoe UI",system-ui,sans-serif; background:#eee9dd; color:var(--tx); padding:24px; }
+  h1 { font-size:18px; margin-bottom:4px; }
+  .note { font-size:12px; color:var(--mut); margin-bottom:16px; line-height:1.6; }
+  .frame { width:940px; background:var(--cbg); border:2px solid var(--bd); border-radius:12px; overflow:hidden; margin-bottom:26px; box-shadow:0 2px 8px rgba(0,0,0,.08); }
+  .caption { font-size:13px; font-weight:600; margin:0 0 6px; }
+  .topbar { display:flex; align-items:center; gap:8px; padding:8px 12px; border-bottom:2px solid var(--bd); background:var(--bub); }
+  .sheet-tab { padding:5px 14px; border-radius:8px; border:1.5px solid var(--bd); background:var(--bub); font-size:13px; cursor:pointer; }
+  .sheet-tab.on { background:var(--acc); color:#fff; border-color:var(--acc); }
+  .spacer { flex:1; }
+  .modegrp { display:flex; gap:4px; }
+  .modebtn { width:30px; height:26px; border:1.5px solid var(--bd); border-radius:6px; background:var(--bub); font-size:12px; color:var(--mut); }
+  .modebtn.on { border-color:var(--acc); color:var(--acc); }
+  .xbtn { width:26px; height:26px; border:none; background:none; color:var(--mut); font-size:15px; }
+  .split { display:flex; min-height:300px; }
+  .pane { min-width:0; }
+  .pane.left { width:46%; border-right:2px solid var(--bd); }
+  .pane.right { flex:1; }
+  .filterbar { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--bd); font-size:12px; flex-wrap:wrap; }
+  .fgroup { display:flex; align-items:center; gap:5px; }
+  .fgroup .lb { color:var(--mut); white-space:nowrap; }
+  .fgroup select { padding:3px 6px; border:1px solid var(--bd); border-radius:6px; background:var(--bub); font-size:12px; color:var(--tx); }
+  .vsep { width:1px; height:20px; background:var(--bd); }
+  .search { flex:1; min-width:120px; padding:4px 8px; border:1px solid var(--bd); border-radius:6px; background:var(--bub); font-size:12px; color:var(--mut); }
+  .sa-list { padding:10px 12px; }
+  .sa-title { font-size:11px; letter-spacing:1px; color:var(--mut); margin-bottom:8px; }
+  .sa-card { display:flex; align-items:center; gap:8px; width:100%; text-align:left; padding:8px 10px; border:none; border-radius:10px; background:transparent; cursor:pointer; font-size:13px; }
+  .sa-card:hover { background:rgba(0,0,0,.05); }
+  .sa-card.sel { background:rgba(124,92,214,.12); outline:1.5px solid var(--acc); }
+  .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+  .dot.g { background:var(--grn); } .dot.k { background:var(--gry); }
+  .sa-name { font-weight:600; }
+  .sa-desc { font-size:11px; color:var(--mut); margin-left:6px; }
+  .sa-metrics { margin-left:auto; font-size:12px; color:var(--mut); flex-shrink:0; }
+  .flist { padding:6px 12px 10px; }
+  .fitem { display:flex; align-items:center; gap:8px; padding:8px 10px; border-radius:10px; font-size:13px; cursor:pointer; }
+  .fitem:hover { background:rgba(0,0,0,.05); }
+  .fitem .src { font-size:11px; color:var(--mut); border:1px solid var(--bd); border-radius:6px; padding:0 5px; }
+  .fitem .when { margin-left:auto; font-size:12px; color:var(--mut); }
+  .detail { padding:10px 14px; }
+  .d-head { display:flex; align-items:center; gap:8px; padding-bottom:8px; border-bottom:1px solid var(--bd); margin-bottom:10px; font-size:13px; }
+  .badge { font-size:10px; color:var(--mut); border:1px solid var(--bd); border-radius:6px; padding:1px 6px; }
+  .task { border:1px solid var(--bd); background:var(--bub); border-radius:8px; padding:8px 10px; font-size:13px; margin-bottom:10px; }
+  .task .lb { font-size:10px; color:var(--mut); letter-spacing:1px; margin-bottom:4px; }
+  .msg { border:1px solid var(--bd); border-radius:14px; background:var(--bub); padding:8px 12px; font-size:13px; margin-bottom:8px; }
+  .msg .k { font-size:10px; color:var(--mut); }
+  .fold { font-size:11px; color:var(--mut); cursor:pointer; }
+  .ann { font-size:11px; color:var(--acc); background:rgba(124,92,214,.08); border-radius:6px; padding:6px 8px; margin:8px 12px; }
+  .chiprow { display:flex; flex-wrap:wrap; gap:6px; padding:6px 12px 2px; }
+  .runchip { border:none; border-radius:999px; background:rgba(0,0,0,.07); padding:3px 10px; font-size:12px; cursor:pointer; }
+</style>
+</head>
+<body>
+<h1>子 Agent 观察台 · 预览区 sheet 化线稿 v2（点击线稿内按钮切换状态）</h1>
+<p class="note">
+布局口径：左栏 = 对话区（只承载会话消息 + 子 agent chip，本线稿未画对话内容）；右栏 = 预览区，内含两个平级 sheet（文件 / 子 Agent），每个 sheet 两层级（看板 → 详情/预览）。<br>
+分屏口径：宽屏默认左右分屏（左对话、右预览），窄屏默认全屏——文件预览屏与子 agent 屏都走此逻辑，模式切换钮在顶栏。<br>
+文件 sheet 筛选条：三组下拉（追溯范围[200] ┃ 文件来源[全部] ┃ 文件类型[全部]）以分隔符分组 + 文件名搜索框；原「全部/文档/图片」tabs 与「全部来源/我上传的/工具读取/工具读写」pills 收编为对应下拉。
+</p>
+
+<!-- 状态 A：split（chip 点击 / 清单点卡 → 右栏进详情） -->
+<p class="caption">状态 A ｜ 宽屏默认：左右分屏——左=对话区（含 chip），右=预览区（sheet=子 Agent，二级=详情）</p>
+<div class="frame">
+  <div class="split">
+    <div class="pane left" style="width:44%; border-right:2px solid var(--bd); padding:10px 12px; background:var(--bub);">
+      <div style="font-size:12px; color:var(--mut); margin-bottom:10px;">（左栏 = 会话对话区，本线稿示意）</div>
+      <div class="msg" style="margin-bottom:8px;">用户：跑一个进度测试任务</div>
+      <div class="msg">assistant：已派出后台子 agent progress-waiter…</div>
+      <div class="chiprow" style="padding:0;">
+        <button class="runchip" onclick="show('split')">◉ progress-waiter-2 5:14</button>
+      </div>
+      <div class="ann" style="margin:10px 0 0;">对话区只有消息 + chip；点击 chip → 右栏切「子 Agent」sheet 并进入该 agent 详情（宽屏 split / 窄屏全屏）</div>
+    </div>
+    <div class="pane right">
+      <div class="topbar">
+        <button class="sheet-tab" onclick="show('file')">▤ 文件</button>
+        <button class="sheet-tab on" onclick="show('split')">◉ 子 Agent (3)</button>
+        <span class="spacer"></span>
+        <div class="modegrp"><button class="modebtn on">◧</button><button class="modebtn">◨</button><button class="modebtn">⤢</button></div>
+        <button class="xbtn">✕</button>
+      </div>
+      <div class="split">
+        <div class="pane left" style="width:46%;">
+          <div class="sa-list">
+            <div class="sa-title">子 AGENT（3）</div>
+            <button class="sa-card"><span class="dot k"></span><span class="sa-name">progress-waiter</span><span class="sa-desc">8步等待并计算任务</span><span class="sa-metrics">10:31 · 28.68万</span></button>
+            <button class="sa-card sel" onclick="show('split')"><span class="dot g"></span><span class="sa-name">progress-waiter-2</span><span class="sa-desc">12步等待并计算任务</span><span class="sa-metrics">5:14 · 34.63万</span></button>
+            <button class="sa-card"><span class="dot k"></span><span class="sa-name">progress-waiter-3</span><span class="sa-desc">4步等待并加法任务</span><span class="sa-metrics">1:53 · 12.80万</span></button>
+          </div>
+        </div>
+        <div class="pane right">
+          <div class="detail">
+            <div class="d-head"><span class="dot g"></span><b>progress-waiter-2</b><span class="badge">实时 · 5s</span></div>
+            <div class="task"><div class="lb">任务原文</div>分 12 步、每步等 20 秒并输出一行进度，最后计算 15×17 并复述步骤数</div>
+            <div class="msg"><span class="k">thinking · 已折叠</span> <span class="fold">▸ 展开细看</span></div>
+            <div class="msg"><span class="k">tool-call · 已折叠</span> <span class="fold">▸ Bash: sleep 20</span></div>
+            <div class="msg">步骤 3/12 完成（已等待约 60 秒）…</div>
+            <div class="ann">running：5s 一拍自动刷新、贴底跟随；灰点卡进入 = 定格快照。返回钮回清单（二级导航）</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 状态 B：子 Agent sheet 一级 = 清单（全屏形态示意） -->
+<p class="caption">状态 B ｜ 窄屏全屏形态示意：右栏预览区整宽——「子 Agent」sheet 一级 = 清单；点卡进二级 = 详情（返回钮回清单）</p>
+<div class="frame">
+  <div class="topbar">
+    <button class="sheet-tab on" onclick="show('file')">▤ 文件</button>
+    <button class="sheet-tab" onclick="show('sa')">◉ 子 Agent (3)</button>
+    <span class="spacer"></span>
+    <div class="modegrp"><button class="modebtn">◧</button><button class="modebtn">◨</button><button class="modebtn on">⤢</button></div>
+    <button class="xbtn">✕</button>
+  </div>
+  <div class="sa-list">
+    <div class="sa-title">子 AGENT（3）</div>
+    <button class="sa-card"><span class="dot k"></span><span class="sa-name">progress-waiter</span><span class="sa-desc">8步等待并计算任务</span><span class="sa-metrics">10:31 · 28.68万</span></button>
+    <button class="sa-card"><span class="dot g"></span><span class="sa-name">progress-waiter-2</span><span class="sa-desc">12步等待并计算任务</span><span class="sa-metrics">5:14 · 34.63万</span></button>
+    <button class="sa-card"><span class="dot k"></span><span class="sa-name">progress-waiter-3</span><span class="sa-desc">4步等待并加法任务</span><span class="sa-metrics">1:53 · 12.80万</span></button>
+  </div>
+  <div class="ann">点任意卡 → 二级详情（running=实时预览 / idle=定格快照），页头返回钮回本清单</div>
+</div>
+
+<!-- 状态 C：文件 sheet（新筛选条） -->
+<p class="caption">状态 C ｜ 「文件」sheet：筛选条重排——三组下拉以分隔符分组 + 搜索框；「文档/图片」tabs 收编为「文件类型」下拉</p>
+<div class="frame">
+  <div class="topbar">
+    <button class="sheet-tab on" onclick="show('file')">▤ 文件</button>
+    <button class="sheet-tab" onclick="show('sa')">◉ 子 Agent (3)</button>
+    <span class="spacer"></span>
+    <div class="modegrp"><button class="modebtn on">◧</button><button class="modebtn">◨</button><button class="modebtn">⤢</button></div>
+    <button class="xbtn">✕</button>
+  </div>
+  <div class="filterbar">
+    <div class="fgroup"><span class="lb">追溯范围</span><select><option selected>200</option><option>500</option><option>1000</option></select></div>
+    <div class="vsep"></div>
+    <div class="fgroup"><span class="lb">文件来源</span><select><option selected>全部</option><option>我上传的</option><option>工具读取</option><option>工具读写</option></select></div>
+    <div class="vsep"></div>
+    <div class="fgroup"><span class="lb">文件类型</span><select><option selected>全部</option><option>文档</option><option>图片</option></select></div>
+    <div class="vsep"></div>
+    <input class="search" placeholder="🔍 按文件名搜索">
+  </div>
+  <div class="flist">
+    <div class="fitem">📄 <span class="sa-name">hello_world.py</span><span class="src">工具读写</span><span class="sa-desc">E:/LLMproject/Github/Test2</span><span class="when">刚刚</span></div>
+    <div class="fitem">📄 <span class="sa-name">hello_world.md</span><span class="src">工具读写</span><span class="sa-desc">E:/LLMproject/Github/Test2</span><span class="when">刚刚</span></div>
+  </div>
+  <div class="ann">筛选语义不变：追溯范围（200/500/1000）/ 来源（全部·我上传的·工具读取·工具读写）/ 类型（全部·文档·图片；代码文件仅在「全部」可见）/ 文件名搜索——四者叠加过滤，只是控件形态改为三组下拉 + 分隔符 + 搜索框</div>
+</div>
+
+<script>
+  function show(which) {
+    document.querySelectorAll('.frame').forEach(f => f.style.display = 'none');
+    if (which === 'file') { document.querySelectorAll('.frame')[2].style.display = 'block'; }
+    else if (which === 'sa') { document.querySelectorAll('.frame')[1].style.display = 'block'; }
+    else { document.querySelectorAll('.frame')[0].style.display = 'block'; }
+  }
+  show('split');
+</script>
+</body>
+</html>

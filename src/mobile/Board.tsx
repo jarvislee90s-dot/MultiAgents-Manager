@@ -27,6 +27,11 @@ import {
   type ToolFilter,
 } from "./board-logic";
 import { ToolIcon } from "@/components/common/ToolIcon";
+import {
+  directionKey,
+  isSameDirectionThrottled,
+  sessionNotifyKey,
+} from "@/lib/notification-throttle";
 import type { AgentType, Session, SessionsResponse, TransitionEvent } from "@/types/session";
 
 const POLL_MS = 3000;
@@ -49,6 +54,10 @@ const CLOCK_MS = 30_000;
 const BANNER_TTL_MS = 4000;
 /** 同屏横幅上限：突发跃迁（批量会话同时变化）时不淹没会话列表 */
 const MAX_BANNERS = 3;
+
+// ==== F2a/F2b（终审发现 C / 决策 4）：提醒三件套的静默门与同方向节流 ====
+// 节流/记账口径抽在 @/lib/notification-throttle（桌面 useNotification 与本组件
+// 双端同源，零依赖可进移动 bundle）
 
 // P8e 折叠高度上限（溢出判定与裁剪样式的单一来源，fix round 1）：
 // 36px = 单行 chips（24px）+ 行纵距（12px）——恰容纳一行、第二行起点恰在 36px 被完全裁掉
@@ -136,6 +145,9 @@ export default function Board({
   // 与 SessionWatcher 层的跃迁去重（铁律 4）不冲突：那层去的是「状态边沿」，
   // 这层去的是「同一会话在短时间内反复回到绿」的重复提醒
   const lastChimed = useRef<Map<string, number>>(new Map());
+  // F2a 同方向记账：会话键（工具-id，与横幅 key 同口径）→ (from>to 方向键 → 上次提醒
+  // 时刻)。按方向分存——交替抖动（黄→绿↔绿→黄）的两个边各自压 60s
+  const lastFlapNotified = useRef<Map<string, Map<string, number>>>(new Map());
   // 首个成功快照/首拍只发一次 onPaired：防重复回调导致父级无谓重渲染；
   // 重挂载（403 后重配）时随组件自然复位
   const aliveRef = useRef(false);
@@ -199,7 +211,8 @@ export default function Board({
    *  useNotification 的 currColor === "green"）；黄态细分跃迁
    *  （processing↔thinking↔compacting）不响。修正前对任意状态值变化无条件响，
    *  一轮回合内多次黄态细分跃迁会连响数次（用户实测为噪声）。
-   *  横幅与振动保持「每条跃迁都提醒」不变——它们是最低打扰的通道。 */
+   *  横幅与振动原为「每条跃迁都提醒」（最低打扰通道）；终审发现 C 起三件套共用
+   *  两道门：F2b 打标静默 + F2a 同方向 60s 节流（见上方常量区注释） */
   const maybeChime = useCallback(
     (ev: TransitionEvent) => {
       if (!soundOn) return;
@@ -238,6 +251,26 @@ export default function Board({
         })();
       }
       setNow(Date.now());
+      // F2b 静默门（终审发现 C / 决策 4）：后端打标（活跃子 agent 在场 ∧ 最新 hook
+      // 事件 ∈ PostToolUse 族 ∧ < 30s TTL）的跃迁默认静默——手机端仅消费默认静默
+      // （开关可见面在桌面设置页）。上方卡片数据刷新照常执行（数据与提醒分离），
+      // 此处仅免提醒三件套（横幅/提示音/振动）
+      if (ev.flapFromSubagentActivity) return;
+      // F2a 同方向节流：同会话同一 from→to 颜色对 60s 内不重复提醒（横幅/提示音/
+      // 振动三件套同门）；红/waiting 双向豁免在 isSameDirectionThrottled 内
+      const flapKey = sessionNotifyKey(ev.agentType, ev.sessionId);
+      const fromColor = STATUS_COLOR_KIND[ev.from];
+      const toColor = STATUS_COLOR_KIND[ev.to];
+      const nowMs = Date.now();
+      if (
+        isSameDirectionThrottled(lastFlapNotified.current.get(flapKey), fromColor, toColor, nowMs)
+      ) {
+        return;
+      }
+      // 落账（只在真实提醒时记）：后续同方向 60s 内的跃迁由此被压住
+      const dirMap = lastFlapNotified.current.get(flapKey) ?? new Map<string, number>();
+      dirMap.set(directionKey(fromColor, toColor), nowMs);
+      lastFlapNotified.current.set(flapKey, dirMap);
       pushBanner(ev);
       maybeChime(ev);
       // 振动（能力检测）：桌面浏览器与 iOS Safari 均无此 API，缺失即跳过

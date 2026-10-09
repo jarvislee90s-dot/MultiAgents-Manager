@@ -16,9 +16,6 @@
 //   （P2-B 评审修复）；首次加载与手动刷新仍无条件落底。
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode, Ref } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
-import rehypeHighlight from "rehype-highlight";
 import {
   ArrowDownToLine,
   ArrowLeft,
@@ -27,24 +24,31 @@ import {
   ChevronRight,
   PanelLeft,
   RotateCw,
+  X,
 } from "lucide-react";
 import ApproveCard from "./ApproveCard";
 import PlanFeedbackBar from "./PlanFeedbackBar";
 import { collapsedLabel, isProcessKind } from "./message-fold";
+import { useMessageRenderers } from "./message-render";
 import ModeBar from "./ModeBar";
+import SubagentChips from "./SubagentChips";
+import SubagentDetail from "./SubagentDetail";
+import SubagentList from "./SubagentList";
 import QuestionCard from "./QuestionCard";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
 import MessageComposer from "./MessageComposer";
-import { type PreviewMode } from "./PreviewModeSwitcher";
+import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
 import SplitHandle from "./SplitHandle";
 import {
   ApiError,
   fetchSessionFiles,
   fetchSessionMessages,
+  fetchSessionSubagents,
   type SessionFileEntry,
   type SessionMessage,
+  type SubagentView,
 } from "./api";
 import { STATUS_DOT_COLOR, TOOL_LABELS } from "./board-logic";
 import {
@@ -85,13 +89,21 @@ interface SessionDetailProps {
   onBack: () => void;
 }
 
-/** 预览侧栏状态（M3+ 辨识联合）：
- *  - list：文件面板（聚合列表，用户裁决 4/6）；
- *  - file：单文件预览；backToList 标记来源（从面板进入 → 显示返回按钮，
- *    从消息正文链接进入 → 无返回按钮，行为不变） */
-type PreviewState =
-  | { view: "list"; mode: PreviewMode }
-  | { view: "file"; path: string; mode: PreviewMode; backToList: boolean };
+/** 预览区状态（T1 sheet 化，2026-10-09：原 list/file/subagent 三形联合的等价重构
+ *  ——三形收敛为「看板 sheet + sheet 内选中态」）：
+ *  - sheet：当前看板（文件 / 子 Agent 两看板平级，顶栏 sheet 钮切换）；
+ *  - open：sheet 内选中态——none = 看板态；file = 单文件预览（files sheet 的二级）；
+ *    subagent = 子 agent 详情（subagents sheet 的二级，活跃=实时预览自动刷新 /
+ *    不活跃=定格快照）；
+ *  - mode：预览布局三态（唯一切换器在顶栏 sheet bar，S5 裁决）；
+ *  - backToList：open 项来源标记（从看板进入 → 内容页头显示返回按钮，
+ *    从消息正文链接 / chip 直达进入 → 无返回按钮，既有行为不变） */
+type PreviewState = {
+  sheet: "files" | "subagents";
+  open: { kind: "none" } | { kind: "file"; path: string } | { kind: "subagent"; id: string };
+  mode: PreviewMode;
+  backToList: boolean;
+};
 
 /** 面板默认追溯档位（首屏数据源，与详情页默认 limit 同标尺） */
 const FILE_DEFAULT_SCOPE = 200;
@@ -112,10 +124,9 @@ interface LoadError {
 // collapsedLabel / isProcessKind 迁至 ./message-fold（2026-09-20 归档详情对齐批，
 // 纯搬家零语义变化——归档页共用同一套摘要文案与过程 kind 判定）
 
-/** 已知路径按长度降序（最长优先替换：路径互为前缀时不被短路径截断） */
-function sortedPaths(files: Set<string>): string[] {
-  return [...files].sort((a, b) => b.length - a.length);
-}
+// sortedPaths / linkifyMarkdown / linkifySegments / extractPlanBody 与渲染器
+// （renderMarkdown / renderLinkifiedText / renderBody）迁至 ./message-render
+// （2026-10-09 观察台 T6，纯搬家零语义变化——子 agent 详情共用同一套渲染）
 
 /** 贴底判定（P2-B）：距底距离（scrollHeight - scrollTop - clientHeight）落在
  *  阈值窗口内即贴底。轮询 tick 刷新前对消息滚动容器采样一次，作为该次刷新
@@ -193,27 +204,6 @@ function MessageScrollArea({
   );
 }
 
-/** 计划正文抽取（2026-09-20 用户实测：ExitPlanMode 的整篇计划在手机上是 \n 字面量汤）。
- *  后端把工具输入原封透传为 JSON 串（claude content.rs:413 / zcode content.rs:1630
- *  同为 serde_json::to_string），字符串值里的换行全是 `\n` 转义，塞进 <pre> 不可读。
- *  按形态识别：toolArgs 解析出**非空字符串 `plan` 字段** → 返回该正文（走 markdown
- *  渲染）；其余一切情况 → null（维持原样渲染）。不看 toolName——zcode 的
- *  ExitPlanMode 输入同为 {plan}（zcode.cjs：校验 e.plan.trim()），但 MAM 记录的
- *  是显示 title，按名字匹配会漏；形态匹配 claude/zcode 同覆盖。
- *  注意：纯 pretty-print（stringify(_,null,2)）救不了——字符串值里的 \n 依然是
- *  转义（JSON 规范）。用户裁决：其他工具的参数渲染不做通用美化。 */
-export function extractPlanBody(toolArgs: string): string | null {
-  try {
-    const parsed = JSON.parse(toolArgs) as { plan?: unknown };
-    if (typeof parsed?.plan === "string" && parsed.plan.trim() !== "") {
-      return parsed.plan;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
 /** **计划待确认预期态**（丁T2，纯函数，镜像后端 `remote::api::plan_pending_tail_index`）：
  *  消息尾部存在计划类消息（`kind="plan"` / `"plan-file"`）且其后**无**用户消息、无工具
  *  事件 → 终端正在等这个计划的确认。
@@ -258,43 +248,6 @@ export function isPlanPending(
   return true;
 }
 
-/** markdown 正文链接化预处理：把出现的已知路径替换为 `#file:` 内链，
- *  再由 components.a 拦截渲染成可点按钮。路径含 markdown 特殊字符（[]()）时
- *  该处替换可能不成链（保持原样文本，M3 接受） */
-function linkifyMarkdown(text: string, files: string[]): string {
-  let out = text;
-  for (const p of files) {
-    if (!p) continue;
-    out = out.split(p).join(`[${p}](#file:${encodeURIComponent(p)})`);
-  }
-  return out;
-}
-
-/** 链接化分段元素：文本段或命中已知路径的文件段 */
-type LinkSegment = { type: "text" | "file"; value: string };
-
-/** 纯文本分段链接化：按已知路径把正文切成文本段与文件段（thinking / tool-result 用） */
-function linkifySegments(text: string, files: string[]): LinkSegment[] {
-  let segments: LinkSegment[] = [{ type: "text", value: text }];
-  for (const p of files) {
-    if (!p) continue;
-    const next: LinkSegment[] = [];
-    for (const seg of segments) {
-      if (seg.type !== "text" || !seg.value.includes(p)) {
-        next.push(seg);
-        continue;
-      }
-      const parts = seg.value.split(p);
-      parts.forEach((part, i) => {
-        if (part) next.push({ type: "text", value: part });
-        if (i < parts.length - 1) next.push({ type: "file", value: p });
-      });
-    }
-    segments = next;
-  }
-  return segments;
-}
-
 // ============================================================
 // 组件
 // ============================================================
@@ -329,6 +282,12 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // fileEntries 驱动文件面板列表，派生 Set 驱动正文路径链接化
   const [fileEntries, setFileEntries] = useState<SessionFileEntry[]>([]);
   const [fileTruncated, setFileTruncated] = useState(false);
+  // 子 agent 全量名单（观察台 §二）：单一数据源供三处消费——chip（过滤 running）/
+  // 文件面板卡区（全量绿灰点）/ 详情对话框（status 查询）。拉取 effect 在下方
+  // 文件表拉取旁；**finished 只付首拉一次**（tick 冻结为 0，见 effect 注）；
+  // 失败静默保留上一份（不闪断），首拉失败维持 null（卡区/chip 不渲染）
+  const [subagentList, setSubagentList] = useState<SubagentView[] | null>(null);
+  const subagentTick = session.status === "finished" ? 0 : refreshTick;
   // 追溯档位（M3+ 用户裁决 3）：面板三档 200/500/1000，切档重拉
   const [fileScope, setFileScope] = useState<number>(FILE_DEFAULT_SCOPE);
   const [fileLoading, setFileLoading] = useState(false);
@@ -483,6 +442,26 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     };
   }, [session.agentType, session.id, fileScope]);
 
+  // 子 agent 全量名单拉取（观察台 §二，state 见上方 subagentList）：挂载 +
+  // subagentTick 变化时重拉。subagentTick = refreshTick（10s 轮询 + 手动刷新
+  // 免费继承 hidden 暂停/恢复补刷），但 **finished 冻结为 0**（评审 P2-1：清单要
+  // 历史回溯 §二.6，而 finished 后磁盘数据不再变化——不再随 refreshTick 轮询；
+  // processing→finished 翻转时 tick N→0 恰好触发最后一次重拉刷新名单终态，之后
+  // 停拍；chip 的 finished 挂载门仍在 cardDock）
+  useEffect(() => {
+    let alive = true;
+    fetchSessionSubagents(session.agentType, session.id)
+      .then((v) => {
+        if (alive) setSubagentList(v);
+      })
+      .catch(() => {
+        /* 静默：保留上一份；首拉失败维持 null */
+      });
+    return () => {
+      alive = false;
+    };
+  }, [session.agentType, session.id, subagentTick]);
+
   // 链接化 Set（派生自面板条目，单一数据源）：正文路径匹配用
   const files = useMemo(() => new Set(fileEntries.map((e) => e.path)), [fileEntries]);
 
@@ -539,239 +518,102 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, []);
 
   // 点文件链接（消息正文）→ 预览。Bug 2 顺手项（spec P9「按屏幕宽度自适应」）：
-  // ≥768px 分屏（2026-09-20 裁决：竖屏 split = 文件在上、对话在下）、<768px 全屏；手动切换随时覆盖该默认值。
-  // backToList=false（从正文进入，无返回列表按钮，既有行为不变）
+  // ≥768px 分屏（2026-09-20 裁决 + T2 决策 2 收口：宽屏默认 split-h = 左对话右文件）、
+  // <768px 全屏；手动切换随时覆盖该默认值。
+  // 正文进入 → files sheet 选中该文件，backToList=false（无返回列表按钮，既有行为不变）
   const openFile = useCallback(
     (path: string) => {
       setPreview({
-        view: "file",
-        path,
-        mode: isWideViewport() ? "split" : "fullscreen",
+        sheet: "files",
+        open: { kind: "file", path },
+        mode: isWideViewport() ? "split-h" : "fullscreen",
         backToList: false,
       });
     },
     [isWideViewport]
   );
 
-  // 从文件面板进入单文件预览（M3+）：backToList=true → 预览页头显示返回按钮；
+  // 从文件看板进入单文件预览（M3+）：backToList=true → 预览页头显示返回按钮；
   // 布局沿用当前 mode（往返保持，用户裁决「布局保持」）
   const openFileFromList = useCallback((path: string) => {
     setPreview((p) => ({
-      view: "file",
-      path,
+      sheet: "files",
+      open: { kind: "file", path },
       mode: p?.mode ?? "fullscreen",
       backToList: true,
     }));
   }, []);
 
+  // chip 直达子 agent 详情（观察台 §二.4）：切到 subagents sheet 并选中该 agent。
+  // 2026-10-09 sheet 两层级导航裁决：子 Agent sheet 不做预览区内分屏，清单与详情
+  // 是两级导航——chip 直达落在详情级，backToList=true（页头返回钮回清单，与清单
+  // 点卡同款，避免死端）；mode 仍按宽窄屏赋值（文件 sheet 消费；子 Agent sheet
+  // 忽略 mode 恒单栏）
+  const openSubagent = useCallback(
+    (id: string) => {
+      setPreview({
+        sheet: "subagents",
+        open: { kind: "subagent", id },
+        mode: isWideViewport() ? "split-h" : "fullscreen",
+        backToList: true,
+      });
+    },
+    [isWideViewport]
+  );
+
+  // 清单看板点卡进入（观察台 §二.5）：沿用当前 mode（往返保持，openFileFromList 同款）
+  const openSubagentFromList = useCallback((id: string) => {
+    setPreview((p) => ({
+      sheet: "subagents",
+      open: { kind: "subagent", id },
+      mode: p?.mode ?? "fullscreen",
+      backToList: true,
+    }));
+  }, []);
+
+  // 顶栏 sheet 钮切换（T1 sheet 化）：两看板平级互切；跨 sheet 的选中态不携带
+  // （file 选中在 subagents sheet 无从显示，反之亦然）→ 一并收回看板态
+  const switchSheet = useCallback((sheet: "files" | "subagents") => {
+    setPreview((p) =>
+      p === null || p.sheet === sheet
+        ? p
+        : { ...p, sheet, open: { kind: "none" }, backToList: false }
+    );
+  }, []);
+
   // 页头面板入口（M3+）：宽屏默认 split-h（列表是行集，右侧整列纵向空间大）、
   // 窄屏 fullscreen（用户裁决：面板默认布局口径）。
-  // 面板开启态 = 当前是 list 视图（页头按钮高亮依据；文件预览态不算——那是
-  // 从列表或正文进入的下一层）；再点收回（ZCode 式排版，2026-09-16 用户裁决）
-  const panelOpen = preview?.view === "list";
+  // 面板开启态 = files sheet 看板态（页头按钮高亮依据；文件预览/子 agent 详情
+  // 不算——那是从看板或正文进入的下一层）；再点收回（ZCode 式排版，2026-09-16 用户裁决）
+  const panelOpen = preview !== null && preview.sheet === "files" && preview.open.kind === "none";
   const togglePanel = useCallback(() => {
     setPreview((p) =>
-      p?.view === "list"
+      p !== null && p.sheet === "files" && p.open.kind === "none"
         ? null
-        : { view: "list", mode: isWideViewport() ? "split-h" : "fullscreen" }
+        : {
+            sheet: "files",
+            open: { kind: "none" },
+            mode: isWideViewport() ? "split-h" : "fullscreen",
+            backToList: false,
+          }
     );
   }, [isWideViewport]);
 
   const closePreview = useCallback(() => setPreview(null), []);
 
-  // 从单文件预览返回列表（保持当前布局 mode）
-  const backToList = useCallback(() => {
-    setPreview((p) => ({ view: "list", mode: p?.mode ?? "fullscreen" }));
+  // 从二级内容（文件预览 / 子 agent 详情）返回所在 sheet 的看板态（保持当前布局 mode）
+  const backToBoard = useCallback(() => {
+    setPreview((p) => (p ? { ...p, open: { kind: "none" }, backToList: false } : p));
   }, []);
 
-  // 布局切换（预览页头控件与面板共用同一状态出口）
+  // 布局切换（顶栏 sheet bar 唯一实例，S5 裁决——预览组件内部的切换器已删）
   const changePreviewMode = useCallback((mode: PreviewMode) => {
     setPreview((p) => (p ? { ...p, mode } : p));
   }, []);
 
-  const sortedFiles = useMemo(() => sortedPaths(files), [files]);
-
-  // markdown 渲染（assistant / user 正文）：remark-gfm 表格/删除线 + rehype-highlight
-  // 代码块高亮（主题色由 mobile.css 双态内联，见其注释）；#file: 内链拦截为文件按钮
-  const renderMarkdown = useCallback(
-    (text: string) => (
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
-        components={{
-          a: ({ href, children }) => {
-            if (href?.startsWith("#file:")) {
-              const p = decodeURIComponent(href.slice("#file:".length));
-              return (
-                <button
-                  type="button"
-                  data-testid="file-link"
-                  className="inline text-left break-all text-[var(--tx)] underline underline-offset-2"
-                  onClick={() => openFile(p)}
-                >
-                  {children}
-                </button>
-              );
-            }
-            return (
-              <a href={href} target="_blank" rel="noreferrer">
-                {children}
-              </a>
-            );
-          },
-        }}
-      >
-        {linkifyMarkdown(text, sortedFiles)}
-      </ReactMarkdown>
-    ),
-    [openFile, sortedFiles]
-  );
-
-  // 纯文本链接化渲染（thinking / tool-result：正文常含路径，值得可点）
-  const renderLinkifiedText = useCallback(
-    (text: string) =>
-      linkifySegments(text, sortedFiles).map((seg, i) =>
-        seg.type === "text" ? (
-          <span key={i}>{seg.value}</span>
-        ) : (
-          <button
-            key={i}
-            type="button"
-            data-testid="file-link"
-            className="break-all text-[var(--tx)] underline underline-offset-2"
-            onClick={() => openFile(seg.value)}
-          >
-            {seg.value}
-          </button>
-        )
-      ),
-    [openFile, sortedFiles]
-  );
-
-  const renderBody = useCallback(
-    (m: SessionMessage) => {
-      switch (m.kind) {
-        case "assistant":
-        case "user":
-          // md-body：markdown 排版层（Bug 5——preflight 拍平标题/列表的修复锚点）
-          return <div className="md-body text-sm">{renderMarkdown(m.content)}</div>;
-        case "thinking":
-          return (
-            <div className="text-xs break-words whitespace-pre-wrap text-[var(--mut)]">
-              {renderLinkifiedText(m.content)}
-            </div>
-          );
-        case "tool-result":
-          return (
-            <pre className="overflow-x-auto rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-2 text-xs break-words whitespace-pre-wrap text-[var(--tx)]">
-              {renderLinkifiedText(m.content)}
-            </pre>
-          );
-        case "plan": {
-          // T1 一等计划卡片：后端已把 ExitPlanMode 形态（input.plan 非空）升格为
-          // kind="plan"，content 即计划 markdown 本体——无需 extractPlanBody，
-          // 直接渲染；恒展开（isCollapsed/isToggleable 豁免总结模式折叠）。
-          // 旧存量会话里未升格的 ExitPlanMode tool-call 仍走下方 extractPlanBody 分支
-          return (
-            <div
-              data-testid={`plan-${m.seq}`}
-              className="rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-2 text-xs text-[var(--tx)]"
-            >
-              <p className="mb-1 text-[11px] font-medium tracking-wide text-[var(--mut)] uppercase">
-                计划
-              </p>
-              {/* 丁T5 修复（问题 11 的真实断点）：计划卡此前**漏挂** `.md-body` 排版层
-                  ——Tailwind v4 preflight 把 h1-h6 的字号/字重与 ul/ol 的 list-style
-                  全部重置（见 mobile.css 排版层注释），故计划正文里的 `###` 小标题与
-                  `-` 列表在这张卡上被**拍平成正文**。
-                  **订正（复评 F6-1）**：实际是「普通消息卡挂了，**计划卡与工具参数升格
-                  卡都没挂**」——本文件里三张用 `renderMarkdown` 的卡中只有
-                  `case "assistant"` 挂了 `.md-body`；下面 `case "tool-call"` 的升格支
-                  （claude ExitPlanMode 走的那条，即任务书问题 11 点名的路径）同样漏挂，
-                  本次两张一起补齐。
-                  真机证据：本机 rollout `~/.codex/sessions/2026/09/21/
-                  rollout-2026-09-21T17-38-17-…jsonl` 行 115 的计划含 4 个 `###` 小标题
-                  + 14 行列表——正是任务书问题 11 说的「markdown 不完整」。 */}
-              <div className="md-body">{renderMarkdown(m.content)}</div>
-            </div>
-          );
-        }
-        case "plan-file": {
-          // T7 计划文件卡：后端从工具结果/正文里识别出计划文件引用（如 kimi 的
-          // "Wrote 4263 bytes to …/plans/x.md"）→ 补一张 kind="plan-file" 消息，
-          // content = 文件路径。卡片显示文件名 + 「查看计划」按钮 → 走既有文件预览
-          // 面板（后端豁免面已放行 kimi 的 agents/main/plans 子树）。
-          const full = m.content;
-          const name = full.split(/[\\/]/).pop() || full;
-          return (
-            <div
-              data-testid={`plan-file-${m.seq}`}
-              className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 p-2 text-xs"
-            >
-              <p className="mb-1 text-[11px] font-medium tracking-wide text-emerald-700 uppercase dark:text-emerald-400">
-                计划文件
-              </p>
-              <div className="flex items-center gap-2">
-                <span
-                  data-testid={`plan-file-name-${m.seq}`}
-                  className="min-w-0 flex-1 truncate font-mono text-[var(--tx)]"
-                  title={full}
-                >
-                  {name}
-                </span>
-                <button
-                  type="button"
-                  data-testid={`plan-file-open-${m.seq}`}
-                  className="shrink-0 rounded-md bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white hover:bg-emerald-700"
-                  onClick={() => openFile(full)}
-                >
-                  查看计划
-                </button>
-              </div>
-            </div>
-          );
-        }
-        case "tool-call": {
-          // 计划类工具（ExitPlanMode / zcode 同形）：plan 字段是整篇 markdown，
-          // 抽出来走 markdown 渲染；其余工具维持参数 JSON 原样（用户裁决不做通用美化）
-          const planBody = m.toolArgs ? extractPlanBody(m.toolArgs) : null;
-          return (
-            <div className="space-y-1">
-              <p className="text-xs font-medium text-[var(--tx)]">
-                {m.toolName ? `调用 ${m.toolName}` : "工具调用"}
-              </p>
-              {m.toolArgs && planBody === null && (
-                <pre
-                  data-testid={`tool-args-${m.seq}`}
-                  className="overflow-x-auto rounded-lg bg-[var(--cbg)] p-2 text-xs text-[var(--tx)]"
-                >
-                  {m.toolArgs}
-                </pre>
-              )}
-              {planBody !== null && (
-                <div
-                  data-testid={`tool-args-${m.seq}`}
-                  className="rounded-lg border border-[var(--cb)] bg-[var(--cbg)] p-2 text-xs text-[var(--tx)]"
-                >
-                  <p className="mb-1 text-[11px] font-medium tracking-wide text-[var(--mut)] uppercase">
-                    计划
-                  </p>
-                  {/* 丁T5 复评 F6-1：本支（**工具参数升格**——claude 的 ExitPlanMode 走这
-                      里，任务书问题 11 点名的路径）与上面的 `case "plan"` 是同一缺陷的
-                      两半：都漏挂 `.md-body`，故 `###` 标题与 `-` 列表被 preflight 拍平。
-                      本次两张一起补齐。 */}
-                  <div className="md-body">{renderMarkdown(planBody)}</div>
-                </div>
-              )}
-            </div>
-          );
-        }
-        default:
-          return <div className="text-sm">{m.content}</div>;
-      }
-    },
-    [renderLinkifiedText, renderMarkdown]
-  );
+  // 消息渲染器（观察台 T6 起迁至 ./message-render 共用）：renderBody 消费本页
+  // 既有 openFile（正文路径点击 → 预览）与 files（链接化路径集）
+  const { renderBody } = useMessageRenderers({ openFile, files });
 
   const retry = useCallback(() => {
     setError(null);
@@ -1066,7 +908,22 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         />
       )}
       {!isSummary && <QuestionCard key={`question-${session.id}`} session={session} />}
-      <ModeBar key={`mode-${session.id}`} session={session} />
+      {/* 2026-10-08 子 agent chip：与 ModeBar 同一行（flex-wrap 兄弟），生命周期
+          解耦——mode 视图失败/unsupported 时 chip 仍活，反之亦然（spec §6）。
+          finished 不挂载（idle 不拦：claude 后台 agent 可在主会话 idle 时仍在跑）；
+          其余状态的空态裁决交给数据（list 为 null/无 running 项 → 不渲染）。
+          观察台 T5：chip 改纯展示，名单由上方 subagentList 单一数据源下发
+          （拉取不再自持），点击直达详情对话框（§二.4）。 */}
+      <div data-testid="status-row" className="flex flex-wrap items-center gap-2">
+        <ModeBar key={`mode-${session.id}`} session={session} />
+        {session.status !== "finished" && (
+          <SubagentChips
+            key={`subagents-${session.id}`}
+            list={subagentList}
+            onOpenDetail={openSubagent}
+          />
+        )}
+      </div>
     </div>
   );
 
@@ -1222,6 +1079,136 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     </>
   );
 
+  // ===== 预览区 sheet 化（T1，2026-10-09）=====
+  // 子 Agent sheet 钮的挂载门（决策 7）：名单为 null/空 → 钮不渲染（sheet 不可达）
+  const subagentsShown = subagentList !== null && subagentList.length > 0;
+  // 顶栏「子 Agent」钮的运行数徽标（n = running 数，非总数）
+  const runningCount = subagentList?.filter((s) => s.status === "running").length ?? 0;
+  // 当前选中的子 agent（subagents sheet 二级详情在显；null = 看板态/文件选中）。
+  // 先解出裸 id：闭包（.find 回调）里 TS 不保留 preview.open 的属性路径收窄
+  const subagentDetailId = preview?.open.kind === "subagent" ? preview.open.id : null;
+
+  // 顶栏 sheet bar（审查 S5 唯一实例裁决）：sheet 两钮 + 布局切换器 + 关闭。
+  // 原 FilePanel / FilePreview / SubagentDetail 内部的切换器/关闭钮全部不再渲染。
+  // split/split-h 时位于预览窗格顶部、fullscreen 时位于浮层顶部——同一份 JSX
+  // 两处落点，任一时刻只渲染一处（唯一实例不变）
+  const sheetBar = preview ? (
+    <div
+      data-testid="sheet-bar"
+      className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] bg-[var(--cbg)] px-3 py-2"
+    >
+      <button
+        type="button"
+        data-testid="sheet-tab-files"
+        aria-pressed={preview.sheet === "files"}
+        onClick={() => switchSheet("files")}
+        className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${
+          preview.sheet === "files"
+            ? "bg-violet-600 text-white dark:bg-violet-400"
+            : "bg-[var(--cb)] text-[var(--mut)] hover:text-[var(--tx)]"
+        }`}
+      >
+        ▤ 文件
+      </button>
+      {subagentsShown && (
+        <button
+          type="button"
+          data-testid="sheet-tab-subagents"
+          aria-pressed={preview.sheet === "subagents"}
+          onClick={() => switchSheet("subagents")}
+          className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${
+            preview.sheet === "subagents"
+              ? "bg-violet-600 text-white dark:bg-violet-400"
+              : "bg-[var(--cb)] text-[var(--mut)] hover:text-[var(--tx)]"
+          }`}
+        >
+          ◉ 子 Agent ({runningCount})
+        </button>
+      )}
+      {/* 布局切换器：仅「文件」sheet 显示——子 Agent sheet 是两层级导航（清单 →
+          详情），无分屏布局可切（2026-10-09 用户裁决）；关闭钮两 sheet 恒有 */}
+      <span className="ml-auto flex shrink-0 items-center gap-1">
+        {preview.sheet === "files" && (
+          <PreviewModeSwitcher
+            mode={preview.mode}
+            onChange={changePreviewMode}
+            testIdPrefix="preview-toggle"
+          />
+        )}
+        <button
+          type="button"
+          data-testid="preview-close"
+          aria-label="关闭预览"
+          onClick={closePreview}
+          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
+        >
+          <X size={16} />
+        </button>
+      </span>
+    </div>
+  ) : null;
+
+  // sheet 看板（左栏）：文件面板 / 子 Agent 清单（分屏主从布局下选中卡高亮）
+  const sheetBoard = preview ? (
+    preview.sheet === "files" ? (
+      <FilePanel
+        entries={fileEntries}
+        truncated={fileTruncated}
+        scope={fileScope}
+        loading={fileLoading}
+        onScopeChange={setFileScope}
+        onOpenFile={openFileFromList}
+        fontScale={fontScale}
+      />
+    ) : subagentsShown ? (
+      <div data-font-scale={fontScale} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+        <SubagentList
+          list={subagentList}
+          onOpen={openSubagentFromList}
+          selectedId={subagentDetailId}
+        />
+      </div>
+    ) : (
+      <p
+        data-testid="subagent-board-empty"
+        className="flex-1 py-12 text-center text-sm text-[var(--mut)]"
+      >
+        暂无子 Agent
+      </p>
+    )
+  ) : null;
+
+  // sheet 二级内容（右栏）：文件预览 / 子 agent 详情 / 空态提示
+  const sheetContent = preview ? (
+    preview.open.kind === "file" ? (
+      <FilePreview
+        session={session}
+        filePath={preview.open.path}
+        mode={preview.mode}
+        fontScale={fontScale}
+        onBack={preview.backToList ? backToBoard : undefined}
+      />
+    ) : subagentDetailId !== null ? (
+      <SubagentDetail
+        key={`subagent-detail-${session.id}-${subagentDetailId}`}
+        session={session}
+        subagentId={subagentDetailId}
+        subagentName={subagentList?.find((s) => s.id === subagentDetailId)?.name ?? null}
+        running={subagentList?.find((s) => s.id === subagentDetailId)?.status === "running"}
+        onBack={preview.backToList ? backToBoard : undefined}
+        openFile={openFile}
+        fontScale={fontScale}
+      />
+    ) : (
+      <div
+        data-testid="preview-empty"
+        className="flex h-full items-center justify-center px-4 text-sm text-[var(--mut)]"
+      >
+        选择左侧项目查看
+      </div>
+    )
+  ) : null;
+
   return (
     <div className="flex h-dvh flex-col bg-[var(--pg)] text-[var(--tx)]">
       <header className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] px-3 py-2">
@@ -1281,8 +1268,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             </option>
           ))}
         </select>
-        {/* 布局切换器唯一实例在预览侧栏页头（FilePreview / FilePanel 内，
-            2026-09-16 用户裁决：两处重复出现占用页面空间，只保留贴近文件的那份） */}
+        {/* 布局切换器唯一实例已上收顶栏 sheet bar（T1 审查 S5 裁决：预览区 sheet 化后
+            顶栏持有唯一切换器/关闭钮，预览页头不再各自挂载） */}
         <button
           type="button"
           data-testid="detail-refresh"
@@ -1294,8 +1281,11 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </button>
       </header>
 
-      {/* 预览侧栏（M3+ 两视图共用）：split/split-h 内联分屏（可拖分隔条），
-          fullscreen 全屏浮层；list 视图渲染 FilePanel，file 视图渲染 FilePreview */}
+      {/* 预览区（T1 sheet 化）：split/split-h 内联分屏（可拖分隔条）——右/下窗格 =
+          顶栏 sheet bar + [看板 ┃ 内容] 主从两栏；fullscreen 全屏浮层——顶栏在浮层
+          顶部，看板与内容互斥（既有语义保留）。看板二选一：FilePanel（files sheet）/
+          SubagentList（subagents sheet）；内容三选一：FilePreview / SubagentDetail /
+          空态提示 */}
       {preview?.mode === "split" || preview?.mode === "split-h" ? (
         <div
           ref={splitRef}
@@ -1357,33 +1347,26 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           >
             <div
               data-testid="preview-shell"
-              data-view={preview.view}
+              data-sheet={preview.sheet}
+              data-open={preview.open.kind}
               data-mode={preview.mode}
-              className="h-full"
+              className="flex h-full min-h-0 flex-col"
             >
-              {preview.view === "list" ? (
-                <FilePanel
-                  entries={fileEntries}
-                  truncated={fileTruncated}
-                  scope={fileScope}
-                  loading={fileLoading}
-                  mode={preview.mode}
-                  onScopeChange={setFileScope}
-                  onOpenFile={openFileFromList}
-                  onModeChange={changePreviewMode}
-                  fontScale={fontScale}
-                  onClose={closePreview}
-                />
+              {/* 顶栏 sheet bar（唯一实例：sheet 钮 + 布局切换器 + 关闭）。
+                布局切换器控制预览窗格的停靠方式（dock 在对话旁 / 全屏覆盖）；
+                窗格内部两个 sheet 均为**两层级导航**（2026-10-09 用户裁决：看板与
+                详情/预览互斥单栏，不做窗格内分屏——46/54 双栏太窄） */}
+              {sheetBar}
+              {/* 两层级导航（两个 sheet 同构）：open=none → 看板（一级）；
+                open 命中 → 详情/预览（二级），页头返回钮回看板 */}
+              {preview.open.kind === "none" ? (
+                <div data-testid="sheet-board" className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  {sheetBoard}
+                </div>
               ) : (
-                <FilePreview
-                  session={session}
-                  filePath={preview.path}
-                  mode={preview.mode}
-                  onModeChange={changePreviewMode}
-                  fontScale={fontScale}
-                  onBack={preview.backToList ? backToList : undefined}
-                  onClose={closePreview}
-                />
+                <div data-testid="sheet-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  {sheetContent}
+                </div>
               )}
             </div>
           </div>
@@ -1413,38 +1396,30 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </div>
       )}
 
-      {/* fullscreen = 全屏浮层（覆盖对话，关闭回到原位——列表状态由本组件持有） */}
+      {/* fullscreen = 全屏浮层（覆盖对话，关闭回到原位——sheet 状态由本组件持有）。
+          顶栏 sheet bar 在浮层顶部（S5 唯一实例在全屏态的可达位）；看板与内容互斥
+          单栏整宽（既有互斥语义保留） */}
       {preview?.mode === "fullscreen" && (
-        <div className="fixed inset-0 z-50 bg-[var(--cbg)]">
+        <div className="fixed inset-0 z-50 flex flex-col bg-[var(--cbg)]">
           <div
             data-testid="preview-shell"
-            data-view={preview.view}
+            data-sheet={preview.sheet}
+            data-open={preview.open.kind}
             data-mode="fullscreen"
-            className="h-full"
+            className="flex min-h-0 flex-1 flex-col"
           >
-            {preview.view === "list" ? (
-              <FilePanel
-                entries={fileEntries}
-                truncated={fileTruncated}
-                scope={fileScope}
-                loading={fileLoading}
-                mode="fullscreen"
-                onScopeChange={setFileScope}
-                onOpenFile={openFileFromList}
-                onModeChange={changePreviewMode}
-                fontScale={fontScale}
-                onClose={closePreview}
-              />
+            {sheetBar}
+            {preview.open.kind === "none" ? (
+              <div
+                data-testid="sheet-board"
+                className="flex min-h-0 flex-1 flex-col overflow-hidden"
+              >
+                {sheetBoard}
+              </div>
             ) : (
-              <FilePreview
-                session={session}
-                filePath={preview.path}
-                mode="fullscreen"
-                onModeChange={changePreviewMode}
-                fontScale={fontScale}
-                onBack={preview.backToList ? backToList : undefined}
-                onClose={closePreview}
-              />
+              <div data-testid="sheet-content" className="min-h-0 min-w-0 flex-1">
+                {sheetContent}
+              </div>
             )}
           </div>
         </div>

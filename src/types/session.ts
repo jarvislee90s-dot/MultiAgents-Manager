@@ -19,6 +19,13 @@ export interface Session {
   status: SessionStatus;
   lastMessage: string | null;
   lastMessageRole: string | null;
+  /** lastMessage 是否为「子 agent 回报」触发（观察台 §四 提醒开关判定信号；
+   *  后端判据层打标，claude 专属、其余工具恒 false = 未区分） */
+  lastMessageSubagentReport: boolean;
+  /** 「本次状态由子 agent 活动引发」打标（终审发现 C / 决策 4）：活跃子 agent 在场
+   *  ∧ 最新 hook 事件 ∈ PostToolUse 族 ∧ < 30s TTL。后端判定、前端只消费布尔，
+   *  永不匹配文案；桌面/移动通知入口按该字段默认静默 */
+  flapFromSubagentActivity: boolean;
   lastActivityAt: string;
   pid: number;
   cpuUsage: number;
@@ -50,6 +57,9 @@ export interface TransitionEvent {
   projectName: string;
   /** 变化时刻该会话的最新消息预览（可为 null：无消息） */
   lastMessage: string | null;
+  /** 「跃迁由子 agent 活动引发」打标（T4 F2b / 决策 4，取 curr 会话同名会话字段）：
+   *  移动端横幅/提示音/振动入口按本字段默认静默 */
+  flapFromSubagentActivity: boolean;
   /** 事件产生时刻（服务端毫秒时间戳） */
   ts: number;
 }

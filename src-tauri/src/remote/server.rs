@@ -459,6 +459,21 @@ impl CreateTaskHub {
     }
 }
 
+/// 子 agent 运行源注入缝（spec §5.2，评审定的「每工具一个 source」模式）：
+/// 键 = agent_type；闭包参数 (agent_type, session_id)——与 message_source 的
+/// (tool, sid, …) 形态同构（键已是工具名，首参供通用假源复用，实现可忽略）。
+/// 生产 = 四工具 monitor::subagents::{claude,opencode,kimi,codex}::collect；
+/// 测试注入假源（零真实磁盘/DB）。**端点契约冻结**：kimi/opencode 校准只改
+/// 各自 source 实现，不动端点与载荷。
+pub type SubagentSourceFn =
+    dyn Fn(&str, &str) -> Vec<crate::monitor::subagents::SubagentView> + Send + Sync;
+
+/// 子 agent 详情源注入缝（观察台 §三）：键 = agent_type；闭包 (session_id,
+/// subagent_id, limit) → MessagesPage。生产仅 claude；未装配 → 端点回
+/// supported:false（其余工具转写格式未普查，spec §三.6 如实申报——清单照常）。
+pub type SubagentMessageSourceFn =
+    dyn Fn(&str, &str, usize) -> Result<crate::remote::content::MessagesPage, String> + Send + Sync;
+
 pub struct RemoteState {
     /// 会话数据源（P8 同源）：生产 = adapter::get_all_sessions；测试注入
     pub session_source: Box<dyn Fn() -> crate::session::SessionsResponse + Send + Sync>,
@@ -575,6 +590,13 @@ pub struct RemoteState {
     /// ui-config 专用用例就地覆盖）。**只读缝**——写走桌面 tauri 命令 set_setting
     /// 直写 KV，不经 axum（移动端只 GET，改外观是桌面端职责）
     pub ui_config_source: Box<dyn Fn() -> Option<String> + Send + Sync>,
+    /// 子 agent 运行源注入缝（spec §5.2）：见 [`SubagentSourceFn`] 文档。
+    /// 空表 = 一切工具空态（测试缺省；未知 agent_type 同形）
+    pub subagent_source: std::collections::HashMap<&'static str, Box<SubagentSourceFn>>,
+    /// 子 agent 详情源注入缝（观察台 §三）：见 [`SubagentMessageSourceFn`] 文档。
+    /// 空表 = 一切工具 supported:false（测试缺省）
+    pub subagent_message_source:
+        std::collections::HashMap<&'static str, Box<SubagentMessageSourceFn>>,
 }
 
 /// API 子路由：业务端点 + /pair/pin + 内层 fallback（未知 API 路径直接 403）+ gate 内层 layer。
@@ -599,6 +621,16 @@ fn api_router(state: Arc<RemoteState>) -> Router<Arc<RemoteState>> {
         .route("/session-messages", get(api::session_messages))
         // /session-files（M3 Task 8）：会话涉及的文件路径表（链接化数据源）
         .route("/session-files", get(api::session_files))
+        // /session-subagents（2026-10-08 子 agent chip，spec §5.2）：会话运行中子
+        // agent 视图（四工具 source 注入缝；PIN 门禁内层 gate 结构性覆盖——新端点
+        // 不需要各自鉴权代码；空态唯一权威）
+        .route("/session-subagents", get(api::session_subagents))
+        // /session-subagent-messages（2026-10-09 观察台 §三）：子 agent 执行过程
+        // 详情（claude 复用消息映射；其余工具 supported=false 如实申报）
+        .route(
+            "/session-subagent-messages",
+            get(api::session_subagent_messages),
+        )
         // /file（M3 Task 8）：会话 cwd 内安全文件读取（预览）
         .route("/file", get(api::read_file))
         // M7 Task 6：注入三端点（PIN 门禁内层 gate 结构性覆盖——新端点不需要各自
@@ -744,6 +776,8 @@ mod tests {
     fn test_state() -> Arc<RemoteState> {
         Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
@@ -1389,6 +1423,8 @@ mod tests {
         // 重建 state 以注入阻塞源（其余注入缝与 test_state 一致：内存库、预发行 token）
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| {
                 std::thread::sleep(std::time::Duration::from_millis(300));
@@ -1585,6 +1621,7 @@ mod tests {
                 to: "processing".into(),
                 project_name: "proj".into(),
                 last_message: Some("hello".into()),
+                flap_from_subagent_activity: false,
                 ts: 42,
             })
             .unwrap();
@@ -1780,6 +1817,8 @@ mod tests {
         // 重建 state：host_source 注入假载荷（与 sessions_scan_* 重建 state 的先例一致）
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
@@ -1890,6 +1929,8 @@ mod tests {
         let cap = captured.clone();
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(|| crate::session::SessionsResponse {
                 sessions: vec![],
@@ -2098,6 +2139,8 @@ mod tests {
             status: crate::session::SessionStatus::Idle,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-15T00:00:00Z".into(),
             pid: 1,
             cpu_usage: 0.0,
@@ -2108,6 +2151,8 @@ mod tests {
         };
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -2393,6 +2438,8 @@ mod tests {
             status: crate::session::SessionStatus::Idle,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-15T00:00:00Z".into(),
             pid: 1,
             cpu_usage: 0.0,
@@ -2405,6 +2452,8 @@ mod tests {
         let h = hit.clone();
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -2586,6 +2635,8 @@ mod tests {
         (
             Arc::new(RemoteState {
                 ui_config_source: Box::new(|| None),
+                subagent_source: std::collections::HashMap::new(),
+                subagent_message_source: std::collections::HashMap::new(),
                 capability_table: crate::inject::capability::new_table(),
                 session_source: Box::new(|| crate::session::SessionsResponse {
                     sessions: vec![],
@@ -3798,6 +3849,8 @@ mod tests {
             (
                 Arc::new(RemoteState {
                     ui_config_source: Box::new(|| None),
+                    subagent_source: std::collections::HashMap::new(),
+                    subagent_message_source: std::collections::HashMap::new(),
                     capability_table: crate::inject::capability::new_table(),
                     session_source: Box::new(|| crate::session::SessionsResponse {
                         sessions: vec![],
@@ -4007,6 +4060,8 @@ mod tests {
             status,
             last_message: None,
             last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-18T00:00:00Z".into(),
             pid,
             cpu_usage: 0.0,
@@ -4139,6 +4194,8 @@ mod tests {
         ];
         Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
@@ -4373,6 +4430,8 @@ mod tests {
         ];
         Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
@@ -6543,6 +6602,8 @@ mod tests {
         ];
         Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
@@ -7579,6 +7640,8 @@ mod tests {
         let session = inj_sess(sid, tool, pid, crate::session::SessionStatus::Waiting);
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -10529,6 +10592,16 @@ mod tests {
     /// sess_o（workbuddy Idle，未入 resume 命令表）；spawner 注入记录型假体。
     /// 其余缝与 inject_state 同口径（内存库，零接触真实 ~/.mam）。
     fn open_state(spawner: std::sync::Arc<crate::inject::resume::SpawnFn>) -> Arc<RemoteState> {
+        open_state_with_home(spawner, None)
+    }
+
+    /// T3 带 home 注入的 state 变体：home_source 消费注入值——信任归一用例注入
+    /// tempdir home（携假 ~/.claude.json，零接触真实主目录）；None = 既有用例
+    /// 直跳过归一。调用方持 TempDir 存活于测试作用域即可（state 只存路径串）。
+    fn open_state_with_home(
+        spawner: std::sync::Arc<crate::inject::resume::SpawnFn>,
+        home: Option<std::path::PathBuf>,
+    ) -> Arc<RemoteState> {
         let mut sess_m = inj_sess(
             "sess_m",
             crate::session::AgentType::Claude,
@@ -10552,6 +10625,8 @@ mod tests {
         let sessions = vec![sess_m, sess_n, sess_o];
         Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: sessions.clone(),
@@ -10587,7 +10662,8 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
-            home_source: Box::new(|| None),
+            // T3：home_source 消费注入值（信任归一用例 = tempdir home；None = 跳过）
+            home_source: Box::new(move || home.as_ref().map(|p| p.to_string_lossy().to_string())),
             // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
             pairing_counter: Box::new(Vec::new),
         })
@@ -10704,6 +10780,114 @@ mod tests {
             .store
             .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
         assert!(audits.is_empty(), "校验失败不写审计");
+    }
+
+    /// T3 未信任预检（远程/手机回执面）：命中 ~/.claude.json projects 条款但全部
+    /// 未信任 → 200 opening 回执附 `trustPromptExpected:true`（会话页提示条消费）；
+    /// 全 false 无可复用 casing → spawn cwd 保持原样。tempdir 假 home（假
+    /// ~/.claude.json），零接触真实主目录。
+    #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
+    async fn session_open_endpoint_trust_prompt_expected_when_untrusted() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"projects":{"/tmp/proj-m":{"hasTrustDialogAccepted":false}}}"#,
+        )
+        .unwrap();
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state_with_home(spawner_rec.seam(), Some(home.path().to_path_buf()));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // macOS 生产效果回查探针需要 argv 暗桩（opens_and_audits 同口径）；非 macOS no-op
+        spawn_effect_decoy("claude --resume sess_m");
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_m"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"opening\""),
+            "照常 opening：{body}"
+        );
+        assert!(
+            body.contains("\"trustPromptExpected\":true"),
+            "命中未信任条款必须附预检字段（会话页提示条）：{body}"
+        );
+        // 全 false：无可复用 casing，spawn cwd 原样（平台分臂断言同 opens_and_audits）
+        let recorded = spawner_rec.recorded();
+        assert_eq!(recorded.len(), 1, "spawner 恰被调用一次");
+        match &recorded[0] {
+            crate::inject::resume::SpawnSpec::Windows { cwd, .. } => {
+                assert_eq!(cwd, "/tmp/proj-m", "全 false 不得改写 cwd");
+            }
+            crate::inject::resume::SpawnSpec::MacosApplescript { script } => {
+                assert!(
+                    script.contains("/tmp/proj-m"),
+                    "全 false 不得改写 cwd：{script}"
+                );
+            }
+        }
+    }
+
+    /// T3 归一端到端（远程路径，实证形态）：双 casing 条款一真一假并存 → spawn
+    /// cwd **静默**复用真条款精确 casing（claude 查信任即命中、不弹窗），回执
+    /// **不带** trustPromptExpected（已信任不得误报提醒）
+    #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
+    async fn session_open_endpoint_reuses_trusted_casing_silently() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"projects":{"/tmp/proj-m":{"hasTrustDialogAccepted":false},"/TMP/PROJ-M":{"hasTrustDialogAccepted":true}}}"#,
+        )
+        .unwrap();
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state_with_home(spawner_rec.seam(), Some(home.path().to_path_buf()));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        spawn_effect_decoy("claude --resume sess_m");
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_m"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            !body.contains("trustPromptExpected"),
+            "复用真条款（已信任）不得误报预检提醒：{body}"
+        );
+        // spawn cwd = 真条款逐字 casing（平台分臂断言同 opens_and_audits）
+        let recorded = spawner_rec.recorded();
+        assert_eq!(recorded.len(), 1, "spawner 恰被调用一次");
+        match &recorded[0] {
+            crate::inject::resume::SpawnSpec::Windows { cwd, .. } => {
+                assert_eq!(cwd, "/TMP/PROJ-M", "spawn cwd 必须是真条款的精确 casing");
+            }
+            crate::inject::resume::SpawnSpec::MacosApplescript { script } => {
+                assert!(
+                    script.contains("/TMP/PROJ-M"),
+                    "spawn 载荷必须携带真条款精确 casing：{script}"
+                );
+            }
+        }
     }
 
     /// 无映射（workbuddy 未入命令表）：404 no_resume_command + spawner 不出手
@@ -11563,6 +11747,8 @@ mod tests {
         };
         Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -11842,6 +12028,8 @@ mod tests {
         );
         let state2 = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: {
                 let s = codex_sess.clone();
@@ -12331,6 +12519,8 @@ mod tests {
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -12384,6 +12574,8 @@ mod tests {
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -12467,6 +12659,8 @@ mod tests {
         let sid_out = session.id.clone();
         let state = Arc::new(RemoteState {
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
             capability_table: crate::inject::capability::new_table(),
             session_source: Box::new(move || crate::session::SessionsResponse {
                 sessions: vec![session.clone()],
@@ -13500,6 +13694,8 @@ mod tests {
             // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
             pairing_counter: Box::new(Vec::new),
             ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: std::collections::HashMap::new(),
         })
     }
 
@@ -14381,5 +14577,347 @@ mod tests {
             Some(0),
             "2 天前归档不出 1 天窗：{v}"
         );
+    }
+
+    // ==== 2026-10-08 子 agent 运行 chip：GET /m/api/v1/session-subagents（spec §5.2）====
+
+    /// 假源装配：复制 test_state() 完整字面量（逐字段同值），仅 subagent_source
+    /// 换成假源（仓内先例：inject/queue.rs 的 state()、server.rs 各用例组持有字面量）。
+    /// claude 假源返回两条**故意倒序**的视图——端点必须按 spawnTs 升序输出、None 排尾。
+    fn state_with_subagent_fakes() -> Arc<RemoteState> {
+        let mut fakes: std::collections::HashMap<&'static str, Box<SubagentSourceFn>> =
+            std::collections::HashMap::new();
+        fakes.insert(
+            "claude",
+            Box::new(|_: &str, sid: &str| {
+                vec![
+                    crate::monitor::subagents::SubagentView {
+                        id: format!("late-{sid}"),
+                        name: "Plan".into(),
+                        description: Some("设计新建会话两改动实现方案".into()),
+                        spawn_ts: Some("2026-10-08T09:00:00.000+00:00".into()),
+                        tokens: crate::monitor::subagents::TokenUsage {
+                            input: 5124,
+                            cache_read: 56448,
+                            cache_creation: 0,
+                            output: 9312,
+                        },
+                        status: crate::monitor::subagents::SubagentStatus::Running,
+                        end_ts: None,
+                    },
+                    crate::monitor::subagents::SubagentView {
+                        id: format!("early-{sid}"),
+                        name: "Explore".into(),
+                        description: None,
+                        spawn_ts: None, // spawn 竞态：无时长
+                        tokens: crate::monitor::subagents::TokenUsage::default(),
+                        status: crate::monitor::subagents::SubagentStatus::Idle,
+                        end_ts: Some("2026-10-08T08:59:00.000+00:00".into()),
+                    },
+                ]
+            }),
+        );
+        Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
+            subagent_source: fakes,
+            subagent_message_source: std::collections::HashMap::new(),
+            capability_table: crate::inject::capability::new_table(),
+            session_source: Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![],
+                total_count: 7,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            create_hub: create_hub_stub(),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
+            host_source: Box::new(|| {
+                serde_json::json!({
+                    "host": { "name": "test-host", "platform": "macos", "version": "0.0.0-test" },
+                    "enabledTools": ["claude"]
+                })
+            }),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
+            home_source: Box::new(|| None),
+            pairing_counter: Box::new(Vec::new),
+        })
+    }
+
+    /// 端点契约矩阵（spec §5.2/§7）：缺参 400 / 空白 400 / 未知工具空态 / 假源
+    /// camelCase 载荷 / no-store 头 / spawnTs 升序（None 排尾）/ 无 cookie 403
+    /// （gate 结构性覆盖）
+    #[tokio::test]
+    async fn session_subagents_contract_matrix() {
+        let st = state_with_subagent_fakes();
+        let app = crate::remote::server::router(st.clone());
+        // 直插设备表返回 cookie，不走 /pair/pin（零 PIN 依赖）
+        let cookie = paired_cookie(&st, "sub-chips-1");
+        // ① 缺 agent_type → 400
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagents?session_id=s1",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        // ② 缺 session_id → 400
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagents?agent_type=claude",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        // ③ 空白参（%20）→ 400
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagents?agent_type=%20&session_id=s1",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        // ④ 未知工具 → 200 空态（端点是空态唯一权威）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagents?agent_type=zzz&session_id=s1",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(body_string(r).await, r#"{"subagents":[]}"#);
+        // ⑤ 假源：camelCase 载荷 + spawnTs 升序（None 排尾）+ 四桶 + no-store
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagents?agent_type=claude&session_id=s1",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(
+            r.headers().get("cache-control").unwrap(),
+            "no-store",
+            "门禁下私有数据禁中间层缓存"
+        );
+        let body = body_string(r).await;
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let arr = v["subagents"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["id"], "late-s1", "spawnTs 升序：有时戳在前");
+        assert_eq!(arr[0]["name"], "Plan");
+        assert_eq!(arr[0]["tokens"]["cacheRead"], 56448);
+        assert_eq!(arr[0]["description"], "设计新建会话两改动实现方案");
+        assert_eq!(arr[1]["id"], "early-s1", "无 spawnTs 排尾");
+        assert_eq!(arr[1]["spawnTs"], serde_json::Value::Null);
+        // ⑤b（观察台 §二）：全量名单——idle 也返回；status 小写单词；endTs camelCase
+        assert_eq!(arr[0]["status"], "running", "活跃条目照常返回");
+        assert_eq!(arr[0]["endTs"], serde_json::Value::Null);
+        assert_eq!(
+            arr[1]["status"], "idle",
+            "终态条目不再被端点过滤（全量名单）"
+        );
+        assert_eq!(arr[1]["endTs"], "2026-10-08T08:59:00.000+00:00");
+        // ⑥ 无 cookie → 403（gate 结构性覆盖）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagents?agent_type=claude&session_id=s1",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
+    }
+
+    // ==== 2026-10-09 观察台 T4：GET /m/api/v1/session-subagent-messages ====
+
+    /// 假源装配（观察台 §三）：复制 state_with_subagent_fakes 完整字面量（逐字段
+    /// 同值），subagent_source 置空缺省、subagent_message_source 换成入参假源
+    /// （仓内「每用例组持有字面量」惯例同款）。
+    fn state_with_subagent_msg_fakes(
+        fakes: std::collections::HashMap<&'static str, Box<SubagentMessageSourceFn>>,
+    ) -> Arc<RemoteState> {
+        Arc::new(RemoteState {
+            ui_config_source: Box::new(|| None),
+            subagent_source: std::collections::HashMap::new(),
+            subagent_message_source: fakes,
+            capability_table: crate::inject::capability::new_table(),
+            session_source: Box::new(|| crate::session::SessionsResponse {
+                sessions: vec![],
+                total_count: 7,
+                waiting_count: 0,
+            }),
+            store: crate::remote::pairing::DeviceStore::memory(),
+            injector: std::sync::Arc::new(crate::inject::engine::RealInjector),
+            resume_spawner: std::sync::Arc::new(|_: &crate::inject::resume::SpawnSpec| Ok(())),
+            create_hub: create_hub_stub(),
+            archive_source: Box::new(Vec::new),
+            archive_delete: std::sync::Arc::new(|_: Option<&str>| 0usize),
+            confirm_probe: std::sync::Arc::new(|_, _, _| true),
+            dialog_probe: std::sync::Arc::new(|_, _| None),
+            screen_probe: std::sync::Arc::new(|_, _| None),
+            host_source: Box::new(|| {
+                serde_json::json!({
+                    "host": { "name": "test-host", "platform": "macos", "version": "0.0.0-test" },
+                    "enabledTools": ["claude"]
+                })
+            }),
+            message_source: Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            path_source: Box::new(|_, _, _| (Vec::new(), false)),
+            watcher_tx: tokio::sync::broadcast::channel(64).0,
+            board_hidden_ids: Box::new(Vec::new),
+            board_hidden_hide: std::sync::Arc::new(|_| 0usize),
+            board_hidden_unhide: std::sync::Arc::new(|_| 0usize),
+            unread_mark_read: std::sync::Arc::new(|_, _| ()),
+            session_close: std::sync::Arc::new(|_| Ok(())),
+            sse_registry: Arc::new(SseRegistry::default()),
+            max_devices_source: Box::new(|| 3),
+            pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::new()),
+            global_pin_limiter: std::sync::Mutex::new(crate::remote::pin::PinRateLimiter::global()),
+            pin_source: Box::new(|| Some("1234".to_string())),
+            now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
+            via_hosts_source: Box::new(|| None),
+            rate_bucket_channels_source: Box::new(Vec::new),
+            home_source: Box::new(|| None),
+            pairing_counter: Box::new(Vec::new),
+        })
+    }
+
+    /// GET /session-subagent-messages 契约矩阵（观察台 §三）：缺参 400 / 穿越 400 /
+    /// 未装配工具 supported:false / claude 假源消息形状 / no-store / 无 cookie 403
+    #[tokio::test]
+    async fn session_subagent_messages_contract_matrix() {
+        let mut fakes: std::collections::HashMap<&'static str, Box<SubagentMessageSourceFn>> =
+            std::collections::HashMap::new();
+        fakes.insert(
+            "claude",
+            Box::new(|_sid: &str, _sub: &str, _limit: usize| {
+                Ok(crate::remote::content::MessagesPage {
+                    messages: vec![crate::remote::content::SessionMessage {
+                        seq: 0,
+                        role: "user".into(),
+                        kind: "user".into(),
+                        content: "设计新方案".into(),
+                        ts: Some(1760000000000),
+                        tool_name: None,
+                        tool_args: None,
+                        collapsed: false,
+                    }],
+                    truncated: false,
+                })
+            }),
+        );
+        let st = state_with_subagent_msg_fakes(fakes);
+        let app = crate::remote::server::router(st.clone());
+        let cookie = paired_cookie(&st, "sub-det-1");
+        // ① 缺 subagent_id → 400
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagent-messages?agent_type=claude&session_id=s1",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        // ② subagent_id 穿越 → 400（该 id 直接拼 subagents/agent-<id>.jsonl 文件名）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagent-messages?agent_type=claude&session_id=s1&subagent_id=..%2F..%2Fsecret",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 400);
+        // ③ 未装配工具（opencode）→ 200 supported:false 空表（「暂不支持」是正常态）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagent-messages?agent_type=opencode&session_id=s1&subagent_id=x",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["supported"], false);
+        assert_eq!(v["messages"].as_array().map(Vec::len), Some(0));
+        // ④ claude 假源：消息形状 + supported:true + no-store
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagent-messages?agent_type=claude&session_id=s1&subagent_id=a1",
+                Some(&cookie),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["supported"], true);
+        assert_eq!(v["messages"][0]["kind"], "user");
+        assert_eq!(v["messages"][0]["content"], "设计新方案");
+        // ⑤ 无 cookie → 403（gate 结构性覆盖）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-subagent-messages?agent_type=claude&session_id=s1&subagent_id=a1",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 403);
     }
 }

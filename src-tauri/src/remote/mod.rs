@@ -69,6 +69,9 @@ fn max_devices_from_kv() -> usize {
 // remote 模块所有 spawn 点统一走这里，调用点不用 #[cfg] 门控（非 Windows no-op）。
 // ============================================================
 
+// 非 Windows 构建：NoWindow impl 整体编译裁掉（下方两个 impl 均 #[cfg(windows)]），
+// 本常量随 impl 同门裁剪——否则 Linux clippy -D warnings 报「常量未使用」（PR CI 暴露）
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub(crate) trait NoWindow {
@@ -380,6 +383,41 @@ static STATE: Lazy<std::sync::Arc<server::RemoteState>> = Lazy::new(|| {
         // M3 Task 8：文件路径源同源直调（files::extract_file_paths 内部复用 content
         // 层读取，注入缝供端点测试）
         path_source: Box::new(files::extract_file_paths),
+        // 2026-10-08 子 agent chip（spec §5.2）：四工具 source 直调 monitor::subagents
+        // 各 collect（判据/缓存在那层；本缝只做接线）。空表键 = 未知工具空态。
+        subagent_source: [
+            (
+                "claude",
+                Box::new(|_a: &str, sid: &str| crate::monitor::subagents::claude::collect(sid))
+                    as Box<server::SubagentSourceFn>,
+            ),
+            (
+                "opencode",
+                Box::new(|_a: &str, sid: &str| crate::monitor::subagents::opencode::collect(sid))
+                    as Box<server::SubagentSourceFn>,
+            ),
+            (
+                "kimi",
+                Box::new(|_a: &str, sid: &str| crate::monitor::subagents::kimi::collect(sid))
+                    as Box<server::SubagentSourceFn>,
+            ),
+            (
+                "codex",
+                Box::new(|_a: &str, sid: &str| crate::monitor::subagents::codex::collect(sid))
+                    as Box<server::SubagentSourceFn>,
+            ),
+        ]
+        .into_iter()
+        .collect(),
+        // 2026-10-09 观察台 §三：详情源仅 claude（其余工具 supported=false；
+        // 转写格式普查后另批补，spec §五）
+        subagent_message_source: [(
+            "claude",
+            Box::new(crate::remote::content::read_claude_subagent_messages)
+                as Box<server::SubagentMessageSourceFn>,
+        )]
+        .into_iter()
+        .collect(),
         // M3 Task 5：跃迁事件通道与扫描循环同源（watcher::event_sender 与
         // SessionWatcher::start 共用全进程唯一通道；Task 6 的 SSE 只订阅此 tx）
         watcher_tx: watcher::event_sender(),

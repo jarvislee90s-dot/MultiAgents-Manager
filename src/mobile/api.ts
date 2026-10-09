@@ -1222,8 +1222,11 @@ export async function fetchSessionModeMenu(sessionId: string): Promise<ModeMenuR
 // ==== M6R–M9R Task 11：一键 resume（R5，在电脑上打开）====
 
 /** 一键 resume 回执（POST /session-open）：200 {status:"opening"} 表示电脑侧正在
- *  打开终端恢复该会话；spawn 出手失败 → 200 {status:"failed",error}（可重试） */
-export type SessionOpenResult = { status: "opening" } | { status: "failed"; error: string };
+ *  打开终端恢复该会话；`trustPromptExpected`（T3）：会话目录命中 ~/.claude.json
+ *  未信任条款——claude 将在终端弹信任提示，需人工应答否则会话挂起（调用方据此
+ *  toast 提醒）；spawn 出手失败 → 200 {status:"failed",error}（可重试） */
+export type SessionOpenResult =
+  { status: "opening"; trustPromptExpected?: boolean } | { status: "failed"; error: string };
 
 /** 一键 resume（R5）：请求电脑本机打开终端 + cd 项目目录 + 恢复会话 + 聚焦。
  *  404 {error:"no_session"|"no_cwd"|"no_resume_command"} → 非 2xx 抛 ApiError
@@ -1470,4 +1473,75 @@ export async function fetchCreateStatus(
   if (r.status === 404) return { kind: "no_task" };
   if (!r.ok) throw new ApiError(r.status, `session-create/status ${r.status}`);
   return (await r.json()) as CreateStatusPayload;
+}
+
+// ==== 2026-10-08 子 agent 运行 chip（spec 2026-10-08-mobile-subagent-chips §5.2/§6）====
+
+/** GET /session-subagents 载荷单条（与 Rust monitor::subagents::SubagentView 的
+ *  camelCase 序列化逐字段对应，勿漂移）。spawnTs=null：首条时间戳未落盘（spawn
+ *  竞态，下轮自愈）——前端不显示时长只显 token。
+ *  2026-10-09 观察台：**全量名单**（含终态）——status=running → chip 活跃区；
+ *  idle → 清单卡灰点冻结（endTs = 冻结锚，elapsed = (endTs ?? now) − spawnTs）。 */
+export interface SubagentView {
+  id: string;
+  name: string;
+  description: string | null;
+  spawnTs: string | null;
+  tokens: { input: number; cacheRead: number; cacheCreation: number; output: number };
+  status: "running" | "idle";
+  endTs: string | null;
+}
+
+/** 拉取会话的子 agent 全量名单（含终态；运行过滤在 chip 层）。空列表 = 该会话
+ *  无子 agent——端点是空态唯一权威（前端不另特判）。非 2xx / 网络异常 → 抛
+ *  ApiError（调用方静默，ModeBar 同惯例） */
+export async function fetchSessionSubagents(
+  agentType: string,
+  sessionId: string
+): Promise<SubagentView[]> {
+  const q = new URLSearchParams({ agent_type: agentType, session_id: sessionId });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-subagents?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-subagents 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-subagents ${r.status}`);
+  const data = (await r.json()) as { subagents: SubagentView[] };
+  return data.subagents;
+}
+
+// ==== 2026-10-09 观察台 §三：子 agent 详情（/session-subagent-messages）====
+
+/** 详情载荷：messages/truncated 与 /session-messages 同形（渲染器零适配）；
+ *  supported=false = 该工具暂不支持查看详情（opencode/kimi/codex——spec §三.6，
+ *  如实申报不空白页不假数据），前端显示明确提示态 */
+export interface SubagentMessagesPage {
+  messages: SessionMessage[];
+  truncated: boolean;
+  supported: boolean;
+}
+
+/** 拉取子 agent 执行过程（claude）。404（会话/转写不存在）与非 2xx → ApiError；
+ *  supported=false 是 200 正常载荷不是错误 */
+export async function fetchSubagentMessages(
+  agentType: string,
+  sessionId: string,
+  subagentId: string,
+  limit = 200
+): Promise<SubagentMessagesPage> {
+  const q = new URLSearchParams({
+    agent_type: agentType,
+    session_id: sessionId,
+    subagent_id: subagentId,
+    limit: String(limit),
+  });
+  let r: Response;
+  try {
+    r = await fetch(`/m/api/v1/session-subagent-messages?${q}`);
+  } catch (e) {
+    throw new ApiError(null, `session-subagent-messages 网络异常: ${String(e)}`);
+  }
+  if (!r.ok) throw new ApiError(r.status, `session-subagent-messages ${r.status}`);
+  return (await r.json()) as SubagentMessagesPage;
 }

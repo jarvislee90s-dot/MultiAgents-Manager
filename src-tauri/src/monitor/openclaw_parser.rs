@@ -157,6 +157,8 @@ fn build_session(
         status,
         last_message: Some(format!("OpenClaw agent: {}", display_name)),
         last_message_role: Some("system".to_string()),
+        last_message_subagent_report: false,
+        flap_from_subagent_activity: false,
         last_activity_at,
         pid: process.pid,
         cpu_usage: process.cpu_usage,
