@@ -14,10 +14,6 @@ use tauri::Emitter;
 use tauri_plugin_updater::UpdaterExt;
 
 const GITHUB_REPO: &str = "jarvislee90s-dot/tuvis";
-/// 品牌改名前的旧仓名（2026-10 改名兔维斯）：存量客户端编译死的校验前缀是旧仓名，
-/// 而新 latest.json 里的资产 URL 用新仓名——校验必须双前缀兼容，否则存量用户
-/// 拉到新清单会因前缀不符被直接拒升（自动更新断链）
-const LEGACY_GITHUB_REPO: &str = "jarvislee90s-dot/MultiAgents-Manager";
 /// 钉 IP 直连的域名（resolve 只对**直连**生效；兜底客户端必须 no_proxy，见下）
 const GITHUB_API_HOST: &str = "api.github.com";
 /// GitHub API 强制要求 User-Agent，否则 403
@@ -149,33 +145,23 @@ fn flatten_error_chain(e: &(dyn std::error::Error + 'static)) -> String {
 
 /// 默认管道一次请求（reqwest 默认读环境变量与 Windows/macOS 系统代理——挂 VPN
 /// 时走的就是它；hyper-util 注册表读取链路 2026-10-08 独立探针实证可用）
-/// Release 发现双仓回退（品牌改名过渡，见 LEGACY_GITHUB_REPO）：仓库改名前新仓名
-/// 404 → 落回旧仓名；改名后新仓名直接命中。配合 validate_latest_json_url 的
-/// 双前缀校验，发现与校验两侧对改名顺序都不敏感。
+/// Release 发现：仓库已一次性更名（2026-10，用户裁决取消分阶段过渡——存量用户
+/// 极少且接受手动重装），直接打新仓名。
 async fn fetch_releases_with_client(client: reqwest::Client) -> Result<Vec<GithubRelease>, String> {
-    let mut last_err = String::new();
-    for repo in [GITHUB_REPO, LEGACY_GITHUB_REPO] {
-        let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
-        let resp = client
-            .get(&url)
-            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-            .send()
-            .await
-            .map_err(|e| format!("GitHub API 请求失败: {}", flatten_error_chain(&e)))?;
-        if !resp.status().is_success() {
-            last_err = format!("GitHub API 状态异常: {}（{repo}）", resp.status());
-            continue;
-        }
-        let list: Vec<GithubRelease> = resp
-            .json()
-            .await
-            .map_err(|e| format!("GitHub API 响应解析失败: {e}"))?;
-        if !list.is_empty() {
-            return Ok(list);
-        }
-        last_err = format!("{repo}: releases 列表为空");
+    let resp = client
+        .get(format!(
+            "https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=30"
+        ))
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("GitHub API 请求失败: {}", flatten_error_chain(&e)))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API 状态异常: {}", resp.status()));
     }
-    Err(last_err)
+    resp.json::<Vec<GithubRelease>>()
+        .await
+        .map_err(|e| format!("GitHub API 响应解析失败: {e}"))
 }
 
 /// DoH 解析 + 钉 IP 直连兜底：**绕开本地 DNS 污染与失效代理**。
@@ -291,11 +277,8 @@ pub async fn check_for_github_update(app: tauri::AppHandle) -> CheckUpdateStatus
 /// （前端传参理论只有自家 webview，纵深防御；latest.json 进插件后另有
 /// pinned 公钥签名校验兜底）。抽纯函数以便单测（评审 M8）。
 pub fn validate_latest_json_url(url: &str) -> Result<(), String> {
-    // 新旧仓名前缀都合法（改名过渡期，见 LEGACY_GITHUB_REPO）
-    let prefix_ok = [GITHUB_REPO, LEGACY_GITHUB_REPO].iter().any(|repo| {
-        url.starts_with(&format!("https://github.com/{repo}/releases/download/"))
-    });
-    if !prefix_ok {
+    let expected_prefix = format!("https://github.com/{GITHUB_REPO}/releases/download/");
+    if !url.starts_with(&expected_prefix) {
         return Err(format!("非法的升级清单地址（前缀不符）: {url}"));
     }
     if !url.ends_with("latest.json") {
@@ -581,11 +564,6 @@ mod tests {
         // 合法：本仓库 release 资产下的 latest.json
         assert!(validate_latest_json_url(
             "https://github.com/jarvislee90s-dot/tuvis/releases/download/v0.5.0-beta.1/latest.json"
-        )
-        .is_ok());
-        // 合法：改名前的旧仓名前缀（过渡期双兼容）
-        assert!(validate_latest_json_url(
-            "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0/latest.json"
         )
         .is_ok());
         // 他仓库前缀
