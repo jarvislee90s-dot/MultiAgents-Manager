@@ -69,6 +69,9 @@ fn max_devices_from_kv() -> usize {
 // remote 模块所有 spawn 点统一走这里，调用点不用 #[cfg] 门控（非 Windows no-op）。
 // ============================================================
 
+// 非 Windows 构建：NoWindow impl 整体编译裁掉（下方两个 impl 均 #[cfg(windows)]），
+// 本常量随 impl 同门裁剪——否则 Linux clippy -D warnings 报「常量未使用」（PR CI 暴露）
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 pub(crate) trait NoWindow {
