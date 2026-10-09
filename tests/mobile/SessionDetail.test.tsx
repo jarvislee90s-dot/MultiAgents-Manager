@@ -2743,7 +2743,7 @@ describe("SessionDetail：预览区 sheet 化（T1）", () => {
     expect(screen.queryByTestId("sheet-tab-subagents")).toBeNull();
   });
 
-  it("宽屏分屏空态：右栏「选择左侧项目查看」；点文件后右栏换文件预览、左栏看板保留", async () => {
+  it("宽屏分屏：文件 sheet 一级=看板；点文件后两层级换文件预览（返回钮回看板）", async () => {
     installFetch();
     routes.messages = [msg({ seq: 0, kind: "assistant", content: "hi" })];
     routes.files = [fileEntry("/tmp/proj/src/app.rs")];
@@ -2753,19 +2753,23 @@ describe("SessionDetail：预览区 sheet 化（T1）", () => {
       value: (q: string) => ({ matches: q.includes("min-width"), media: q }),
     });
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
-    // 宽屏打开面板 → 默认 split-h：左栏对话、右栏预览区（顶栏 + 看板 | 内容）
+    // 宽屏打开面板 → 默认 split-h：左栏对话、右栏预览区（顶栏 + 一级看板）
     fireEvent.click(await screen.findByTestId("file-panel-button"));
     expect(await screen.findByTestId("preview-shell")).toBeTruthy();
     expect(screen.getByTestId("split-container").className).toContain("flex-row");
-    expect(screen.getByTestId("preview-empty").textContent).toContain("选择左侧项目查看");
-    // 点文件 → 右栏换文件预览，左栏 FilePanel 看板保留（主从并存）
+    expect(screen.getByTestId("sheet-board")).toBeTruthy();
+    expect(screen.getByTestId("file-panel")).toBeTruthy();
+    // 点文件 → 二级：文件预览替换看板（单栏整宽），页头返回钮回看板
     fireEvent.click(screen.getByTestId("file-row-0-open"));
     expect(await screen.findByTestId("file-preview")).toBeTruthy();
     expect((await screen.findByTestId("preview-shell")).getAttribute("data-open")).toBe("file");
-    expect(screen.queryByTestId("preview-empty")).toBeNull();
-    const board = screen.getByTestId("sheet-board");
-    expect(board.contains(screen.getByTestId("file-panel"))).toBe(true);
-    // 预览组件内部无返回钮时返回路径仍在：关闭钮（顶栏唯一实例）收回整个预览区
+    expect(screen.queryByTestId("sheet-board")).toBeNull();
+    expect(screen.getByTestId("preview-back-list")).toBeTruthy();
+    // 返回钮 → 回一级看板
+    fireEvent.click(screen.getByTestId("preview-back-list"));
+    expect(await screen.findByTestId("file-panel")).toBeTruthy();
+    expect(screen.queryByTestId("file-preview")).toBeNull();
+    // 预览区关闭钮照旧收回整个预览区
     fireEvent.click(screen.getByTestId("preview-close"));
     expect(screen.queryByTestId("preview-shell")).toBeNull();
   });

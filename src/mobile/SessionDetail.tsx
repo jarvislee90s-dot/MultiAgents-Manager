@@ -1353,38 +1353,19 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
               className="flex h-full min-h-0 flex-col"
             >
               {/* 顶栏 sheet bar（唯一实例：sheet 钮 + 布局切换器 + 关闭）。
-                布局切换器仅「文件」sheet 显示——子 Agent sheet 是两层级导航
-                （清单 → 详情，2026-10-09 用户裁决：不做预览区内分屏），无布局可切 */}
+                布局切换器控制预览窗格的停靠方式（dock 在对话旁 / 全屏覆盖）；
+                窗格内部两个 sheet 均为**两层级导航**（2026-10-09 用户裁决：看板与
+                详情/预览互斥单栏，不做窗格内分屏——46/54 双栏太窄） */}
               {sheetBar}
-              {/* 子 Agent sheet：**两层级导航**（用户裁决 2026-10-09：不做预览区内
-                分屏——46/54 双栏太窄）。清单（一级）与详情（二级）互斥单栏，
-                页头返回钮回清单；与文件 sheet 的主从分屏形态不同 */}
-              {preview.sheet === "subagents" ? (
-                preview.open.kind === "subagent" ? (
-                  <div data-testid="sheet-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
-                    {sheetContent}
-                  </div>
-                ) : (
-                  <div data-testid="sheet-board" className="flex min-h-0 min-w-0 flex-1 flex-col">
-                    {sheetBoard}
-                  </div>
-                )
+              {/* 两层级导航（两个 sheet 同构）：open=none → 看板（一级）；
+                open 命中 → 详情/预览（二级），页头返回钮回看板 */}
+              {preview.open.kind === "none" ? (
+                <div data-testid="sheet-board" className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  {sheetBoard}
+                </div>
               ) : (
-                /* sheet 内二级：左=看板（FilePanel），右=文件预览/空态。
-                 46% 出自线稿（.pane.left width:46%）；内容与看板以竖线分界 */
-                <div className="flex min-h-0 min-w-0 flex-1">
-                  <div
-                    data-testid="sheet-board"
-                    className="flex min-h-0 w-[46%] shrink-0 flex-col overflow-hidden"
-                  >
-                    {sheetBoard}
-                  </div>
-                  <div
-                    data-testid="sheet-content"
-                    className="min-h-0 min-w-0 flex-1 overflow-hidden border-l border-[var(--cb)]"
-                  >
-                    {sheetContent}
-                  </div>
+                <div data-testid="sheet-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
+                  {sheetContent}
                 </div>
               )}
             </div>
