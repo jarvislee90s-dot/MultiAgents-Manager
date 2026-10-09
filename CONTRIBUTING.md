@@ -10,8 +10,8 @@
 
 ### 搭建步骤
 ```bash
-git clone https://github.com/jarvis/MultiAgents-Manager.git
-cd MultiAgents-Manager
+git clone https://github.com/jarvislee90s-dot/tuvis.git
+cd tuvis
 pnpm install
 pnpm tauri:dev
 ```

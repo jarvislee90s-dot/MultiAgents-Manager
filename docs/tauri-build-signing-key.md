@@ -14,8 +14,8 @@ pnpm tauri:build   # 等价于 tauri build --bundles nsis
 编译到 NSIS 打包完成、`setup.exe` 已经生成之后，**最后一步**报错退出：
 
 ```text
-Running makensis to produce ...\bundle\nsis\MultiAgents Manager_0.1.0_x64-setup.exe
-Finished 1 bundle at: ...\MultiAgents Manager_0.1.0_x64-setup.exe
+Running makensis to produce ...\bundle\nsis\兔维斯_0.1.0_x64-setup.exe
+Finished 1 bundle at: ...\兔维斯_0.1.0_x64-setup.exe
 A public key has been found, but no private key. Make sure to set `TAURI_SIGNING_PRIVATE_KEY` environment variable.
        Error A public key has been found, but no private key. ...
 [ELIFECYCLE] Command failed with exit code 1.
@@ -23,7 +23,7 @@ A public key has been found, but no private key. Make sure to set `TAURI_SIGNING
 
 关键事实：
 
-- **安装包其实已经成功产出**：`src-tauri/target/release/bundle/nsis/MultiAgents Manager_0.1.0_x64-setup.exe`
+- **安装包其实已经成功产出**：`src-tauri/target/release/bundle/nsis/兔维斯_0.1.0_x64-setup.exe`
 - 报错只发生在**更新器（updater）产物签名**环节，导致命令整体以 exit 1 收尾
 - 不是代码问题、不是编译失败，是**密钥 / 环境变量缺失**的配置问题
 

@@ -1,10 +1,10 @@
 # Getting Started
 
-本指南介绍 MultiAgents Manager 的 Getting Started 功能。
+本指南介绍 兔维斯 的 Getting Started 功能。
 
 ## 概述
 
-MultiAgents Manager 是一个多 Agent 编程工具统一管理平台，支持 Claude Code、Codex CLI、OpenCode 和 OpenClaw 四种工具的会话监控、资源管理和预设组切换。
+兔维斯 是一个你的桌面多 Agent 指挥台，支持 Claude Code、Codex CLI、OpenCode 和 OpenClaw 四种工具的会话监控、资源管理和预设组切换。
 
 ## 安装
 

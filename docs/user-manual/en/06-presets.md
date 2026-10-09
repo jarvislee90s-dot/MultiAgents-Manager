@@ -9,9 +9,9 @@ A preset group bundles a set of skills / MCP servers / plugins into a single "ki
 ## Core Concepts
 
 - **Exclusive kit**: applying a preset = "disable/stash what's currently active → enable the preset's items". After applying, the tool's resource surface = preset items + resident items, nothing else.
-- **Universal presets**: contain only MAM repository resources (skills / MCP / plugins) and can be applied to any enabled tool.
-- **Tool-scoped presets**: bound to a single tool; besides MAM resources they may also include that tool's **native skills** (skills installed directly in the tool's own directory, outside the MAM repository).
-- **At most one active preset per tool**: switching on a new preset for a tool automatically switches the previous one off. With everything off, the tool is back to its original state — MAM takes a "base snapshot" before each application, and turning the preset off restores from that snapshot.
+- **Universal presets**: contain only Tuvis repository resources (skills / MCP / plugins) and can be applied to any enabled tool.
+- **Tool-scoped presets**: bound to a single tool; besides Tuvis resources they may also include that tool's **native skills** (skills installed directly in the tool's own directory, outside the Tuvis repository).
+- **At most one active preset per tool**: switching on a new preset for a tool automatically switches the previous one off. With everything off, the tool is back to its original state — Tuvis takes a "base snapshot" before each application, and turning the preset off restores from that snapshot.
 
 ## The Preset List
 
@@ -29,7 +29,7 @@ Each preset card shows: the preset name, a one-line truncated description, an it
 - **On = apply**: turning a switch on first opens a **confirmation dialog** showing a dry-run preview of the full diff, in five sections (empty sections are hidden):
   1. **To enable** — items that will actually be enabled after exclusive-binding filtering;
   2. **Filtered out** — items skipped because their exclusive binding does not allow this tool, each with the reason;
-  3. **To disable** — MAM resources that will be swept away;
+  3. **To disable** — Tuvis resources that will be swept away;
   4. **To stash** — native skills that will be moved into the stash area (named one by one);
   5. **Resident exempt** — resources outside the preset that the resident lock protects from the sweep (count only).
 
@@ -42,7 +42,7 @@ Each preset card shows: the preset name, a one-line truncated description, an it
 
 When a preset is applied, the tool's **non-resident** native skill directories are moved wholesale into the stash area at `~/.mam/stash/<tool>/skills/` (a same-volume rename, zero copying); restoring the default moves them back. Every move is recorded in a ledger (stash_journal), so after a crash the next start can reconcile from it.
 
-- **Same-name conflicts**: if the original spot is occupied when restoring (say you manually installed a same-named skill during the preset session), MAM **never overwrites** — the item stays in the stash area and is reported as a conflict for you to resolve manually.
+- **Same-name conflicts**: if the original spot is occupied when restoring (say you manually installed a same-named skill during the preset session), Tuvis **never overwrites** — the item stays in the stash area and is reported as a conflict for you to resolve manually.
 - Stash entries that never got restored also show up in the health check card under "pending stash entries", each with a manual "restore" button.
 
 ## Resident Locks
@@ -52,7 +52,7 @@ Some resources should survive every preset — your core MCP servers, must-have 
 - The exclusive sweep **never touches** resident resources: they are neither disabled nor stashed.
 - The "resident exempt" count in the apply confirmation dialog is exactly what this lock saved from the sweep.
 
-**Built-in native skills (resident by definition)**: a tool's own built-in skill directories (such as codex's `.system` and `_shared`, and any directory carrying a `.codex-system-skills.marker` file) are **resident by definition** — no lock needed. MAM identifies them automatically and protects them on every path: they never enter the base snapshot, are never stashed, and can be neither toggled nor uninstalled through MAM. The same applies to native skills in a tool's directory that were never imported (registered) through MAM — exclusive presets leave them alone; import them via the Resources panel first if you want them to participate in preset switching.
+**Built-in native skills (resident by definition)**: a tool's own built-in skill directories (such as codex's `.system` and `_shared`, and any directory carrying a `.codex-system-skills.marker` file) are **resident by definition** — no lock needed. Tuvis identifies them automatically and protects them on every path: they never enter the base snapshot, are never stashed, and can be neither toggled nor uninstalled through Tuvis. The same applies to native skills in a tool's directory that were never imported (registered) through Tuvis — exclusive presets leave them alone; import them via the Resources panel first if you want them to participate in preset switching.
 
 ## Exclusive Bindings
 
@@ -74,8 +74,8 @@ Preset exclusivity and enable/disable both rely on the ledger (database) and the
 |-------|------|---------|
 | L1 | Missing link | The ledger says enabled, but the link is gone from disk |
 | L2 | Real directory | A real directory sits where a link should be, and the ledger says enabled |
-| L3 | Extra link | A link into the MAM repository exists on disk, but the ledger does not record it |
-| L4 | External link | The link points outside `~/.mam` (not MAM's business) |
+| L3 | Extra link | A link into the Tuvis repository exists on disk, but the ledger does not record it |
+| L4 | External link | The link points outside `~/.mam` (not Tuvis's business) |
 
 Each row offers three dispositions:
 
@@ -83,7 +83,7 @@ Each row offers three dispositions:
 - **b. Trust the disk, write back the ledger** — accept what's on disk and update the ledger to match;
 - **c. Leave it for now** — collapses the row for this round (it reappears on the next check).
 
-Two safety floors: **if L2-a finds the real directory's contents differ from the shared repository copy, the row escalates to "needs manual attention" — MAM never deletes a real directory**; and L4 always escalates to manual regardless of choosing a or b, leaving the scene untouched. Group headers offer batch buttons ("fix all disk from ledger / write all back to ledger") that process a whole tool at once.
+Two safety floors: **if L2-a finds the real directory's contents differ from the shared repository copy, the row escalates to "needs manual attention" — Tuvis never deletes a real directory**; and L4 always escalates to manual regardless of choosing a or b, leaving the scene untouched. Group headers offer batch buttons ("fix all disk from ledger / write all back to ledger") that process a whole tool at once.
 
 **② Snapshot invariant violations**: leftovers such as "snapshot exists but no active preset", each with a one-click fix (which runs restore-default for that tool).
 

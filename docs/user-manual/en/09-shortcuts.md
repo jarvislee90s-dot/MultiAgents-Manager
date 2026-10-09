@@ -4,11 +4,11 @@ Global hotkeys and quick actions
 
 ## Overview
 
-This chapter covers Shortcuts functionality in MultiAgents Manager.
+This chapter covers Shortcuts functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Shortcuts features for managing AI programming tools.
+Tuvis provides comprehensive Shortcuts features for managing AI programming tools.
 
 ## Steps
 

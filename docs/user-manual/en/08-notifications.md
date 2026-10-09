@@ -4,11 +4,11 @@ Sound and desktop notification configuration
 
 ## Overview
 
-This chapter covers Notifications functionality in MultiAgents Manager.
+This chapter covers Notifications functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Notifications features for managing AI programming tools.
+Tuvis provides comprehensive Notifications features for managing AI programming tools.
 
 ## Steps
 

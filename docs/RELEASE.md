@@ -28,13 +28,13 @@ pnpm tauri signer generate -w ~/.mam/tauri.key   # 密码直接回车留空
 5. 完成后到 Releases 页核对：正文含更新内容 + 下载清单，产物全部挂载
 
 ## 用户如何下载/更新
-- GitHub Releases 页面（`https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases`）：下载对应平台的 dmg / exe
+- GitHub Releases 页面（`https://github.com/jarvislee90s-dot/tuvis/releases`）：下载对应平台的 dmg / exe
 - 已安装旧版的应用：启动时自动检测更新并提示（自动更新走 `latest.json`，无需手动下载）
-- 自动更新端点：`https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/latest/download/latest.json`
+- 自动更新端点：`https://github.com/jarvislee90s-dot/tuvis/releases/latest/download/latest.json`
 
 ## 手动补挂产物（个别平台构建失败时）
 ```bash
-gh release upload vX.Y.Z ./path/to/installer.exe --repo jarvislee90s-dot/MultiAgents-Manager
+gh release upload vX.Y.Z ./path/to/installer.exe --repo jarvislee90s-dot/tuvis
 ```
 
 ## 失败恢复

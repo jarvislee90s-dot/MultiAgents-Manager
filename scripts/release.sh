@@ -16,9 +16,9 @@ VERSION="${1:-$(python3 -c "import json; print(json.load(open('src-tauri/tauri.c
 echo "🔨 Building v$VERSION..."
 pnpm tauri build
 
-DMG_SRC="$PROJECT_DIR/src-tauri/target/release/bundle/dmg/MultiAgents Manager_${VERSION}_aarch64.dmg"
-APP_SRC="$PROJECT_DIR/src-tauri/target/release/bundle/macos/MultiAgents Manager.app"
-TAR_SRC="$PROJECT_DIR/src-tauri/target/release/bundle/macos/MultiAgents Manager.app.tar.gz"
+DMG_SRC="$PROJECT_DIR/src-tauri/target/release/bundle/dmg/Tuvis_${VERSION}_aarch64.dmg"
+APP_SRC="$PROJECT_DIR/src-tauri/target/release/bundle/macos/Tuvis.app"
+TAR_SRC="$PROJECT_DIR/src-tauri/target/release/bundle/macos/Tuvis.app.tar.gz"
 
 RELEASE_DIR="$PROJECT_DIR/release"
 mkdir -p "$RELEASE_DIR"
@@ -27,14 +27,14 @@ echo "📦 Copying artifacts to $RELEASE_DIR/..."
 
 if [ -f "$DMG_SRC" ]; then
   cp "$DMG_SRC" "$RELEASE_DIR/"
-  echo "  ✅ DMG: MultiAgents Manager_${VERSION}_aarch64.dmg"
+  echo "  ✅ DMG: Tuvis_${VERSION}_aarch64.dmg"
 else
   echo "  ⚠️  DMG not found: $DMG_SRC"
 fi
 
 if [ -f "$TAR_SRC" ]; then
   cp "$TAR_SRC" "$RELEASE_DIR/"
-  echo "  ✅ TAR: MultiAgents Manager.app.tar.gz"
+  echo "  ✅ TAR: Tuvis.app.tar.gz"
 else
   echo "  ⚠️  TAR not found: $TAR_SRC"
 fi
@@ -55,8 +55,8 @@ if [ ! -f "$NOTES_FILE" ]; then
 
 ### 📦 打包
 
-- macOS DMG: \`MultiAgents Manager_${VERSION}_aarch64.dmg\`
-- macOS .app: \`MultiAgents Manager.app\`
+- macOS DMG: \`Tuvis_${VERSION}_aarch64.dmg\`
+- macOS .app: \`Tuvis.app\`
 EOF
   echo "  📝 Created release notes template: $NOTES_FILE"
   echo "  ⚠️  请编辑 $NOTES_FILE 补充变更内容后提交"

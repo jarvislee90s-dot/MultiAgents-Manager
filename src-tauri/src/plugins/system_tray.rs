@@ -251,7 +251,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
                 .icon(app.default_window_icon().unwrap().clone())
-                .tooltip("MultiAgents Manager")
+                .tooltip("Tuvis")
                 .show_menu_on_left_click(false)
                 .on_tray_icon_event(|tray, event| {
                     if let TrayIconEvent::Click {
@@ -406,14 +406,14 @@ pub fn update_tray_status(
 
         // 托盘提示
         let tooltip = if total_count == 0 {
-            "MultiAgents Manager".to_string()
+            "Tuvis".to_string()
         } else if waiting_count > 0 {
             format!(
-                "MultiAgents Manager \u{2014} {} sessions, {} waiting",
+                "Tuvis \u{2014} {} sessions, {} waiting",
                 total_count, waiting_count
             )
         } else {
-            format!("MultiAgents Manager \u{2014} {} sessions", total_count)
+            format!("Tuvis \u{2014} {} sessions", total_count)
         };
         let _ = tray.set_tooltip(Some(&tooltip));
     }

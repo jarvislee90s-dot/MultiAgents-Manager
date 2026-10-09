@@ -49,7 +49,7 @@ export default function AboutPage() {
   }, []);
 
   const handleOpenGithub = async () => {
-    await openUrl("https://github.com/jarvislee90s-dot/MultiAgents-Manager");
+    await openUrl("https://github.com/jarvislee90s-dot/tuvis");
   };
 
   return (

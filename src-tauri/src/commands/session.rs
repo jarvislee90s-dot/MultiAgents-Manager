@@ -408,7 +408,7 @@ pub async fn session_open(app: tauri::AppHandle, session_id: String) -> Result<(
             if let Err(e) = app
                 .notification()
                 .builder()
-                .title("MultiAgents Manager")
+                .title("Tuvis")
                 .body(crate::inject::resume::TRUST_PROMPT_REMINDER)
                 .show()
             {

@@ -28,7 +28,7 @@ pub fn capture_window_screenshot(_app: tauri::AppHandle) -> ScreenshotResult {
         let screenshot_path = screenshot_dir.join(format!("screenshot_{}.png", timestamp));
         let path_str = screenshot_path.to_string_lossy().to_string();
         let window_id_output = Command::new("sh")
-            .args(["-c", "osascript -e 'tell application \"System Events\" to get id of first process whose name contains \"multi-agents-manager\"' 2>/dev/null || echo ''"])
+            .args(["-c", "osascript -e 'tell application \"System Events\" to get id of first process whose name contains \"multi-agents-manager\" or name contains \"tuvis\"' 2>/dev/null || echo ''"])
             .output();
         let capture_result = if let Ok(output) = window_id_output {
             let window_id = String::from_utf8_lossy(&output.stdout).trim().to_string();

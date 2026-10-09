@@ -13,4 +13,4 @@
 
 ## English Summary
 
-MultiAgents-Manager is local-first: no telemetry, no analytics or ad SDKs; all data stays on your machine (`~/.mam/`). Supported agents' local files are read only to power management features. Update checks contact GitHub Releases only. Remote-access features (M2+) travel over channels you configure yourself; no official servers are operated today.
+Tuvis is local-first: no telemetry, no analytics or ad SDKs; all data stays on your machine (`~/.mam/`). Supported agents' local files are read only to power management features. Update checks contact GitHub Releases only. Remote-access features (M2+) travel over channels you configure yourself; no official servers are operated today.

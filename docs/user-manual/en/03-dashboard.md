@@ -4,11 +4,11 @@ Dashboard layout, session cards, and status indicators
 
 ## Overview
 
-This chapter covers Dashboard functionality in MultiAgents Manager.
+This chapter covers Dashboard functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Dashboard features for managing AI programming tools.
+Tuvis provides comprehensive Dashboard features for managing AI programming tools.
 
 ## Steps
 

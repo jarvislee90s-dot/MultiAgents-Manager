@@ -4,11 +4,11 @@ Installation steps for macOS, Linux, and Windows
 
 ## Overview
 
-This chapter covers Installation functionality in MultiAgents Manager.
+This chapter covers Installation functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Installation features for managing AI programming tools.
+Tuvis provides comprehensive Installation features for managing AI programming tools.
 
 ## Steps
 

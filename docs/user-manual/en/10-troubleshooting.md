@@ -4,11 +4,11 @@ Common issues and solutions
 
 ## Overview
 
-This chapter covers Troubleshooting functionality in MultiAgents Manager.
+This chapter covers Troubleshooting functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Troubleshooting features for managing AI programming tools.
+Tuvis provides comprehensive Troubleshooting features for managing AI programming tools.
 
 ## Steps
 

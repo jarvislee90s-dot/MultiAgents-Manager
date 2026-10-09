@@ -5952,7 +5952,7 @@ mod tests {
             .values()
             .filter(|p| {
                 let name = p.name().to_string_lossy().to_lowercase();
-                if name.contains("multi-agents-manager") {
+                if name.contains("multi-agents-manager") || name.contains("tuvis") {
                     return false;
                 }
                 if name.contains("codex") {

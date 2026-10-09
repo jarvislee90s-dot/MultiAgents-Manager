@@ -13,13 +13,17 @@ use serde::{Deserialize, Serialize};
 use tauri::Emitter;
 use tauri_plugin_updater::UpdaterExt;
 
-const GITHUB_REPO: &str = "jarvislee90s-dot/MultiAgents-Manager";
+const GITHUB_REPO: &str = "jarvislee90s-dot/tuvis";
+/// 品牌改名前的旧仓名（2026-10 改名兔维斯）：存量客户端编译死的校验前缀是旧仓名，
+/// 而新 latest.json 里的资产 URL 用新仓名——校验必须双前缀兼容，否则存量用户
+/// 拉到新清单会因前缀不符被直接拒升（自动更新断链）
+const LEGACY_GITHUB_REPO: &str = "jarvislee90s-dot/MultiAgents-Manager";
 const RELEASES_API_URL: &str =
-    "https://api.github.com/repos/jarvislee90s-dot/MultiAgents-Manager/releases?per_page=30";
+    "https://api.github.com/repos/jarvislee90s-dot/tuvis/releases?per_page=30";
 /// 钉 IP 直连的域名（resolve 只对**直连**生效；兜底客户端必须 no_proxy，见下）
 const GITHUB_API_HOST: &str = "api.github.com";
 /// GitHub API 强制要求 User-Agent，否则 403
-const USER_AGENT: &str = "multi-agents-manager-updater";
+const USER_AGENT: &str = "tuvis-updater";
 /// 进度事件名（沿用 `mam-` 前缀惯例）
 pub const PROGRESS_EVENT: &str = "mam-updater-progress";
 /// 兜底直连最多试几个 DoH 地址（同 reach.rs B-M7 口径：首条陈旧时还有得试，
@@ -275,8 +279,11 @@ pub async fn check_for_github_update(app: tauri::AppHandle) -> CheckUpdateStatus
 /// （前端传参理论只有自家 webview，纵深防御；latest.json 进插件后另有
 /// pinned 公钥签名校验兜底）。抽纯函数以便单测（评审 M8）。
 pub fn validate_latest_json_url(url: &str) -> Result<(), String> {
-    let expected_prefix = format!("https://github.com/{GITHUB_REPO}/releases/download/");
-    if !url.starts_with(&expected_prefix) {
+    // 新旧仓名前缀都合法（改名过渡期，见 LEGACY_GITHUB_REPO）
+    let prefix_ok = [GITHUB_REPO, LEGACY_GITHUB_REPO].iter().any(|repo| {
+        url.starts_with(&format!("https://github.com/{repo}/releases/download/"))
+    });
+    if !prefix_ok {
         return Err(format!("非法的升级清单地址（前缀不符）: {url}"));
     }
     if !url.ends_with("latest.json") {
@@ -561,7 +568,12 @@ mod tests {
     fn validates_latest_json_url_prefix_and_suffix() {
         // 合法：本仓库 release 资产下的 latest.json
         assert!(validate_latest_json_url(
-            "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0-beta.1/latest.json"
+            "https://github.com/jarvislee90s-dot/tuvis/releases/download/v0.5.0-beta.1/latest.json"
+        )
+        .is_ok());
+        // 合法：改名前的旧仓名前缀（过渡期双兼容）
+        assert!(validate_latest_json_url(
+            "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0/latest.json"
         )
         .is_ok());
         // 他仓库前缀
@@ -571,12 +583,12 @@ mod tests {
         .is_err());
         // 明文 http
         assert!(validate_latest_json_url(
-            "http://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0/latest.json"
+            "http://github.com/jarvislee90s-dot/tuvis/releases/download/v0.5.0/latest.json"
         )
         .is_err());
         // 非 latest.json 资产
         assert!(validate_latest_json_url(
-            "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0/evil.exe"
+            "https://github.com/jarvislee90s-dot/tuvis/releases/download/v0.5.0/evil.exe"
         )
         .is_err());
     }
@@ -609,11 +621,11 @@ mod tests {
         // CI 拼装的 body 形态：标题 + 下载清单 + --- + ### 更新内容 + 说明本体。
         // 弹窗只该拿分节符之后的本体（0.5.2 用户实测：整段塞弹窗 = 第一屏全是
         // 与场景无关的下载清单，真内容在折叠线下，「没头没尾」）
-        let body = "## MultiAgents Manager v0.5.2\n\
+        let body = "## Tuvis v0.5.2\n\
                     \n\
                     ### 下载\n\
                     \n\
-                    - **macOS**: `MultiAgents-Manager-0.5.2-macOS.dmg`\n\
+                    - **macOS**: `Tuvis-0.5.2-macOS.dmg`\n\
                     \n\
                     ---\n\
                     \n\

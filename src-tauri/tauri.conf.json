@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "MultiAgents Manager",
-  "mainBinaryName": "multi-agents-manager",
+  "productName": "Tuvis",
+  "mainBinaryName": "tuvis",
   "version": "0.5.2",
   "identifier": "com.jarvis.multiagents-manager",
   "build": {
@@ -14,7 +14,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDVFNUM2ODkzRkYzNjQwRjgKUldUNFFEYi9rMmhjWHRoN1IvMERlOEw4aEpSV25tdDl3TCtDMkZsL2wycGtqbnRraXdUb3BxV2wK",
       "endpoints": [
-        "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/latest/download/latest.json"
+        "https://github.com/jarvislee90s-dot/tuvis/releases/latest/download/latest.json"
       ],
       "windows": {
         "installMode": "passive"
@@ -26,7 +26,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "MultiAgents Manager",
+        "title": "Tuvis",
         "width": 800,
         "height": 600,
         "decorations": false,

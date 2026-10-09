@@ -9045,7 +9045,7 @@ fn write_create_evidence(
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
     let path = base.join(format!("create-{task_id}-{ts}.txt"));
     let mut body = format!(
-        "MAM 新建会话未识别屏现场快照\n任务 {task_id} · 工具 {tool} · 目录 {dir}\n\
+        "兔维斯新建会话未识别屏现场快照\n任务 {task_id} · 工具 {tool} · 目录 {dir}\n\
          采集 {ts}（末次屏读逐行原文）\n----\n"
     );
     for line in screen {

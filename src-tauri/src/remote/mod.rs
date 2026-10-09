@@ -1189,7 +1189,7 @@ fn display_host_name(saved: Option<String>, sysinfo: impl FnOnce() -> Option<Str
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
         .or_else(sysinfo)
-        .unwrap_or_else(|| "MAM".into())
+        .unwrap_or_else(|| "Tuvis".into())
 }
 
 /// 编译目标平台标识（P8）：固定三值，供移动端按平台给提示/图标
@@ -4147,7 +4147,7 @@ mod host_tests {
         assert!(!boot_id().is_empty());
     }
 
-    /// 本机名取值顺序：DB 设置（Some 且非空）> sysinfo > "MAM"（P8b 优先级）
+    /// 本机名取值顺序：DB 设置（Some 且非空）> sysinfo > "Tuvis"（P8b 优先级）
     #[test]
     fn display_host_name_prefers_saved_then_sysinfo_then_fallback() {
         // 1) DB 设置非空 → 直接采用
@@ -4162,8 +4162,8 @@ mod host_tests {
             display_host_name(None, || Some("mac-studio".into())),
             "mac-studio"
         );
-        // 3) 双双未命中 → "MAM" 品牌兜底
-        assert_eq!(display_host_name(None, || None), "MAM");
+        // 3) 双双未命中 → "Tuvis" 品牌兜底
+        assert_eq!(display_host_name(None, || None), "Tuvis");
     }
 
     /// 空串设置视为未设置（配置损坏不得顶替 sysinfo 真实主机名）
@@ -4174,7 +4174,7 @@ mod host_tests {
             "real-host",
             "空串设置必须回落 sysinfo（filter 非 empty）"
         );
-        assert_eq!(display_host_name(Some("   ".into()), || None), "MAM");
+        assert_eq!(display_host_name(Some("   ".into()), || None), "Tuvis");
     }
 
     /// platform 判定（P8）：固定三值之一；本机编译目标 darwin → macos

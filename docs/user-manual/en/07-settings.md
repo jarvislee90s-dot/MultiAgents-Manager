@@ -4,11 +4,11 @@ Notifications, polling, tool detection settings
 
 ## Overview
 
-This chapter covers Settings functionality in MultiAgents Manager.
+This chapter covers Settings functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Settings features for managing AI programming tools.
+Tuvis provides comprehensive Settings features for managing AI programming tools.
 
 ## Remote Access
 

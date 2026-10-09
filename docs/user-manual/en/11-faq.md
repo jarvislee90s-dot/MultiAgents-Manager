@@ -4,11 +4,11 @@ Frequently asked questions
 
 ## Overview
 
-This chapter covers FAQ functionality in MultiAgents Manager.
+This chapter covers FAQ functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive FAQ features for managing AI programming tools.
+Tuvis provides comprehensive FAQ features for managing AI programming tools.
 
 ## Steps
 

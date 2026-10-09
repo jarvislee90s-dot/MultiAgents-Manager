@@ -162,11 +162,11 @@ if (!isTauri) {
             {
               id: "mock-claude-1",
               agentType: "claude",
-              projectName: "MultiAgents-Manager",
-              projectPath: "/Users/jarvis/Documents/MultiAgents-Manager",
+              projectName: "tuvis",
+              projectPath: "/Users/jarvis/Documents/tuvis",
               title: "实现资源看板重构",
               gitBranch: "feat/resource-dashboard-redesign",
-              githubUrl: "https://github.com/user/MultiAgents-Manager",
+              githubUrl: "https://github.com/user/tuvis",
               status: "processing",
               lastMessage: "继续实现 Layer 2 目录管理...",
               lastMessageRole: "assistant",
@@ -181,8 +181,8 @@ if (!isTauri) {
             {
               id: "mock-codex-1",
               agentType: "codex",
-              projectName: "MultiAgents-Manager",
-              projectPath: "/Users/jarvis/Documents/MultiAgents-Manager",
+              projectName: "tuvis",
+              projectPath: "/Users/jarvis/Documents/tuvis",
               title: "修复编译错误",
               gitBranch: "feat/resource-dashboard-redesign",
               githubUrl: null,
@@ -839,11 +839,11 @@ if (!isTauri) {
               notes:
                 "## v0.5.0-beta.1 更新\n\n> 预发布：远程操控试验性开放。\n\n- **手机远程操控**：发消息/排队/撤回\n- **远程审批与问答**：屏读为准实时同步\n\n| 功能 | 状态 |\n| --- | --- |\n| 发消息 | ✅ |\n| 审批 | ✅ |\n",
               htmlUrl:
-                "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/tag/v0.5.0-beta.1",
+                "https://github.com/jarvislee90s-dot/tuvis/releases/tag/v0.5.0-beta.1",
               publishedAt: "2026-09-23T15:18:19Z",
               tag: "v0.5.0-beta.1",
               latestJsonUrl:
-                "https://github.com/jarvislee90s-dot/MultiAgents-Manager/releases/download/v0.5.0-beta.1/latest.json",
+                "https://github.com/jarvislee90s-dot/tuvis/releases/download/v0.5.0-beta.1/latest.json",
             },
           });
         }

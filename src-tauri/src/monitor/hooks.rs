@@ -991,10 +991,10 @@ pub fn consume_codex_trust_notice(app: &tauri::AppHandle) {
     if let Err(e) = app
         .notification()
         .builder()
-        .title("MultiAgents Manager")
+        .title("Tuvis")
         .body(
             "Codex 钩子已注册，需信任后事件才会触发：请在 Codex 终端输入 /hooks \
-             并信任 MAM 条目（一次性）",
+             并信任兔维斯条目（一次性）",
         )
         .show()
     {
@@ -1093,7 +1093,7 @@ pub fn register_all_hooks() {
                 // 仅需在 TUI 内人工信任一次；每次（重）注册后都提醒，核验跳过路径不提醒
                 if tool_id == "codex" {
                     warn!(
-                        "codex 需在 TUI 内 /hooks 审阅并信任 MAM 钩子一次，事件才会触发（trust 后 hash 落用户层 config）"
+                        "codex 需在 TUI 内 /hooks 审阅并信任兔维斯钩子一次，事件才会触发（trust 后 hash 落用户层 config）"
                     );
                     // T5 一次性桌面通知：仅首次（未示过）登记 pending，setup 期
                     // AppHandle 就绪后消费发出；重复注册/重启不再弹（KV 一次性）

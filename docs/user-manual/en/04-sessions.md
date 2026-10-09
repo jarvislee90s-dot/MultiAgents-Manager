@@ -4,11 +4,11 @@ Session status, notifications, and terminal focus
 
 ## Overview
 
-This chapter covers Session Management functionality in MultiAgents Manager.
+This chapter covers Session Management functionality in Tuvis.
 
 ## Features
 
-MultiAgents Manager provides comprehensive Session Management features for managing AI programming tools.
+Tuvis provides comprehensive Session Management features for managing AI programming tools.
 
 ## Steps
 

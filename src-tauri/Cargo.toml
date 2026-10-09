@@ -1,7 +1,7 @@
 [package]
-name = "multi-agents-manager"
+name = "tuvis"
 version = "0.5.2"
-description = "多 Agent 编程工具统一管理平台"
+description = "你的桌面多 Agent 指挥台"
 authors = ["jarvis"]
 edition = "2021"
 # MSRV：代码实际要求 1.89——src/linker/mod.rs:271 File::unlock（1.89 稳定）、
@@ -14,7 +14,7 @@ license = "MIT"
 # src/bin/mam-marker.rs（issue #43 marker helper）加入后仓库存在两个 bin，
 # 不指定 default-run 时 `cargo run` / `pnpm tauri:dev` 报
 # "could not determine which binary to run"（2026-09-11 Windows 实机验收发现 1）
-default-run = "multi-agents-manager"
+default-run = "tuvis"
 
 [features]
 # helper bin 的构建门（默认关）：额外 bin 在 macOS universal 打包下会必然失败
@@ -31,7 +31,7 @@ hook-listener = []
 marker-helper = ["hook-listener"]
 
 [[bin]]
-name = "multi-agents-manager"
+name = "tuvis"
 path = "src/main.rs"
 
 [[bin]]
