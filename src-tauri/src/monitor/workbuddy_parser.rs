@@ -449,6 +449,7 @@ pub fn get_workbuddy_sessions(processes: &[AgentProcess]) -> Vec<Session> {
             },
             last_message_role: None,
             last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: jsonl_mtime_ms
                 .map(|ms| {
                     chrono::DateTime::from_timestamp((ms / 1000) as i64, 0)

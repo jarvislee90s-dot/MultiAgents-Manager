@@ -1,15 +1,19 @@
 // 文件面板（M3+ 计划 Task 3）：会话工具调用涉及文件的聚合列表。
 // 纯展示（用户裁决 4）——排序/去重/计数全部后端完成（files.rs FileEntry），
-// 本组件的 chips 过滤只是**视图层筛选**已有结果。
+// 本组件的筛选只是**视图层筛选**已有结果。
 //
-// 布局由父组件（SessionDetail）决定：split/split-h 内联分屏、fullscreen 全屏，
-// 与单文件预览共用同一侧栏空间与三态切换器。
+// T1 sheet 化（2026-10-09）：本组件是预览区「文件」sheet 的看板——
+// - 子 Agent 卡区迁出为独立 sheet 看板（subagents/onOpenSubagent props 删除）；
+// - 布局切换器/关闭钮上收 SessionDetail 顶栏 sheet bar（唯一实例裁决，
+//   mode/onModeChange/onClose props 删除，布局本身由父组件承担）；
+// - 筛选条重排（决策 6）：单行三组下拉（追溯范围 ┃ 文件来源 ┃ 文件类型）+
+//   文件名搜索框，组间竖分隔符——kind/origin/scope/search 四状态与叠加过滤
+//   逻辑零变化（同一批 useState 换控件形态），「代码文件仅在类型=全部可见」
+//   口径保留，搜索纪律（S3：点「搜索」或回车才执行）保留。
 import { useEffect, useMemo, useState } from "react";
 import { FileText, Image as ImageIcon, X } from "lucide-react";
-import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
-import SubagentList from "./SubagentList";
 import { formatRelativeTime } from "./board-logic";
-import { fetchChannel, type ChannelInfo, type SessionFileEntry, type SubagentView } from "./api";
+import { fetchChannel, type ChannelInfo, type SessionFileEntry } from "./api";
 
 /** 带宽耗时预估的参考附件大小（§C5，MB）：面板只知路径不知大小，按线稿口径用
  *  20 MB 参考量给出「量级感受」（20MB×8bit / 1.8Mbps ≈ 1.5 分钟 / ÷0.8 ≈ 3.3 分钟） */
@@ -88,42 +92,44 @@ export function fileDirPrefix(path: string): string {
   return parts.join("/");
 }
 
+/** 组间竖分隔符（决策 6 单行三组筛选条的分组线；wireframe .vsep） */
+function FilterDivider() {
+  return (
+    <span
+      data-testid="file-filter-divider"
+      role="separator"
+      aria-orientation="vertical"
+      className="h-4 w-px shrink-0 bg-[var(--cb)]"
+    />
+  );
+}
+
+/** 下拉组的统一控件样式（三组同款，仅尺寸紧凑） */
+const FILTER_SELECT_CLS =
+  "rounded-md border border-[var(--cb)] bg-[var(--cbg)] px-1 py-0.5 text-xs text-[var(--tx)]";
+
 interface FilePanelProps {
-  /** 子 Agent 全量名单（观察台 §二）：空/undefined → 卡区整体不渲染 */
-  subagents?: SubagentView[] | null;
-  /** 卡片点击 → 详情（活跃实时预览 / 不活跃定格快照） */
-  onOpenSubagent?: (id: string) => void;
   /** 已按 lastSeq 降序（后端契约，本组件不再排序） */
   entries: SessionFileEntry[];
   /** 该档位下还有更早文件未纳入（档位提示依据） */
   truncated: boolean;
   scope: number;
   loading: boolean;
-  /** 当前布局（切换器高亮当前态；布局本身由父组件承担） */
-  mode: PreviewMode;
   onScopeChange: (n: number) => void;
   /** 主行文件名点击 → 进入单文件预览 */
   onOpenFile: (path: string) => void;
-  /** 布局切换（与单文件预览共用三态） */
-  onModeChange: (mode: PreviewMode) => void;
-  /** 字号档位（2026-09-16 用户裁决）：作用于列表内容区（头部/档位卡不受影响） */
+  /** 字号档位（2026-09-16 用户裁决）：作用于列表内容区（筛选条不受影响） */
   fontScale?: number;
-  onClose: () => void;
 }
 
 export default function FilePanel({
-  subagents = null,
-  onOpenSubagent,
   entries,
   truncated,
   scope,
   loading,
-  mode,
   onScopeChange,
   onOpenFile,
-  onModeChange,
   fontScale = 1,
-  onClose,
 }: FilePanelProps) {
   const [kind, setKind] = useState<FileKindFilter>("all");
   // 来源筛选（M5 B3）：默认全部来源；undefined origin 的旧载荷条目只在「全部」可见
@@ -174,14 +180,15 @@ export default function FilePanel({
 
   // 到顶判定（用户裁决 3）：1000 = MAX_LIMIT，到顶后不再提示"还有更早文件"
   const atTop = scope >= FILE_SCOPES[FILE_SCOPES.length - 1];
-  const chips: Array<{ key: FileKindFilter; label: string }> = [
+  // 类型下拉档（原 chips 收编为「文件类型」下拉，决策 6）
+  const kindOptions: Array<{ key: FileKindFilter; label: string }> = [
     { key: "all", label: "全部" },
     { key: "doc", label: "文档" },
     { key: "image", label: "图片" },
   ];
-  // 来源 chips（M5 线稿三池 + 全部；键 = 后端 origin 值域）
-  const originChips: Array<{ key: FileOriginFilter; label: string }> = [
-    { key: "all", label: "全部来源" },
+  // 来源下拉档（原 origin chips 收编为「文件来源」下拉；键 = 后端 origin 值域）
+  const originOptions: Array<{ key: FileOriginFilter; label: string }> = [
+    { key: "all", label: "全部" },
     { key: "user", label: "我上传的" },
     { key: "tool_read", label: "工具读取" },
     { key: "tool_write", label: "工具读写" },
@@ -199,87 +206,69 @@ export default function FilePanel({
       aria-label="文件面板"
       className="flex h-full min-h-0 flex-col bg-[var(--cbg)]"
     >
-      <header className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] px-3 py-2">
-        <span className="shrink-0 text-sm font-medium text-[var(--tx)]">文件</span>
-        {/* 类型过滤 chips（用户裁决 5） */}
-        <span role="group" aria-label="文件类型过滤" className="flex items-center gap-1">
-          {chips.map((c) => (
-            <button
-              key={c.key}
-              type="button"
-              data-testid={`file-chip-${c.key}`}
-              aria-pressed={kind === c.key}
-              onClick={() => setKind(c.key)}
-              className={`rounded-full px-2 py-0.5 text-xs ${
-                kind === c.key
-                  ? "bg-[var(--btnp)] text-[var(--btnpt)]"
-                  : "bg-[var(--cb)] text-[var(--mut)]"
-              }`}
-            >
-              {c.label}
-            </button>
-          ))}
-        </span>
-        <PreviewModeSwitcher mode={mode} onChange={onModeChange} testIdPrefix="preview-toggle" />
-        <button
-          type="button"
-          data-testid="panel-close"
-          aria-label="关闭文件面板"
-          onClick={onClose}
-          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
-        >
-          <X size={16} />
-        </button>
-      </header>
-
-      {/* 档位卡片（用户裁决 3）：三档常显、当前高亮 */}
-      <div className="flex shrink-0 items-center gap-1 border-b border-[var(--cb)] px-3 py-2">
-        {/* 单位注释（2026-09-16 用户裁决）：200/500/1000 指**消息条数** */}
-        <span className="text-xs text-[var(--mut)]">追溯范围</span>
-        <span
-          data-testid="file-scope-hint"
-          className="text-[10px] text-[var(--mut)]"
-          title="按最近的消息条数统计：user / assistant / 思考 / 工具调用 / 工具结果 各算 1 条"
-        >
-          （消息条数）
-        </span>
-        {FILE_SCOPES.map((s) => (
-          <button
-            key={s}
-            type="button"
-            data-testid={`file-scope-${s}`}
-            aria-pressed={scope === s}
-            onClick={() => onScopeChange(s)}
-            className={`rounded-full px-2 py-0.5 text-xs ${
-              scope === s
-                ? "bg-[var(--btnp)]/20 text-[var(--tx)]"
-                : "bg-[var(--cb)] text-[var(--mut)]"
-            }`}
+      {/* 筛选条（决策 6 单行三组）：追溯范围 ┃ 文件来源 ┃ 文件类型 ┃ 文件名搜索。
+          四状态与叠加过滤逻辑零变化；「代码文件仅在类型=全部可见」口径保留 */}
+      <div
+        data-testid="file-filter-bar"
+        className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-[var(--cb)] px-3 py-2 text-xs"
+      >
+        <label className="flex items-center gap-1 text-[var(--mut)]">
+          <span
+            data-testid="file-scope-hint"
+            title="按最近的消息条数统计：user / assistant / 思考 / 工具调用 / 工具结果 各算 1 条"
           >
-            {s}
-          </button>
-        ))}
-        {/* 来源筛选（M5 决策 10 / 线稿三池）：全部来源 / 我上传的 / 工具读取 / 工具读写 */}
-        <span className="text-[var(--mut)]">|</span>
-        <span role="group" aria-label="文件来源过滤" className="flex items-center gap-1">
-          {originChips.map((c) => (
-            <button
-              key={c.key}
-              type="button"
-              data-testid={`file-origin-${c.key}`}
-              aria-pressed={origin === c.key}
-              onClick={() => setOrigin(c.key)}
-              className={`rounded-full px-2 py-0.5 text-xs ${
-                origin === c.key
-                  ? "bg-violet-600 text-white dark:bg-violet-400"
-                  : "bg-[var(--cb)] text-[var(--mut)]"
-              }`}
-            >
-              {c.label}
-            </button>
-          ))}
-        </span>
-        {/* 文件名搜索（M5 决策 10）：点「搜索」（或回车）才执行 */}
+            追溯范围
+          </span>
+          <select
+            data-testid="file-scope-select"
+            aria-label="追溯范围（消息条数）"
+            value={String(scope)}
+            onChange={(e) => onScopeChange(Number(e.target.value))}
+            className={FILTER_SELECT_CLS}
+          >
+            {FILE_SCOPES.map((s) => (
+              <option key={s} value={String(s)}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <FilterDivider />
+        <label className="flex items-center gap-1 text-[var(--mut)]">
+          <span>文件来源</span>
+          <select
+            data-testid="file-origin-select"
+            aria-label="文件来源"
+            value={origin}
+            onChange={(e) => setOrigin(e.target.value as FileOriginFilter)}
+            className={FILTER_SELECT_CLS}
+          >
+            {originOptions.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <FilterDivider />
+        <label className="flex items-center gap-1 text-[var(--mut)]">
+          <span>文件类型</span>
+          <select
+            data-testid="file-kind-select"
+            aria-label="文件类型"
+            value={kind}
+            onChange={(e) => setKind(e.target.value as FileKindFilter)}
+            className={FILTER_SELECT_CLS}
+          >
+            {kindOptions.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <FilterDivider />
+        {/* 文件名搜索（M5 决策 10）：点「搜索」（或回车）才执行——两态分离纪律不变 */}
         <form
           role="search"
           aria-label="文件名搜索"
@@ -313,9 +302,6 @@ export default function FilePanel({
         data-font-scale={fontScale}
         className="min-h-0 flex-1 overflow-y-auto px-3 py-2"
       >
-        {/* 子 Agent 卡区（观察台 §二）：派发序单一列表，绿点走字/灰点冻结原位；
-            名单为空时卡区整体不渲染，不影响下方文件列表 */}
-        <SubagentList list={subagents ?? null} onOpen={onOpenSubagent ?? (() => {})} />
         {visible.length === 0 && !loading && (
           <p data-testid="panel-empty" className="py-12 text-center text-sm text-[var(--mut)]">
             {activeSearch || origin !== "all" ? "无匹配文件" : "该范围内未发现文件"}

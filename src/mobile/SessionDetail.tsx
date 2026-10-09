@@ -24,6 +24,7 @@ import {
   ChevronRight,
   PanelLeft,
   RotateCw,
+  X,
 } from "lucide-react";
 import ApproveCard from "./ApproveCard";
 import PlanFeedbackBar from "./PlanFeedbackBar";
@@ -32,12 +33,13 @@ import { useMessageRenderers } from "./message-render";
 import ModeBar from "./ModeBar";
 import SubagentChips from "./SubagentChips";
 import SubagentDetail from "./SubagentDetail";
+import SubagentList from "./SubagentList";
 import QuestionCard from "./QuestionCard";
 import BookmarkBar from "./BookmarkBar";
 import FilePanel from "./FilePanel";
 import FilePreview from "./FilePreview";
 import MessageComposer from "./MessageComposer";
-import { type PreviewMode } from "./PreviewModeSwitcher";
+import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
 import SplitHandle from "./SplitHandle";
 import {
   ApiError,
@@ -87,16 +89,21 @@ interface SessionDetailProps {
   onBack: () => void;
 }
 
-/** 预览侧栏状态（M3+ 辨识联合；观察台 §三 增第三形）：
- *  - list：文件面板（聚合列表，用户裁决 4/6）；
- *  - file：单文件预览；backToList 标记来源（从面板进入 → 显示返回按钮，
- *    从消息正文链接进入 → 无返回按钮，行为不变）；
- *  - subagent：子 agent 详情（活跃=实时预览自动刷新 / 不活跃=定格快照）——
- *    backToList 语义与 file 同款（chip 直达 = false，面板卡片进入 = true） */
-type PreviewState =
-  | { view: "list"; mode: PreviewMode }
-  | { view: "file"; path: string; mode: PreviewMode; backToList: boolean }
-  | { view: "subagent"; subagentId: string; mode: PreviewMode; backToList: boolean };
+/** 预览区状态（T1 sheet 化，2026-10-09：原 list/file/subagent 三形联合的等价重构
+ *  ——三形收敛为「看板 sheet + sheet 内选中态」）：
+ *  - sheet：当前看板（文件 / 子 Agent 两看板平级，顶栏 sheet 钮切换）；
+ *  - open：sheet 内选中态——none = 看板态；file = 单文件预览（files sheet 的二级）；
+ *    subagent = 子 agent 详情（subagents sheet 的二级，活跃=实时预览自动刷新 /
+ *    不活跃=定格快照）；
+ *  - mode：预览布局三态（唯一切换器在顶栏 sheet bar，S5 裁决）；
+ *  - backToList：open 项来源标记（从看板进入 → 内容页头显示返回按钮，
+ *    从消息正文链接 / chip 直达进入 → 无返回按钮，既有行为不变） */
+type PreviewState = {
+  sheet: "files" | "subagents";
+  open: { kind: "none" } | { kind: "file"; path: string } | { kind: "subagent"; id: string };
+  mode: PreviewMode;
+  backToList: boolean;
+};
 
 /** 面板默认追溯档位（首屏数据源，与详情页默认 limit 同标尺） */
 const FILE_DEFAULT_SCOPE = 200;
@@ -511,76 +518,95 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   }, []);
 
   // 点文件链接（消息正文）→ 预览。Bug 2 顺手项（spec P9「按屏幕宽度自适应」）：
-  // ≥768px 分屏（2026-09-20 裁决：竖屏 split = 文件在上、对话在下）、<768px 全屏；手动切换随时覆盖该默认值。
-  // backToList=false（从正文进入，无返回列表按钮，既有行为不变）
+  // ≥768px 分屏（2026-09-20 裁决 + T2 决策 2 收口：宽屏默认 split-h = 左对话右文件）、
+  // <768px 全屏；手动切换随时覆盖该默认值。
+  // 正文进入 → files sheet 选中该文件，backToList=false（无返回列表按钮，既有行为不变）
   const openFile = useCallback(
     (path: string) => {
       setPreview({
-        view: "file",
-        path,
-        mode: isWideViewport() ? "split" : "fullscreen",
+        sheet: "files",
+        open: { kind: "file", path },
+        mode: isWideViewport() ? "split-h" : "fullscreen",
         backToList: false,
       });
     },
     [isWideViewport]
   );
 
-  // 从文件面板进入单文件预览（M3+）：backToList=true → 预览页头显示返回按钮；
+  // 从文件看板进入单文件预览（M3+）：backToList=true → 预览页头显示返回按钮；
   // 布局沿用当前 mode（往返保持，用户裁决「布局保持」）
   const openFileFromList = useCallback((path: string) => {
     setPreview((p) => ({
-      view: "file",
-      path,
+      sheet: "files",
+      open: { kind: "file", path },
       mode: p?.mode ?? "fullscreen",
       backToList: true,
     }));
   }, []);
 
-  // chip 直达子 agent 详情（观察台 §二.4：不经过清单）：宽屏分屏/窄屏全屏，
-  // backToList=false（无返回列表按钮——FilePreview 从正文进入的同款语义）
+  // chip 直达子 agent 详情（观察台 §二.4）：切到 subagents sheet 并选中该 agent。
+  // 2026-10-09 sheet 两层级导航裁决：子 Agent sheet 不做预览区内分屏，清单与详情
+  // 是两级导航——chip 直达落在详情级，backToList=true（页头返回钮回清单，与清单
+  // 点卡同款，避免死端）；mode 仍按宽窄屏赋值（文件 sheet 消费；子 Agent sheet
+  // 忽略 mode 恒单栏）
   const openSubagent = useCallback(
     (id: string) => {
       setPreview({
-        view: "subagent",
-        subagentId: id,
-        mode: isWideViewport() ? "split" : "fullscreen",
-        backToList: false,
+        sheet: "subagents",
+        open: { kind: "subagent", id },
+        mode: isWideViewport() ? "split-h" : "fullscreen",
+        backToList: true,
       });
     },
     [isWideViewport]
   );
 
-  // 面板卡区进入（观察台 §二.5）：沿用当前 mode（往返保持，openFileFromList 同款）
+  // 清单看板点卡进入（观察台 §二.5）：沿用当前 mode（往返保持，openFileFromList 同款）
   const openSubagentFromList = useCallback((id: string) => {
     setPreview((p) => ({
-      view: "subagent",
-      subagentId: id,
+      sheet: "subagents",
+      open: { kind: "subagent", id },
       mode: p?.mode ?? "fullscreen",
       backToList: true,
     }));
+  }, []);
+
+  // 顶栏 sheet 钮切换（T1 sheet 化）：两看板平级互切；跨 sheet 的选中态不携带
+  // （file 选中在 subagents sheet 无从显示，反之亦然）→ 一并收回看板态
+  const switchSheet = useCallback((sheet: "files" | "subagents") => {
+    setPreview((p) =>
+      p === null || p.sheet === sheet
+        ? p
+        : { ...p, sheet, open: { kind: "none" }, backToList: false }
+    );
   }, []);
 
   // 页头面板入口（M3+）：宽屏默认 split-h（列表是行集，右侧整列纵向空间大）、
   // 窄屏 fullscreen（用户裁决：面板默认布局口径）。
-  // 面板开启态 = 当前是 list 视图（页头按钮高亮依据；文件预览态不算——那是
-  // 从列表或正文进入的下一层）；再点收回（ZCode 式排版，2026-09-16 用户裁决）
-  const panelOpen = preview?.view === "list";
+  // 面板开启态 = files sheet 看板态（页头按钮高亮依据；文件预览/子 agent 详情
+  // 不算——那是从看板或正文进入的下一层）；再点收回（ZCode 式排版，2026-09-16 用户裁决）
+  const panelOpen = preview !== null && preview.sheet === "files" && preview.open.kind === "none";
   const togglePanel = useCallback(() => {
     setPreview((p) =>
-      p?.view === "list"
+      p !== null && p.sheet === "files" && p.open.kind === "none"
         ? null
-        : { view: "list", mode: isWideViewport() ? "split-h" : "fullscreen" }
+        : {
+            sheet: "files",
+            open: { kind: "none" },
+            mode: isWideViewport() ? "split-h" : "fullscreen",
+            backToList: false,
+          }
     );
   }, [isWideViewport]);
 
   const closePreview = useCallback(() => setPreview(null), []);
 
-  // 从单文件预览返回列表（保持当前布局 mode）
-  const backToList = useCallback(() => {
-    setPreview((p) => ({ view: "list", mode: p?.mode ?? "fullscreen" }));
+  // 从二级内容（文件预览 / 子 agent 详情）返回所在 sheet 的看板态（保持当前布局 mode）
+  const backToBoard = useCallback(() => {
+    setPreview((p) => (p ? { ...p, open: { kind: "none" }, backToList: false } : p));
   }, []);
 
-  // 布局切换（预览页头控件与面板共用同一状态出口）
+  // 布局切换（顶栏 sheet bar 唯一实例，S5 裁决——预览组件内部的切换器已删）
   const changePreviewMode = useCallback((mode: PreviewMode) => {
     setPreview((p) => (p ? { ...p, mode } : p));
   }, []);
@@ -1053,6 +1079,136 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
     </>
   );
 
+  // ===== 预览区 sheet 化（T1，2026-10-09）=====
+  // 子 Agent sheet 钮的挂载门（决策 7）：名单为 null/空 → 钮不渲染（sheet 不可达）
+  const subagentsShown = subagentList !== null && subagentList.length > 0;
+  // 顶栏「子 Agent」钮的运行数徽标（n = running 数，非总数）
+  const runningCount = subagentList?.filter((s) => s.status === "running").length ?? 0;
+  // 当前选中的子 agent（subagents sheet 二级详情在显；null = 看板态/文件选中）。
+  // 先解出裸 id：闭包（.find 回调）里 TS 不保留 preview.open 的属性路径收窄
+  const subagentDetailId = preview?.open.kind === "subagent" ? preview.open.id : null;
+
+  // 顶栏 sheet bar（审查 S5 唯一实例裁决）：sheet 两钮 + 布局切换器 + 关闭。
+  // 原 FilePanel / FilePreview / SubagentDetail 内部的切换器/关闭钮全部不再渲染。
+  // split/split-h 时位于预览窗格顶部、fullscreen 时位于浮层顶部——同一份 JSX
+  // 两处落点，任一时刻只渲染一处（唯一实例不变）
+  const sheetBar = preview ? (
+    <div
+      data-testid="sheet-bar"
+      className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] bg-[var(--cbg)] px-3 py-2"
+    >
+      <button
+        type="button"
+        data-testid="sheet-tab-files"
+        aria-pressed={preview.sheet === "files"}
+        onClick={() => switchSheet("files")}
+        className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${
+          preview.sheet === "files"
+            ? "bg-violet-600 text-white dark:bg-violet-400"
+            : "bg-[var(--cb)] text-[var(--mut)] hover:text-[var(--tx)]"
+        }`}
+      >
+        ▤ 文件
+      </button>
+      {subagentsShown && (
+        <button
+          type="button"
+          data-testid="sheet-tab-subagents"
+          aria-pressed={preview.sheet === "subagents"}
+          onClick={() => switchSheet("subagents")}
+          className={`shrink-0 rounded-full px-2.5 py-1 text-xs ${
+            preview.sheet === "subagents"
+              ? "bg-violet-600 text-white dark:bg-violet-400"
+              : "bg-[var(--cb)] text-[var(--mut)] hover:text-[var(--tx)]"
+          }`}
+        >
+          ◉ 子 Agent ({runningCount})
+        </button>
+      )}
+      {/* 布局切换器：仅「文件」sheet 显示——子 Agent sheet 是两层级导航（清单 →
+          详情），无分屏布局可切（2026-10-09 用户裁决）；关闭钮两 sheet 恒有 */}
+      <span className="ml-auto flex shrink-0 items-center gap-1">
+        {preview.sheet === "files" && (
+          <PreviewModeSwitcher
+            mode={preview.mode}
+            onChange={changePreviewMode}
+            testIdPrefix="preview-toggle"
+          />
+        )}
+        <button
+          type="button"
+          data-testid="preview-close"
+          aria-label="关闭预览"
+          onClick={closePreview}
+          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
+        >
+          <X size={16} />
+        </button>
+      </span>
+    </div>
+  ) : null;
+
+  // sheet 看板（左栏）：文件面板 / 子 Agent 清单（分屏主从布局下选中卡高亮）
+  const sheetBoard = preview ? (
+    preview.sheet === "files" ? (
+      <FilePanel
+        entries={fileEntries}
+        truncated={fileTruncated}
+        scope={fileScope}
+        loading={fileLoading}
+        onScopeChange={setFileScope}
+        onOpenFile={openFileFromList}
+        fontScale={fontScale}
+      />
+    ) : subagentsShown ? (
+      <div data-font-scale={fontScale} className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+        <SubagentList
+          list={subagentList}
+          onOpen={openSubagentFromList}
+          selectedId={subagentDetailId}
+        />
+      </div>
+    ) : (
+      <p
+        data-testid="subagent-board-empty"
+        className="flex-1 py-12 text-center text-sm text-[var(--mut)]"
+      >
+        暂无子 Agent
+      </p>
+    )
+  ) : null;
+
+  // sheet 二级内容（右栏）：文件预览 / 子 agent 详情 / 空态提示
+  const sheetContent = preview ? (
+    preview.open.kind === "file" ? (
+      <FilePreview
+        session={session}
+        filePath={preview.open.path}
+        mode={preview.mode}
+        fontScale={fontScale}
+        onBack={preview.backToList ? backToBoard : undefined}
+      />
+    ) : subagentDetailId !== null ? (
+      <SubagentDetail
+        key={`subagent-detail-${session.id}-${subagentDetailId}`}
+        session={session}
+        subagentId={subagentDetailId}
+        subagentName={subagentList?.find((s) => s.id === subagentDetailId)?.name ?? null}
+        running={subagentList?.find((s) => s.id === subagentDetailId)?.status === "running"}
+        onBack={preview.backToList ? backToBoard : undefined}
+        openFile={openFile}
+        fontScale={fontScale}
+      />
+    ) : (
+      <div
+        data-testid="preview-empty"
+        className="flex h-full items-center justify-center px-4 text-sm text-[var(--mut)]"
+      >
+        选择左侧项目查看
+      </div>
+    )
+  ) : null;
+
   return (
     <div className="flex h-dvh flex-col bg-[var(--pg)] text-[var(--tx)]">
       <header className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] px-3 py-2">
@@ -1112,8 +1268,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
             </option>
           ))}
         </select>
-        {/* 布局切换器唯一实例在预览侧栏页头（FilePreview / FilePanel 内，
-            2026-09-16 用户裁决：两处重复出现占用页面空间，只保留贴近文件的那份） */}
+        {/* 布局切换器唯一实例已上收顶栏 sheet bar（T1 审查 S5 裁决：预览区 sheet 化后
+            顶栏持有唯一切换器/关闭钮，预览页头不再各自挂载） */}
         <button
           type="button"
           data-testid="detail-refresh"
@@ -1125,9 +1281,11 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </button>
       </header>
 
-      {/* 预览侧栏（M3+ 两视图共用 → 观察台起三视图）：split/split-h 内联分屏（可拖
-          分隔条），fullscreen 全屏浮层；list 视图渲染 FilePanel，file 视图渲染
-          FilePreview，subagent 视图渲染 SubagentDetail（观察台 T6 实时预览对话框） */}
+      {/* 预览区（T1 sheet 化）：split/split-h 内联分屏（可拖分隔条）——右/下窗格 =
+          顶栏 sheet bar + [看板 ┃ 内容] 主从两栏；fullscreen 全屏浮层——顶栏在浮层
+          顶部，看板与内容互斥（既有语义保留）。看板二选一：FilePanel（files sheet）/
+          SubagentList（subagents sheet）；内容三选一：FilePreview / SubagentDetail /
+          空态提示 */}
       {preview?.mode === "split" || preview?.mode === "split-h" ? (
         <div
           ref={splitRef}
@@ -1189,53 +1347,45 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
           >
             <div
               data-testid="preview-shell"
-              data-view={preview.view}
+              data-sheet={preview.sheet}
+              data-open={preview.open.kind}
               data-mode={preview.mode}
-              className="h-full"
+              className="flex h-full min-h-0 flex-col"
             >
-              {preview.view === "list" ? (
-                <FilePanel
-                  subagents={subagentList}
-                  onOpenSubagent={openSubagentFromList}
-                  entries={fileEntries}
-                  truncated={fileTruncated}
-                  scope={fileScope}
-                  loading={fileLoading}
-                  mode={preview.mode}
-                  onScopeChange={setFileScope}
-                  onOpenFile={openFileFromList}
-                  onModeChange={changePreviewMode}
-                  fontScale={fontScale}
-                  onClose={closePreview}
-                />
-              ) : preview.view === "subagent" ? (
-                <SubagentDetail
-                  key={`subagent-detail-${session.id}-${preview.subagentId}`}
-                  session={session}
-                  subagentId={preview.subagentId}
-                  subagentName={
-                    subagentList?.find((s) => s.id === preview.subagentId)?.name ?? null
-                  }
-                  running={
-                    subagentList?.find((s) => s.id === preview.subagentId)?.status === "running"
-                  }
-                  mode={preview.mode}
-                  onModeChange={changePreviewMode}
-                  onBack={preview.backToList ? backToList : undefined}
-                  openFile={openFile}
-                  fontScale={fontScale}
-                  onClose={closePreview}
-                />
+              {/* 顶栏 sheet bar（唯一实例：sheet 钮 + 布局切换器 + 关闭）。
+                布局切换器仅「文件」sheet 显示——子 Agent sheet 是两层级导航
+                （清单 → 详情，2026-10-09 用户裁决：不做预览区内分屏），无布局可切 */}
+              {sheetBar}
+              {/* 子 Agent sheet：**两层级导航**（用户裁决 2026-10-09：不做预览区内
+                分屏——46/54 双栏太窄）。清单（一级）与详情（二级）互斥单栏，
+                页头返回钮回清单；与文件 sheet 的主从分屏形态不同 */}
+              {preview.sheet === "subagents" ? (
+                preview.open.kind === "subagent" ? (
+                  <div data-testid="sheet-content" className="flex min-h-0 min-w-0 flex-1 flex-col">
+                    {sheetContent}
+                  </div>
+                ) : (
+                  <div data-testid="sheet-board" className="flex min-h-0 min-w-0 flex-1 flex-col">
+                    {sheetBoard}
+                  </div>
+                )
               ) : (
-                <FilePreview
-                  session={session}
-                  filePath={preview.path}
-                  mode={preview.mode}
-                  onModeChange={changePreviewMode}
-                  fontScale={fontScale}
-                  onBack={preview.backToList ? backToList : undefined}
-                  onClose={closePreview}
-                />
+                /* sheet 内二级：左=看板（FilePanel），右=文件预览/空态。
+                 46% 出自线稿（.pane.left width:46%）；内容与看板以竖线分界 */
+                <div className="flex min-h-0 min-w-0 flex-1">
+                  <div
+                    data-testid="sheet-board"
+                    className="flex min-h-0 w-[46%] shrink-0 flex-col overflow-hidden"
+                  >
+                    {sheetBoard}
+                  </div>
+                  <div
+                    data-testid="sheet-content"
+                    className="min-h-0 min-w-0 flex-1 overflow-hidden border-l border-[var(--cb)]"
+                  >
+                    {sheetContent}
+                  </div>
+                </div>
               )}
             </div>
           </div>
@@ -1265,56 +1415,30 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
         </div>
       )}
 
-      {/* fullscreen = 全屏浮层（覆盖对话，关闭回到原位——列表状态由本组件持有） */}
+      {/* fullscreen = 全屏浮层（覆盖对话，关闭回到原位——sheet 状态由本组件持有）。
+          顶栏 sheet bar 在浮层顶部（S5 唯一实例在全屏态的可达位）；看板与内容互斥
+          单栏整宽（既有互斥语义保留） */}
       {preview?.mode === "fullscreen" && (
-        <div className="fixed inset-0 z-50 bg-[var(--cbg)]">
+        <div className="fixed inset-0 z-50 flex flex-col bg-[var(--cbg)]">
           <div
             data-testid="preview-shell"
-            data-view={preview.view}
+            data-sheet={preview.sheet}
+            data-open={preview.open.kind}
             data-mode="fullscreen"
-            className="h-full"
+            className="flex min-h-0 flex-1 flex-col"
           >
-            {preview.view === "list" ? (
-              <FilePanel
-                subagents={subagentList}
-                onOpenSubagent={openSubagentFromList}
-                entries={fileEntries}
-                truncated={fileTruncated}
-                scope={fileScope}
-                loading={fileLoading}
-                mode="fullscreen"
-                onScopeChange={setFileScope}
-                onOpenFile={openFileFromList}
-                onModeChange={changePreviewMode}
-                fontScale={fontScale}
-                onClose={closePreview}
-              />
-            ) : preview.view === "subagent" ? (
-              <SubagentDetail
-                key={`subagent-detail-${session.id}-${preview.subagentId}`}
-                session={session}
-                subagentId={preview.subagentId}
-                subagentName={subagentList?.find((s) => s.id === preview.subagentId)?.name ?? null}
-                running={
-                  subagentList?.find((s) => s.id === preview.subagentId)?.status === "running"
-                }
-                mode="fullscreen"
-                onModeChange={changePreviewMode}
-                onBack={preview.backToList ? backToList : undefined}
-                openFile={openFile}
-                fontScale={fontScale}
-                onClose={closePreview}
-              />
+            {sheetBar}
+            {preview.open.kind === "none" ? (
+              <div
+                data-testid="sheet-board"
+                className="flex min-h-0 flex-1 flex-col overflow-hidden"
+              >
+                {sheetBoard}
+              </div>
             ) : (
-              <FilePreview
-                session={session}
-                filePath={preview.path}
-                mode="fullscreen"
-                onModeChange={changePreviewMode}
-                fontScale={fontScale}
-                onBack={preview.backToList ? backToList : undefined}
-                onClose={closePreview}
-              />
+              <div data-testid="sheet-content" className="min-h-0 min-w-0 flex-1">
+                {sheetContent}
+              </div>
             )}
           </div>
         </div>

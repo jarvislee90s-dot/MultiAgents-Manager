@@ -400,7 +400,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("fullscreen");
   });
 
-  it("Bug 2 顺手项：宽屏（matchMedia ≥768px）打开文件自动进分屏，窄屏默认全屏", async () => {
+  it("Bug 2 顺手项：宽屏（matchMedia ≥768px）打开文件自动进左右分屏 split-h，窄屏默认全屏", async () => {
     installFetch();
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
@@ -414,8 +414,9 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     });
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
     fireEvent.click(await screen.findByTestId("file-link"));
-    expect((await screen.findByTestId("file-preview")).getAttribute("data-mode")).toBe("split");
-    expect(screen.getByTestId("split-container")).toBeTruthy();
+    // T2 决策 2：宽屏默认 split-h（左右分行），不再是纵向 split
+    expect((await screen.findByTestId("file-preview")).getAttribute("data-mode")).toBe("split-h");
+    expect(screen.getByTestId("split-container").className).toContain("flex-row");
   });
 
   it("Bug 5：markdown 标题/列表渲染结构化元素且容器挂 md-body 排版类", async () => {
@@ -749,7 +750,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(filePaneH.getAttribute("style")).not.toContain("max-height");
   });
 
-  it("切换器只保留预览页头一份（2026-09-16 裁决），不占详情页头空间", async () => {
+  it("切换器与关闭钮唯一实例在顶栏 sheet bar（T1 审查 S5 裁决），预览组件内部不再有", async () => {
     installFetch();
     routes.messages = [
       msg({ seq: 0, kind: "assistant", content: "改了 /tmp/proj/src/app.rs 请看" }),
@@ -758,27 +759,30 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.fileContent = "fn main() {}";
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
 
-    // 预览未打开：整个页面没有任何布局切换器
+    // 预览未打开：无顶栏 sheet bar，整个页面没有任何布局切换器
+    expect(screen.queryByTestId("sheet-bar")).toBeNull();
     expect(screen.queryAllByTestId("preview-toggle-split")).toHaveLength(0);
     expect(screen.queryAllByTestId("preview-mode-split")).toHaveLength(0);
 
     fireEvent.click(await screen.findByTestId("file-link"));
-    // 打开后：切换器恰好一份（旧版两份——详情页头 + 预览页头），且属于预览页头
+    // 打开后：切换器与关闭钮恰好各一份，且都在顶栏 sheet bar 内（唯一实例）
     expect(screen.getAllByTestId("preview-toggle-split")).toHaveLength(1);
-    // 详情页头那份（旧 testid 前缀 preview-mode-*）不得再存在
+    expect(screen.getAllByTestId("preview-close")).toHaveLength(1);
+    const bar = screen.getByTestId("sheet-bar");
+    expect(bar.contains(screen.getByTestId("preview-toggle-split"))).toBe(true);
+    expect(bar.contains(screen.getByTestId("preview-close"))).toBe(true);
+    // 预览组件内部不得再有切换器/关闭钮（S5：内部实例删除或不再渲染）
+    const previewEl = screen.getByTestId("file-preview");
+    expect(previewEl.contains(screen.getByTestId("preview-toggle-split"))).toBe(false);
+    expect(previewEl.contains(screen.getByTestId("preview-close"))).toBe(false);
+    // 详情页头旧前缀（preview-mode-*）不得复活
     expect(screen.queryAllByTestId("preview-mode-split")).toHaveLength(0);
     expect(screen.queryAllByTestId("preview-mode-split-h")).toHaveLength(0);
     expect(screen.queryAllByTestId("preview-mode-fullscreen")).toHaveLength(0);
-    // 唯一那份在 file-preview 容器内（预览页头）
-    const previewEl = screen.getByTestId("file-preview");
-    expect(previewEl.contains(screen.getByTestId("preview-toggle-split"))).toBe(true);
-    expect(previewEl.contains(screen.getByTestId("preview-toggle-split-h"))).toBe(true);
-    expect(previewEl.contains(screen.getByTestId("preview-toggle-fullscreen"))).toBe(true);
 
-    // 三态在唯一入口下仍全通：全屏 → 左右 → 上下 → 回全屏
+    // 三态在唯一入口下仍全通：全屏 → 左右 → 上下 → 回全屏（含分屏态仍只有一份）
     fireEvent.click(screen.getByTestId("preview-toggle-split-h"));
     expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split-h");
-    // 分屏态（文件区顶部页头）同样只有一份
     expect(screen.getAllByTestId("preview-toggle-split")).toHaveLength(1);
     fireEvent.click(screen.getByTestId("preview-toggle-split"));
     expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split");
@@ -800,8 +804,10 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(screen.queryByTestId("preview-shell")).toBeNull();
     fireEvent.click(btn);
     // 进入列表视图：侧栏容器出现（jsdom 无 matchMedia → 窄屏默认 fullscreen）
+    // T1 sheet 化：data-view 三形收敛为 data-sheet + data-open（files sheet 看板态）
     const shell = await screen.findByTestId("preview-shell");
-    expect(shell.getAttribute("data-view")).toBe("list");
+    expect(shell.getAttribute("data-sheet")).toBe("files");
+    expect(shell.getAttribute("data-open")).toBe("none");
     expect(shell.getAttribute("data-mode")).toBe("fullscreen");
   });
 
@@ -854,24 +860,26 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     routes.fileContent = "fn main() {}";
     routes.fileMime = "text/rust";
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
-    // 打开面板 → 列表视图（窄屏全屏）
+    // 打开面板 → files sheet 看板态（窄屏全屏）
     fireEvent.click(await screen.findByTestId("file-panel-button"));
     const shell = await screen.findByTestId("preview-shell");
-    expect(shell.getAttribute("data-view")).toBe("list");
+    expect(shell.getAttribute("data-sheet")).toBe("files");
+    expect(shell.getAttribute("data-open")).toBe("none");
     // 面板列表渲染（后端顺序）
     expect(screen.getByTestId("file-row-0-open").textContent).toContain("app.rs");
     expect(screen.getByTestId("file-row-1-open").textContent).toContain("doc.md");
-    // 点文件名 → 单文件预览 + 返回按钮
+    // 点文件名 → files sheet 内选中该文件（open.file）+ 返回按钮
     fireEvent.click(screen.getByTestId("file-row-0-open"));
-    expect((await screen.findByTestId("preview-shell")).getAttribute("data-view")).toBe("file");
+    expect((await screen.findByTestId("preview-shell")).getAttribute("data-open")).toBe("file");
     expect((await screen.findByTestId("preview-code")).textContent).toContain("fn main() {}");
     // 从面板进入 → 有返回按钮
     const backBtn = screen.getByTestId("preview-back-list");
     expect(backBtn.getAttribute("aria-label")).toBe("返回文件列表");
-    // 返回列表：视图切回 list，布局 mode 保持
+    // 返回：open 收回看板态（none），布局 mode 保持
     fireEvent.click(backBtn);
     const back = screen.getByTestId("preview-shell");
-    expect(back.getAttribute("data-view")).toBe("list");
+    expect(back.getAttribute("data-open")).toBe("none");
+    expect(back.getAttribute("data-sheet")).toBe("files");
     expect(back.getAttribute("data-mode")).toBe("fullscreen");
   }, 15000);
 
@@ -2625,16 +2633,70 @@ describe("丁T2 N2：isPlanPending 与后端判据的跨语言共享夹具锁", 
 });
 
 // ==== 子 Agent 观察台 T5：清单拉取上提 SessionDetail（单一数据源）+ 点击跳转 ====
-// 拉取行为细节（轮询/失败静默/finished 冻结）由组件层用例覆盖，此处锁集成面：
-// 面板卡区全量名单（绿灰同列）与「点击卡片 → 预览区切 subagent 视图」。
+// T1 sheet 化：清单从 FilePanel 卡区迁出为独立 sheet 看板——集成面改为：
+// 顶栏切「子 Agent」sheet → 清单全量名单（绿灰同列）→ 点卡进详情（带返回钮）→ 返回回清单。
 describe("SessionDetail：子 Agent 清单与跳转（观察台 §二）", () => {
-  it("FilePanel 打开 → 卡区渲染全量名单（绿灰同列）；点击卡片 → 预览区切 subagent 视图", async () => {
+  const subagentRoutes = [
+    {
+      id: "a1",
+      name: "Plan",
+      description: "设计新方案",
+      spawnTs: "2026-10-08T07:31:07Z",
+      tokens: { input: 1, cacheRead: 0, cacheCreation: 0, output: 0 },
+      status: "running" as const,
+      endTs: null,
+    },
+    {
+      id: "b1",
+      name: "Explore",
+      description: null,
+      spawnTs: "2026-10-08T07:00:00Z",
+      tokens: { input: 1, cacheRead: 0, cacheCreation: 0, output: 0 },
+      status: "idle" as const,
+      endTs: "2026-10-08T07:30:00Z",
+    },
+  ];
+
+  it("顶栏切「子 Agent」sheet → 清单渲染全量名单（绿灰同列）；点卡进详情带返回钮；返回回清单", async () => {
+    installFetch();
+    routes.subagents = subagentRoutes;
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    // jsdom 无 matchMedia → 窄屏语义，面板默认 fullscreen 浮层
+    fireEvent.click(await screen.findByTestId("file-panel-button"));
+    // files sheet 的看板是 FilePanel，不再含子 Agent 卡区
+    expect(await screen.findByTestId("file-panel")).toBeTruthy();
+    expect(screen.queryByTestId("subagent-list")).toBeNull();
+    // 顶栏切到「子 Agent」sheet → 清单看板
+    fireEvent.click(screen.getByTestId("sheet-tab-subagents"));
+    const shell = await screen.findByTestId("preview-shell");
+    expect(shell.getAttribute("data-sheet")).toBe("subagents");
+    expect(shell.getAttribute("data-open")).toBe("none");
+    expect(await screen.findByTestId("subagent-card-a1")).toBeTruthy();
+    expect(screen.getByTestId("subagent-dot-b1").className).toContain("bg-gray-400");
+    // 点卡 → 详情（open.subagent，从清单进入 → backToList=true → 返回钮在场）
+    fireEvent.click(screen.getByTestId("subagent-card-a1"));
+    await vi.waitFor(() => {
+      const el = document.querySelector('[data-sheet="subagents"][data-open="subagent"]');
+      expect(el).toBeTruthy();
+    });
+    expect(screen.getByTestId("subagent-detail")).toBeTruthy();
+    expect(screen.getByTestId("subagent-back")).toBeTruthy();
+    // 返回 → 收回看板态（清单复现，选中高亮消失）
+    fireEvent.click(screen.getByTestId("subagent-back"));
+    expect((await screen.findByTestId("preview-shell")).getAttribute("data-open")).toBe("none");
+    expect(screen.getByTestId("subagent-card-a1")).toBeTruthy();
+  });
+});
+
+// ==== T1 预览区 sheet 化：顶栏 / 决策 7 / 空态 / chip 直达 ====
+describe("SessionDetail：预览区 sheet 化（T1）", () => {
+  it("顶栏两 sheet 钮 + 运行数徽标「子 Agent (n)」；点钮互切看板", async () => {
     installFetch();
     routes.subagents = [
       {
         id: "a1",
         name: "Plan",
-        description: "设计新方案",
+        description: null,
         spawnTs: "2026-10-08T07:31:07Z",
         tokens: { input: 1, cacheRead: 0, cacheCreation: 0, output: 0 },
         status: "running",
@@ -2651,14 +2713,92 @@ describe("SessionDetail：子 Agent 清单与跳转（观察台 §二）", () =>
       },
     ];
     render(<SessionDetail session={makeSession()} onBack={() => {}} />);
-    // jsdom 无 matchMedia → 窄屏语义，面板默认 fullscreen 浮层
     fireEvent.click(await screen.findByTestId("file-panel-button"));
-    expect(await screen.findByTestId("subagent-card-a1")).toBeTruthy();
-    expect(screen.getByTestId("subagent-dot-b1").className).toContain("bg-gray-400");
-    fireEvent.click(screen.getByTestId("subagent-card-a1"));
-    // T6 前占位断言：预览区进入 subagent 视图（data-view 由渲染分支写入）
-    await vi.waitFor(() =>
-      expect(document.querySelector('[data-view="subagent"]')).toBeTruthy()
+    // 顶栏：文件钮高亮；子 Agent 钮带 running 数徽标（1 running / 2 总数）
+    const filesTab = screen.getByTestId("sheet-tab-files");
+    expect(filesTab.getAttribute("aria-pressed")).toBe("true");
+    const saTab = screen.getByTestId("sheet-tab-subagents");
+    expect(saTab.getAttribute("aria-pressed")).toBe("false");
+    expect(saTab.textContent).toContain("子 Agent (1)");
+    // 切到子 Agent sheet：看板换为清单，FilePanel 退场
+    fireEvent.click(saTab);
+    expect((await screen.findByTestId("preview-shell")).getAttribute("data-sheet")).toBe(
+      "subagents"
     );
+    expect(await screen.findByTestId("subagent-list")).toBeTruthy();
+    expect(screen.queryByTestId("file-panel")).toBeNull();
+    expect(screen.getByTestId("sheet-tab-subagents").getAttribute("aria-pressed")).toBe("true");
+    // 切回文件 sheet
+    fireEvent.click(screen.getByTestId("sheet-tab-files"));
+    expect((await screen.findByTestId("preview-shell")).getAttribute("data-sheet")).toBe("files");
+    expect(await screen.findByTestId("file-panel")).toBeTruthy();
+  });
+
+  it("无子 agent 名单（空数组）→ 子 Agent 钮不渲染（决策 7），文件钮仍在", async () => {
+    installFetch();
+    routes.subagents = [];
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    fireEvent.click(await screen.findByTestId("file-panel-button"));
+    expect(screen.getByTestId("sheet-tab-files")).toBeTruthy();
+    expect(screen.queryByTestId("sheet-tab-subagents")).toBeNull();
+  });
+
+  it("宽屏分屏空态：右栏「选择左侧项目查看」；点文件后右栏换文件预览、左栏看板保留", async () => {
+    installFetch();
+    routes.messages = [msg({ seq: 0, kind: "assistant", content: "hi" })];
+    routes.files = [fileEntry("/tmp/proj/src/app.rs")];
+    routes.fileContent = "fn main() {}";
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: (q: string) => ({ matches: q.includes("min-width"), media: q }),
+    });
+    render(<SessionDetail session={makeSession()} onBack={() => {}} />);
+    // 宽屏打开面板 → 默认 split-h：左栏对话、右栏预览区（顶栏 + 看板 | 内容）
+    fireEvent.click(await screen.findByTestId("file-panel-button"));
+    expect(await screen.findByTestId("preview-shell")).toBeTruthy();
+    expect(screen.getByTestId("split-container").className).toContain("flex-row");
+    expect(screen.getByTestId("preview-empty").textContent).toContain("选择左侧项目查看");
+    // 点文件 → 右栏换文件预览，左栏 FilePanel 看板保留（主从并存）
+    fireEvent.click(screen.getByTestId("file-row-0-open"));
+    expect(await screen.findByTestId("file-preview")).toBeTruthy();
+    expect((await screen.findByTestId("preview-shell")).getAttribute("data-open")).toBe("file");
+    expect(screen.queryByTestId("preview-empty")).toBeNull();
+    const board = screen.getByTestId("sheet-board");
+    expect(board.contains(screen.getByTestId("file-panel"))).toBe(true);
+    // 预览组件内部无返回钮时返回路径仍在：关闭钮（顶栏唯一实例）收回整个预览区
+    fireEvent.click(screen.getByTestId("preview-close"));
+    expect(screen.queryByTestId("preview-shell")).toBeNull();
+  });
+
+  it("chip 点击直达：切到「子 Agent」sheet 并进详情，页头带返回钮（两层级导航，2026-10-09 裁决）；宽屏默认 split-h", async () => {
+    installFetch();
+    routes.subagents = [
+      {
+        id: "a1",
+        name: "Plan",
+        description: "设计新方案",
+        spawnTs: "2026-10-08T07:31:07Z",
+        tokens: { input: 1, cacheRead: 0, cacheCreation: 0, output: 0 },
+        status: "running",
+        endTs: null,
+      },
+    ];
+    // 宽屏 shim：chip 直达默认进 split-h（左对话右详情，T2 决策 2）
+    Object.defineProperty(window, "matchMedia", {
+      writable: true,
+      value: (q: string) => ({ matches: q.includes("min-width"), media: q }),
+    });
+    render(<SessionDetail session={makeSession({ status: "processing" })} onBack={() => {}} />);
+    // 运行态 chip 行在 cardDock（finished 不挂载——既有门不变）
+    fireEvent.click(await screen.findByTestId("subagent-chip-a1"));
+    // sheet=subagents + open=subagent + mode=split-h（两层级导航：chip 直达落详情级，返回钮回清单）
+    await vi.waitFor(() => {
+      expect(
+        document.querySelector('[data-sheet="subagents"][data-open="subagent"][data-mode="split-h"]')
+      ).toBeTruthy();
+    });
+    expect(screen.getByTestId("subagent-detail")).toBeTruthy();
+    expect(screen.getByTestId("split-container").className).toContain("flex-row");
+    expect(screen.getByTestId("subagent-back")).toBeTruthy(); // 两层级导航：详情级必有返回钮
   });
 });

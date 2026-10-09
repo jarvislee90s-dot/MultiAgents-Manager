@@ -1013,6 +1013,7 @@ async fn e2e_http_full_chain() {
         last_message: None,
         last_message_role: None,
         last_message_subagent_report: false,
+        flap_from_subagent_activity: false,
         last_activity_at: chrono::Utc::now().to_rfc3339(),
         pid: proc.target,
         cpu_usage: 0.0,

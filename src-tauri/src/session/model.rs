@@ -82,6 +82,10 @@ pub struct Session {
     /// claude 判据层同源打标——teammate-message / task-notification，其余工具
     /// 恒 false = 「未区分」如实申报，spec §四.4）
     pub last_message_subagent_report: bool,
+    /// 「本次状态由子 agent 活动引发」打标（终审发现 C / 决策 4）：活跃子 agent 在场
+    /// ∧ 最新 hook 事件 ∈ PostToolUse 族 ∧ 事件年龄 < 30s TTL。后端判定、前端只消费
+    /// 布尔、永不匹配文案；红/等待语义不受影响（前端对红边不节流不静默）
+    pub flap_from_subagent_activity: bool,
     pub last_activity_at: String,
     pub pid: u32,
     pub cpu_usage: f32,
@@ -137,5 +141,42 @@ mod jump_tests {
         let expected = cfg!(windows) || cfg!(target_os = "macos");
         assert_eq!(jump_supported_for(ProcessForm::Cli), expected);
         assert_eq!(jump_supported_for(ProcessForm::App), expected);
+    }
+
+    /// T4 F2b wire 契约：打标字段按 rename_all = camelCase 序列化为
+    /// `flapFromSubagentActivity`——前端（桌面 useNotification / 移动 Board）按此键消费，
+    /// snake_case 会静默 undefined（先例：watcher TransitionEvent 评审 Important 1）
+    #[test]
+    fn flap_tag_serializes_camel_case() {
+        let s = Session {
+            id: "s1".into(),
+            agent_type: AgentType::Claude,
+            project_name: "p".into(),
+            project_path: "/p".into(),
+            title: None,
+            git_branch: None,
+            github_url: None,
+            status: SessionStatus::Processing,
+            last_message: None,
+            last_message_role: None,
+            last_message_subagent_report: false,
+            flap_from_subagent_activity: true,
+            last_activity_at: String::new(),
+            pid: 1,
+            cpu_usage: 0.0,
+            active_subagent_count: 1,
+            form: ProcessForm::Cli,
+            jump_supported: false,
+            unread: false,
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(
+            v["flapFromSubagentActivity"], true,
+            "wire 键必须为 camelCase 的 flapFromSubagentActivity"
+        );
+        assert!(
+            v.get("flap_from_subagent_activity").is_none(),
+            "不得出现 snake_case 键（前端契约 camelCase）"
+        );
     }
 }

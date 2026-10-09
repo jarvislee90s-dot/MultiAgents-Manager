@@ -25,7 +25,11 @@ vi.mock("@/components/pet/petConfig", () => ({
 }));
 
 import { useSessionStore } from "@/stores/sessionStore";
-import { useNotification, GREEN_STABLE_MS } from "@/hooks/useNotification";
+import {
+  useNotification,
+  GREEN_STABLE_MS,
+  SAME_DIRECTION_NOTIFY_MS,
+} from "@/hooks/useNotification";
 
 const mkSession = (id: string, status: string) => ({
   id,
@@ -141,7 +145,7 @@ describe("绿灯稳定窗（GREEN_STABLE_MS）", () => {
     expect(greenNotices()).toBe(1);
   });
 
-  it("绿→黄→绿：黄即时播，第二段绿重新过窗再播", async () => {
+  it("绿→黄→绿：黄即时播；跨过同方向节流窗后第二段绿重新过窗再播", async () => {
     renderHook(() => useNotification());
     await drain();
 
@@ -158,6 +162,9 @@ describe("绿灯稳定窗（GREEN_STABLE_MS）", () => {
     await drain();
     expect(sendNotificationMock.mock.calls.length).toBeGreaterThanOrEqual(2);
     expect(greenNotices()).toBe(1);
+
+    // 跨过 F2a 同方向节流窗（60s，终审发现 C）：黄→绿边的节流记账过期
+    await advance(SAME_DIRECTION_NOTIFY_MS);
 
     // 再翻绿：重新过窗，满窗后再播
     setSessions([mkSession("s1", "idle")]);

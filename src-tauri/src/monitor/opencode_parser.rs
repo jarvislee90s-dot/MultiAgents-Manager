@@ -404,6 +404,7 @@ fn build_session_from_row(
         last_message: display_message,
         last_message_role: last_role,
         last_message_subagent_report: false,
+        flap_from_subagent_activity: false,
         last_activity_at,
         pid: process.pid,
         cpu_usage: process.cpu_usage,

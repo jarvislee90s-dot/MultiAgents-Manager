@@ -690,6 +690,8 @@ if (!isTauri) {
       case "get_setting":
         if (args?.key === "notifications_enabled") return Promise.resolve(true);
         if (args?.key === "notify_subagent_report") return Promise.resolve(true);
+        // F2b 静默开关：mock 缺省 true=静默（与真实端缺省语义一致）
+        if (args?.key === "silence_subagent_activity_flap") return Promise.resolve(true);
         if (args?.key === "notification_sound") return Promise.resolve("default");
         if (args?.key === "ui_theme") return Promise.resolve(null);
         // 升级忽略版本（prerelease 渠道）：配合 localStorage["mam-mock-updater-skipped"] 手验忽略语义

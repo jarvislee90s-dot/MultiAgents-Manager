@@ -51,12 +51,17 @@ export default function NotificationPage() {
 
   useEffect(() => {
     const win = getCurrentWindow();
+    // [Bug A 取证插桩·临时] 挂载行：浮窗页每次（重）加载记一条（H3 窗体重载判别）
+    console.debug("[notifwin] mounted", win.label, Date.now());
     let unlisten: (() => void) | null = null;
     // 监听必须限定本窗口：不指定 target 时监听器目标为 Any，会收到所有槽位窗口的
     // notification:new（emit_to 定向发送被 Any 监听器全收），导致每个浮窗都显示最后一条内容
     listen<NotificationPayload>(
       "notification:new",
       (e) => {
+        // [Bug A 取证插桩·临时] 出现行：每次实际弹出示必有一条（与 Rust cmd 行、
+        // 前端 [notif] SHOW_WINDOW 三点对账——有弹窗无此行 = 窗体被其他路径 show）
+        console.debug("[notifwin] shown", e.payload.sessionId, e.payload.status, Date.now());
         setPayload(e.payload);
         // 新通知到达时清掉旧候选列表，避免与卡片同时出现（先还原高度再显示，避免闪帧）
         setCandidates(null);

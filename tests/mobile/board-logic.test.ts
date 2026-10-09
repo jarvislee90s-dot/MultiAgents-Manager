@@ -168,6 +168,7 @@ describe("board-logic 跃迁展示（M3 Task 6）", () => {
       to: "waiting",
       projectName: "mam",
       lastMessage: null,
+      flapFromSubagentActivity: false,
       ts: 42,
       ...overrides,
     };

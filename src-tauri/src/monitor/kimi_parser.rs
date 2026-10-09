@@ -382,6 +382,7 @@ fn parse_kimi_session(entry: &IndexedSession, process: &AgentProcess) -> Option<
         last_message: d.last_message.clone(),
         last_message_role: d.last_role.clone(),
         last_message_subagent_report: false,
+        flap_from_subagent_activity: false,
         last_activity_at,
         pid: process.pid,
         cpu_usage: process.cpu_usage,

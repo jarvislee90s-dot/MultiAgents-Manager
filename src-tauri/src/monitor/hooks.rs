@@ -3677,6 +3677,7 @@ mod signal_health_tests {
             last_message: None,
             last_message_role: None,
             last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-20T00:00:00Z".to_string(),
             pid: 1,
             cpu_usage: 0.0,

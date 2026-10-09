@@ -1,15 +1,17 @@
-// 子 Agent 实时预览对话框（观察台 §三）：预览空间第三形态（与文件预览同区，
-// split/split-h/fullscreen 由父排版）。活跃 = 打开期间 5s 一拍自动刷新逐步输出
-// （关闭即停；hidden 暂停对齐 SessionDetail 轮询先例）；不活跃 = 定格快照。
+// 子 Agent 实时预览详情（观察台 §三）：预览区「子 Agent」sheet 的二级内容视图
+// （T1 sheet 化起与文件预览同区平级，split/split-h/fullscreen 由父排版）。
+// 活跃 = 打开期间 5s 一拍自动刷新逐步输出（关闭即停；hidden 暂停对齐
+// SessionDetail 轮询先例）；不活跃 = 定格快照。
 // 渲染复用 useMessageRenderers（与会话消息同一套视觉与交互，§三.5）。
 // 仅 claude：其余工具 supported=false → 明确「暂不支持查看详情」态。
 // 详情内**不重复展示时长/token**（评审 P3-8）：定格快照以清单卡冻结值为准
 // （验收口径单点），对话框只承载执行过程正文。
 // 页头状态点与 SubagentList 卡片点同款样式（两处 3 行重复，容忍——出现第三处
 // 消费再抽 Dot 小组件，评审 P3-9）。
+// T1 审查 S5 唯一实例裁决：布局切换器与关闭钮上收 SessionDetail 顶栏 sheet bar——
+// 本组件页头仅保留 状态点/名字/back 钮（mode/onModeChange/onClose props 删除）。
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import PreviewModeSwitcher, { type PreviewMode } from "./PreviewModeSwitcher";
 import { collapsedLabel, isProcessKind } from "./message-fold";
 import { useMessageRenderers } from "./message-render";
 import { ApiError, fetchSessionFiles, fetchSubagentMessages, type SessionMessage } from "./api";
@@ -26,11 +28,10 @@ interface SubagentDetailProps {
   subagentName: string | null;
   /** 运行态（来自名单快照）：true=实时预览（自动刷新），false=定格快照 */
   running: boolean;
-  mode: PreviewMode;
-  onModeChange?: (mode: PreviewMode) => void;
+  /** 返回清单（从清单看板进入时提供 → 页头显示返回按钮；
+   *  chip 直达（backToList=false）时缺省不渲染，既有行为不变） */
   onBack?: () => void;
   fontScale?: number;
-  onClose: () => void;
   /** 正文路径点击 → 文件预览（SessionDetail 传既有 openFile——§三.5「同一套交互」：
    *  详情正文里的已知路径可点开，与消息正文行为一致） */
   openFile: (path: string) => void;
@@ -52,11 +53,8 @@ export default function SubagentDetail({
   subagentId,
   subagentName,
   running,
-  mode,
-  onModeChange,
   onBack,
   fontScale = 1,
-  onClose,
   openFile,
 }: SubagentDetailProps) {
   const [messages, setMessages] = useState<SessionMessage[] | null>(null);
@@ -169,6 +167,7 @@ export default function SubagentDetail({
       className="flex h-full min-h-0 flex-col bg-[var(--cbg)]"
     >
       <header className="flex shrink-0 items-center gap-2 border-b border-[var(--cb)] px-3 py-2">
+        {/* 返回清单（二级导航）：仅从清单看板进入时出现（chip 直达无） */}
         {onBack && (
           <button
             type="button"
@@ -190,18 +189,7 @@ export default function SubagentDetail({
           {subagentName ?? subagentId}
         </span>
         {running && <span className="shrink-0 text-[10px] text-[var(--mut)]">实时 · 5s</span>}
-        {onModeChange && (
-          <PreviewModeSwitcher mode={mode} onChange={onModeChange} testIdPrefix="preview-toggle" />
-        )}
-        <button
-          type="button"
-          data-testid="subagent-close"
-          aria-label="关闭详情"
-          onClick={onClose}
-          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
-        >
-          <ChevronDown size={16} className="rotate-90" />
-        </button>
+        {/* S5 唯一实例裁决：布局切换器与关闭钮在顶栏 sheet bar，本页头不再渲染 */}
       </header>
 
       <div

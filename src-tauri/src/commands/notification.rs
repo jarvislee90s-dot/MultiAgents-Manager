@@ -38,6 +38,19 @@ pub async fn show_notification_window(
     app: AppHandle,
     payload: NotificationPayload,
 ) -> Result<(), String> {
+    // [Bug A 取证插桩·临时] 命令入口单行摘要：每次浮窗触发必有一条本日志，
+    // 与前端 [notif] SHOW_WINDOW / 浮窗页 [notifwin] shown 三点对账——
+    // 有弹窗无本行 = 浮窗自重显（H3）；本行频现而前端门全关 = 存在其他调用方（H1）。
+    log::info!(
+        "[notif] cmd show_notification_window: agentType={} project={} status={} title={} sessionId={} pid={} at={}",
+        payload.agent_type,
+        payload.project_name,
+        payload.status,
+        payload.title.chars().take(60).collect::<String>(),
+        payload.session_id,
+        payload.pid,
+        chrono::Local::now().to_rfc3339()
+    );
     // 建房必须放独立线程（Windows 上在命令内直接创建 webview 会死锁，wry#583）；
     // 结果经 oneshot 回收向上传播：失败时前端 catch 到 Err、降级系统 toast，通知不丢。
     // await 发生在异步运行时线程，不阻塞主循环，不会复活死锁。

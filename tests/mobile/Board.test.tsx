@@ -46,6 +46,7 @@ function chipSession(
     form: "cli",
     jumpSupported: false,
     unread: false,
+    flapFromSubagentActivity: false,
     ...overrides,
   };
 }
@@ -93,6 +94,7 @@ function transitionEvent(overrides: Partial<TransitionEvent> = {}): TransitionEv
     to: "waiting",
     projectName: "proj",
     lastMessage: "needs approval",
+    flapFromSubagentActivity: false,
     ts: 42,
     ...overrides,
   };
@@ -343,6 +345,118 @@ describe("Board 跃迁提醒（SSE transition）", () => {
     expect(() => emitFrame("transition", transitionEvent({ projectName: "no-cap" }))).not.toThrow();
     await advance(0);
     expect(screen.getByTestId("transition-banners").textContent).toContain("no-cap");
+  });
+});
+
+// 终审发现 C（决策 4）：子 agent 活动打标静默 + 同方向 60s 节流——手机端
+// 横幅/提示音/振动三件套共用同一静默门与节流门（口径镜像桌面 useNotification）。
+// 手机端仅消费**默认静默**（开关可见面在桌面设置页，无远程设置读取）
+describe("Board 子 agent 活动静默与同方向节流（终审发现 C）", () => {
+  beforeEach(() => {
+    localStorage.removeItem("mam-mobile-sound");
+  });
+
+  async function withChimeSpy() {
+    const chime = vi.fn();
+    const sound = await import("@/mobile/sound");
+    const spy = vi.spyOn(sound, "playCompletionChime").mockImplementation(chime);
+    return { chime, spy };
+  }
+
+  it("打标跃迁默认静默：无横幅/不振动/不响，卡片状态刷新照常（数据与提醒分离）", async () => {
+    installSse(
+      sessionsWith([
+        chipSession({
+          id: "s1",
+          agentType: "claude",
+          status: "processing",
+          projectName: "mam",
+          lastActivityAt: "2026-09-15T10:00:00Z",
+        }),
+      ])
+    );
+    const vibrate = vi.fn();
+    Object.defineProperty(navigator, "vibrate", { value: vibrate, configurable: true });
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame(
+        "transition",
+        transitionEvent({ from: "processing", to: "idle", flapFromSubagentActivity: true })
+      );
+      await advance(0);
+      expect(screen.queryByTestId("transition-banners")).not.toBeInTheDocument();
+      expect(vibrate).not.toHaveBeenCalled();
+      expect(chime).not.toHaveBeenCalled();
+      // 卡片数据刷新不受静默门影响：徽标已转绿（teammate 活动引发的翻绿如实上板）
+      const card = screen.getByText("mam").closest("li") as HTMLElement;
+      const badge = card.querySelector("span.mt-2") as HTMLElement;
+      expect(badge.className).toContain("bg-[#E3F2E7]");
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>).vibrate;
+      spy.mockRestore();
+    }
+  });
+
+  it("同方向 60s 内只提醒一次（黄→绿边）；反方向与红边不节流", async () => {
+    installSse(okSessions(0));
+    const vibrate = vi.fn();
+    Object.defineProperty(navigator, "vibrate", { value: vibrate, configurable: true });
+    const { chime, spy } = await withChimeSpy();
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+
+      // 第一次黄→绿：横幅 + 振动 + 提示音
+      emitFrame("transition", transitionEvent({ from: "processing", to: "idle" }));
+      await advance(0);
+      expect(vibrate).toHaveBeenCalledTimes(1);
+      expect(chime).toHaveBeenCalledTimes(1);
+
+      // 60s 内再次黄→绿（teammate 抖动形态）：三件套全免
+      emitFrame("transition", transitionEvent({ from: "processing", to: "idle" }));
+      await advance(0);
+      expect(vibrate).toHaveBeenCalledTimes(1); // 同方向 60s 内不得重复振动
+      expect(chime).toHaveBeenCalledTimes(1);
+
+      // 反方向（绿→黄）：不节流
+      emitFrame("transition", transitionEvent({ from: "idle", to: "processing" }));
+      await advance(0);
+      expect(vibrate).toHaveBeenCalledTimes(2);
+
+      // 红边（黄→waiting）重复两次：waiting 提醒永不节流（既有语义）
+      emitFrame("transition", transitionEvent({ from: "processing", to: "waiting" }));
+      await advance(0);
+      expect(vibrate).toHaveBeenCalledTimes(3);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "waiting" }));
+      await advance(0);
+      expect(vibrate).toHaveBeenCalledTimes(4); // waiting 提醒永不节流（既有语义）
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>).vibrate;
+      spy.mockRestore();
+    }
+  });
+
+  it("跨过 60s 节流窗后，同方向跃迁恢复提醒", async () => {
+    installSse(okSessions(0));
+    const vibrate = vi.fn();
+    Object.defineProperty(navigator, "vibrate", { value: vibrate, configurable: true });
+    try {
+      render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
+      await advance(0);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "idle" }));
+      await advance(0);
+      expect(vibrate).toHaveBeenCalledTimes(1);
+
+      // 跨过节流窗（fake timers 同步推进 Date.now）
+      await advance(60_000);
+      emitFrame("transition", transitionEvent({ from: "processing", to: "idle" }));
+      await advance(0);
+      expect(vibrate).toHaveBeenCalledTimes(2);
+    } finally {
+      delete (navigator as unknown as Record<string, unknown>).vibrate;
+    }
   });
 });
 

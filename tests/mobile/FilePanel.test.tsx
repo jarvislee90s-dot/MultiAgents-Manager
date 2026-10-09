@@ -1,5 +1,9 @@
 // M3+ 文件面板（计划 Task 3）：纯函数 + 组件行为矩阵。
 // 零真实数据：条目夹具全部合成；纯展示组件，零网络（点击回调由测试断言）。
+// T1 sheet 化适配（审查 S4）：筛选条重构为单行三组下拉 + 文件名搜索——原
+// file-chip-* / file-scope-* / file-origin-* 按钮交互全部改为下拉形态断言，
+// kind/origin/scope/search 四状态与叠加过滤语义零变化；布局切换器与关闭钮
+// 上收 SessionDetail 顶栏（唯一实例裁决），本组件头部操作用例随之删除。
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import FilePanel, { FILE_SCOPES, fileKindOf } from "@/mobile/FilePanel";
@@ -12,29 +16,29 @@ function entry(path: string, over: Partial<SessionFileEntry> = {}): SessionFileE
   return { path, lastSeq: 1, lastTs: 1_700_000_000_000, hits: 1, modified: true, ...over };
 }
 
-/** 渲染面板（默认回调全部注入 mock） */
+/** 渲染面板（默认回调全部注入 mock；mode/onModeChange/onClose 等顶栏收编 props 已删） */
 function renderPanel(
   entries: SessionFileEntry[],
   over: { truncated?: boolean; scope?: number; loading?: boolean } = {}
 ) {
   const onOpenFile = vi.fn();
   const onScopeChange = vi.fn();
-  const onModeChange = vi.fn();
-  const onClose = vi.fn();
   render(
     <FilePanel
       entries={entries}
       truncated={over.truncated ?? false}
       scope={over.scope ?? 200}
       loading={over.loading ?? false}
-      mode="fullscreen"
       onScopeChange={onScopeChange}
       onOpenFile={onOpenFile}
-      onModeChange={onModeChange}
-      onClose={onClose}
     />
   );
-  return { onOpenFile, onScopeChange, onModeChange, onClose };
+  return { onOpenFile, onScopeChange };
+}
+
+/** 下拉选档（下拉形态的「点击」） */
+function pick(testId: string, value: string) {
+  fireEvent.change(screen.getByTestId(testId), { target: { value } });
 }
 
 describe("FilePanel 纯函数：fileKindOf 扩展名判定", () => {
@@ -117,53 +121,59 @@ describe("FilePanel 列表渲染", () => {
   });
 });
 
-describe("FilePanel chips 类型过滤（用户裁决 5）", () => {
-  const mixed = [
-    entry("/p/doc.md", { lastSeq: 5 }),
-    entry("/p/pic.png", { lastSeq: 4 }),
-    entry("/p/code.rs", { lastSeq: 3 }),
-  ];
-
-  it("默认「全部」：三类都可见（代码文件仅在全部）", () => {
-    renderPanel(mixed);
-    expect(screen.getByText("doc.md")).toBeTruthy();
-    expect(screen.getByText("pic.png")).toBeTruthy();
-    expect(screen.getByText("code.rs")).toBeTruthy();
+describe("FilePanel 筛选条：单行三组下拉（决策 6 / 审查 S4 结构断言）", () => {
+  it("三组下拉存在、默认值 200/全部/全部、组间竖分隔符 ×3、搜索框+搜索钮在列", () => {
+    renderPanel([]);
+    const scopeSel = screen.getByTestId("file-scope-select") as HTMLSelectElement;
+    const originSel = screen.getByTestId("file-origin-select") as HTMLSelectElement;
+    const kindSel = screen.getByTestId("file-kind-select") as HTMLSelectElement;
+    expect(scopeSel.value).toBe("200");
+    expect([...scopeSel.options].map((o) => o.text)).toEqual(["200", "500", "1000"]);
+    expect(originSel.value).toBe("all");
+    expect([...originSel.options].map((o) => o.text)).toEqual([
+      "全部",
+      "我上传的",
+      "工具读取",
+      "工具读写",
+    ]);
+    expect(kindSel.value).toBe("all");
+    expect([...kindSel.options].map((o) => o.text)).toEqual(["全部", "文档", "图片"]);
+    expect(screen.getAllByTestId("file-filter-divider")).toHaveLength(3);
+    expect(screen.getByTestId("file-search-input")).toBeTruthy();
+    expect(screen.getByTestId("file-search-run").textContent).toBe("搜索");
   });
 
-  it("切「文档」：仅 md 可见，图片与代码隐藏", () => {
-    renderPanel(mixed);
-    fireEvent.click(screen.getByTestId("file-chip-doc"));
-    expect(screen.getByText("doc.md")).toBeTruthy();
-    expect(screen.queryByText("pic.png")).toBeNull();
-    expect(screen.queryByText("code.rs")).toBeNull();
+  it("组标签齐备：追溯范围 / 文件来源 / 文件类型", () => {
+    renderPanel([]);
+    const bar = screen.getByTestId("file-filter-bar");
+    expect(bar.textContent).toContain("追溯范围");
+    expect(bar.textContent).toContain("文件来源");
+    expect(bar.textContent).toContain("文件类型");
   });
 
-  it("切「图片」：仅 png 可见", () => {
-    renderPanel(mixed);
-    fireEvent.click(screen.getByTestId("file-chip-image"));
-    expect(screen.getByText("pic.png")).toBeTruthy();
-    expect(screen.queryByText("doc.md")).toBeNull();
-    expect(screen.queryByText("code.rs")).toBeNull();
-  });
-
-  it("过滤后无匹配 → 空态（不与「范围内无文件」混淆）", () => {
-    renderPanel([entry("/p/code.rs")]);
-    fireEvent.click(screen.getByTestId("file-chip-image"));
-    expect(screen.getByTestId("panel-empty")).toBeTruthy();
+  it("旧控件形态已删：类型 tabs（file-chip-*）与来源/scope pills（file-scope-*/file-origin-*）不存在", () => {
+    renderPanel([entry("/p/a.rs")]);
+    expect(screen.queryByTestId("file-chip-all")).toBeNull();
+    expect(screen.queryByTestId("file-scope-200")).toBeNull();
+    expect(screen.queryByTestId("file-origin-user")).toBeNull();
+    // 布局切换器/关闭钮已上收顶栏（唯一实例裁决），面板内不再出现
+    expect(screen.queryByTestId("preview-toggle-split")).toBeNull();
+    expect(screen.queryByTestId("panel-close")).toBeNull();
   });
 });
 
-describe("FilePanel 档位卡片（用户裁决 3）", () => {
-  it("三档常显、当前高亮、点击回调 onScopeChange", () => {
+describe("FilePanel 追溯范围下拉（用户裁决 3，下拉形态）", () => {
+  it("当前档位回显；切档回调 onScopeChange", () => {
     const { onScopeChange } = renderPanel([entry("/p/a.rs")], { scope: 500 });
-    for (const s of FILE_SCOPES) {
-      expect(screen.getByTestId(`file-scope-${s}`)).toBeTruthy();
-    }
-    expect(screen.getByTestId("file-scope-500").getAttribute("aria-pressed")).toBe("true");
-    expect(screen.getByTestId("file-scope-200").getAttribute("aria-pressed")).toBe("false");
-    fireEvent.click(screen.getByTestId("file-scope-1000"));
+    const sel = screen.getByTestId("file-scope-select") as HTMLSelectElement;
+    expect(sel.value).toBe("500");
+    pick("file-scope-select", "1000");
     expect(onScopeChange).toHaveBeenCalledWith(1000);
+  });
+
+  it("档位带单位注释（title）：说明 200/500/1000 是消息条数", () => {
+    renderPanel([entry("/p/a.rs")]);
+    expect(screen.getByTestId("file-scope-hint").getAttribute("title")).toContain("消息");
   });
 
   it("truncated 且未到顶 → 显示提示", () => {
@@ -179,6 +189,51 @@ describe("FilePanel 档位卡片（用户裁决 3）", () => {
   it("未 truncated → 不显示提示", () => {
     renderPanel([entry("/p/a.rs")], { truncated: false, scope: 200 });
     expect(screen.queryByTestId("panel-truncated-hint")).toBeNull();
+  });
+});
+
+describe("FilePanel 文件类型下拉（用户裁决 5，原 chips 改下拉）", () => {
+  const mixed = [
+    entry("/p/doc.md", { lastSeq: 5 }),
+    entry("/p/pic.png", { lastSeq: 4 }),
+    entry("/p/code.rs", { lastSeq: 3 }),
+  ];
+
+  it("默认「全部」：三类都可见（代码文件仅在全部）", () => {
+    renderPanel(mixed);
+    expect(screen.getByText("doc.md")).toBeTruthy();
+    expect(screen.getByText("pic.png")).toBeTruthy();
+    expect(screen.getByText("code.rs")).toBeTruthy();
+  });
+
+  it("切「文档」：仅 md 可见，图片与代码隐藏", () => {
+    renderPanel(mixed);
+    pick("file-kind-select", "doc");
+    expect(screen.getByText("doc.md")).toBeTruthy();
+    expect(screen.queryByText("pic.png")).toBeNull();
+    expect(screen.queryByText("code.rs")).toBeNull();
+  });
+
+  it("切「图片」：仅 png 可见", () => {
+    renderPanel(mixed);
+    pick("file-kind-select", "image");
+    expect(screen.getByText("pic.png")).toBeTruthy();
+    expect(screen.queryByText("doc.md")).toBeNull();
+    expect(screen.queryByText("code.rs")).toBeNull();
+  });
+
+  it("切回「全部」：代码文件重新可见（代码仅在类型=全部可见的口径保留）", () => {
+    renderPanel(mixed);
+    pick("file-kind-select", "doc");
+    expect(screen.queryByText("code.rs")).toBeNull();
+    pick("file-kind-select", "all");
+    expect(screen.getByText("code.rs")).toBeTruthy();
+  });
+
+  it("过滤后无匹配 → 空态（不与「范围内无文件」混淆）", () => {
+    renderPanel([entry("/p/code.rs")]);
+    pick("file-kind-select", "image");
+    expect(screen.getByTestId("panel-empty")).toBeTruthy();
   });
 });
 
@@ -199,12 +254,6 @@ describe("FilePanel 已改写 / 仅读过 的视觉区分（2026-09-16 用户裁
     expect(edited.className).toContain("text-[var(--tx)]");
     expect(readonly.className).toContain("text-[var(--mut)]");
     expect(readonly.className).not.toContain("font-semibold");
-  });
-
-  it("档位卡片带单位注释：说明 200/500/1000 是消息条数", () => {
-    renderPanel([entry("/p/a.rs")]);
-    const hint = screen.getByTestId("file-scope-hint");
-    expect(hint.textContent).toContain("消息");
   });
 });
 
@@ -234,19 +283,9 @@ describe("FilePanel 目录路径点击弹全路径（2026-09-16 用户裁决）"
   });
 });
 
-describe("FilePanel 头部操作", () => {
-  it("关闭按钮回调 onClose；切换器回调 onModeChange", () => {
-    const { onClose, onModeChange } = renderPanel([entry("/p/a.rs")]);
-    fireEvent.click(screen.getByTestId("panel-close"));
-    expect(onClose).toHaveBeenCalled();
-    fireEvent.click(screen.getByTestId("preview-toggle-split-h"));
-    expect(onModeChange).toHaveBeenCalledWith("split-h");
-  });
-});
+// ==== M5 B3：来源筛选 + 文件名搜索（决策 10 / 线稿三池；来源改下拉形态）====
 
-// ==== M5 B3：来源筛选 + 文件名搜索（决策 10 / 线稿三池）====
-
-describe("FilePanel 来源筛选（M5 B3）", () => {
+describe("FilePanel 来源筛选（M5 B3，下拉形态）", () => {
   const entries = [
     entry("/p/upload.png", { lastSeq: 5, origin: "user" }),
     entry("/p/read-only.rs", { lastSeq: 4, origin: "tool_read" }),
@@ -262,7 +301,7 @@ describe("FilePanel 来源筛选（M5 B3）", () => {
 
   it("切「我上传的」：仅 origin=user 可见，旧载荷条目隐藏", () => {
     renderPanel(entries);
-    fireEvent.click(screen.getByTestId("file-origin-user"));
+    pick("file-origin-select", "user");
     expect(screen.getByText("upload.png")).toBeTruthy();
     expect(screen.queryByText("read-only.rs")).toBeNull();
     expect(screen.queryByText("legacy.rs")).toBeNull();
@@ -270,17 +309,17 @@ describe("FilePanel 来源筛选（M5 B3）", () => {
 
   it("切「工具读取」与「工具读写」各自精确过滤", () => {
     renderPanel(entries);
-    fireEvent.click(screen.getByTestId("file-origin-tool_read"));
+    pick("file-origin-select", "tool_read");
     expect(screen.getByText("read-only.rs")).toBeTruthy();
     expect(screen.queryByText("edited.rs")).toBeNull();
-    fireEvent.click(screen.getByTestId("file-origin-tool_write"));
+    pick("file-origin-select", "tool_write");
     expect(screen.getByText("edited.rs")).toBeTruthy();
     expect(screen.queryByText("read-only.rs")).toBeNull();
   });
 
   it("行内来源徽标：三值中文文案，旧载荷不渲染徽标", () => {
     renderPanel(entries);
-    // 徽标按行内 testid 定位（chips 里也有同文案，不能全局查文本）
+    // 徽标按行内 testid 定位（筛选条里也有同文案，不能全局查文本）
     expect(screen.getByTestId("file-row-0-origin").textContent).toBe("我上传的");
     expect(screen.getByTestId("file-row-1-origin").textContent).toBe("工具读取");
     expect(screen.getByTestId("file-row-2-origin").textContent).toBe("工具读写");
@@ -289,7 +328,7 @@ describe("FilePanel 来源筛选（M5 B3）", () => {
 
   it("来源筛选无匹配 → 「无匹配文件」空态", () => {
     renderPanel([entry("/p/a.rs", { origin: "user" })]);
-    fireEvent.click(screen.getByTestId("file-origin-tool_write"));
+    pick("file-origin-select", "tool_write");
     expect(screen.getByText("无匹配文件")).toBeTruthy();
   });
 });
@@ -339,9 +378,9 @@ describe("FilePanel 文件名搜索（M5 决策 10：点「搜索」或回车才
     ];
     renderPanel(mixed);
     // 类型=图片
-    fireEvent.click(screen.getByTestId("file-chip-image"));
+    pick("file-kind-select", "image");
     // 来源=我上传的
-    fireEvent.click(screen.getByTestId("file-origin-user"));
+    pick("file-origin-select", "user");
     expect(screen.getByText("upload.png")).toBeTruthy();
     expect(screen.queryByText("tool.png")).toBeNull();
     expect(screen.queryByText("upload.md")).toBeNull();

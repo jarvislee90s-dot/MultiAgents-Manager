@@ -6668,6 +6668,8 @@ where
 // ==== M6R–M9R Task 11：一键 resume 端点（R5，B 兜底可见性半部）====
 // 契约（JSON camelCase；Json 响应带 no-store——门禁下私有写路径）：
 //   POST /session-open body {sessionId} → 200 {"status":"opening"}
+//     | 200 {"status":"opening","trustPromptExpected":true}（T3：命中
+//       ~/.claude.json projects 条款但全部未信任——重开会挂信任弹窗，移动端提示条）
 //     | 404 {"error":"no_session"}（会话不在快照）
 //     | 404 {"error":"no_resume_command"}（工具未入 resume 命令表——未查证不出手）
 //     | 404 {"error":"no_cwd"}（会话无项目目录）
@@ -6676,7 +6678,8 @@ where
 // 出手时落账（ok / failed:{e}）——404 校验失败不写审计（session-send 同口径）。
 // 终端选择在核心（inject::resume）：Windows 优先 wt、回退 conhost；macOS 优先
 // iTerm2、次选 Terminal.app。spawn 缝（RemoteState.resume_spawner）使端点测试
-// 零真开窗。
+// 零真开窗。T3 信任归一：spawn 前 cwd 经 home_source 缝做 ~/.claude.json 只读
+// 归一（命中已信任条款复用其精确 casing；测试注入 tempdir/None 零接触真实主目录）。
 
 /// POST /m/api/v1/session-open 请求体（camelCase；缺参不触发 axum 提取器 422，
 /// 由 handler 统一按契约给 400 bad_request）
@@ -6709,9 +6712,10 @@ pub async fn session_open(
     let probe_st = st.clone();
     let probe_sid = sid.clone();
     let outcome = match tokio::task::spawn_blocking(
-        move || -> Result<(String, Result<(), String>), String> {
+        move || -> Result<(String, Result<(), String>, bool), String> {
             // 复合键口径（Task 5 教训）：快照里按 id 找第一个匹配——契约如此
-            let session = match (probe_st.session_source)()
+            // （mut：T3 信任归一在 spawn 前原地改写 project_path）
+            let mut session = match (probe_st.session_source)()
                 .sessions
                 .into_iter()
                 .find(|s| s.id == probe_sid)
@@ -6746,6 +6750,7 @@ pub async fn session_open(
                         last_message: None,
                         last_message_role: None,
                         last_message_subagent_report: false,
+                        flap_from_subagent_activity: false,
                         last_activity_at: row.last_seen.clone(),
                         pid: 0,
                         cpu_usage: 0.0,
@@ -6757,11 +6762,18 @@ pub async fn session_open(
                 }
             };
             let tool = session.agent_type.tool_id().to_string();
+            // T3 信任归一（claude 专属，只读 ~/.claude.json 永不写）：home 经
+            // home_source 缝解析——测试注入 tempdir（或 None 直跳过），零接触真实
+            // 主目录。命中已信任条款 → project_path 原地复用其精确 casing；命中全
+            // false → trust_prompt=true（回执附 trustPromptExpected，移动端提示条）
+            let home = (probe_st.home_source)().map(std::path::PathBuf::from);
+            let trust_prompt =
+                crate::inject::resume::normalize_cwd_for_trust(&mut session, home.as_deref());
             let r = crate::inject::resume::open_session_terminal_with(
                 &session,
                 probe_st.resume_spawner.as_ref(),
             );
-            Ok((tool, r))
+            Ok((tool, r, trust_prompt))
         },
     )
     .await
@@ -6775,7 +6787,7 @@ pub async fn session_open(
             );
         }
     };
-    let (tool, result) = match outcome {
+    let (tool, result, trust_prompt) = match outcome {
         Ok(v) => v,
         Err(code) => {
             // 会话不在快照：无工具可审计（session-send 的 no_session 同口径不落账）
@@ -6797,7 +6809,17 @@ pub async fn session_open(
                 "open",
                 "ok",
             );
-            json_no_store(StatusCode::OK, serde_json::json!({ "status": "opening" }))
+            // T3 未信任预检（远程/手机发起 → 手机端 surface）：命中未信任条款 →
+            // 回执附 trustPromptExpected:true（会话页提示条），主机侧 log 存证同源
+            let mut body = serde_json::json!({ "status": "opening" });
+            if trust_prompt {
+                log::warn!(
+                    "session-open 未信任预检（session={sid}）：{}",
+                    crate::inject::resume::TRUST_PROMPT_REMINDER
+                );
+                body["trustPromptExpected"] = serde_json::Value::Bool(true);
+            }
+            json_no_store(StatusCode::OK, body)
         }
         Err(e) if e == "no_resume_command" || e == "no_cwd" => {
             json_no_store(StatusCode::NOT_FOUND, serde_json::json!({ "error": e }))

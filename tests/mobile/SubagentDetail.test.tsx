@@ -68,7 +68,7 @@ describe("SubagentDetail（实时预览对话框）", () => {
     routes.body = { messages: [], supported: false };
     render(
       <SubagentDetail session={baseSession} subagentId="x1" subagentName="Explore"
-        running={false} mode="fullscreen" onClose={() => {}} openFile={() => {}} />
+        running={false} openFile={() => {}} />
     );
     expect(await screen.findByTestId("subagent-detail-unsupported")).toBeTruthy();
     // 不渲染消息区：unsupported 时无任何消息条目（subagent-messages 容器是
@@ -87,7 +87,7 @@ describe("SubagentDetail（实时预览对话框）", () => {
     };
     render(
       <SubagentDetail session={baseSession} subagentId="a1" subagentName="Plan"
-        running={true} mode="fullscreen" onClose={() => {}} openFile={() => {}} />
+        running={true} openFile={() => {}} />
     );
     // 任务原文：首条 user 剥 teammate-message 壳（§三.2「任务原文=首条指令」）
     // （实施订正：await 须括住 findBy* 再取 textContent——计划稿写法先取
@@ -113,7 +113,7 @@ describe("SubagentDetail（实时预览对话框）", () => {
     routes.body = { messages: [msg({ seq: 0, kind: "assistant", content: "步骤 1" })] };
     render(
       <SubagentDetail session={baseSession} subagentId="a1" subagentName="Plan"
-        running={true} mode="fullscreen" onClose={() => {}} openFile={() => {}} />
+        running={true} openFile={() => {}} />
     );
     // findBy* 不推进 fake timers：act 冲刷初始加载，再同步断言
     await act(async () => {});
@@ -137,7 +137,7 @@ describe("SubagentDetail（实时预览对话框）", () => {
     routes.body = { messages: [msg({ seq: 0, kind: "assistant", content: "终稿" })] };
     const { unmount } = render(
       <SubagentDetail session={baseSession} subagentId="a1" subagentName="Plan"
-        running={false} mode="fullscreen" onClose={() => {}} openFile={() => {}} />
+        running={false} openFile={() => {}} />
     );
     // findBy* 不推进 fake timers：act 冲刷初始加载，再同步断言
     await act(async () => {});
@@ -158,7 +158,7 @@ describe("SubagentDetail（实时预览对话框）", () => {
     routes.fail = true;
     render(
       <SubagentDetail session={baseSession} subagentId="a1" subagentName="Plan"
-        running={false} mode="fullscreen" onClose={() => {}} openFile={() => {}} />
+        running={false} openFile={() => {}} />
     );
     expect(await screen.findByTestId("subagent-detail-error")).toBeTruthy();
     expect(screen.getByTestId("subagent-detail-retry")).toBeTruthy();

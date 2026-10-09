@@ -200,6 +200,7 @@ mod tests {
             last_message: None,
             last_message_role: None,
             last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-20T00:00:00Z".into(),
             pid: 7,
             cpu_usage: 0.0,

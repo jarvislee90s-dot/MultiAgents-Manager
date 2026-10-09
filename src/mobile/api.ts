@@ -1222,8 +1222,11 @@ export async function fetchSessionModeMenu(sessionId: string): Promise<ModeMenuR
 // ==== M6R–M9R Task 11：一键 resume（R5，在电脑上打开）====
 
 /** 一键 resume 回执（POST /session-open）：200 {status:"opening"} 表示电脑侧正在
- *  打开终端恢复该会话；spawn 出手失败 → 200 {status:"failed",error}（可重试） */
-export type SessionOpenResult = { status: "opening" } | { status: "failed"; error: string };
+ *  打开终端恢复该会话；`trustPromptExpected`（T3）：会话目录命中 ~/.claude.json
+ *  未信任条款——claude 将在终端弹信任提示，需人工应答否则会话挂起（调用方据此
+ *  toast 提醒）；spawn 出手失败 → 200 {status:"failed",error}（可重试） */
+export type SessionOpenResult =
+  { status: "opening"; trustPromptExpected?: boolean } | { status: "failed"; error: string };
 
 /** 一键 resume（R5）：请求电脑本机打开终端 + cd 项目目录 + 恢复会话 + 聚焦。
  *  404 {error:"no_session"|"no_cwd"|"no_resume_command"} → 非 2xx 抛 ApiError

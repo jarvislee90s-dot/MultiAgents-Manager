@@ -376,18 +376,46 @@ pub fn dismiss_session_card(agent_type: String, session_id: String, status: Stri
 /// 评审 M3：扫描 + 核心并进同一 spawn_blocking——核心内 `where wt` 首调探测是
 /// 同步进程等待，留在闭包里不占 tokio worker。
 #[tauri::command]
-pub async fn session_open(session_id: String) -> Result<(), String> {
+pub async fn session_open(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
     let sid = session_id.trim().to_string();
     if sid.is_empty() {
         return Err("缺少 session_id".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || {
-        let session = crate::adapter::get_all_sessions()
+        // mut：T3 信任归一在 spawn 前原地改写 project_path（claude 专属，只读
+        // ~/.claude.json 永不写）
+        let mut session = crate::adapter::get_all_sessions()
             .sessions
             .into_iter()
             .find(|s| s.id == sid)
             .ok_or_else(|| "会话不在当前列表（可能已退出）".to_string())?;
-        crate::inject::resume::open_session_terminal(&session)
+        // T3 信任归一：命中已信任条款复用其精确 casing（防 claude 信任弹窗挂起）。
+        // 桌面发起 → 桌面 surface：不冒用会话状态卡浮窗（NotificationPayload 形态
+        // 是会话卡，信任提醒非会话卡）——走系统通知 toast（consume_codex_trust_notice
+        // 同款 builder 直发通道，评审修复：预检提醒桌面侧用户可见承载）
+        let home = dirs::home_dir();
+        let trust_prompt =
+            crate::inject::resume::normalize_cwd_for_trust(&mut session, home.as_deref());
+        let r = crate::inject::resume::open_session_terminal(&session);
+        if trust_prompt && r.is_ok() {
+            log::warn!(
+                "一键打开未信任预检（session={}）：{}",
+                session.id,
+                crate::inject::resume::TRUST_PROMPT_REMINDER
+            );
+            // 通知发送失败降级 log（文案已在 log 存证，重开会话卡状态不丢失）
+            use tauri_plugin_notification::NotificationExt;
+            if let Err(e) = app
+                .notification()
+                .builder()
+                .title("MultiAgents Manager")
+                .body(crate::inject::resume::TRUST_PROMPT_REMINDER)
+                .show()
+            {
+                log::warn!("未信任预检系统通知发送失败: {e}");
+            }
+        }
+        r
     })
     .await
     .map_err(|e| format!("会话扫描任务异常: {e}"))?

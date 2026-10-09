@@ -301,6 +301,7 @@ fn parse_claude_jsonl(
         last_message: digest.last_message.clone(),
         last_message_role: digest.last_role.clone(),
         last_message_subagent_report: digest.last_is_subagent_report,
+        flap_from_subagent_activity: false,
         last_activity_at: digest
             .last_timestamp
             .clone()

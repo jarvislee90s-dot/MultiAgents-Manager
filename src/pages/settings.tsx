@@ -242,6 +242,9 @@ const SETTINGS_BLOCKS: {
 export default function SettingsPage() {
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [subagentReportEnabled, setSubagentReportEnabled] = useState(true);
+  // F2b 子 agent 活动打标静默开关（终审发现 C）：默认 true=静默，与消费侧
+  // （useNotification / 手机端默认静默）同一缺省语义
+  const [silenceSubagentFlap, setSilenceSubagentFlap] = useState(true);
   const [soundConfig, setSoundConfig] = useState<SoundConfig>(() => getSoundConfig());
   // 一级导航状态 = 当前**块**。块内所有卡片同时渲染（用户裁决的形态），故不再有
   // 「当前分区」这一层状态 —— 删掉 `activeSection` 是刻意的：留着一个不参与渲染的旧状态，
@@ -309,6 +312,20 @@ export default function SettingsPage() {
         setSubagentReportEnabled(v !== "false");
       } catch {
         /* 缺省开 */
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const v = await invoke<string | null>("get_setting", {
+          key: "silence_subagent_activity_flap",
+        });
+        // 缺省/读取失败 = 静默（"true"），与 useNotification 运行时消费侧同口径
+        setSilenceSubagentFlap(v !== "false");
+      } catch {
+        /* 缺省静默 */
       }
     })();
   }, []);
@@ -484,6 +501,22 @@ export default function SettingsPage() {
       newValue
         ? t("settings.notifications.subagentReportOnToast")
         : t("settings.notifications.subagentReportOffToast")
+    );
+  };
+
+  // F2b 静默开关（终审发现 C）：true=静默（value 落库 "true"/"false"，消费侧
+  // `v !== "false"` 判静默，语义不倒挂——与 notify_subagent_report 的「true=提醒」相区分）
+  const toggleSilenceSubagentFlap = async () => {
+    const newValue = !silenceSubagentFlap;
+    setSilenceSubagentFlap(newValue);
+    await invoke("set_setting", {
+      key: "silence_subagent_activity_flap",
+      value: String(newValue),
+    });
+    toast.success(
+      newValue
+        ? t("settings.notifications.silenceSubagentFlapOnToast")
+        : t("settings.notifications.silenceSubagentFlapOffToast")
     );
   };
 
@@ -669,6 +702,27 @@ export default function SettingsPage() {
                   </Button>
                 </div>
                 <div className="border-t" />
+                {/* F2b 进阶开关（终审发现 C）：子 agent 活动引发的状态跃迁默认静默 */}
+                <div className="flex items-center justify-between py-2.5">
+                  <div className="flex-1">
+                    <label className={SETTINGS_FIELD}>
+                      {t("settings.notifications.silenceSubagentFlap")}
+                    </label>
+                    <p className="text-muted-foreground mt-0.5 text-xs">
+                      {t("settings.notifications.silenceSubagentFlapDesc")}
+                    </p>
+                  </div>
+                  <Button
+                    variant={silenceSubagentFlap ? "default" : "outline"}
+                    size="sm"
+                    onClick={toggleSilenceSubagentFlap}
+                  >
+                    {silenceSubagentFlap
+                      ? t("settings.notifications.on")
+                      : t("settings.notifications.off")}
+                  </Button>
+                </div>
+                <div className="border-t" />
                 <div className="space-y-3 py-2.5">
                   {/* 全局完成音：所有工具默认播放的音效 */}
                   <div className="flex items-center justify-between gap-2">
@@ -766,6 +820,13 @@ export default function SettingsPage() {
                     size="sm"
                     onClick={async () => {
                       try {
+                        // [Bug A 取证插桩·临时] 第二调用方（设置页浮窗试听按钮，手动触发）：
+                        // 带 3 帧栈提示，用于与 useNotification 主路径对账（H1 排除用）
+                        console.debug(
+                          "[notif] SHOW_WINDOW(settings-test)",
+                          new Error().stack?.split("\n").slice(0, 3).join(" | "),
+                          Date.now()
+                        );
                         await invoke("show_notification_window", {
                           payload: {
                             agentType: "claude",

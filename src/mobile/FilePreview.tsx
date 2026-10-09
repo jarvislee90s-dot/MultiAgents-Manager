@@ -28,9 +28,9 @@ interface FilePreviewProps {
   /** 呈现形态：split=上对话下文件 / split-h=左对话右文件 / fullscreen=全屏浮层
    *  （只影响容器布局语义，布局本身由 SessionDetail 承担） */
   mode: PreviewMode;
-  /** 布局切换回调（Bug 2，M3 验收）：提供后页头出现三态切换控件——
-   *  全屏浮层 fixed inset-0 盖住 SessionDetail 页头，此控件是全屏态唯一可达入口；
-   *  缺省不渲染（既有直接用法/测试不受影响），切换仍由 SessionDetail 持有 mode */
+  /** 布局切换回调（Bug 2，M3 验收）：T1 sheet 化后切换器唯一实例在 SessionDetail 顶栏
+   *  sheet bar（S5 裁决）——本 prop 仅直接用法/既有测试显式传入时才渲染页头三态切换控件，
+   *  切换仍由持有方拥有 mode */
   onModeChange?: (mode: PreviewMode) => void;
   /** 返回文件列表（M3+）：从面板进入时提供 → 页头显示返回按钮；
    *  从消息正文链接进入（backToList=false）时缺省不渲染，既有行为不变 */
@@ -38,7 +38,10 @@ interface FilePreviewProps {
   /** 字号档位（2026-09-16 用户裁决）：只作用于预览内容区（页头不受影响）。
    *  缺省 1（100%，不覆写 CSS 变量） */
   fontScale?: number;
-  onClose: () => void;
+  /** 关闭预览。T1 审查 S5 唯一实例裁决：关闭钮上收 SessionDetail 顶栏 sheet bar——
+   *  SessionDetail 不再传本 prop（页头关闭钮不渲染）；直接用法/既有测试传值仍渲染，
+   *  行为不变 */
+  onClose?: () => void;
 }
 
 type LoadState =
@@ -283,8 +286,9 @@ export default function FilePreview({
             重试
           </button>
         )}
-        {/* 布局切换控件（Bug 2，M3 验收）：全屏浮层盖住 SessionDetail 页头时，
-            此处是三态切换的唯一可达入口 */}
+        {/* 布局切换控件（Bug 2，M3 验收）：T1 后切换器唯一实例在 SessionDetail 顶栏
+            sheet bar（S5 裁决）——本控件仅 onModeChange 被显式传入时渲染
+            （直接用法/既有测试场景），SessionDetail 不再传 */}
         {onModeChange && (
           <PreviewModeSwitcher mode={mode} onChange={onModeChange} testIdPrefix="preview-toggle" />
         )}
@@ -362,15 +366,19 @@ export default function FilePreview({
             </button>
           </span>
         )}
-        <button
-          type="button"
-          data-testid="preview-close"
-          aria-label="关闭预览"
-          onClick={onClose}
-          className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
-        >
-          <X size={16} />
-        </button>
+        {/* S5 唯一实例裁决：SessionDetail 不传 onClose（关闭钮在顶栏 sheet bar），
+            此处仅在直接用法/既有测试传值时渲染 */}
+        {onClose && (
+          <button
+            type="button"
+            data-testid="preview-close"
+            aria-label="关闭预览"
+            onClick={onClose}
+            className="shrink-0 rounded-full p-1 text-[var(--mut)] hover:bg-[var(--cb)] dark:hover:bg-[var(--btnp)]"
+          >
+            <X size={16} />
+          </button>
+        )}
       </header>
       <div
         data-testid="preview-content"

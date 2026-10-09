@@ -25,7 +25,7 @@ function sa(
   };
 }
 
-describe("SubagentList（文件面板子 Agent 卡区）", () => {
+describe("SubagentList（子 Agent sheet 清单）", () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => {
     cleanup();
@@ -92,5 +92,21 @@ describe("SubagentList（文件面板子 Agent 卡区）", () => {
     fireEvent.click(screen.getByTestId("subagent-card-a1"));
     fireEvent.click(screen.getByTestId("subagent-card-b1"));
     expect(onOpen.mock.calls.map((c) => c[0])).toEqual(["a1", "b1"]);
+  });
+
+  // T1 sheet 化：清单升格为独立 sheet 看板，分屏主从布局下左清单需要选中态高亮
+  it("selectedId 高亮选中卡（aria-pressed），null/缺省全不选", () => {
+    vi.setSystemTime(new Date("2026-10-08T07:36:45Z"));
+    const list = [
+      sa("a1", "Plan", "running", "2026-10-08T07:31:07Z", null),
+      sa("b1", "Explore", "idle", "2026-10-08T07:00:00Z", "2026-10-08T07:30:00Z"),
+    ];
+    const { rerender } = render(<SubagentList list={list} onOpen={() => {}} selectedId="b1" />);
+    expect(screen.getByTestId("subagent-card-b1").getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByTestId("subagent-card-a1").getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByTestId("subagent-card-b1").className).toContain("ring-1");
+    // 取消选中（详情关闭回清单）：高亮随之消失
+    rerender(<SubagentList list={list} onOpen={() => {}} selectedId={null} />);
+    expect(screen.getByTestId("subagent-card-b1").getAttribute("aria-pressed")).toBe("false");
   });
 });

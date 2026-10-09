@@ -1621,6 +1621,7 @@ mod tests {
                 to: "processing".into(),
                 project_name: "proj".into(),
                 last_message: Some("hello".into()),
+                flap_from_subagent_activity: false,
                 ts: 42,
             })
             .unwrap();
@@ -2139,6 +2140,7 @@ mod tests {
             last_message: None,
             last_message_role: None,
             last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-15T00:00:00Z".into(),
             pid: 1,
             cpu_usage: 0.0,
@@ -2437,6 +2439,7 @@ mod tests {
             last_message: None,
             last_message_role: None,
             last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-15T00:00:00Z".into(),
             pid: 1,
             cpu_usage: 0.0,
@@ -4058,6 +4061,7 @@ mod tests {
             last_message: None,
             last_message_role: None,
             last_message_subagent_report: false,
+            flap_from_subagent_activity: false,
             last_activity_at: "2026-09-18T00:00:00Z".into(),
             pid,
             cpu_usage: 0.0,
@@ -10588,6 +10592,16 @@ mod tests {
     /// sess_o（workbuddy Idle，未入 resume 命令表）；spawner 注入记录型假体。
     /// 其余缝与 inject_state 同口径（内存库，零接触真实 ~/.mam）。
     fn open_state(spawner: std::sync::Arc<crate::inject::resume::SpawnFn>) -> Arc<RemoteState> {
+        open_state_with_home(spawner, None)
+    }
+
+    /// T3 带 home 注入的 state 变体：home_source 消费注入值——信任归一用例注入
+    /// tempdir home（携假 ~/.claude.json，零接触真实主目录）；None = 既有用例
+    /// 直跳过归一。调用方持 TempDir 存活于测试作用域即可（state 只存路径串）。
+    fn open_state_with_home(
+        spawner: std::sync::Arc<crate::inject::resume::SpawnFn>,
+        home: Option<std::path::PathBuf>,
+    ) -> Arc<RemoteState> {
         let mut sess_m = inj_sess(
             "sess_m",
             crate::session::AgentType::Claude,
@@ -10648,7 +10662,8 @@ mod tests {
             now_source: Box::new(|| chrono::Utc::now().timestamp_millis()),
             via_hosts_source: Box::new(|| None),
             rate_bucket_channels_source: Box::new(Vec::new),
-            home_source: Box::new(|| None),
+            // T3：home_source 消费注入值（信任归一用例 = tempdir home；None = 跳过）
+            home_source: Box::new(move || home.as_ref().map(|p| p.to_string_lossy().to_string())),
             // C7：配对计数缝缺省空表（既有用例零影响；配对打标/提示用例就地覆盖）
             pairing_counter: Box::new(Vec::new),
         })
@@ -10765,6 +10780,114 @@ mod tests {
             .store
             .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
         assert!(audits.is_empty(), "校验失败不写审计");
+    }
+
+    /// T3 未信任预检（远程/手机回执面）：命中 ~/.claude.json projects 条款但全部
+    /// 未信任 → 200 opening 回执附 `trustPromptExpected:true`（会话页提示条消费）；
+    /// 全 false 无可复用 casing → spawn cwd 保持原样。tempdir 假 home（假
+    /// ~/.claude.json），零接触真实主目录。
+    #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
+    async fn session_open_endpoint_trust_prompt_expected_when_untrusted() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"projects":{"/tmp/proj-m":{"hasTrustDialogAccepted":false}}}"#,
+        )
+        .unwrap();
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state_with_home(spawner_rec.seam(), Some(home.path().to_path_buf()));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        // macOS 生产效果回查探针需要 argv 暗桩（opens_and_audits 同口径）；非 macOS no-op
+        spawn_effect_decoy("claude --resume sess_m");
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_m"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            body.contains("\"status\":\"opening\""),
+            "照常 opening：{body}"
+        );
+        assert!(
+            body.contains("\"trustPromptExpected\":true"),
+            "命中未信任条款必须附预检字段（会话页提示条）：{body}"
+        );
+        // 全 false：无可复用 casing，spawn cwd 原样（平台分臂断言同 opens_and_audits）
+        let recorded = spawner_rec.recorded();
+        assert_eq!(recorded.len(), 1, "spawner 恰被调用一次");
+        match &recorded[0] {
+            crate::inject::resume::SpawnSpec::Windows { cwd, .. } => {
+                assert_eq!(cwd, "/tmp/proj-m", "全 false 不得改写 cwd");
+            }
+            crate::inject::resume::SpawnSpec::MacosApplescript { script } => {
+                assert!(
+                    script.contains("/tmp/proj-m"),
+                    "全 false 不得改写 cwd：{script}"
+                );
+            }
+        }
+    }
+
+    /// T3 归一端到端（远程路径，实证形态）：双 casing 条款一真一假并存 → spawn
+    /// cwd **静默**复用真条款精确 casing（claude 查信任即命中、不弹窗），回执
+    /// **不带** trustPromptExpected（已信任不得误报提醒）
+    #[tokio::test]
+    #[cfg_attr(
+        not(any(windows, target_os = "macos")),
+        ignore = "注入平台门（inject/routing.rs）：仅 Windows/macOS 可注入，本测走注入链"
+    )]
+    async fn session_open_endpoint_reuses_trusted_casing_silently() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join(".claude.json"),
+            r#"{"projects":{"/tmp/proj-m":{"hasTrustDialogAccepted":false},"/TMP/PROJ-M":{"hasTrustDialogAccepted":true}}}"#,
+        )
+        .unwrap();
+        let spawner_rec = RecordingSpawner::new();
+        let state = open_state_with_home(spawner_rec.seam(), Some(home.path().to_path_buf()));
+        persist_named_device(&state, "mm", "测试设备");
+        let app = router(state.clone());
+        spawn_effect_decoy("claude --resume sess_m");
+        let r = app
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-open",
+                Some("mam_device=mm"),
+                Some(r#"{"sessionId":"sess_m"}"#),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            !body.contains("trustPromptExpected"),
+            "复用真条款（已信任）不得误报预检提醒：{body}"
+        );
+        // spawn cwd = 真条款逐字 casing（平台分臂断言同 opens_and_audits）
+        let recorded = spawner_rec.recorded();
+        assert_eq!(recorded.len(), 1, "spawner 恰被调用一次");
+        match &recorded[0] {
+            crate::inject::resume::SpawnSpec::Windows { cwd, .. } => {
+                assert_eq!(cwd, "/TMP/PROJ-M", "spawn cwd 必须是真条款的精确 casing");
+            }
+            crate::inject::resume::SpawnSpec::MacosApplescript { script } => {
+                assert!(
+                    script.contains("/TMP/PROJ-M"),
+                    "spawn 载荷必须携带真条款精确 casing：{script}"
+                );
+            }
+        }
     }
 
     /// 无映射（workbuddy 未入命令表）：404 no_resume_command + spawner 不出手

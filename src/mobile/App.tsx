@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { Toaster } from "sonner";
 import ArchiveBoard from "./ArchiveBoard";
 import ArchiveDetail from "./ArchiveDetail";
 import Board from "./Board";
@@ -91,6 +92,9 @@ export default function App() {
       {/* M5 P3-b：null（探测中）与 false（未配对）分診——探测期渲染连接指示器，
           不再出现密码表单（实测走隧道探测有一二十秒延迟，密码页先出像「时滞掉线」） */}
       {paired !== true && <PairPage onPaired={onPaired} probing={paired === null} />}
+      {/* T3 未信任预检的 toast 承载面：移动端入口此前零 sonner 挂载（toast 会落进
+          虚空，UsageExportActions 同款顾虑）——App 根常驻一枚，路由切换不丢 */}
+      <Toaster position="top-center" />
     </>
   );
 }
