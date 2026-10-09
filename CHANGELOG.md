@@ -1,5 +1,48 @@
 # Changelog
 
+## [0.5.5] - 2026-10-10
+
+### Changed（Breaking：一次性品牌更名）
+
+- **项目更名 MultiAgents-Manager (MAM) → 兔维斯（Tuvis）**：显示层、仓库地址
+  （旧地址 301 永久重定向）、安装包名（`Tuvis-*`）、bundle identifier
+  （`com.jarvis.multiagents-manager` → `com.jarvis.tuvis`）全部更名。
+  **≤0.5.2 客户端应用内自动更新失效，需手动下载安装**；建议先卸载旧版再装新版
+  （详见 `docs/release-notes/2026-10-10-rebrand-tuvis.md`）
+- **数据目录一次性迁移**：启动时自动执行 `~/.mam` → `~/.tuvis`、`mam.db` →
+  `tuvis.db`（新目录已存在则不触碰；失败时旧数据原地保留并记日志）。内部代号
+  同步退役：`MAM_HOME`→`TUVIS_HOME`、`mam-marker`→`tuvis-marker`、
+  `mam-hook-listener`→`tuvis-hook-listener`、窗口标记 `"MAM:"`→`"TUVIS:"`、
+  `tuvis-updater-progress` 事件、`x-tuvis-reach` 头、`tuvis-theme` 存储键
+- **Codex 信任门重置**：hook 注册路径随数据目录变化，首次启动需在 Codex 终端
+  `/hooks` 重新信任一次兔维斯条目
+
+### Added
+
+- **子 Agent 运行 chip 与观察台**（会话详情 · v1 仅 Claude 全量，其余工具清单照常）：
+  - 四工具运行子 agent 实时 **chip**（名字 / 时长走字 / token 消耗，点击直达详情）；
+  - 文件面板平级「**子 Agent**」看板：单一清单按派发序排列，绿点活跃走字 / 灰点完成
+    冻结（时长/token 定格），点卡片进入执行过程详情；
+  - **执行过程详情对话框**：任务原文、思考过程（默认折叠）、工具调用与结果（折叠单行）、
+    输出正文；活跃 5s 一拍自动刷新贴底跟随，完成后定格快照；
+  - **「子 Agent 回报提醒」开关**（设置页，默认开）：子 agent 完成回报唤醒主会话的提醒
+    可独立静默，主会话自身提醒不受影响。
+
+### Fixed
+
+- **完成识别修复（真机验收 FAIL 项）**：Claude Code 存在经典任务通知与 teammate 空闲
+  通告两套后台子 agent 机制，v1 只认前者导致 teammate 完成后 chip 永挂。现按登记档案
+  的机制标记自动分派事件格式，teammate 只带名字不带编号 → 名字→编号归一（完成/续跑
+  双向），真机验收「完成即消失、续跑即复现」通过。
+- **重开会话信任归一**：历史会话重开时 cwd 与 claude 信任库存量条目做大小写/分隔符
+  归一（多命中择优取已信任条款），已信任目录不再重复弹信任确认；未信任目录提前推送
+  「请在主机终端应答信任提示」提醒（桌面系统通知 / 手机回执字段 + 提示条）。
+- **会话状态黄绿抖动期逐次弹窗**：子 agent 运行期主会话状态在处理中↔空闲间抖动，每次
+  颜色变化都弹提醒。现同会话同方向跃迁 60s 节流（红/等待不节流）+ 后端打标（活跃子
+  agent 在场 ∧ 最新钩子 ∈ PostToolUse 族）的抖动跃迁默认静默（设置页可关）。
+- **update_entry 缓存核直测恢复** + `/session-subagent-messages` limit 入口 clamp 回归锁
+  （终审修复）。
+
 ## [Unreleased]
 
 ### Added
