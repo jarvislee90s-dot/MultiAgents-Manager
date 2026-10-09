@@ -628,8 +628,8 @@ export default function SessionDetail({ session, onBack }: SessionDetailProps) {
   // 「在桌面端打开」），可用性门与错误文案在 ./resume-gate.ts 共享。
 
   // ---- 书签（M3+，2026-09-16 用户裁决）----
-  // 恢复：拿到 MAM 进程 bootId 后从 localStorage 种回内存单例（刷新页面/
-  // 卸载重挂均走此路径）；bootId 不一致（MAM 已重启）由 restore 内部清空
+  // 恢复：拿到 兔维斯 进程 bootId 后从 localStorage 种回内存单例（刷新页面/
+  // 卸载重挂均走此路径）；bootId 不一致（兔维斯 已重启）由 restore 内部清空
   useEffect(() => {
     let alive = true;
     void ensureBootId().then((boot) => {

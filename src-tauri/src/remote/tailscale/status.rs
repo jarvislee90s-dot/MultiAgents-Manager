@@ -19,7 +19,7 @@ use crate::remote::NoWindow;
 pub(super) struct TsStatus {
     /// 实测取值：`Running`（已登录在线）/ `NeedsLogin` / `Stopped` 等
     pub backend_state: String,
-    /// 待登录时的授权链接；已登录为空串。**MAM 把它做成按钮，不自己登录**
+    /// 待登录时的授权链接；已登录为空串。**兔维斯 把它做成按钮，不自己登录**
     pub auth_url: String,
     /// **带结尾点**（实测 `xxx.ts.net.`）——使用前必须归一
     pub dns_name: String,
@@ -136,7 +136,7 @@ pub(super) fn board_url_from_dns_name(dns: &str) -> String {
 /// - 只认标准安装位置的存在性。**探测不到 = 没装**，由调用方如实报「未检测到 Tailscale」。
 ///
 /// ⚠️ **本表只是候选链的第一段**（2026-10-08 补）：它装的是「最常见/最快命中」的固定
-/// 位置，**不再是唯一来源**。用户在 MSI 里自选路径（MAM 刻意不加 `/qn`，选择权本就该
+/// 位置，**不再是唯一来源**。用户在 MSI 里自选路径（兔维斯 刻意不加 `/qn`，选择权本就该
 /// 给用户）时这里必然落空，由 [`discovered_cli`]（Windows = 服务登记 `ImagePath`）兜底
 /// ——**顺序与 fail-closed 契约见 [`find_cli_with`]**。本表自身仍是"逐平台固定完整路径"
 /// （动态来源不进这张表，见其守卫测试）。
@@ -181,7 +181,7 @@ pub(super) fn find_cli_with(
 }
 
 // ------------------------------------------------------------
-// 第二来源（Windows 服务登记）：**治本**——安装路径由用户选，MAM 不得假定它在哪
+// 第二来源（Windows 服务登记）：**治本**——安装路径由用户选，兔维斯 不得假定它在哪
 // ------------------------------------------------------------
 
 /// 服务登记的注册表子键（`HKLM\` 下；末段 `Tailscale` = MSI 装出来的**服务名**——
@@ -326,7 +326,7 @@ fn expand_env_refs(raw: &str, lookup: impl Fn(&str) -> Option<String>) -> String
 ///    本实现取「**存在且最长**」的候选。与 Windows 的"由短到长取首个存在者"在常态下同解
 ///    （`C:\Program.exe` 这类劫持位通常不存在），但在**劫持位真存在**时本实现**不会**被
 ///    引到那个文件上：本函数的用途是定位 Tailscale 的安装目录，照搬由短到长就等于让一个
-///    人为放进 `C:\Program.exe` 的文件来决定 MAM 去哪里找 CLI（unquoted service path
+///    人为放进 `C:\Program.exe` 的文件来决定 兔维斯 去哪里找 CLI（unquoted service path
 ///    提权的同一机理）；退一步说，即便只剩下被劫持的短前缀存在，推出的
 ///    `<目录>\tailscale.exe` 仍要过链尾存在性门 ⇒ 依旧 fail-closed；
 /// 4. **无存在者 / 形态残缺 → `None`**。**不猜**：宁可如实报「未检测到 Tailscale」，
@@ -382,7 +382,7 @@ pub(super) fn cli_beside_service_exe(service_exe: &str) -> Option<String> {
 /// **第二来源**（默认位置之外的唯一来源；**惰性**——只在默认位置全部落空时才求值，
 /// 见 [`find_cli_with`] 的顺序契约）。
 ///
-/// 治本依据：Windows MSI 让用户自选安装路径（MAM 执行 `msiexec /i`，**刻意不加 `/qn`**），
+/// 治本依据：Windows MSI 让用户自选安装路径（兔维斯 执行 `msiexec /i`，**刻意不加 `/qn`**），
 /// 装到哪由用户定；而**服务登记必然指向真实安装位置**，与盘符 / 目录名 / 中文都无关。
 ///
 /// 返回的是**候选**（**CLI 路径**此处不判存在：存在性由 [`find_cli_with`] 在链尾统一收口，
@@ -665,7 +665,7 @@ pub(super) static LAST_REVERIFY: once_cell::sync::Lazy<
 /// 本轮是否该重验（纯函数，可测——B-I2 的核心判据）：**只要通道在运行且窗口到期就
 /// 校验，不分当前校验态**。旧口径（`reachability == Verified && due`）有两个实测后果：
 /// ① 一旦 `reverify_with` 把它翻成 Failed，条件恒假 → **再无自动重试**，只能用户手点；
-/// ② 每次 MAM 重启校验态复位 Unverified，而 `restore_enabled_tunnels` 只 refresh 不校验
+/// ② 每次 兔维斯 重启校验态复位 Unverified，而 `restore_enabled_tunnels` 只 refresh 不校验
 /// → 载荷恒报「尚未生效」、地址恒不显示，与 §C1「设置页常驻固定地址」「重启后地址不变」
 /// 直接冲突。故本判据**刻意不读校验态**——读它就是退回旧口径。
 pub(super) fn should_reverify(running: bool, due: bool) -> bool {
@@ -682,7 +682,7 @@ static POLLER: once_cell::sync::Lazy<std::sync::Mutex<Option<std::thread::JoinHa
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(None));
 
 /// serve 配置的归属分类（B-I5/B-M4 **判据的原话**——注释与判据必须一致，见
-/// [`disable_funnel`]）。判据 = 逐条 handler 的 `Proxy` **精确**指向本机 MAM 端口：
+/// [`disable_funnel`]）。判据 = 逐条 handler 的 `Proxy` **精确**指向本机 兔维斯 端口：
 /// - `Ours` = 每一条都是我们的 → 撤销安全；
 /// - `Mixed` = 我们那路在 + 还有别人的条目 → **不拒绝**（加严会让公开暴露撤不掉，
 ///   见 disable_funnel 的权衡登记），但把将一并被清除的条目数如实交出去；
@@ -697,12 +697,12 @@ pub(super) enum ServeOwnership {
 }
 
 impl ServeOwnership {
-    /// 完全不含 MAM 那路 → 守卫拒绝（`foreign_serve_config` 的公开语义）
+    /// 完全不含 兔维斯 那路 → 守卫拒绝（`foreign_serve_config` 的公开语义）
     pub(super) fn is_foreign(self) -> bool {
         matches!(self, Self::Foreign { .. })
     }
 
-    /// 将随 `funnel reset` **一并被清除**的非 MAM 条目数（撤销回执/日志明示的数据源）
+    /// 将随 `funnel reset` **一并被清除**的非 兔维斯 条目数（撤销回执/日志明示的数据源）
     pub(super) fn cleared_others(self) -> usize {
         match self {
             Self::Mixed { others } | Self::Foreign { others } => others,
@@ -711,9 +711,9 @@ impl ServeOwnership {
     }
 }
 
-/// 单条 handler 是否就是 MAM 那一路（纯函数）：取 `Proxy` 的 host:port，**端口精确相等
+/// 单条 handler 是否就是 兔维斯 那一路（纯函数）：取 `Proxy` 的 host:port，**端口精确相等
 /// 且 host 是回环**才算自己。旧判据用「整份 JSON 序列化后包含 `http://127.0.0.1:PORT`」
-/// ——端口 ≤6553 时外来的 8080 会被端口 808 的 MAM 认成自己人（子串撞车，B-M4），
+/// ——端口 ≤6553 时外来的 8080 会被端口 808 的 兔维斯 认成自己人（子串撞车，B-M4），
 /// 于是 `funnel reset` 会清掉别人的配置。host 认回环的常见拼写（不把拼写当契约）
 fn handler_is_ours(handler: &serde_json::Value, mam_port: u16) -> bool {
     let Some(proxy) = handler.get("Proxy").and_then(|p| p.as_str()) else {
@@ -737,7 +737,7 @@ fn handler_is_ours(handler: &serde_json::Value, mam_port: u16) -> bool {
 /// 同纪律：描述文案不得参与安全逻辑）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ServeEntry {
-    /// 是否就是 MAM 那一路（判据 = [`handler_is_ours`]，与归属分类同源）
+    /// 是否就是 兔维斯 那一路（判据 = [`handler_is_ours`]，与归属分类同源）
     pub ours: bool,
     /// 人类可读描述（主机 + 路径 + 转发目标），例如
     /// `x.ts.net:443 /media → http://127.0.0.1:7000`
@@ -773,7 +773,7 @@ pub(super) fn serve_entries(funnel_json: &str, mam_port: u16) -> Vec<ServeEntry>
         } else {
             vec![ServeEntry {
                 ours: false,
-                label: "（配置形态无法识别——按非 MAM 条目处理）".to_string(),
+                label: "（配置形态无法识别——按非 兔维斯 条目处理）".to_string(),
             }]
         };
     };
@@ -826,13 +826,13 @@ pub(super) fn serve_ownership(funnel_json: &str, mam_port: u16) -> ServeOwnershi
     }
 }
 
-/// 开通/撤销/自愈前的守卫：若**当前已有 serve/Funnel 配置**且**完全不含 MAM 那一路**，
+/// 开通/撤销/自愈前的守卫：若**当前已有 serve/Funnel 配置**且**完全不含 兔维斯 那一路**，
 /// 拒绝执行并如实报错——`funnel reset` 会清掉整份 serve 配置，静默清掉用户的
 /// 自建配置是不可接受的副作用。
 /// **判据的原话以 [`serve_ownership`] 为准**；本函数只回答「是否完全不含我们那路」。
 /// ⚠️ **已知缺口（如实登记，勿在注释里宣称判据不给的保护）**：`Mixed`（我们那路 +
 /// 用户自建条目）**放行** reset，**用户的条目会被一并清除**。这是有意的取舍：加严
-/// 会让「公开暴露撤不掉」（守卫拒绝 → MAM 的 Funnel 配置留在公网且 UI 无出路），
+/// 会让「公开暴露撤不掉」（守卫拒绝 → 兔维斯 的 Funnel 配置留在公网且 UI 无出路），
 /// 失败模式比「多清一条用户条目」更糟（独立评审确认该权衡成立）。缓解 = 撤销回执与
 /// audit 日志明示被清条目数（[`ServeOwnership::cleared_others`]）+ `disable_force`
 /// 之外的手动出口（错误文案里给出终端命令）
@@ -884,7 +884,7 @@ pub(super) fn map_status(
         return crate::remote::tunnel::ChannelStatus::default();
     }
     if foreign_serve_config(&funnel_json, mam_port) {
-        return failed("Funnel 已被其他 serve 配置占用（非 MAM）".into());
+        return failed("Funnel 已被其他 serve 配置占用（非 兔维斯）".into());
     }
     // 机器域名：DNSName 优先（带结尾点，board_url_from_dns_name 剥），
     // 回落 CertDomains[0]（不带点的同值域名）
@@ -1238,12 +1238,12 @@ pub(super) enum FunnelOutcome {
 ///    （守卫放行）并重开 `funnel --bg`；而 T+73s 实测 tailscaled 自己就把配置逐字段
 ///    恢复了。更糟的是紧接着的 `set --shields-up=false` 回读在初始化期必然失败，
 ///    UI 会收到「无法确认已关闭」的**假故障**（真机现象见 W-A 报告）。
-/// ① 守卫：已有 serve/Funnel 配置且不是 MAM 的 → 拒绝（`funnel --bg` 会覆盖/混入
+/// ① 守卫：已有 serve/Funnel 配置且不是 兔维斯 的 → 拒绝（`funnel --bg` 会覆盖/混入
 ///    用户自建配置——绝不静默覆盖）
 /// ② shields-up 关（Funnel 前置；幂等——实测 `get --json` 里键名精确为 `shields-up`）
 /// ③ `funnel --bg <port>`（**A6：`--bg` 是必需的**，2026-10-07 Windows 实测——不加
 ///    `--bg` 时 `tailscale funnel <port>` 打印横幅 + `Press Ctrl+C to exit.` 后
-///    **一直阻塞终端**，而 MAM 是 GUI 应用、绝不能让任何调用线程挂住；带 `--bg` 时
+///    **一直阻塞终端**，而 兔维斯 是 GUI 应用、绝不能让任何调用线程挂住；带 `--bg` 时
 ///    退出码 0、0.1 秒返回、无批准链接。**macOS 侧仍是预期**——本机只跑过只读命令，
 ///    见 [`super::wizard::write_path_verified`]）
 /// 返回批准链接：首次开通时上游**可能**要求一次浏览器批准（实测两平台各执一端：
@@ -1298,17 +1298,17 @@ pub(super) fn disable_shields_up() -> Result<(), String> {
 /// 这也是本模块守卫存在的唯一理由。
 ///
 /// **判据的原话（B-I5 ③：注释不得宣称判据不给的保护）**：守卫只拒绝
-/// `ServeOwnership::Foreign`，即「整份配置里**一条**指向本机 MAM 端口的 handler 都没有」
+/// `ServeOwnership::Foreign`，即「整份配置里**一条**指向本机 兔维斯 端口的 handler 都没有」
 /// （含非空但读不懂的未知形态）。它**不保证**「配置里只有我们那一条」——
 /// `Mixed`（我们那路 + 用户自建条目）**照常放行**，**用户的条目会随这次 reset 一并
 /// 被清除**。
 ///
 /// **为什么明知会误清仍不加严（失败模式比较，独立评审确认权衡成立）**：加严 = 叠加形态下
-/// 守卫拒绝 reset → MAM 自己开通的 Funnel 配置留在公网、地址继续可达，而 UI 没有任何
+/// 守卫拒绝 reset → 兔维斯 自己开通的 Funnel 配置留在公网、地址继续可达，而 UI 没有任何
 /// 出路（用户只能去终端手敲命令）——「公开暴露撤不掉」比「多清一条用户自建路径」更糟。
 ///
 /// **缺口如何向用户呈现**：① **撤销前**——前端先调 `disable_preview` 拿到逐条预览
-/// （`serve_entries` 的条目表 + `foreign`），只要「有非 MAM 条目会被清」或「普通撤销会被
+/// （`serve_entries` 的条目表 + `foreign`），只要「有非 兔维斯 条目会被清」或「普通撤销会被
 /// 守卫拒绝」就弹确认框逐条列出，用户点头才走 `disable_force`（B1 已接线）；
 /// ② **撤销后**——回执带上**实际被清除的条目**（[`ServeResetReport::cleared_entries`]，
 /// 与条数同源），卡面逐条回看「我的 /media 那次是被谁清的」（M-1 已接线），并同步写
@@ -1364,12 +1364,12 @@ pub(crate) fn start_channel(port: u16) -> Result<(), String> {
 pub(super) fn foreign_serve_error(action: &str, others: usize) -> String {
     // 条目数如实报出（B-I5 ②）：连"会清掉几条"都说不出来，用户就没有知情可言
     let detail = if others > 0 {
-        format!("（{others} 条非 MAM 条目）")
+        format!("（{others} 条非 兔维斯 条目）")
     } else {
         String::new()
     };
     format!(
-        "检测到非 MAM 的 Tailscale serve/Funnel 配置{detail}，为避免覆盖已中止{action}；\
+        "检测到非 兔维斯 的 Tailscale serve/Funnel 配置{detail}，为避免覆盖已中止{action}；\
          如确认可放弃该配置，请在终端执行 `tailscale funnel reset` 后重试，\
          或在向导中确认后执行强制撤销（向导步 disable_force）"
     )
@@ -1385,14 +1385,14 @@ pub(super) fn funnel_status_unreadable(action: &str, e: &str) -> String {
 }
 
 /// 停止内核（start/stop 对称的唯一实现，stop_channel / stop_all / run_step("disable")
-/// 共用）：**本地宣称先收口**（DESIRED 清空 + 快照复位——无论后续 CLI 结果如何，MAM
+/// 共用）：**本地宣称先收口**（DESIRED 清空 + 快照复位——无论后续 CLI 结果如何，兔维斯
 /// 绝不继续宣称运行）→ 守卫（配置已是外来 → 拒绝 `funnel reset`——它清整份 serve
 /// 配置，静默清掉用户自建配置不可接受；错误口径与 start_channel 同款）→ 非外来才撤。
 /// port 来源：显式 hint（向导步参数）优先，回落 DESIRED（取走即清）；两者皆无 =
-/// MAM 从未开过本通道，无事可做直接 Ok（停机路径依赖这条零 CLI 早退，不悬挂）。
+/// 兔维斯 从未开过本通道，无事可做直接 Ok（停机路径依赖这条零 CLI 早退，不悬挂）。
 /// CLI 失败（含未安装）在收口之后如实 Err 上抛——调用方（开关闭包）写快照展示。
 /// `force` = 用户已显式确认的强制撤销（B-M4 出口，见 run_step("disable_force")）：
-/// **只跳过归属守卫**（配置完全不含 MAM 那路也照撤——否则端口被改后 MAM 自己的旧配置
+/// **只跳过归属守卫**（配置完全不含 兔维斯 那路也照撤——否则端口被改后 兔维斯 自己的旧配置
 /// 会变"外来"，开通与撤销双双被拒、Funnel 留在公网且 UI 无出路），
 /// 仍要求守卫读数成功（读不到配置就不动，fail-closed 不因 force 放宽）。
 ///
@@ -1452,7 +1452,7 @@ pub(super) fn stop_inner_outcome(
         // B-I5 ②：`funnel reset` 会把这 N 条一起清掉——如实告知（日志/审计），
         // 不静默（回执另随 run_step("disable") 交回调用方）
         log::warn!(
-            "tailscale 撤销：另有 {} 条非 MAM serve 条目随 funnel reset 一并清除{}",
+            "tailscale 撤销：另有 {} 条非 兔维斯 serve 条目随 funnel reset 一并清除{}",
             report.cleared_others,
             if report.forced {
                 "（强制撤销）"
@@ -1475,24 +1475,24 @@ pub(super) fn stop_inner(port_hint: Option<u16>, force: bool) -> Result<ServeRes
     stop_inner_outcome(port_hint, force).map(|r| r.unwrap_or_default())
 }
 
-/// 撤销回执（B-I5 ②/ B-M4 / M-1）：把「随 `funnel reset` 一并被清除的非 MAM 条目」如实
+/// 撤销回执（B-I5 ②/ B-M4 / M-1）：把「随 `funnel reset` 一并被清除的非 兔维斯 条目」如实
 /// 交回调用方——**条数与条目表同源**（都取自同一次 `serve_entries`），叠加形态下这是用户
 /// 唯一能看到 "你的 /media 也没了" 的数据源。前端 B1 已接线：确认框用 disable_preview
 /// 逐条列出将清除的条目，撤销后用本回执的 `cleared_entries` 逐条呈现**实际**被清者
 /// （两条路的条目来源都是后端条目表，不靠前端猜测拼装）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(super) struct ServeResetReport {
-    /// 随本次 `funnel reset` 一并被清除的非 MAM 条目数
+    /// 随本次 `funnel reset` 一并被清除的非 兔维斯 条目数
     pub cleared_others: usize,
     /// 是否走了强制撤销（跳过了归属守卫）
     pub forced: bool,
-    /// **实际被一并清除的非 MAM 条目**（与 `cleared_others` 同源，恒等）
+    /// **实际被一并清除的非 兔维斯 条目**（与 `cleared_others` 同源，恒等）
     pub cleared_entries: Vec<ServeEntry>,
 }
 
 /// 停止 Tailscale 通道（开关 off 的入口）：本地宣称收口 + 守卫后撤配置。
 /// Err = 守卫拒绝（外来配置在先不撤）或 CLI 失败——收口已完成，Err 仅供调用方
-/// 把原因写快照展示。被一并清除的非 MAM 条目走日志/审计——**本入口（开关关闭路径）没有
+/// 把原因写快照展示。被一并清除的非 兔维斯 条目走日志/审计——**本入口（开关关闭路径）没有
 /// 回执消费方**，条目级的卡面回看走向导步 `disable` / `disable_force` 的回执
 /// （[`ServeResetReport::cleared_entries`]，M-1/B1 接线）。
 pub(crate) fn stop_channel() -> Result<(), String> {
@@ -1523,7 +1523,7 @@ pub(crate) fn stop_all() {
 /// 撤销步**同源**（`channel_toggled` + 空格分隔 `key=value`）：一把 `channel=tailscale` 的
 /// grep 就能拉出完整开/关序列。**`forced` 不在本行**：本路径 `force` 恒为 false（从不强制
 /// 撤销），写一个恒假常量是硬编噪声而非事实——是否强制只有向导步那条路有。连带清掉的非
-/// MAM 条目数照记（`cleared_others`，与向导行同字段同口径）；`>0` 时 [`stop_inner_outcome`]
+/// 兔维斯 条目数照记（`cleared_others`，与向导行同字段同口径）；`>0` 时 [`stop_inner_outcome`]
 /// 另发一条副作用审计 `tailscale_serve_reset_cleared_extras`，两条各司其职（一条记撤销动作
 /// 本身、一条记副作用），互不替代。
 pub(super) fn stop_all_with(audit: impl FnOnce(&str, &str)) {

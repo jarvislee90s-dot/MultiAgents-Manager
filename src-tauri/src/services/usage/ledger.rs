@@ -1,12 +1,12 @@
 //! 账本落库：**分批短事务**（宿主硬约束，说明书 §7.2/§10）。
 //!
-//! 为什么必须分批：MAM 的 SQLite 未启用 WAL、未设 busy_timeout，全局只有一把
+//! 为什么必须分批：兔维斯 的 SQLite 未启用 WAL、未设 busy_timeout，全局只有一把
 //! `Mutex<Connection>`（database/connection.rs:21），而 3 秒的 `get_all_sessions`
 //! 轮询要频繁取同一把锁。若一个事务写完 20 万行，会话卡/通知/宠物会一起卡住数秒。
 //! 因此：每事务 ≤ LEDGER_BATCH_ROWS 行 → drop 锁 → sleep(LEDGER_YIELD_MS) 让出，
 //! 单批锁持有窗口稳定在毫秒级（Task 4 测试与 Task 22 并发验收双重锁住）。
 //!
-//! **不启用 WAL / 不换独立连接**：那会改变整个 mam.db 的既有行为，属【默认裁定】，
+//! **不启用 WAL / 不换独立连接**：那会改变整个 tuvis.db 的既有行为，属【默认裁定】，
 //! 只做评估与提请（Task 22），不在本计划实施范围内。
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -116,7 +116,7 @@ pub fn apply_delta(
 /// **调用方持连接的落库入口**（与 `apply_delta` 同一主体，只是连接由调用方给）。
 ///
 /// 存在的理由（独立验证复核 §3.2.2 阻塞 2）：集成测试二进制里 `support::setup()` 用 `Once`
-/// 只重定向一次 `HOME`/`MAM_HOME` → **同一个测试文件里的所有用例共用一个库**，
+/// 只重定向一次 `HOME`/`TUVIS_HOME` → **同一个测试文件里的所有用例共用一个库**，
 /// 于是 `count_rows_conn(..., "usage_detail") == 1` 这类**绝对行数**断言会随用例数量与执行顺序
 /// 变化（旧计划里 Task 11/13 往同文件加了两条落库用例之后，Task 4 的 round_trip 在任何顺序下
 /// 都不可能成立）。有了这个入口，每条集成用例可以拿 `support::open_ledger_db(tag)` 开一个

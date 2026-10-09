@@ -1504,7 +1504,7 @@ describe("SessionDetail：轮询滚动跟随条件化（P2-B）", () => {
 // ==== 计划正文渲染（2026-09-20 用户实测：ExitPlanMode 整篇计划在详情页是 \n 字面量汤）====
 // 根因：后端把工具输入原封透传为 JSON 串（字符串值换行全为 \n 转义），前端 <pre> 原样上屏。
 // 修法：toolArgs 解析出非空字符串 plan 字段 → 该正文走 markdown 渲染；不看 toolName——
-// zcode 的 ExitPlanMode 输入同为 {plan} 但 MAM 记录的是显示 title，按名字匹配会漏。
+// zcode 的 ExitPlanMode 输入同为 {plan} 但 兔维斯 记录的是显示 title，按名字匹配会漏。
 // 其他工具参数维持原样（用户裁决：不做通用美化）。
 describe("SessionDetail：计划正文渲染（2026-09-20）", () => {
   function expandToolCall(seq: number) {
@@ -2487,7 +2487,7 @@ describe("SessionDetail：计划待确认挂载门的真机状态矩阵（丁T2 
   });
 
   // 边界对照：kimi 的计划审批真机落 **Waiting**（interaction.request 红灯），
-  // idle 只是防御位（MAM 未运行时状态可能回落）——两者都必须挂载。
+  // idle 只是防御位（兔维斯 未运行时状态可能回落）——两者都必须挂载。
   it("kimi idle + 尾部计划提案：同样挂载（防御位——真机在 Waiting 已由既有用例覆盖）", async () => {
     installFetch();
     routes.messages = [planMsg(0, "# Plan: Create hi.txt"), planMsg(1, "# Plan: Create yo.txt")];

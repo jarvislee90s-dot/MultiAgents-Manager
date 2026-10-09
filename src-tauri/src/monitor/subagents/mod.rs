@@ -257,7 +257,7 @@ pub(crate) fn sort_views(v: &mut [SubagentView]) {
     });
 }
 
-/// 测试隔离：清空全部条目（MAM 重启语义的测试等价物；仅测试构建）
+/// 测试隔离：清空全部条目（兔维斯 重启语义的测试等价物；仅测试构建）
 #[cfg(test)]
 pub(crate) fn reset_cache_for_tests() {
     registry().lock().unwrap_or_else(|e| e.into_inner()).clear();

@@ -162,7 +162,7 @@ export function UsageExportActions(props: {
       await openContainingDir(savedPath);
     } catch (e) {
       // 定位失败不改「导出成功」的结论（文件已在磁盘上），但入口撤掉 + 如实报原因：
-      // 留着入口只会让用户反复点、反复失败（开发机设了 MAM_HOME 时导出目录会重定向，正会走到这里）
+      // 留着入口只会让用户反复点、反复失败（开发机设了 TUVIS_HOME 时导出目录会重定向，正会走到这里）
       setSavedPath("");
       setNote(t("usage.export.saveFailed", { error: String(e) }));
     }

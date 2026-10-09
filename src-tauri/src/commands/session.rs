@@ -55,7 +55,7 @@ fn mark_read_on_jump(
 ) {
     if let (Some(sid), Some(agent)) = (session_id, agent_type) {
         crate::database::dao::unread::delete(&agent.to_lowercase(), sid);
-        // issue #35-1：已读墓碑——缓存失忆（长间隙清缓存 / MAM 重启）后
+        // issue #35-1：已读墓碑——缓存失忆（长间隙清缓存 / 兔维斯 重启）后
         // Insert 边沿与补偿据此不再复活已读未读卡
         crate::database::dao::unread::mark_read(&agent.to_lowercase(), sid);
         let _ = app.emit(
@@ -168,14 +168,14 @@ pub fn focus_session(
                 }
             }
         }
-        // marker 与按需注入 helper 贴的标题标记一致：MAM:<session_id 剥连字符后
-        // 前 12 位>。口径两处互引（改动须同步）：本处（匹配侧）/ mam-marker
-        // helper（src/bin/mam-marker.rs，注入侧）。8 位对 codex UUIDv7 只编码
+        // marker 与按需注入 helper 贴的标题标记一致：TUVIS:<session_id 剥连字符后
+        // 前 12 位>。口径两处互引（改动须同步）：本处（匹配侧）/ tuvis-marker
+        // helper（src/bin/tuvis-marker.rs，注入侧）。8 位对 codex UUIDv7 只编码
         // 65.5s 粒度、同分钟双开撞车（实测 2026-09-08），12 位不撞；必须先剥
         // 连字符——UUID 第 9 位即 '-'，直接 take(12) 会切进分隔符
         let marker = session_id.as_deref().map(|id| {
             format!(
-                "MAM:{}",
+                "TUVIS:{}",
                 id.chars()
                     .filter(|c| *c != '-')
                     .take(12)
@@ -537,20 +537,20 @@ mod on_demand_tests {
 mod marker_literal_tests {
     // 匹配侧 marker 构造回归锁（与本文件 focus_session 的内联构造逐字一致；
     // 口径内联于命令内，按互引纪律不抽取 helper，靠本锁镜像防漂移）。
-    // 与注入侧锁成对：src/bin/mam-marker.rs marker_strips_hyphens_and_takes_12
+    // 与注入侧锁成对：src/bin/tuvis-marker.rs marker_strips_hyphens_and_takes_12
     // 对同一 session id 断言同一字面量，两侧改动必须同步（互引：focus_session
-    // marker 注释 / mam-marker.rs 模块注释）
+    // marker 注释 / tuvis-marker.rs 模块注释）
     #[test]
     fn matching_side_marker_literal_matches_helper_side() {
         let session_id = "01a08083-5ca0-4948-8276-9a0b8c7d6e5f";
         let marker = format!(
-            "MAM:{}",
+            "TUVIS:{}",
             session_id
                 .chars()
                 .filter(|c| *c != '-')
                 .take(12)
                 .collect::<String>()
         );
-        assert_eq!(marker, "MAM:01a080835ca0");
+        assert_eq!(marker, "TUVIS:01a080835ca0");
     }
 }

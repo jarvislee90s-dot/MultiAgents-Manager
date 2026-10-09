@@ -239,7 +239,7 @@ describe("UsageExportActions（计划② Task 11：复制文本 + CSV 导出）"
 
     // 出图那一步收到的装配入参：brief 步骤 4 的钉死文案逐条到位（「用量趋势」只此一处小标题）
     const input = renderShareImageMock.mock.calls[0][0] as Record<string, unknown>;
-    expect(input.brand).toBe("MAM · 用量看板");
+    expect(input.brand).toBe("兔维斯 · 用量看板");
     expect(input.rangeLabel).toBe("近 7 天 · 09/27 – 10/03");
     expect(input.heroLabel).toBe("近 7 天 Token 合计");
     expect(input.trendTitle).toBe("用量趋势");

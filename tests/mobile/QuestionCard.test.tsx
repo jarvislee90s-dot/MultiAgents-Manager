@@ -1074,7 +1074,7 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     installFetch();
     const info = twoQuestionInteractive();
     // 终端实际停在第 2 题（多选），且第 2 题已有终端侧勾选与自由作答
-    // （MAM 重启 / 终端手动作答的漂移场景）
+    // （兔维斯 重启 / 终端手动作答的漂移场景）
     info.screen = {
       heading: "Second?",
       checked: [null, true],
@@ -1118,7 +1118,7 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
   it("GET 快照 review+summary 形态（db45945 回归锁）：刷新后确认卡摘要落位", async () => {
     installFetch();
     const info = twoQuestionInteractive();
-    // 终端已停在 Review 页，后端屏读解析出逐题摘要（Q/→ 行）——MAM 刷新/重开页面
+    // 终端已停在 Review 页，后端屏读解析出逐题摘要（Q/→ 行）——兔维斯 刷新/重开页面
     // 后 GET 载荷即此形态。db45945 之前：主 GET effect 的旧内联 review 分支只切
     // 确认卡、不落 confirmSummary → 确认卡所有题全显「（未作答）」（后端已回传
     // summary 前端没收货）；归一到 applyScreenSync 后 summary 落位、确认卡唯一

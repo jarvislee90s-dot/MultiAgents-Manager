@@ -6,7 +6,7 @@
 // 自动含自愈）；头部看板地址只在 reach=Verified 时显示（未验证不得当可用地址展示）；
 // 动作失败（Err reject）落到对应步骤行的可见错误行——**不弹全局 toast、也不静默**。
 // Windows 行如实标注「尚未实机校验」弱提示（数据源 windowsVerified）——不把未验证的
-// 流程伪装成已验证。**当前 Windows 已实测整条流程**（2026-10-07 用户实机走完 MAM 向导
+// 流程伪装成已验证。**当前 Windows 已实测整条流程**（2026-10-07 用户实机走完 兔维斯 向导
 // 全程），故该提示在生产载荷下不渲染；机制保留（后端 `windowsUnverifiedSteps` 非空时
 // 自动回来并点名），见下方渲染块注释。数据源 = remote_ts_probe / remote_ts_run_step
 //（形状契约见 Rust 端 tailscale::wizard_status / run_step 注释）。
@@ -46,9 +46,9 @@ const STEP_KEY: Record<string, string> = {
 const stepLabel = (t: ReturnType<typeof useAppTranslation>["t"], id: string) =>
   STEP_KEY[id] ? t(STEP_KEY[id]) : id;
 
-// 可自动触发的步（id 与 Rust wizard_steps 一致）。login 不在列：MAM 不代登录，
+// 可自动触发的步（id 与 Rust wizard_steps 一致）。login 不在列：兔维斯 不代登录，
 // 动作是「去登录」链接；detect/sys_ext 是只读探针；verify 走下方专属「重试」按钮
-//（§C3，未验/失败都要能重触发校验）；autostart 是 MAM 自身行为（恒已完成）
+//（§C3，未验/失败都要能重触发校验）；autostart 是 兔维斯 自身行为（恒已完成）
 const RUNNABLE = new Set(["download", "install", "shields_up", "funnel"]);
 
 // ④ 「在走动」反馈的适用范围（2026-10-07 用户裁决）：只有这三步会给用户一段
@@ -56,7 +56,7 @@ const RUNNABLE = new Set(["download", "install", "shields_up", "funnel"]);
 // 取回，期间零反馈）；install = 系统授权框之后到安装器返回之间（msiexec/installer 阻塞）；
 // login = 「获取登录链接」的动作（后端后台发起 `tailscale login` + 有界轮询取链接，
 // 最长 9.5s——这一步同样只有"进行中…"可看，而它正是用户实测"没有可点之物"的那一步，
-// 更要让用户看见 MAM 确实去要了）。其余步（shields_up / funnel）是秒级 CLI 写，不给每步都挂噪音。
+// 更要让用户看见 兔维斯 确实去要了）。其余步（shields_up / funnel）是秒级 CLI 写，不给每步都挂噪音。
 // **不确定进度（indeterminate）**：总量未知 ⇒ 不给百分比（与移动端「速率未知只显示已传
 // 字节，不显示假百分比」同一条纪律），只表示「正在传输，没有卡住」。
 const LONG_STEP_HINT: Record<string, string> = {
@@ -90,7 +90,7 @@ export function TailscaleWizard() {
   const [loadError, setLoadError] = useState<string | null>(null);
   // 在途步互斥：连点会并发远程命令（下载/安装竞态）
   const [busyStep, setBusyStep] = useState<string | null>(null);
-  // funnel 步回执带出的批准链接（首次开通时上游要求一次浏览器批准；MAM 只递不代点）
+  // funnel 步回执带出的批准链接（首次开通时上游要求一次浏览器批准；兔维斯 只递不代点）
   const [approvalUrl, setApprovalUrl] = useState<string | null>(null);
   // ⑤ login 步回执带出的授权链接（「获取登录链接」按钮的产物）：回执里拿到的链接**立即**
   // 上墙，不等下一次探测——探测的 authUrl 是同一字段（后端 status --json 的 AuthURL），
@@ -126,7 +126,7 @@ export function TailscaleWizard() {
     try {
       const r = await remoteTsRunStep(step);
       if (r.approvalUrl) setApprovalUrl(r.approvalUrl);
-      // ⑤ login 步回执的授权链接（后端主动取回的，MAM 只递不代登录）；M4：记下它到的
+      // ⑤ login 步回执的授权链接（后端主动取回的，兔维斯 只递不代登录）；M4：记下它到的
       // **探测代数**——紧随其后的那次重探一落地，本回执即作废（探测是权威源）
       if (r.authUrl) {
         setAuthUrl(r.authUrl);
@@ -162,7 +162,7 @@ export function TailscaleWizard() {
   const loginLink = probedLink ?? (receiptLive ? authUrl : null);
 
   // ⑤ 登录窗口的**自动复评**（用户实测：登录步曾无可点之物，见下方渲染块注释）。
-  // 用户路径是「点链接 → 浏览器抢走焦点 → 在浏览器完成登录 → 切回 MAM」——窗口重新拿到
+  // 用户路径是「点链接 → 浏览器抢走焦点 → 在浏览器完成登录 → 切回 兔维斯」——窗口重新拿到
   // focus 时重探一次，登录步自动翻「已完成」、向导继续往下走。
   // **为什么不做定时轮询**：本仓纪律是「GET 时机 = 挂载 / 状态跃迁 / 动作后」，且这一窗口的
   // 真值变化**只可能由用户离开/回到本窗口引起**；拿不到链接时用户手上还有「获取登录链接」
@@ -187,7 +187,7 @@ export function TailscaleWizard() {
         </Button>
       </div>
       {/* Windows 行弱提示（I-3：验证位不得大于证据）——**机制保留，当前不渲染**：
-          2026-10-07 用户在本机 Windows 上卸载 Tailscale 后**从零走完 MAM 向导全程**
+          2026-10-07 用户在本机 Windows 上卸载 Tailscale 后**从零走完 兔维斯 向导全程**
           （下载 → 安装 UAC → 登录 → 关 shields-up → 开通 Funnel → 可达性校验，全程正常），
           故后端把「实测覆盖起点」前移到第一步（`wizard.rs::WINDOWS_VERIFIED_FROM`）⇒
           未验清单为空 ⇒ `windowsVerified=true` ⇒ 本行不渲染（用户实测看到的黄标就此撤下）。
@@ -349,7 +349,7 @@ export function TailscaleWizard() {
                       {t("settings.remote.tsWizard.runStep")}
                     </Button>
                   )}
-                  {/* login：MAM 不代登录——只递授权链接。**⑤（2026-10-07 用户实测）**：
+                  {/* login：兔维斯 不代登录——只递授权链接。**⑤（2026-10-07 用户实测）**：
                       旧实现只在 `probe.authUrl` 非空时渲染一条文字链接，而新装机器上
                       `status --json` 是 `NeedsLogin ∧ AuthURL=""`（授权链接要**发起一次
                       交互式登录**才由尾网生成）⇒ **登录行里没有任何可点的东西**，用户
@@ -357,7 +357,7 @@ export function TailscaleWizard() {
                       现在两条路都给：
                       ① 拿到链接（回执 / 探测）→ 做成**明确的按钮**（Button asChild 包 <a>，
                          新窗口 + noreferrer noopener）；
-                      ② 还没有链接 → 一个**「获取登录链接」按钮**（点它让 MAM 主动向后端要：
+                      ② 还没有链接 → 一个**「获取登录链接」按钮**（点它让 兔维斯 主动向后端要：
                          后端后台发起 `tailscale login` + 有界轮询取链接，见 Rust
                          `login_step_with`）+ 一句**明确的下一步**文案（不是让用户自己去
                          客户端里找）。合规红线不变：**只递链接，不代登录、不持凭据**。 */}
@@ -433,10 +433,10 @@ export function TailscaleWizard() {
                   </p>
                 )}
                 {/* 2026-10-08（用户实测缺口）：Windows 走 MSI，**安装向导会让用户选安装
-                    路径**（MAM 执行 msiexec 刻意不加 /qn——「装在哪里」的选择权本就该给
+                    路径**（兔维斯 执行 msiexec 刻意不加 /qn——「装在哪里」的选择权本就该给
                     用户）。装到自定义路径时后端已能经「服务登记 ImagePath」找到 CLI，但
                     用户不会知道，只会一直看到「未安装」→ 又下载又安装（用户实测的死循环）。
-                    故安装行常驻一条弱提示：说清 MAM 的**两个查找位置**，并给出「装完点
+                    故安装行常驻一条弱提示：说清 兔维斯 的**两个查找位置**，并给出「装完点
                     刷新状态」的动作（重探时机 = 挂载/动作后，不点就一直显示旧结论）。
                     macOS 的 .pkg 由 installer 固定装到 /Applications，用户无从选择
                     ⇒ 不显示（与后端 actAdminWinMsi 的逐平台分叉同口径）。 */}
@@ -450,7 +450,7 @@ export function TailscaleWizard() {
                 )}
                 {/* ⑤ 拿不到链接时的**明确下一步**（用户实测的正是这一段：行里只有动作文案、
                     没有任何可点的东西，用户只能自己去客户端里手动登录）。文案说清三件事：
-                    点上面的按钮让 MAM 去要链接 / MAM 不代登录不碰账号 / 兜底可到本机
+                    点上面的按钮让 兔维斯 去要链接 / 兔维斯 不代登录不碰账号 / 兜底可到本机
                     Tailscale 客户端点「Log in」，或点右上「刷新状态」重试。
                     busy 期间不挂（正在要链接，别同时喊两边）。 */}
                 {step.id === "login" && !done && !loginLink && !busy && (
@@ -528,7 +528,7 @@ export function TailscaleWizard() {
           解释它是什么**，而用户被要求装一个没听过的第三方软件、还要去它的官网登录一次。
           页脚恒挂一行（不随相位/平台变化——未装 / 配置中 / 恢复中 / 未运行任何挂载形态
           都要能回答「这是什么」）：① 它是什么 = 免费的个人组网工具；② **为什么需要它**
-          = 它给每台设备一个固定的私有地址，MAM 因此**不需要用户自备域名**就能给出永久
+          = 它给每台设备一个固定的私有地址，兔维斯 因此**不需要用户自备域名**就能给出永久
           链接（正是本卡卖点「免域名」的原理）；③ 官网外链（新窗口 + noreferrer noopener:
           不给新窗口 opener 句柄，安全惯例——与会话内其它外链同口径）。 */}
       <p

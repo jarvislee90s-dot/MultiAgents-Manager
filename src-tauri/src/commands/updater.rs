@@ -19,7 +19,7 @@ const GITHUB_API_HOST: &str = "api.github.com";
 /// GitHub API 强制要求 User-Agent，否则 403
 const USER_AGENT: &str = "tuvis-updater";
 /// 进度事件名（沿用 `mam-` 前缀惯例）
-pub const PROGRESS_EVENT: &str = "mam-updater-progress";
+pub const PROGRESS_EVENT: &str = "tuvis-updater-progress";
 /// 兜底直连最多试几个 DoH 地址（同 reach.rs B-M7 口径：首条陈旧时还有得试，
 /// 全试一遍又太贵）
 const PINNED_MAX_ADDRS: usize = 3;
@@ -297,7 +297,7 @@ struct ProgressPayload<'a> {
 
 /// 一键升级：动态端点指向目标 release 的 latest.json，复用插件的
 /// 签名校验与平台安装（Windows NSIS passive 后插件自行退出重启；
-/// macOS 换壳成功后由本命令重启）。进度经 `mam-updater-progress` 事件广播。
+/// macOS 换壳成功后由本命令重启）。进度经 `tuvis-updater-progress` 事件广播。
 #[tauri::command]
 pub async fn install_github_update(
     app: tauri::AppHandle,

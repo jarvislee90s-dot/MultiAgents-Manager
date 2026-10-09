@@ -9,13 +9,13 @@ pub fn setup() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().to_path_buf();
         std::env::set_var("HOME", &home);
-        // Windows 下 dirs::home_dir 忽略 HOME 环境变量，用专用覆盖变量 MAM_HOME 重定向应用数据目录
-        std::env::set_var("MAM_HOME", &home);
-        // 创建 ~/.mam 目录结构
-        std::fs::create_dir_all(home.join(".mam/skills")).unwrap();
-        std::fs::create_dir_all(home.join(".mam/mcp")).unwrap();
-        std::fs::create_dir_all(home.join(".mam/plugins")).unwrap();
-        std::fs::create_dir_all(home.join(".mam/active")).unwrap();
+        // Windows 下 dirs::home_dir 忽略 HOME 环境变量，用专用覆盖变量 TUVIS_HOME 重定向应用数据目录
+        std::env::set_var("TUVIS_HOME", &home);
+        // 创建 ~/.tuvis 目录结构
+        std::fs::create_dir_all(home.join(".tuvis/skills")).unwrap();
+        std::fs::create_dir_all(home.join(".tuvis/mcp")).unwrap();
+        std::fs::create_dir_all(home.join(".tuvis/plugins")).unwrap();
+        std::fs::create_dir_all(home.join(".tuvis/active")).unwrap();
         // 初始化数据库（Lazy 只初始化一次）
         multi_agents_manager_lib::database::init();
         // 泄漏 TempDir 防止它被清理（测试期间需要保持数据库文件存在）
@@ -41,7 +41,7 @@ use std::path::PathBuf;
 #[allow(dead_code)]
 pub fn open_ledger_db(tag: &str) -> Connection {
     let home = unique_home(tag);
-    let conn = Connection::open(home.join(".mam").join("mam.db")).expect("打开用例私有账本库失败");
+    let conn = Connection::open(home.join(".tuvis").join("tuvis.db")).expect("打开用例私有账本库失败");
     // 与生产启动路径同款：schema::init 建齐（含 Task 2 追加的 4 张用量账本表）
     multi_agents_manager_lib::database::schema::init(&conn);
     conn
@@ -52,7 +52,7 @@ pub fn open_ledger_db(tag: &str) -> Connection {
 fn unique_home(tag: &str) -> PathBuf {
     let temp = tempfile::tempdir().expect("创建用例私有 tempdir 失败");
     let home = temp.path().join(tag);
-    std::fs::create_dir_all(home.join(".mam")).expect("创建 .mam 目录失败");
+    std::fs::create_dir_all(home.join(".tuvis")).expect("创建 .tuvis 目录失败");
     std::mem::forget(temp); // 与 setup() 同款：用例存活期间目录不得被清理
     home
 }

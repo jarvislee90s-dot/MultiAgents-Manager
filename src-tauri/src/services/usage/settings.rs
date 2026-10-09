@@ -75,7 +75,7 @@ pub fn merge_patch(
 }
 
 /// 单测注入的设置覆盖（**仅 `#[cfg(test)]`**，评审 C5）：让调度层/采集器的单测
-/// **完全不碰数据库**——旧版几个用例经 `save()` 写的是开发机真实 `~/.mam/mam.db`。
+/// **完全不碰数据库**——旧版几个用例经 `save()` 写的是开发机真实 `~/.tuvis/tuvis.db`。
 /// 用**全局静态量**而不是 `thread_local`：`concurrent_calls_share_one_run` 会在 4 个
 /// 子线程里调用 `collect_with` → `load()`，thread_local 传不进去。
 #[cfg(test)]
@@ -100,7 +100,7 @@ pub fn load() -> UsageSettings {
     parse_settings(get_setting(SETTINGS_KEY).as_deref())
 }
 
-/// 连接注入版（单测/查询层用）：**不触碰全局 DB**，避免单测污染真实 `~/.mam/mam.db`
+/// 连接注入版（单测/查询层用）：**不触碰全局 DB**，避免单测污染真实 `~/.tuvis/tuvis.db`
 pub fn load_from_conn(conn: &rusqlite::Connection) -> UsageSettings {
     parse_settings(crate::database::dao::settings::get_setting_conn(conn, SETTINGS_KEY).as_deref())
 }

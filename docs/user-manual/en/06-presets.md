@@ -40,7 +40,7 @@ Each preset card shows: the preset name, a one-line truncated description, an it
 
 ## The Stash Area
 
-When a preset is applied, the tool's **non-resident** native skill directories are moved wholesale into the stash area at `~/.mam/stash/<tool>/skills/` (a same-volume rename, zero copying); restoring the default moves them back. Every move is recorded in a ledger (stash_journal), so after a crash the next start can reconcile from it.
+When a preset is applied, the tool's **non-resident** native skill directories are moved wholesale into the stash area at `~/.tuvis/stash/<tool>/skills/` (a same-volume rename, zero copying); restoring the default moves them back. Every move is recorded in a ledger (stash_journal), so after a crash the next start can reconcile from it.
 
 - **Same-name conflicts**: if the original spot is occupied when restoring (say you manually installed a same-named skill during the preset session), Tuvis **never overwrites** — the item stays in the stash area and is reported as a conflict for you to resolve manually.
 - Stash entries that never got restored also show up in the health check card under "pending stash entries", each with a manual "restore" button.
@@ -75,7 +75,7 @@ Preset exclusivity and enable/disable both rely on the ledger (database) and the
 | L1 | Missing link | The ledger says enabled, but the link is gone from disk |
 | L2 | Real directory | A real directory sits where a link should be, and the ledger says enabled |
 | L3 | Extra link | A link into the Tuvis repository exists on disk, but the ledger does not record it |
-| L4 | External link | The link points outside `~/.mam` (not Tuvis's business) |
+| L4 | External link | The link points outside `~/.tuvis` (not Tuvis's business) |
 
 Each row offers three dispositions:
 
@@ -102,7 +102,7 @@ The system tray menu has a "Preset Groups" section for quick switching without o
 
 ## Notes
 
-- Applying or restoring presets really moves directories and rewrites tool configurations. **Back up `~/.mam/` before your first run or any manual testing**; you can also verify in an isolated environment (the `MAM_HOME` environment variable redirects the data directory, effective in development/debug builds only).
+- Applying or restoring presets really moves directories and rewrites tool configurations. **Back up `~/.tuvis/` before your first run or any manual testing**; you can also verify in an isolated environment (the `TUVIS_HOME` environment variable redirects the data directory, effective in development/debug builds only).
 - Turning a preset off = restore default, and it is idempotent: with no active preset, running it changes nothing.
 - Whiteboard mode only clears the stage and enables nothing — confirm only when that is what you want.
 

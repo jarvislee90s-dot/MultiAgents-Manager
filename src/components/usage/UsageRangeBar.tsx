@@ -7,7 +7,7 @@
 //    常见形态挡在原生校验层（真正的夹取在页面 `clampCustomRange`，输入框显示的必须是实际查询的区间）。
 //  * `clamped` 只在**真被上限截断**时为真（range.ts 的 `clampCustomRange` 判据），提示常驻到用户
 //    下次编辑日期（不是一帧即逝）——状态归页面持有，本组件只负责渲染。
-//  * 按钮一律 `@/components/ui/button` 原语；日期输入无仓内原语（§3 第 40 条：MAM 无数字输入组件、
+//  * 按钮一律 `@/components/ui/button` 原语；日期输入无仓内原语（§3 第 40 条：兔维斯 无数字输入组件、
 //    无 shadcn Select），用原生 input。
 import { Button } from "@/components/ui/button";
 import { dayKeyOf, USAGE_PRESETS, type TFn } from "@/lib/usage/range";

@@ -128,7 +128,7 @@ describe("computePetStatus", () => {
   });
 
   it("P2-6：首帧消费后端 s.unread 点亮恢复的未读卡；首帧仍零事件", () => {
-    // MAM 重启/宠物窗口重建后 prev=null：既存未读卡没有本地转绿差分可回放，
+    // 兔维斯 重启/宠物窗口重建后 prev=null：既存未读卡没有本地转绿差分可回放，
     // 只有消费 payload 的 unread 才能点亮（此前 first 强制 false → 通知静默盲区）
     const first = computePetStatus([mk("c", "idle", { unread: true, form: "app" })], null, 0);
     expect(first.cards.find((x) => x.id === "c")).toMatchObject({ light: "done", unread: true });

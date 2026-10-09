@@ -742,7 +742,7 @@ fn start_server() -> Result<(), String> {
 ///     总开关启停；监听热重启弹掉隧道会让 lan 开关把 quick 临时隧道换址）；
 ///   - 重置密码（`remote_set_pin` 改值）/ 重置设备（`remote_reset_devices`）→ 不经停机，
 ///     走 `revoke_all_and_disconnect`（服务器不停）；
-///   - MAM 应用退出/重启（lib.rs `RunEvent::Exit`）→ 本就不调 stop_server（只停对外
+///   - 兔维斯 应用退出/重启（lib.rs `RunEvent::Exit`）→ 本就不调 stop_server（只停对外
 ///     通道 stop_all + 放电源锁，修复轮 1 Finding 2② 追加 tailscale——Funnel 无子进程
 ///     可 kill_on_drop，进程退出必须显式撤），维持「重启不吊销」现状。
 ///
@@ -1183,7 +1183,7 @@ fn channels_payload(
 
 /// 本机展示名（纯函数，注入缝：sysinfo 以闭包注入便于测试）：
 /// DB 设置（Some 且**非空白**，配置损坏的空串不得顶替真实主机名）
-/// > sysinfo 探测 > "MAM" 品牌兜底——双机双子域辨识（P8b）
+/// > sysinfo 探测 > "兔维斯" 品牌兜底——双机双子域辨识（P8b）
 fn display_host_name(saved: Option<String>, sysinfo: impl FnOnce() -> Option<String>) -> String {
     saved
         .map(|v| v.trim().to_string())
@@ -1206,8 +1206,8 @@ fn platform_id() -> &'static str {
 /// host 载荷内核（纯装配，外部依赖全部注入，零 DB 接触可单测）：
 ///   host: { name, platform, version } + enabledTools（P8d chips 过滤数据源，Task 3 消费）。
 /// 返回 serde_json Value 便于 remote_status 原地并入其余 status 键
-/// MAM 进程生命周期标识（每次启动重新生成，进程内恒定）：移动端「随进程
-/// 消失」的客户端态（消息书签）持久化时打上此标识——MAM 重启后客户端读到
+/// 兔维斯 进程生命周期标识（每次启动重新生成，进程内恒定）：移动端「随进程
+/// 消失」的客户端态（消息书签）持久化时打上此标识——兔维斯 重启后客户端读到
 /// 不同的 bootId 即自行清空，页面刷新（同一进程）则原样恢复
 static BOOT_ID: Lazy<String> = Lazy::new(|| {
     let mut b = [0u8; 8];
@@ -1234,7 +1234,7 @@ fn host_payload(
             "platform": platform_id(),
             "version": env!("CARGO_PKG_VERSION"),
             // 进程生命周期标识（书签修复）：移动端「随进程消失」的客户端态
-            // （消息书签）据此区分同一进程与「MAM 已重启」——重启即清空
+            // （消息书签）据此区分同一进程与「兔维斯 已重启」——重启即清空
             "bootId": boot_id,
         },
         "enabledTools": enabled_tools(),
@@ -1855,7 +1855,7 @@ mod tests {
     ///
     /// 零污染：`STATE` 构造只存函数指针与内存态（`DeviceStore::Global` 是 ZST，
     /// 不打开 DB——DB 仅在 `.with()` 时锁取）；此处只调 `home_source` 一次
-    /// （读 `dirs::home_dir()`），不触真实 ~/.mam、不绑端口。
+    /// （读 `dirs::home_dir()`），不触真实 ~/.tuvis、不绑端口。
     #[test]
     fn production_state_home_source_is_wired_to_real_home() {
         let home = (STATE.home_source)();
@@ -1909,7 +1909,7 @@ mod tests {
     }
 
     // ==== Task 4 生命周期接线：纯逻辑测试 ====
-    // 零污染约束：不触真实 ~/.mam/mam.db、不绑端口、不真正 start_server()。
+    // 零污染约束：不触真实 ~/.tuvis/tuvis.db、不绑端口、不真正 start_server()。
     // (a)(b) 测的是从 bind_and_port / remote_status 抽出的纯函数内核（DB 读取留在薄壳里）。
 
     /// (a) bind_and_port 的解析内核：无设置 / 坏端口字符串的回落行为。
@@ -2029,7 +2029,7 @@ mod tests {
     /// (c-1) toggle 内核的失败回滚（终审修复轮）：开启分支 start 失败（TLS 门拒绝 /
     /// 端口被占）必须把 SSOT 回滚为 false 再原样传出 Err——否则 DB 残留 enabled=true
     /// 而服务器没起，设置页重进显示 ON（状态撒谎）。零污染：SSOT 写入与启停均为
-    /// 记录调用的假闭包，不触真实 ~/.mam/mam.db、不绑端口、不碰 SERVER_HANDLE
+    /// 记录调用的假闭包，不触真实 ~/.tuvis/tuvis.db、不绑端口、不碰 SERVER_HANDLE
     #[test]
     fn toggle_core_rolls_back_ssot_when_start_fails() {
         // (1) 开启失败：先写 true，start 报错后回滚 false，Err 原样传出
@@ -2108,7 +2108,7 @@ mod tests {
     // ==== M3 Task 2：P7 修正（0.0.0.0 主显示地址改局域网 IP）====
     // 计划里的测试名 url_uses_lan_ip_when_bound_to_all_interfaces 保留，断言落在纯函数
     // display_url_for 上——零污染裁决（延续 Task 1）：brief 原稿直调 remote_status 前
-    // set_setting(KEY_BIND, ...) 会写真实 ~/.mam/mam.db，禁止；display_url_for 是
+    // set_setting(KEY_BIND, ...) 会写真实 ~/.tuvis/tuvis.db，禁止；display_url_for 是
     // remote_status 装配 url 字段的可测内核（DB/网络读取留在薄壳里）
 
     /// 计划测试名保留：0.0.0.0 通配绑定时主显示 url 必须落到可拨号的局域网 IP
@@ -2209,7 +2209,7 @@ mod tests {
     /// (c) 陈旧句柄自愈（评审 Important 修复的行为锁定）：经 `start_server_core` 的
     /// **真实分支**驱动（而非只测谓词——那样把查重还原成 is_some 的变异测不出来）。
     /// 零污染：SERVER_HANDLE / STATE 全局不被触碰——句柄槽是局部变量，设置读取与
-    /// spawn 均为注入的假闭包（不读真实 ~/.mam/mam.db、不绑任何端口）；pending 任务
+    /// spawn 均为注入的假闭包（不读真实 ~/.tuvis/tuvis.db、不绑任何端口）；pending 任务
     /// 用 abort 清理。锁定的行为矩阵（变异锚点：把核心查重还原为 `is_some` 时
     /// case 2 必红）：
     ///   1. 运行中句柄 → 幂等跳过（不 spawn、不读设置）；
@@ -3513,12 +3513,12 @@ mod tests {
             c.error = None;
         });
         restore_one_channel(ChannelKind::Tailscale, 9420, |_p| {
-            Err("检测到非 MAM 的 serve 配置".into())
+            Err("检测到非 兔维斯 的 serve 配置".into())
         });
         let s = crate::remote::tailscale::ts_snapshot();
         assert_eq!(
             s.error.as_deref(),
-            Some("检测到非 MAM 的 serve 配置"),
+            Some("检测到非 兔维斯 的 serve 配置"),
             "恢复失败必须把原因写进快照（否则卡面只剩「尚未生效」）"
         );
         assert!(!s.running, "失败不得宣称运行");
@@ -4076,7 +4076,7 @@ mod tests {
     /// 契约守卫（§C1，与 production_state_home_source_is_wired_to_real_home 同纪律）：
     /// 生产装配的 tailscale 快照源必须真的可调用（不是占位闭包）。
     /// 防「端点测试自注入真值 → 掩盖生产漏接」这一类缺陷。
-    /// 零污染：ts_snapshot 只克隆静态默认值（不触 CLI、不触网络、不触 ~/.mam）
+    /// 零污染：ts_snapshot 只克隆静态默认值（不触 CLI、不触网络、不触 ~/.tuvis）
     #[test]
     fn production_tailscale_source_is_wired() {
         // 只断言可调用且不 panic；不绑定真机、不触网络

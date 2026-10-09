@@ -144,7 +144,7 @@ pub fn scheme_handler_exists(scheme: &str) -> bool {
 /// - Codex：`codex://threads/<threadId>` —— ChatGPT.app 的 app.asar 中存在
 ///   copy-link 处理器模板 `codex://threads/${i}`（解构出 `{threadId:i}`）。
 ///
-/// 注意：Codex 的 threadId 与 MAM 使用的 rollout-session UUID 大概率同源，
+/// 注意：Codex 的 threadId 与 兔维斯 使用的 rollout-session UUID 大概率同源，
 /// 但仅能通过 GUI 点击实测确认；若实测直达失败（APP 打开但停留在原界面），
 /// 按 plan Step 3 回退规则将 codex 分支改回 None。
 pub fn session_url(agent_type: &str, session_id: &str) -> Option<String> {

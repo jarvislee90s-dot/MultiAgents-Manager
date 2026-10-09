@@ -2,7 +2,7 @@
 // DB 拉取为模块级初始化（覆盖所有窗口，包括不消费 useTheme 的窗口）。
 // 原实现以 localStorage 为事实源、跨窗口依赖 storage 事件；Tauri 各窗口是独立
 // WebView，storage 事件不互通 → 设置窗口恒为浅色。新实现：setTheme 写 DB
-// （set_theme 命令）并广播 mam-theme-changed；每个窗口模块加载时应用首帧缓存 +
+// （set_theme 命令）并广播 tuvis-theme-changed；每个窗口模块加载时应用首帧缓存 +
 // initTheme() 从 DB 拉取校正 + 订阅全局事件实时跟随。
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";

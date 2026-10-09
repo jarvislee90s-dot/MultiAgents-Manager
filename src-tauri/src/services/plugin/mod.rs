@@ -24,7 +24,7 @@ pub struct PluginConfig {
 pub fn install_plugin_to_repo(source: &Path, name: &str, overwrite: bool) -> Result<(), String> {
     let repo = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("plugins");
     let _ = std::fs::create_dir_all(&repo);
     let dest = repo.join(name);
@@ -46,11 +46,11 @@ pub fn install_plugin_to_repo(source: &Path, name: &str, overwrite: bool) -> Res
     }
 }
 
-/// 返回 Plugin 的 SSOT 仓库目录 `~/.mam/plugins/`，不存在则创建
+/// 返回 Plugin 的 SSOT 仓库目录 `~/.tuvis/plugins/`，不存在则创建
 fn ensure_plugin_repo_dir() -> std::path::PathBuf {
     let repo = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("plugins");
     let _ = std::fs::create_dir_all(&repo);
     repo
@@ -280,7 +280,7 @@ pub fn toggle_plugin(
                 // config 型 toggle 需要 entries，这里简化：entries 从全局仓库读取
                 let repo = dirs::home_dir()
                     .unwrap_or_default()
-                    .join(".mam")
+                    .join(".tuvis")
                     .join("plugins")
                     .join(format!("{}.json", plugin_name));
                 let entries: BTreeMap<String, serde_json::Value> = if repo.exists() {

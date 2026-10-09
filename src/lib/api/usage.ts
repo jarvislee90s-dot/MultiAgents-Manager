@@ -77,7 +77,7 @@ export async function exportSaveBytes(name: string, base64: string): Promise<str
   return await invoke<string>("export_save_bytes", { name, base64 });
 }
 
-/** 落盘后在文件管理器里定位该文件（复用既有命令，白名单只认 ~/.mam 与 ~/.agents）——传**文件路径** */
+/** 落盘后在文件管理器里定位该文件（复用既有命令，白名单只认 ~/.tuvis 与 ~/.agents）——传**文件路径** */
 export async function revealDir(path: string): Promise<void> {
   return await invoke<void>("reveal_dir", { path });
 }

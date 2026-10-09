@@ -5,7 +5,7 @@ description: Windows 终端 TUI 工具注入与屏读探测工作流——为新
 
 # Windows 终端注入探测（win-console-inject-probe）
 
-为新终端 TUI 工具定注入规格，或诊断注入故障。方法论经 M6R 全量实证 + 独立评审闭环（2026-09-18，MAM 项目）。
+为新终端 TUI 工具定注入规格，或诊断注入故障。方法论经 M6R 全量实证 + 独立评审闭环（2026-09-18，兔维斯 项目）。
 
 ## 核心认知（三句话，先内化）
 
@@ -59,7 +59,7 @@ description: Windows 终端 TUI 工具注入与屏读探测工作流——为新
 
 ### P7 · 规格表 + 判定（5 分钟）
 
-按 `references/report-template.md` 产出规格定案表 + 判定：**GO**（全规格通）/ **GO-with-branches**（带按家分支，常态）/ **PARTIAL**（部分长度/宿主受限，注明）/ **NO-GO**（不可注入，注明证据）。归档：MAM 项目内入 `research/refs/phase2-消息注入/`，其他项目入用户指定目录。
+按 `references/report-template.md` 产出规格定案表 + 判定：**GO**（全规格通）/ **GO-with-branches**（带按家分支，常态）/ **PARTIAL**（部分长度/宿主受限，注明）/ **NO-GO**（不可注入，注明证据）。归档：兔维斯 项目内入 `research/refs/phase2-消息注入/`，其他项目入用户指定目录。
 
 ## 探测纪律（八条铁律，违反则该实验作废重做）
 
@@ -86,7 +86,7 @@ description: Windows 终端 TUI 工具注入与屏读探测工作流——为新
 
 ## 脚本套件（scripts/，M6R 验证版 + opencode 实测迭代）
 
-来源：MAM M6R 探测（2026-09-18，经独立评审逐行核验）+ opencode 实测（2026-09-19，SQLite 对账器/背压节流 runner/WT 标题截图/WT 定位修复）。用法与依赖见 `scripts/README.md`。核心：`ConIn.ps1`（FFI 基座：附加/CONIN$/写记录/模式/占用率/复位）+ 各实验 runner。缺脚本时按 README 里的接口重写，纪律不变。
+来源：兔维斯 M6R 探测（2026-09-18，经独立评审逐行核验）+ opencode 实测（2026-09-19，SQLite 对账器/背压节流 runner/WT 标题截图/WT 定位修复）。用法与依赖见 `scripts/README.md`。核心：`ConIn.ps1`（FFI 基座：附加/CONIN$/写记录/模式/占用率/复位）+ 各实验 runner。缺脚本时按 README 里的接口重写，纪律不变。
 
 ## 屏读侧（screen-read）：形态矩阵与四闸门（2026-10-02 起）
 

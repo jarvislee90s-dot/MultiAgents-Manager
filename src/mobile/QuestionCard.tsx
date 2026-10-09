@@ -405,7 +405,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         if (fp !== "") lastFingerprint.current = fp;
         setInfo(v);
         // **屏读快照同步**（2026-10-03 卡面状态权威源）：GET 带回终端当前态——
-        // 停在题屏 → 对位到载荷题并纠偏 mqIndex/勾选/输入框（MAM 重启、终端手动
+        // 停在题屏 → 对位到载荷题并纠偏 mqIndex/勾选/输入框（兔维斯 重启、终端手动
         // 作答等漂移场景的统一解法）；停在 Review → 直接进确认卡。
         // **2026-10-07 归一到 applyScreenSync**：此前这里是旧内联逻辑，review 分支
         // 只切确认卡不落 summary → 刷新后摘要丢失、四题全显「未作答」（后端已解析

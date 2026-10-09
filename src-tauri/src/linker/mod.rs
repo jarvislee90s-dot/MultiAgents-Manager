@@ -41,7 +41,7 @@ pub fn check_link_health(target: &Path) -> LinkHealth {
 pub fn ensure_repo_dir() -> PathBuf {
     let repo = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("skills");
     let _ = fs::create_dir_all(&repo);
     repo
@@ -248,7 +248,7 @@ pub fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 对配置文件加排他锁后执行原子写入，防止多个 MAM 实例并发写同一配置
+/// 对配置文件加排他锁后执行原子写入，防止多个 兔维斯 实例并发写同一配置
 pub fn write_config_locked(path: &Path, content: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
@@ -406,15 +406,15 @@ mod normalize_link_target_tests {
     fn strips_windows_verbatim_prefixes() {
         let parent = Path::new("/home/u/.agents/skills");
         assert_eq!(
-            normalize_link_target(Path::new(r"\\?\C:\Users\u\.mam\active\codex\foo"), parent),
-            PathBuf::from(r"C:\Users\u\.mam\active\codex\foo")
+            normalize_link_target(Path::new(r"\\?\C:\Users\u\.tuvis\active\codex\foo"), parent),
+            PathBuf::from(r"C:\Users\u\.tuvis\active\codex\foo")
         );
         assert_eq!(
             normalize_link_target(
-                Path::new(r"\\?\UNC\server\share\.mam\active\codex\foo"),
+                Path::new(r"\\?\UNC\server\share\.tuvis\active\codex\foo"),
                 parent
             ),
-            PathBuf::from(r"\\server\share\.mam\active\codex\foo")
+            PathBuf::from(r"\\server\share\.tuvis\active\codex\foo")
         );
     }
 
@@ -432,8 +432,8 @@ mod normalize_link_target_tests {
         );
         // 绝对路径原样保留（无 . / .. 时组件不变）
         assert_eq!(
-            normalize_link_target(Path::new("/home/u/.mam/active/codex/foo"), parent),
-            PathBuf::from("/home/u/.mam/active/codex/foo")
+            normalize_link_target(Path::new("/home/u/.tuvis/active/codex/foo"), parent),
+            PathBuf::from("/home/u/.tuvis/active/codex/foo")
         );
     }
 }

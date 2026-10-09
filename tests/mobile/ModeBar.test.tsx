@@ -674,7 +674,7 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     expect(screen.queryByTestId("mode-receipt")).toBeNull();
   });
 
-  it("picker 二阶段：pick 返回 confirm → 面板切为确认框选项（由用户再点，MAM 不代按）", async () => {
+  it("picker 二阶段：pick 返回 confirm → 面板切为确认框选项（由用户再点，兔维斯 不代按）", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     routes.menuBody = {

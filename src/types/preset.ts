@@ -27,7 +27,7 @@ export interface PresetApplyResult {
   restoredNative: string[];
 }
 
-/** 恢复默认结果（回补 MAM 链接 + 回移暂存的原生资源） */
+/** 恢复默认结果（回补 兔维斯 链接 + 回移暂存的原生资源） */
 export interface RestoreResult {
   restoredMam: string[];
   restoredNative: string[];
@@ -74,7 +74,7 @@ export interface StashEntryRecord {
   restoredAt: string | null;
 }
 
-/** 空目录条目（Rust reconcile::EmptyDirItem）：owner = "mam"（~/.mam/skills）
+/** 空目录条目（Rust reconcile::EmptyDirItem）：owner = "mam"（~/.tuvis/skills）
  *  | "tool:<id>"（该工具 primary skill 目录）；path 为绝对路径 */
 export interface EmptyDirItem {
   owner: string;

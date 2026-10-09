@@ -191,7 +191,7 @@ pub(crate) fn collect_with(projects_root: &Path, session_id: &str) -> Vec<Subage
     let reg = registered_agents(&subagents_dir);
     // 闭包 move parent_jsonl + subagents_dir + reg（发现结果一次取齐，step 不再反推路径）
     update_entry("claude", session_id, move |cur| {
-        let fresh = cur.is_none(); // 缓存缺失/被清（MAM 重启 / 硬上限清空）→ 走重建
+        let fresh = cur.is_none(); // 缓存缺失/被清（兔维斯 重启 / 硬上限清空）→ 走重建
         let mut st = cur
             .and_then(|b| b.downcast::<ClaudeCache>().ok())
             .map(|a| Arc::try_unwrap(a).unwrap_or_else(|a| (*a).clone()))

@@ -244,7 +244,7 @@ function modeGroups(view: SessionModeView): ModeGroupView[] {
  *    shift+tab，目标档按当前档翻转；**当前档未知时禁用**——盲按会 50% 误切）；
  *  - 「完全信任」二次确认（用户裁决）：点完全信任先出确认条，确认后才发——codex 会
  *    连发两次按键（4→1）并代按终端的风险确认框；
- *  - 权限组（无屏读源）current 有值时标注「（上次切换）」——它是 MAM 的记忆，不是
+ *  - 权限组（无屏读源）current 有值时标注「（上次切换）」——它是 兔维斯 的记忆，不是
  *    实时屏读（终端手改会失真，如实声明口径）。 */
 function ModeGroupRow({
   group,
@@ -394,7 +394,7 @@ function ModeGroupRow({
           data-testid="mode-bypass-confirm"
           className="flex w-full flex-wrap items-center gap-2 rounded-lg bg-rose-500/10 px-2 py-1 text-[11px] text-rose-700 dark:text-rose-300"
         >
-          <span>将连发两次按键（4→1）启用完全信任：终端会弹出风险确认框，由 MAM 代按确认。</span>
+          <span>将连发两次按键（4→1）启用完全信任：终端会弹出风险确认框，由 兔维斯 代按确认。</span>
           <button
             type="button"
             data-testid="mode-bypass-confirm-yes"
@@ -426,19 +426,19 @@ function ModeGroupRow({
  *
  * 交互：单钮「切换权限」→ 点开后后端注入 `/permissions` + 回车并**读回终端菜单的
  * 选项表**（编号 = 屏上实读值、文本 = 屏上原文）→ 这里渲染成一列编号按钮 →
- * 用户点哪项，MAM 就敲哪个数字键。
+ * 用户点哪项，兔维斯 就敲哪个数字键。
  *
  * # 为什么这样比「后端自己敲」好（用户实机走查的结论）
  *
  * 旧路径是后端按目标档**猜**屏上编号（前端文案还硬编码「4→1」）。而档位编号会随
  * Guardian 配置前移（`Approve for me` 缺席时 `Full Access` 从 4 变 3）——猜错的
  * 后果是切到**别的档**（用户点只读、实际启用完全信任）。本面板把这一步交给用户：
- * 编号来自屏幕实读，MAM 只是投递，**不猜**。
+ * 编号来自屏幕实读，兔维斯 只是投递，**不猜**。
  *
  * # 两阶段
  *
  * 切 Full Access 时终端会弹风险确认框 → 后端返回 `status:"confirm"` → 面板切为
- * 确认框的选项（同样读自终端原文），由用户再点一次。**MAM 不代按**。
+ * 确认框的选项（同样读自终端原文），由用户再点一次。**兔维斯 不代按**。
  *
  * # 面板形态
  *

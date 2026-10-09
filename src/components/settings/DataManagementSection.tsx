@@ -1,5 +1,5 @@
-// 数据管理分区（2026-09-20 用户要求）：桌面端 MAM 存储数据的统一管理入口。
-// 首版只管移动端附件（各项目 .mam-attachments/<会话>/）：列出占用 + 按项目清理；
+// 数据管理分区（2026-09-20 用户要求）：桌面端 兔维斯 存储数据的统一管理入口。
+// 首版只管移动端附件（各项目 .tuvis-attachments/<会话>/）：列出占用 + 按项目清理；
 // 审计/HANDOFF 等其余数据进治理台账（spec 附录），实现逐期跟进。
 import { SETTINGS_CARD_TITLE } from "@/components/settings/typography";
 import { useCallback, useEffect, useState } from "react";

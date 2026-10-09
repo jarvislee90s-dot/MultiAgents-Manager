@@ -130,7 +130,7 @@ fn scan_skills_recursive(
             if path.is_dir() {
                 // `~/.codex/skills/.system` 是 codex 官方捆绑的系统技能（skill-creator /
                 // skill-installer / imagegen 等，随版本更新生成，spec F2），不属于用户
-                // 技能，不入 MAM SSOT；本函数为递归扫描，`.system/<skill>/SKILL.md`
+                // 技能，不入 兔维斯 SSOT；本函数为递归扫描，`.system/<skill>/SKILL.md`
                 // 会被命中，故显式跳过（spec 2026-09-09 §4.1）。收窄到扫描根顶层
                 // （depth == 0）：官方捆绑只出现在根顶，更深处的同名目录是用户内容，
                 // 不应被一刀切排除（review Minor）
@@ -365,8 +365,8 @@ impl SkillScanSource {
 }
 
 /// skill 导入依赖注入（可测核心，spec §7.7）：真实实现接全局 DB 与 enable 服务，
-/// 测试用内存闭包替代——全局 DB 指向真实 ~/.mam/mam.db，测试禁触。
-/// install_to_repo 同样注入：真实实现会写 ~/.mam/skills（ensure_repo_dir），
+/// 测试用内存闭包替代——全局 DB 指向真实 ~/.tuvis/tuvis.db，测试禁触。
+/// install_to_repo 同样注入：真实实现会写 ~/.tuvis/skills（ensure_repo_dir），
 /// 不注入则测试仍会触真实家目录
 pub(crate) struct SkillImportDeps<'a> {
     pub list_extensions: &'a dyn Fn() -> Vec<crate::database::ExtensionRecord>,
@@ -413,7 +413,7 @@ fn import_skills_from_sources(
         );
         source_counts.push((source.label().to_string(), found.len()));
 
-        // `.agents` 共享源（spec §4.2 / F1/F3）：MAM 对其只读，发现的技能「入库不归属」
+        // `.agents` 共享源（spec §4.2 / F1/F3）：兔维斯 对其只读，发现的技能「入库不归属」
         // ——source_tool 置 None、tags 记 agents-shared、任何分支都不为工具建链
         // （Task 1 后 detect_source_tool 对该路径返回 None，
         // sync_imported_skill_links 同样不会为其补链）
@@ -510,7 +510,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
         })
         .collect();
     // 追加共享源（spec §4.2）：`~/.agents/skills` 是 Agent Skills 开放标准共享目录
-    // （codex/zcode 等工具同读），MAM 只读导入，「入库不归属」任何工具
+    // （codex/zcode 等工具同读），兔维斯 只读导入，「入库不归属」任何工具
     skill_sources.push(SkillScanSource::Shared {
         dir: dirs::home_dir()
             .unwrap_or_default()
@@ -572,7 +572,7 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
                 let kind = if path.is_dir() { "file" } else { "config" };
                 let plugin_repo = dirs::home_dir()
                     .unwrap_or_default()
-                    .join(".mam")
+                    .join(".tuvis")
                     .join("plugins");
                 let _ = std::fs::create_dir_all(&plugin_repo);
                 let dest = plugin_repo.join(&name);
@@ -638,11 +638,11 @@ pub fn auto_import_extensions(force: bool) -> ImportStats {
 pub fn backfill_registry() {
     let home = dirs::home_dir().unwrap_or_default();
 
-    // skill：~/.mam/skills 递归扫描（与资源视图 list_ssot_resources 同一
+    // skill：~/.tuvis/skills 递归扫描（与资源视图 list_ssot_resources 同一
     // scan_skill_dirs 口径），嵌套套件技能（如 superpowers/brainstorming）按
     // 相对路径登记（id/name 均带斜杠路径）；套件目录本身（无 SKILL.md）不入表。
     // 旧实现只扫顶层，嵌套套件永远进不了 extensions 表，还会把套件目录误登记为技能
-    let skills = home.join(".mam").join("skills");
+    let skills = home.join(".tuvis").join("skills");
     if skills.is_dir() {
         for rel in scan_skill_dirs(&skills) {
             let path = skills.join(&rel);
@@ -665,8 +665,8 @@ pub fn backfill_registry() {
         }
     }
 
-    // mcp：~/.mam/mcp/<stem>.json
-    let mcp = home.join(".mam").join("mcp");
+    // mcp：~/.tuvis/mcp/<stem>.json
+    let mcp = home.join(".tuvis").join("mcp");
     if mcp.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&mcp) {
             for e in entries.flatten() {
@@ -702,7 +702,7 @@ pub fn backfill_registry() {
     // 且路径不存在 → 死行——与新登记行并存会让预设编辑弹窗双列。判定口径：
     // Path::exists()（跟随 symlink，死链同样判不存在）。删除该行并连带清
     // extension_assignments / tool_residents / resource_bindings（防孤儿）；
-    // is_native 的 source_path 指向工具目录、MCP 行指向 ~/.mam/mcp/*.json、
+    // is_native 的 source_path 指向工具目录、MCP 行指向 ~/.tuvis/mcp/*.json、
     // 插件行指向插件目录——统一按存在性判定，不做 kind 特判
     let mut pruned = 0usize;
     for ext in crate::database::list_extensions() {
@@ -893,7 +893,7 @@ mod scan_skills_tests {
 
     /// `.system` 排除锁（spec §4.1 / F2）：`~/.codex/skills/.system` 是 codex 官方
     /// 捆绑的系统技能（skill-creator / skill-installer / imagegen 等，随版本更新
-    /// 生成），不入 MAM SSOT。导入扫描是递归的（深度上限 4），`.system/<skill>/
+    /// 生成），不入 兔维斯 SSOT。导入扫描是递归的（深度上限 4），`.system/<skill>/
     /// SKILL.md` 的两层结构会被命中，必须显式跳过 `.system` 条目连同其子树。
     /// tempdir fixture，零真实家目录访问
     #[test]

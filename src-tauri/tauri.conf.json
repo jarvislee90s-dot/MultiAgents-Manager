@@ -41,7 +41,7 @@
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": ["$HOME/.mam/pets/**"],
+          "allow": ["$HOME/.tuvis/pets/**"],
           "requireLiteralLeadingDot": false
         }
       }

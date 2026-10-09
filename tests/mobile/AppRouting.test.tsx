@@ -132,7 +132,7 @@ describe("App 路由：看板卡片 ↔ 会话详情", () => {
 
     // 探测成功：配对页卸载，看板卡片出现
     expect(await screen.findByText("demo-proj")).toBeTruthy();
-    expect(screen.queryByText("MAM 远程接入")).toBeNull();
+    expect(screen.queryByText("兔维斯 远程接入")).toBeNull();
 
     // 卡片点击 → 详情视图（Board 转 hidden 但仍挂载）
     fireEvent.click(screen.getByText("demo-proj").closest("li") as HTMLLIElement);
@@ -160,7 +160,7 @@ describe("App 路由：看板卡片 ↔ 会话详情", () => {
     await act(async () => {
       await new Promise((r) => setTimeout(r, 0));
     });
-    expect(screen.getByText("MAM 远程接入")).toBeTruthy();
+    expect(screen.getByText("兔维斯 远程接入")).toBeTruthy();
     expect(screen.queryByTestId("detail-back")).toBeNull();
   });
 

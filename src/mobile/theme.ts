@@ -9,7 +9,7 @@
 export type Theme = "light" | "dark";
 
 /** 持久化 key：须与 mobile.html 防闪白内联脚本读取的 key 严格一致（同一字符串常量两处使用） */
-const KEY = "mam-theme";
+const KEY = "tuvis-theme";
 
 /** 读已保存主题：localStorage 不可用（隐私模式 Safari 抛 SecurityError）或值非法时返回 null */
 function readSaved(): Theme | null {

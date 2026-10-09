@@ -16,7 +16,7 @@ pub fn capture_window_screenshot(_app: tauri::AppHandle) -> ScreenshotResult {
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let screenshot_dir = dirs::home_dir()
             .unwrap_or_default()
-            .join(".mam")
+            .join(".tuvis")
             .join("screenshots");
         if let Err(e) = std::fs::create_dir_all(&screenshot_dir) {
             return ScreenshotResult {
@@ -84,7 +84,7 @@ pub fn capture_window_screenshot(_app: tauri::AppHandle) -> ScreenshotResult {
 pub fn list_screenshots() -> Vec<String> {
     let screenshot_dir = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("screenshots");
     if !screenshot_dir.exists() {
         return Vec::new();

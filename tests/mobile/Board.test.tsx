@@ -634,7 +634,7 @@ describe("Board 提示音触发口径（仅转绿 + 5 秒去重）", () => {
 
 // M3 Task 1：页头品牌行（P8a 版本号 + P8b 本机名）
 describe("Board 页头品牌行", () => {
-  it("挂载时拉一次 /host，品牌行显示 MAM + v{version} + 本机名；host 403 不踢回配对页", async () => {
+  it("挂载时拉一次 /host，品牌行显示 兔维斯 + v{version} + 本机名；host 403 不踢回配对页", async () => {
     installSse(okSessions(3));
     const fetchMock = vi.fn(async (url: string) => {
       if (url === "/m/api/v1/host") {
@@ -660,7 +660,7 @@ describe("Board 页头品牌行", () => {
     await advance(POLL_MS + 100);
     expect(fetchMock.mock.calls.filter(([u]) => u === "/m/api/v1/host").length).toBe(hostCalls);
 
-    expect(screen.getByText("MAM")).toBeInTheDocument();
+    expect(screen.getByText("兔维斯")).toBeInTheDocument();
     expect(screen.getByText("v0.4.1")).toBeInTheDocument();
     expect(screen.getByText("JARVIS-Win")).toBeInTheDocument();
     // 看板标题行保留（品牌行在其上一行）
@@ -679,7 +679,7 @@ describe("Board 页头品牌行", () => {
     );
     render(<Board onPaired={vi.fn()} onUnpaired={vi.fn()} />);
     await advance(0);
-    expect(screen.queryByText("MAM")).not.toBeInTheDocument();
+    expect(screen.queryByText("兔维斯")).not.toBeInTheDocument();
     // 会话数据照常到达（SSE 快照）
     expect(screen.getByText("0 个会话")).toBeInTheDocument();
   });
@@ -1031,7 +1031,7 @@ describe("Board 主题切换（P8f）", () => {
     document.documentElement.classList.remove("dark", "light");
   });
 
-  it("初始暗色：按钮文案为「切换到浅色模式」；点击后翻转浅色——移除 dark 类 + 持久化 mam-theme=light", async () => {
+  it("初始暗色：按钮文案为「切换到浅色模式」；点击后翻转浅色——移除 dark 类 + 持久化 tuvis-theme=light", async () => {
     installSse(okSessions(0));
     vi.stubGlobal(
       "fetch",
@@ -1044,18 +1044,18 @@ describe("Board 主题切换（P8f）", () => {
     fireEvent.click(toggle);
     // 翻转后：documentElement 去掉 dark 类（dark: 前缀类随之全部失效）
     expect(document.documentElement.classList.contains("dark")).toBe(false);
-    expect(localStorage.getItem("mam-theme")).toBe("light");
+    expect(localStorage.getItem("tuvis-theme")).toBe("light");
     // 图标/文案同步为「切回深色」
     expect(screen.getByRole("button", { name: "切换到深色模式" })).toBeInTheDocument();
 
     // 再点一次回暗色：dark 类加回、持久化翻转
     fireEvent.click(screen.getByRole("button", { name: "切换到深色模式" }));
     expect(document.documentElement.classList.contains("dark")).toBe(true);
-    expect(localStorage.getItem("mam-theme")).toBe("dark");
+    expect(localStorage.getItem("tuvis-theme")).toBe("dark");
   });
 
-  it("手动选择优先于系统：已存 mam-theme=light + 系统暗色 → 初始按钮为「切换到深色模式」", async () => {
-    localStorage.setItem("mam-theme", "light");
+  it("手动选择优先于系统：已存 tuvis-theme=light + 系统暗色 → 初始按钮为「切换到深色模式」", async () => {
+    localStorage.setItem("tuvis-theme", "light");
     installSse(okSessions(0));
     vi.stubGlobal(
       "fetch",

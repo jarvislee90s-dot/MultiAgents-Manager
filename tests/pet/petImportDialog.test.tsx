@@ -20,7 +20,7 @@ vi.mock("@/components/pet/petRuntime", async (importOriginal) => {
 
 const staged = {
   stagingId: "s1",
-  dir: "/home/u/.mam/pets/.import-staging/s1",
+  dir: "/home/u/.tuvis/pets/.import-staging/s1",
   suggestedName: "starry-dew",
   suggestedDisplayName: "Starry Dew",
   spriteVersionNumber: 0,

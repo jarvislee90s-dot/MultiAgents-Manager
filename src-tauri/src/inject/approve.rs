@@ -17,7 +17,7 @@
 //! KV 读取经调用方 `DeviceStore.with` 短临界区：[`load_mappings_conn`] 直用传入
 //! conn（不自取 DB 锁）——临界区内只做这一条 SQL + 纯解析；**内部自取全局 DB 锁的
 //! 调用（如 session_source）必须在 with 之外**（同线程嵌套加锁即自锁死锁，std Mutex
-//! 非重入）。测试策略（零接触真实 ~/.mam）：解析抽为纯内核 [`load_mappings_from`]
+//! 非重入）。测试策略（零接触真实 ~/.tuvis）：解析抽为纯内核 [`load_mappings_from`]
 //! （单测直驱三态 None/损坏/合法）；端点测试经 `DeviceStore::memory()` 自建库 seed
 //! 定制 KV，不触真实 settings 表。
 
@@ -125,7 +125,7 @@ const DEFAULT_MAPPINGS_JSON: &str = r#"[
 /// KV 读取（store 缝版本，远端端点用）：直用调用方 `DeviceStore.with` 短临界区传入的
 /// conn（不自取任何锁，锁内只做这一条 SQL + 纯解析）。生产 `DeviceStore::Global` 即
 /// 全局 DB 同锁同连接，语义与直读 settings KV 完全一致；测试经 `DeviceStore::memory()`
-/// 自建库 seed 定制 KV——零接触真实 ~/.mam（审计词表/严格档等端点测试的注入缝）。
+/// 自建库 seed 定制 KV——零接触真实 ~/.tuvis（审计词表/严格档等端点测试的注入缝）。
 pub fn load_mappings_conn(conn: &rusqlite::Connection) -> Vec<ToolMapping> {
     load_mappings_from(crate::database::dao::settings::get_setting_conn(conn, KV_KEY).as_deref())
 }
@@ -280,7 +280,7 @@ mod tests {
     /// 默认表覆盖 claude/codex，各两项；W6 首批定死只做批准/拒绝
     #[test]
     fn default_mappings_cover_claude_codex() {
-        // 零接触契约：走内核 None 路径（= 无 KV → 默认表），不调 get_setting 触真实 ~/.mam
+        // 零接触契约：走内核 None 路径（= 无 KV → 默认表），不调 get_setting 触真实 ~/.tuvis
         let ms = load_mappings_from(None);
         let claude = ms.iter().find(|m| m.tool == "claude").unwrap();
         assert_eq!(claude.options.len(), 2);

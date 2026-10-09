@@ -44,9 +44,9 @@ pub(super) fn current_platform() -> Platform {
 ///   `shields_up`，之前的 detect / download / install(UAC) / login 四步**流程没被端到端
 ///   跑过**，只有字段形态被顺带核对过。
 /// - **2026-10-07 用户实机确认（本轮依据，起点据此前移到第一步）**：用户在本机 Windows 上
-///   **卸载 Tailscale 后从零走完 MAM 向导全程**（下载 → 安装 UAC → 登录 → 关 shields-up →
+///   **卸载 Tailscale 后从零走完 兔维斯 向导全程**（下载 → 安装 UAC → 登录 → 关 shields-up →
 ///   开通 Funnel → 可达性校验），**全程正常**，故上述四步的**流程**这一次是真的被端到端
-///   跑过了。用户原话：「走的是 MAM 向导」「反正我感觉是足以指导没做过的用户一步一步点
+///   跑过了。用户原话：「走的是 兔维斯 向导」「反正我感觉是足以指导没做过的用户一步一步点
 ///   下去了」。⇒ 起点前移到步骤表第一步（`detect`）：起点之前没有任何步骤 ⇒ 未验清单为
 ///   空 ⇒ `windowsVerified = true`，前端那条「Windows 只实测了后半段」的黄标随之撤下。
 ///   ⚠️ 这是一条**有据**的改动（用户亲口确认 + 实机走完），不是为了让提示消失而翻的位；
@@ -170,7 +170,7 @@ pub(super) struct WizardStep {
 }
 
 /// macOS 九步（**已实测**）/ Windows 八步（**2026-10-07 实机校验回填**，见
-/// [`WINDOWS_VERIFIED_FROM`]——起点已于同日由用户实机走完 MAM 向导全程后前移到第一步，
+/// [`WINDOWS_VERIFIED_FROM`]——起点已于同日由用户实机走完 兔维斯 向导全程后前移到第一步，
 /// 即 Windows 整条流程已实测；字段核对表 7/7 与 macOS 一致）。
 ///
 /// **人工步分「必需 / 可选」两类**（A1，2026-10-07 Windows 实测）：
@@ -198,7 +198,7 @@ pub(super) fn wizard_steps(p: Platform) -> Vec<WizardStep> {
             needs_human: true,
             human_optional: false,
             // **2026-10-08（用户实测缺口）**：动作文案**逐平台分叉**。Windows 走的是 MSI，
-            // 而 MAM 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权本就该
+            // 而 兔维斯 执行 `msiexec /i <包>` **刻意不加 /qn**——「装在哪里」的选择权本就该
             // 给用户（用户裁决：「你不能限制用户安装在哪里」）。既然路径由用户定，就必须
             // **事前**说清「用默认路径最省事；装到别处也可以，请记住那个路径」。
             // macOS 的 .pkg 由 `installer` 固定装到 /Applications，用户无从选择 ⇒ 保持
@@ -341,12 +341,12 @@ pub(super) fn ts_expected_sha256(asset: &str) -> Result<&'static str, String> {
     }
 }
 
-/// 安装包落位路径：`~/.mam/downloads/<资产名>`（bin/ 留给可执行文件；安装包校验
+/// 安装包落位路径：`~/.tuvis/downloads/<资产名>`（bin/ 留给可执行文件；安装包校验
 /// 通过后保留，重复执行 install 无需重新下载）。数据目录构造沿 manifest.rs 先例
 pub(super) fn ts_installer_path() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("downloads")
         .join(ts_asset_name(current_platform()))
 }
@@ -363,7 +363,7 @@ pub(super) fn installer_file_ok(p: Platform, path: &std::path::Path) -> bool {
 }
 
 /// 触发安装。**必须让系统弹授权框——不静默提权**（msiexec 不加 /qn）：要自动化就得
-/// 让 MAM 常驻管理员，那正是本项目安全上要避免的（设计说明书 §C2「安全红线」）
+/// 让 兔维斯 常驻管理员，那正是本项目安全上要避免的（设计说明书 §C2「安全红线」）
 pub(super) fn run_installer(pkg: &std::path::Path) -> Result<(), String> {
     match current_platform() {
         // macOS：installer 自身会弹「输入管理员密码」
@@ -430,7 +430,7 @@ pub(super) fn install_step_with(
 }
 
 /// 从 CLI 输出里捞批准链接（纯函数，可测）：取首个 https:// 且含 tailscale.com 的词，
-/// 剥掉句尾标点。MAM 只把链接递出去，**不代点**
+/// 剥掉句尾标点。兔维斯 只把链接递出去，**不代点**
 pub(super) fn extract_approval_url(text: &str) -> Option<String> {
     text.split_whitespace()
         .find(|w| w.starts_with("https://") && w.contains("tailscale.com"))
@@ -438,7 +438,7 @@ pub(super) fn extract_approval_url(text: &str) -> Option<String> {
 }
 
 // ============================================================
-// ⑤ 登录步（MAM 不代登录——只递链接；但**必须主动把链接取来**）
+// ⑤ 登录步（兔维斯 不代登录——只递链接；但**必须主动把链接取来**）
 // ============================================================
 
 /// 登录步轮询窗上限（注入 `wait` 的累计时长必须 ≤ 它——测试逐条断言，变异即红）
@@ -457,11 +457,11 @@ pub(super) const LOGIN_LINK_POLL_DELAYS_MS: &[u64] = &[
 /// **为什么必须主动发起**（2026-10-07 用户实测诊断）：新装机器上
 /// `tailscale status --json` 是 `NeedsLogin ∧ AuthURL=""`——授权链接由尾网在
 /// **发起一次交互式登录**时才生成（`tailscale login`，与 Windows GUI 的「Log in」
-/// 按钮同义）。MAM 此前从不发起（全仓 `run_cli` 调用点无 `up`/`login`），于是
+/// 按钮同义）。兔维斯 此前从不发起（全仓 `run_cli` 调用点无 `up`/`login`），于是
 /// `AuthURL` 永远是空串，而前端只在 `authUrl` 非空时才渲染「去登录」⇒ **登录步是死胡同**
 /// （行里写着"需要你操作：去浏览器登录"，却没有任何可点的东西）。
 ///
-/// **合规红线（一字不让）**：MAM **不代登录、不持有任何用户凭据**（模块头注释即此条）。
+/// **合规红线（一字不让）**：兔维斯 **不代登录、不持有任何用户凭据**（模块头注释即此条）。
 /// 本步只做两件事：① 让尾网**生成**一个授权链接（发起登录尝试，不带任何凭据参数）；
 /// ② 把链接**原样递出去**。登录本身始终由用户在浏览器完成。
 ///
@@ -472,7 +472,7 @@ pub(super) const LOGIN_LINK_POLL_DELAYS_MS: &[u64] = &[
 /// **等待者的生命周期（I1，2026-10-08 架构评审；注入口 = `cleanup`）**：子进程由
 /// [`spawn_login_attempt`] 登记进单飞槽，本函数**每次成功返回前**都经 `cleanup` 交代它的去向
 /// （[`finish_login_attempt`]）——窗尽且没拿到链接 ⇒ [`LoginCleanup::Kill`]（否则它会按
-/// 默认 0s 一直等，MAM 退出后成孤儿）；拿到链接 / 已登录 ⇒ [`LoginCleanup::Keep`]
+/// 默认 0s 一直等，兔维斯 退出后成孤儿）；拿到链接 / 已登录 ⇒ [`LoginCleanup::Keep`]
 /// （**保守**：杀是否让已生成的 AuthURL 失效**待真机复核**，见 [`LoginCleanup`] 的注释）。
 /// 把收尾做成注入口（而不是在本函数里就地杀）是为了让"什么时候杀"成为**可断言的行为**
 /// 而不是一句注释：`login_step_settles_waiter_conservatively` 锁死两条路各自的决策。
@@ -536,7 +536,7 @@ pub(super) fn login_step_with(
         last_state = s.backend_state;
     }
     // 有界放弃：如实回空串 + 成因（**不编链接、不谎报**），并**收掉那个还在等的子进程**
-    // （I1：窗尽且没拿到链接 ⇒ 再等下去不会有链接，却会按默认 0s 一直等、MAM 退出后成孤儿）
+    // （I1：窗尽且没拿到链接 ⇒ 再等下去不会有链接，却会按默认 0s 一直等、兔维斯 退出后成孤儿）
     cleanup(login_cleanup_decision(false, false));
     // 前端据 authUrl 为空给出「去客户端点 Log in / 稍候重试」的兜底文案（i18n 静态键，
     // 不渲染本 note——中文串直接上屏会绕过 i18n，消费方约定见 src/lib/api/remote.ts 的
@@ -549,7 +549,7 @@ pub(super) fn login_step_with(
         "triggered": true,
         "note": format!(
             "已发起登录，但在 {:?} 内没有拿到授权链接（后端状态 {last_state}）——可在开始菜单\
-             打开 Tailscale 客户端点「Log in」，或稍候重试；MAM 只递链接、不代登录",
+             打开 Tailscale 客户端点「Log in」，或稍候重试；兔维斯 只递链接、不代登录",
             LOGIN_LINK_POLL_WINDOW
         ),
     }))
@@ -589,7 +589,7 @@ pub(super) const LOGIN_ARGS: &[&str] = &["login", "--timeout", LOGIN_TIMEOUT_ARG
 ///
 /// 为什么要有这一层：旧的合规红线守卫是**扫字符串**（`body.contains(".args(LOGIN_ARGS)")`
 /// 且 `!body.contains(".arg(")`），而**在调用点再补一行 `.args(&["--auth-key", …])` 两个断言
-/// 都不会红**——`.args(` 不含子串 `.arg(`，白名单测试又只管常量本身、不管调用点。MAM 绝不持
+/// 都不会红**——`.args(` 不含子串 `.arg(`，白名单测试又只管常量本身、不管调用点。兔维斯 绝不持
 /// 凭据是**合规红线**，不能靠一条可绕过的扫描守着。现在 argv 的拼装被收进唯一一处
 /// （[`login_command`]），并由**行为断言**直接读真实 `Command` 的 `get_args()`
 /// （`login_attempt_command_carries_only_the_whitelist_argv`）——任何就地追加的参数都必红。
@@ -641,7 +641,7 @@ pub(super) fn login_cleanup_decision(done: bool, has_link: bool) -> LoginCleanup
 /// **登录等待者的单飞槽（I1）**：同一时刻至多一个 `tailscale login`。
 ///
 /// 为什么是 `Mutex<Option<Child>>` 而不是"spawn 完起个收尸线程"（旧实现）：旧形态下子进程
-/// 的所有权在收尸线程手里，**外面谁也杀不掉它** ⇒ 轮询失败后没有任何清理路径，MAM 退出后
+/// 的所有权在收尸线程手里，**外面谁也杀不掉它** ⇒ 轮询失败后没有任何清理路径，兔维斯 退出后
 /// 就是一个孤儿进程（评审 I1 三条中的第 3 条）。把句柄放在模块级槽里，窗尽/应用退出才
 /// 有"可杀之物"；顺带把每次点击泄漏的**一个阻塞线程**去掉（旧收尸线程）。
 ///
@@ -772,7 +772,7 @@ pub(super) fn spawn_login_attempt() -> Result<(), String> {
     // **一锁到底（TOCTOU 修复）**：旧形态里 reap / 判空 / 登记三次各自取锁，中间还放开锁
     // 做 find_cli 的 IO 与 spawn——两个并发的 `run_step("login")`（向导重挂后旧步复位再点
     // 一次等场景）可同时通过判空 ⇒ 双 spawn，第二次登记**覆盖**第一个句柄：第一个进程
-    // 15 秒内无人可杀（`--timeout 15s` 有界，但 MAM 退出时 [`cancel_login_attempt`] 只够到
+    // 15 秒内无人可杀（`--timeout 15s` 有界，但 兔维斯 退出时 [`cancel_login_attempt`] 只够到
     // 槽里那个）。判空+spawn+登记并入同一临界区后，「同一时刻至多一个等待者」才真正成立。
     // 持锁跨 spawn（毫秒级系统调用，无 await、无其它锁序）不会长阻塞；本函数跑在
     // spawn_blocking 线程上，短暂等锁不等用户。
@@ -876,11 +876,11 @@ impl StepState {
 ///   （读不到偏好在初始化期是常态，照判会报成「读不到偏好」的假故障）——如实说
 ///   「恢复窗口内不写 shields-up，稍候自动复评」
 /// - `funnel`：`funnel_active(funnel status --json)` 为真**且不是外来配置**
-///   （外来占用时该步对 MAM 不算完成——如实 blocked，与 map_status 同口径）
+///   （外来占用时该步对 兔维斯 不算完成——如实 blocked，与 map_status 同口径）
 /// - `verify`：§C3 可达性校验（Task 7）——判据 = 校验态 `Verified` **且通道在运行**
 ///   （快照停了地址已撤，校验步随之回退为待做）；`Failed` 如实 blocked（带 reason），
 ///   未验/在验 = 待做
-/// - `autostart`：MAM 自身行为（启动时自动恢复，restore_tunnels_core 保证），恒 done
+/// - `autostart`：兔维斯 自身行为（启动时自动恢复，restore_tunnels_core 保证），恒 done
 ///
 /// 单轮 CLI 读数（B-M11：**一次读数多处复用**）：`status --json` / `get --json` /
 /// `funnel status --json` 各派生一次进程，由调用方按需复用（读不到 = None / Err，
@@ -996,7 +996,7 @@ pub(super) fn probe_steps_from(port: u16, installed: bool, r: &CliReadings) -> V
                     Ok(j) if !funnel_active(j) => StepState::pending(ws.id),
                     Ok(j) if foreign_serve_config(j, port) => StepState::blocked(
                         ws.id,
-                        "Funnel 已被其他 serve 配置占用（非 MAM）——为避免覆盖已停止开通;\
+                        "Funnel 已被其他 serve 配置占用（非 兔维斯）——为避免覆盖已停止开通;\
                          如确认可放弃，请在终端执行 `tailscale funnel reset` 后重试"
                             .into(),
                     ),
@@ -1032,9 +1032,9 @@ pub(super) fn probe_steps_from(port: u16, installed: bool, r: &CliReadings) -> V
 ///    "reason"（仅 failed）}`，见下方 Reachability 的 serde 形状）。
 /// steps = 静态平台步骤表（needsHuman/humanActionKey 原样透出，i18n 键由前端翻译）；
 /// states = probe_steps_from 现算；authUrl = 待登录授权链接（login 步「去登录」按钮数据源，
-/// MAM 不代登录）；running/boardUrl = Task 5 通道快照（向导头部展示用）。
+/// 兔维斯 不代登录）；running/boardUrl = Task 5 通道快照（向导头部展示用）。
 /// **I-3**：Windows 验证位三项同源派生（[`windows_verification_for`]）——`windowsVerified`
-/// 表示**整条**流程都实测过（2026-10-07 用户实机走完 MAM 向导全程后**当前为 true**，依据见
+/// 表示**整条**流程都实测过（2026-10-07 用户实机走完 兔维斯 向导全程后**当前为 true**，依据见
 /// [`WINDOWS_VERIFIED_FROM`]），`windowsVerifiedFrom`/`windowsUnverifiedSteps`
 /// 把「验到哪一步为止」说清，前端弱提示据此收窄到精确范围（清单为空时该提示不渲染，
 /// 但**提示与派生机制保留**——将来又有未实测段落时把起点挪回去即可）。
@@ -1149,7 +1149,7 @@ pub(super) fn disable_step_with(
     // 动作名 `channel_toggled` 与开通路径（`remote/mod.rs` 的 toggle_channel）**刻意同源**：
     // 一把 `channel=tailscale` 的 grep 就能拉出完整的开/关序列，正是本条要修的「不对称」。
     // 明细的两个事实字段 = forced（是否走了强制撤销，即跳过了归属守卫）与 cleared_others
-    // （本次 `funnel reset` 连带清掉的非 MAM 条目数）——「强制撤销」与「顺带清了用户配置」
+    // （本次 `funnel reset` 连带清掉的非 兔维斯 条目数）——「强制撤销」与「顺带清了用户配置」
     // 正是最需要留痕的两种情况；条目本身随回执 `clearedEntries` 交回前端逐条呈现。
     // 既有的 `tailscale_serve_reset_cleared_extras`（status.rs，仅 cleared_others>0 时发）
     // 记的是**副作用**，本条记的是**撤销动作本身**，两者并存、各司其职。
@@ -1211,7 +1211,7 @@ pub(crate) fn run_step(step: &str, port: u16) -> Result<serde_json::Value, Strin
                 Ok(s) => Ok(serde_json::json!({
                     "installed": installed,
                     "backendState": s.backend_state,
-                    // AuthURL 非空 = 待登录，向导做成「去登录」按钮（MAM 不自己登录）
+                    // AuthURL 非空 = 待登录，向导做成「去登录」按钮（兔维斯 不自己登录）
                     "authUrl": s.auth_url,
                     "dnsName": s.dns_name.trim_end_matches('.'),
                     "certDomains": s.cert_domains,
@@ -1261,7 +1261,7 @@ pub(crate) fn run_step(step: &str, port: u16) -> Result<serde_json::Value, Strin
             let s = run_cli(&["status", "--json"]).and_then(|j| parse_status(&j))?;
             Ok(serde_json::json!({ "ok": true, "backendState": s.backend_state }))
         }
-        // login：MAM 不代登录——只把授权链接递出去（用户在浏览器完成）。**⑤（2026-10-07
+        // login：兔维斯 不代登录——只把授权链接递出去（用户在浏览器完成）。**⑤（2026-10-07
         // 用户实测）**：链接**不是"等它自己出现"**——新装机器上 `AuthURL` 是空串（要发起
         // 一次交互式登录才由尾网生成），故本步**主动让尾网生成**（后台 `tailscale login`，
         // 只 spawn 不等待）+ 有界轮询取回。长阻塞注意：本臂最长 LOGIN_LINK_POLL_WINDOW
@@ -1358,7 +1358,7 @@ pub(crate) fn run_step(step: &str, port: u16) -> Result<serde_json::Value, Strin
                     .unwrap_or_else(|_| serde_json::json!({ "state": "unverified" })),
             }))
         }
-        // autostart：MAM 自身行为（启动时 restore_tunnels_core 自动恢复），无需动作
+        // autostart：兔维斯 自身行为（启动时 restore_tunnels_core 自动恢复），无需动作
         "autostart" => Ok(serde_json::json!({ "ok": true, "done": true })),
         // disable_preview（B1）：**只读**预览「这次撤销会连带清掉哪些条目」——
         // 撤销前确认框的唯一数据源。为什么不复用 disable 的回执：`funnel reset` 清的是

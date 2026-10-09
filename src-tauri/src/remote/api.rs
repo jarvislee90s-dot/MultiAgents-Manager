@@ -1673,7 +1673,7 @@ pub async fn session_queue_retract(
 }
 
 // ==== 移动端附件上传（2026-09-20 用户裁决）====
-// 存储 = <会话 cwd>/.mam-attachments/<session_id>/（用户项目目录下——所有工具读
+// 存储 = <会话 cwd>/.tuvis-attachments/<session_id>/（用户项目目录下——所有工具读
 // 工作区内文件天然零审批）；git 零污染 = 首份写入时幂等追加 .git/info/exclude
 // （本地管理区，非 .gitignore 跟踪文件）；非 git 项目跳过。消息侧以
 // <image|file path> 内联标记引用（文件池既有约定，自动入池「我上传的」）。
@@ -2189,7 +2189,7 @@ fn approve_options_scan(st: &Arc<RemoteState>, session_id: &str) -> Option<Appro
     let tool = session.agent_type.tool_id().to_string();
     // T4 红卡接铃铛：Waiting 门改「Waiting ∨ 等待标记」（issue #74 根因①——审批
     // 等待期文件推导判 processing，标记是钩子事件落的一等信号；经 store.with 传
-    // 连接，测试内存库零接触真实 ~/.mam，生产 Global 与状态链写侧同库）
+    // 连接，测试内存库零接触真实 ~/.tuvis，生产 Global 与状态链写侧同库）
     let marked = st
         .store
         .with(|conn| crate::database::dao::approval_wait::has(conn, &tool, session_id));
@@ -3715,7 +3715,7 @@ pub async fn session_close(
     });
     let audit = |tool: &str, result: &str| {
         // 审计走 store 内的 DB 连接（record_conn）：与 session-open 同一落账通道，
-        // 端点测试经 store.with(recent_conn) 可回读（全局 record() 会写真实 ~/.mam）
+        // 端点测试经 store.with(recent_conn) 可回读（全局 record() 会写真实 ~/.tuvis）
         st.store.with(|conn| {
             crate::database::dao::write_audit::record_conn(
                 conn,
@@ -3913,7 +3913,7 @@ fn question_scan_sync(
     }
     // ===== 丁T2 扩面：kimi 的审批/问答互斥（无标记分支）=====
     //
-    // 缺口（批次丙的隔离规则只覆盖标记面）：kimi 的审批**未必落标记**——`~/.mam/mam.db`
+    // 缺口（批次丙的隔离规则只覆盖标记面）：kimi 的审批**未必落标记**——`~/.tuvis/tuvis.db`
     // 的 `approval_wait_marks` 至今只有 claude 一行，因为 kimi 的 helper 部署/进程在场
     // 都是前提（B2 勘察结论）。而 kimi 的计划审批在 wire 里是**一等结构化事件**
     // （`interaction.request(kind=approval)`，丁T2 已映射为消息流的 plan 卡）——
@@ -4053,19 +4053,19 @@ pub(crate) fn pending_question_tail_index(
 /// **工具名判据恒等于 `AskUserQuestion`**（claude 的官方工具名，常量
 /// `hook_listener::ASK_USER_QUESTION_TOOL`）：
 /// - **codex → 纳入**：问答工具名是 `request_user_input` ≠ `AskUserQuestion`，
-///   判据恒 false。本机 `~/.mam/events/` 实证：82 个事件文件中唯一带
+///   判据恒 false。本机 `~/.tuvis/events/` 实证：82 个事件文件中唯一带
 ///   `tool_name=request_user_input` 的那条是 `PreToolUse`（codex 注册面），
 ///   走通用分支，不产 `QuestionEntry`。
 /// - **opencode → 纳入**：`hook_supported()` 恒 false（无 hooks）。
 /// - **kimi → 纳入**：kimi 确有 hooks（`hook_events()` = PermissionRequest /
-///   PermissionResult），payload 也**确实**携带 `tool_name`（本机 `~/.mam/events/`
+///   PermissionResult），payload 也**确实**携带 `tool_name`（本机 `~/.tuvis/events/`
 ///   5 条 kimi 形态事件实测：`tool_name ∈ {Write, ExitPlanMode}`，另有一条空串）——
 ///   但 kimi 的 `[[hooks]]` 注册面**只有这两个事件**，而写问题标记要求事件名 ∈
 ///   {PreToolUse, PermissionRequest, Notification} **且** tool_name ==
 ///   `AskUserQuestion`。kimi 的问答工具在 wire 里**恰好就叫 `AskUserQuestion`**
 ///   （本机 544 个 wire.jsonl 全库扫描：`tool.call.name == "AskUserQuestion"` **39 次**，
 ///   且 39/39 都有配对 `tool.result`），理论上 PermissionRequest(AUQ) 能命中判据——
-///   但**本机 `question_wait_marks` 表为空**（0 行，`mam.db` 实证），即从未落过 kimi
+///   但**本机 `question_wait_marks` 表为空**（0 行，`tuvis.db` 实证），即从未落过 kimi
 ///   问题标记。原因是 PermissionRequest 的实际语义边界：kimi 的 `AskUserQuestion`
 ///   是**会话内交互工具（interaction.request）而非权限工具**——本机 wire 全库
 ///   39 次 AUQ 都未被 PermissionRequest 事件覆盖（kimi 的事件只覆盖
@@ -6601,7 +6601,7 @@ where
 }
 
 /// **屏面摘要**（回执 `error` 字段用；证据自带失败——闸门 2）：取最后若干非空行
-/// 拼接截断，让用户在手机上直接看到「MAM 眼里的屏」，无需来回截图。
+/// 拼接截断，让用户在手机上直接看到「兔维斯 眼里的屏」，无需来回截图。
 fn screen_digest(lines: &[String]) -> String {
     let tail: Vec<&str> = lines
         .iter()
@@ -6985,7 +6985,7 @@ fn permission_tier_kv_key(sid: &str) -> String {
 }
 
 /// 记录一次 verified 的权限组切换结果（内存 + settings KV 双写；KV 走
-/// `store.with`——测试注入 memory 库，零接触真实 ~/.mam）
+/// `store.with`——测试注入 memory 库，零接触真实 ~/.tuvis）
 pub(crate) fn remember_permission_tier(
     store: &super::pairing::DeviceStore,
     sid: &str,
@@ -7158,7 +7158,7 @@ pub struct SessionModeReq {
 /// **取值与依据已迁至** [`crate::inject::timing::MENU_POLL_TOTAL_MS`]（D20 的单一事实源：
 /// 值、自裁说明与 `#[ignore]` 实测项的指向都在那里）——此处 re-export 保持既有引用点
 /// （[`menu_stages`] / [`session_mode_switch`] 的文档锚）不破。
-/// **D20 起 600ms → 1500ms**：旧值依据是「M9R 人工敲命令的时序」，不代表 MAM 注入路径
+/// **D20 起 600ms → 1500ms**：旧值依据是「M9R 人工敲命令的时序」，不代表 兔维斯 注入路径
 /// （多了文本分块 + `SUBMIT_DELAY_MS` + TUI 重绘）——用户实机观察②即低估的表现。
 pub use crate::inject::timing::MENU_POLL_TOTAL_MS;
 
@@ -7238,7 +7238,7 @@ pub use crate::inject::timing::RECEIPT_POLL_TOTAL_MS;
 ///
 /// **守卫覆盖面的如实申报**：本函数的菜单路径**不再重入**守卫，因此「第一段与第二段
 /// 之间**用户手动**在终端里触发了另一个对话框」这条极窄窗口不在守卫覆盖内。窗口长度
-/// = 第一段回车到菜单屏读到（≤ `MENU_POLL_TOTAL_MS`），且此间 MAM 侧持有
+/// = 第一段回车到菜单屏读到（≤ `MENU_POLL_TOTAL_MS`），且此间 兔维斯 侧持有
 /// `INFLIGHT` 守卫（同一会话的其它注入被让位），实际可达性极低。**不假装这是全覆盖**。
 ///
 /// # codex `/plan` 运行中不可用（§2.6 表末）→ 如实回执
@@ -7246,7 +7246,7 @@ pub use crate::inject::timing::RECEIPT_POLL_TOTAL_MS;
 /// 判据 = [`crate::inject::mode::codex_plan_busy`]（只对 codex × 模式组 × Plan；
 /// 「运行中」复用 [`crate::inject::queue::is_running`] 三态口径）。命中 → 200
 /// `{status:"failed", error:"…"}`，**零注入**（codex 自己会回 `Plan mode unavailable
-/// right now.`，MAM 提前拦下并说清楚）。**不落审计**（无投递发生，与忙让位同口径）。
+/// right now.`，兔维斯 提前拦下并说清楚）。**不落审计**（无投递发生，与忙让位同口径）。
 ///
 /// # 回执如实（裁5 + 红线 4）
 ///
@@ -7315,7 +7315,7 @@ fn mode_menu_err(status: StatusCode, code: &str, reason: Option<&str>) -> Respon
 /// 旧路径是「后端猜目标档的屏上编号 → 自己敲」。用户实机走查暴露的问题：档位编号会
 /// 随 Guardian 配置前移（`Approve for me` 缺席时 `Full Access` 从 4 变 3），而前端文案
 /// 与后端逻辑都按「4→1」写死——**猜编号这件事本身不可靠**。用户方案把这一步交给用户：
-/// MAM 只负责**读回终端菜单的选项表**（编号 = 屏上实读值、文本 = 屏上原文），用户点哪
+/// 兔维斯 只负责**读回终端菜单的选项表**（编号 = 屏上实读值、文本 = 屏上原文），用户点哪
 /// 一项就敲哪个数字键。于是「猜」被消灭，而不是被修得更准。
 ///
 /// # 两动作
@@ -8749,7 +8749,7 @@ fn mode_verify_receipt(
 // ============================================================
 // C6 远程新建会话（spec §3/§5）：POST /session-create（异步任务起窗 + 弹窗处置
 // + 首句注入 + 物化确认）+ GET /session-create/status + GET /create-projects。
-// 任务簿（RemoteState.create_hub.tasks）内存态不持久化——MAM 重启丢任务，status
+// 任务簿（RemoteState.create_hub.tasks）内存态不持久化——兔维斯 重启丢任务，status
 // 404 引导重试。审计三类行：create（任务终态）/ dialog（弹窗处置留痕）/ send（首句）。
 // ============================================================
 
@@ -9243,7 +9243,7 @@ fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
                 });
                 // codex hooks 信任提示（Done 附带）：T5 信号健康度同源 KV 一行判定
                 //（hooks_registered_{tool}；经 DeviceStore 连接读——测试内存库同语义，
-                // 零真实 ~/.mam 接触），不新建机制
+                // 零真实 ~/.tuvis 接触），不新建机制
                 if run.tool == "codex" {
                     let registered = st.store.with(|c| {
                         crate::database::dao::settings::get_setting_conn(
@@ -9254,7 +9254,7 @@ fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
                     if registered.as_deref() != Some("true") {
                         hub.update(task_id, |t| {
                             t.detail = Some(
-                                "codex 需在 TUI 内 /hooks 审阅并信任 MAM 钩子一次，事件才会触发（trust 后 hash 落用户层 config）"
+                                "codex 需在 TUI 内 /hooks 审阅并信任 兔维斯 钩子一次，事件才会触发（trust 后 hash 落用户层 config）"
                                     .to_string(),
                             );
                         });
@@ -9292,7 +9292,7 @@ fn run_create_pipeline(st: Arc<RemoteState>, run: CreateRun) {
 }
 
 /// GET /m/api/v1/session-create/status?taskId=：任务快照（内存态读口）。
-/// 未知 taskId → 404（MAM 重启丢任务亦此形态——引导移动端重新发起）。
+/// 未知 taskId → 404（兔维斯 重启丢任务亦此形态——引导移动端重新发起）。
 pub async fn session_create_status(
     State(st): State<Arc<RemoteState>>,
     Query(params): Query<HashMap<String, String>>,
@@ -10554,7 +10554,7 @@ mod t3_live_probe_tests {
     /// 前置：Windows + claude（或 codex）已装；真 conhost 窗口里跑一个会话，
     /// 让终端停在**待决对话框**态（claude：计划批准框 `❯ 1. Yes, and use auto mode`
     /// ——探测档案 `screen-t5-claude-plan-before.txt`；或 AUQ 多选题；codex：
-    /// `Implement this plan?`）。MAM 远程服务开启，手机端在详情页。
+    /// `Implement this plan?`）。兔维斯 远程服务开启，手机端在详情页。
     ///
     /// 观测点（逐条抄录）：
     /// 1. 点模式栏的切档钮 → 回执必须是 **409 `blocked_by_dialog`** + 文案
@@ -10688,14 +10688,14 @@ mod t3_live_probe_tests {
 ///
 /// 丁T4 收尾的核心改动（权限菜单关键词定位、闭环导航、Full Access 第三段）**依据的是
 /// 用户手工实机取证**（`research/refs/phase2-消息注入/2026-09-22-codex-kimi权限菜单与
-/// FullAccess三段式-用户实机取证.md`），该档是**用户逐字转抄的屏幕原文**，不是 MAM
+/// FullAccess三段式-用户实机取证.md`），该档是**用户逐字转抄的屏幕原文**，不是 兔维斯
 /// 自己注入路径下的产物。两条用例各自去补一层：
 ///
 /// 1. [`t4_permission_menu_screen_shape_live_probe`]：菜单/确认框/回执行的**逐行原文**
 ///    与 `menu_labels`、`FULL_ACCESS_AFFIRMATIVE_KEYWORD`、两个回执行锚是否**逐字一致**
 ///    （版本升级后最先漂移的就是文案）；
-/// 2. [`t4_four_tools_switch_and_readback_live_probe`]：**MAM 自己的注入路径**下逐家切一轮
-///    ——取证档是「人手敲命令」，不覆盖 MAM 的文本分块、`SUBMIT_DELAY_MS`、轮询窗与
+/// 2. [`t4_four_tools_switch_and_readback_live_probe`]：**兔维斯 自己的注入路径**下逐家切一轮
+///    ——取证档是「人手敲命令」，不覆盖 兔维斯 的文本分块、`SUBMIT_DELAY_MS`、轮询窗与
 ///    闭环按键节拍。
 ///
 /// 两条都**只做前置可满足性检查与探测指引打印**，不发起任何注入或 HTTP 请求（那需要
@@ -10723,7 +10723,7 @@ mod t4_live_probe_tests {
     ///   `Err`「本平台无屏读」，本场景不可观测——那是能力边界，回执会如实说明）；
     /// - codex / kimi 已装且**空闲可输入**（无待决对话框——否则先撞丁T3 守卫，那是另一条
     ///   用例）；Guardian 开启与否会影响 `Approve for me` 是否在场（两种都合法）；
-    /// - MAM 远程服务开启（若要跑注入路径的两条）。
+    /// - 兔维斯 远程服务开启（若要跑注入路径的两条）。
     ///
     /// # 观测点（**逐条抄录「屏上原文」，与下面的期望值逐字比对**）
     ///
@@ -10796,16 +10796,16 @@ mod t4_live_probe_tests {
     ///
     /// # 与上一条的分工
     ///
-    /// 上一条核「屏上原文 ↔ 词表/锚」；本条约核「**MAM 注入路径**下这套键序真的能切对档」
+    /// 上一条核「屏上原文 ↔ 词表/锚」；本条约核「**兔维斯 注入路径**下这套键序真的能切对档」
     /// ——取证档是用户**手敲命令**得到的（人工按 ↑/Enter），它证明的是「菜单长什么样、
-    /// 高亮在哪」，**不代表 MAM 的注入节拍**（文本分块、`SUBMIT_DELAY_MS`、轮询窗、
+    /// 高亮在哪」，**不代表 兔维斯 的注入节拍**（文本分块、`SUBMIT_DELAY_MS`、轮询窗、
     /// 闭环每步的重绘复核）。这两层证据缺一不可。
     ///
     /// # 前置（逐家）
     ///
     /// - Windows + 真 conhost 窗口（屏读是 Windows 能力；非 Windows 下回读恒 null，
     ///   本场景不可观测——回执会如实带 verified=false + 人工核对提示）；
-    /// - 四家 CLI 已装（claude / codex / kimi / opencode），MAM 远程服务开启，
+    /// - 四家 CLI 已装（claude / codex / kimi / opencode），兔维斯 远程服务开启，
     ///   手机端在该会话详情页；
     /// - 终端**空闲可输入**（无待决对话框——否则先撞丁T3 守卫，那是另一条用例）。
     ///

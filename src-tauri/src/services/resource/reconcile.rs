@@ -1,24 +1,24 @@
 // 账本-磁盘对账扫描引擎（spec §13 第一块）
 
-/// 空目录体检条目（wave33 Item 2）：MAM skill 仓库与启用工具 skill 目录中
+/// 空目录体检条目（wave33 Item 2）：兔维斯 skill 仓库与启用工具 skill 目录中
 /// 无任何条目的目录（安装/卸载残留），可安全清理
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EmptyDirItem {
-    /// 归属："mam"（~/.mam/skills）| "tool:<id>"（该工具的 primary skill 目录）
+    /// 归属："mam"（~/.tuvis/skills）| "tool:<id>"（该工具的 primary skill 目录）
     pub owner: String,
     /// 空目录绝对路径
     pub path: String,
 }
 
-/// 空目录扫描根集合：(~/.mam/skills, "mam") + 各启用工具的 primary_skill_dir
+/// 空目录扫描根集合：(~/.tuvis/skills, "mam") + 各启用工具的 primary_skill_dir
 ///（disabled 工具不扫——W5 名册语义，与 scan_drift 同口径），owner 直接带
 /// 完整标签（"mam" | "tool:<id>"）
 fn empty_dir_roots() -> Vec<(std::path::PathBuf, String)> {
     let mut roots = Vec::new();
     let mam = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("skills");
     roots.push((mam, "mam".to_string()));
     for tool in crate::adapter::TOOL_IDS {
@@ -61,7 +61,7 @@ fn collect_subtree_dirs(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>
     }
 }
 
-/// 扫描空目录（wave33 Item 2）：~/.mam/skills 递归 + 各启用工具
+/// 扫描空目录（wave33 Item 2）：~/.tuvis/skills 递归 + 各启用工具
 /// primary_skill_dir 递归；空目录 = 无任何条目（嵌套链只报叶子，父目录
 /// 含该叶子即非空；清理后父目录变空的属下一轮扫描迭代）；symlink 跳过、
 /// 点目录跳过；扫描根本身不报告
@@ -102,7 +102,7 @@ pub fn scan_empty_dirs() -> Vec<EmptyDirItem> {
     out
 }
 
-/// 清理空目录（wave33 Item 2）：仅允许 ~/.mam/skills 与启用工具 primary_skill_dir
+/// 清理空目录（wave33 Item 2）：仅允许 ~/.tuvis/skills 与启用工具 primary_skill_dir
 /// 根前缀内（词法预检 + canonicalize 复核双道白名单）；对每个传入路径收集其
 /// 子树目录按深度降序（自底向上）反复 remove_dir 直到无进展；非空/不存在跳过；
 /// 返回实际删除的目录数
@@ -125,7 +125,7 @@ pub fn clean_empty_dirs(paths: Vec<String>) -> Result<usize, String> {
             || roots_canon.iter().any(|r| path.starts_with(r));
         if !lexically_allowed {
             return Err(format!(
-                "路径不在允许清理的范围（MAM skill 仓库或工具 skill 目录）: {}",
+                "路径不在允许清理的范围（兔维斯 skill 仓库或工具 skill 目录）: {}",
                 p
             ));
         }
@@ -136,7 +136,7 @@ pub fn clean_empty_dirs(paths: Vec<String>) -> Result<usize, String> {
         let canonical = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
         if !roots_canon.iter().any(|r| canonical.starts_with(r)) {
             return Err(format!(
-                "路径不在允许清理的范围（MAM skill 仓库或工具 skill 目录）: {}",
+                "路径不在允许清理的范围（兔维斯 skill 仓库或工具 skill 目录）: {}",
                 p
             ));
         }
@@ -189,7 +189,7 @@ pub struct DriftItem {
 /// 拍平名报告，path 保留磁盘实况——此为该裁决的已知不可反解边界
 pub fn scan_drift() -> Vec<DriftItem> {
     let home = dirs::home_dir().unwrap_or_default();
-    let mam_root = home.join(".mam");
+    let mam_root = home.join(".tuvis");
     let mut out = Vec::new();
     for tool in crate::adapter::TOOL_IDS {
         if !crate::database::get_tool_enabled(tool) {
@@ -254,7 +254,7 @@ pub fn scan_drift() -> Vec<DriftItem> {
             }
         }
         for ext_id in &ledger {
-            // 磁盘 MAM 链接集合按拍平名比较（正向映射，不反解磁盘名）
+            // 磁盘 兔维斯 链接集合按拍平名比较（正向映射，不反解磁盘名）
             if !disk_mam_links.contains(&flat_of(ext_id)) {
                 let name = ext_id.strip_prefix("skill-").unwrap_or(ext_id);
                 // 判定与 path 均按拍平名（磁盘派发落点实况）；extension_id 保持账本嵌套规范名
@@ -322,7 +322,7 @@ fn failed(item: &DriftItem, message: String) -> ReconcileOutcome {
     }
 }
 
-/// 升级人工（MAM 不动手 / 绝不删除现场）
+/// 升级人工（兔维斯 不动手 / 绝不删除现场）
 fn needs_manual(item: &DriftItem, message: String) -> ReconcileOutcome {
     ReconcileOutcome {
         fixed: false,
@@ -346,7 +346,7 @@ fn from_result(res: Result<(), String>, item: &DriftItem, ok_message: String) ->
 /// - L2-a enable（真目录内容与 SSOT 一致才替换；Err 含「不一致」→ needs_manual 且绝不删除现场）
 ///   / L2-b 回写 disabled("missing")（真目录保留原生态）
 /// - L3-a disable（清链含 Layer2 级联）/ L3-b 回写 enabled("valid")
-/// - L4 任意 mode → needs_manual（外链 MAM 不接管，现场不动）
+/// - L4 任意 mode → needs_manual（外链 兔维斯 不接管，现场不动）
 pub fn reconcile_one(item: &DriftItem, mode: &str) -> ReconcileOutcome {
     let name = item
         .extension_id
@@ -370,7 +370,7 @@ pub fn reconcile_one(item: &DriftItem, mode: &str) -> ReconcileOutcome {
             Err(e) if e.contains("不一致") => needs_manual(
                 item,
                 format!(
-                    "{}: 磁盘真目录与共享仓库内容不一致，需人工处理；MAM 未做任何改动，现场已保留（{}）",
+                    "{}: 磁盘真目录与共享仓库内容不一致，需人工处理；兔维斯 未做任何改动，现场已保留（{}）",
                     where_at, e
                 ),
             ),
@@ -397,7 +397,7 @@ pub fn reconcile_one(item: &DriftItem, mode: &str) -> ReconcileOutcome {
         ("L4", _) => needs_manual(
             item,
             format!(
-                "{}: 外链不归 MAM 接管，需人工确认归属或手动处理",
+                "{}: 外链不归 兔维斯 接管，需人工确认归属或手动处理",
                 where_at
             ),
         ),

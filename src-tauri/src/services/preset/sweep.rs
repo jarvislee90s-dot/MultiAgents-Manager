@@ -1,10 +1,10 @@
 // 独占清扫（spec §5.1 步骤4）：差集 = 当前生效资源 − 预设项 − 常驻；
-// MAM 资源走既有停用服务（含 Layer3 级联），原生技能走暂存引擎
+// 兔维斯 资源走既有停用服务（含 Layer3 级联），原生技能走暂存引擎
 use crate::database;
 
 #[derive(Debug, Default)]
 pub struct SweepPlan {
-    /// 要停用的 MAM 资源 (extension_id, kind)
+    /// 要停用的 兔维斯 资源 (extension_id, kind)
     pub disable_mam: Vec<(String, String)>,
     /// 要暂存的原生技能名（目录名，不带 skill- 前缀）
     pub stash_native: Vec<String>,

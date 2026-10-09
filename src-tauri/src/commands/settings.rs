@@ -14,13 +14,13 @@ pub fn set_setting(key: String, value: String) {
 }
 
 /// 主题 SSOT 写入（issue #3）：主题事实源是 DB settings KV（`ui_theme`），
-/// 主窗口/设置窗口等所有窗口共享同一份。写库后广播全局事件 `mam-theme-changed`，
+/// 主窗口/设置窗口等所有窗口共享同一份。写库后广播全局事件 `tuvis-theme-changed`，
 /// 各窗口（独立 WebView，storage 事件不互通）凭此实时跟随；payload 为
 /// `{ theme: "dark"|"light"|"system" }`，与前端 theme-provider 的约定一致。
 #[tauri::command]
 pub fn set_theme(app: tauri::AppHandle, theme: String) {
     crate::database::set_setting("ui_theme", &theme);
-    let _ = app.emit("mam-theme-changed", serde_json::json!({ "theme": theme }));
+    let _ = app.emit("tuvis-theme-changed", serde_json::json!({ "theme": theme }));
 }
 
 #[tauri::command]
@@ -44,7 +44,7 @@ pub fn list_sub_agents(tool_id: String) -> Vec<SubAgentRecord> {
 #[tauri::command]
 pub fn mark_session_read(app: tauri::AppHandle, agent_type: String, session_id: String) {
     crate::database::dao::unread::delete(&agent_type.to_lowercase(), &session_id);
-    // issue #35-1：已读墓碑——缓存失忆（长间隙清缓存 / MAM 重启）后
+    // issue #35-1：已读墓碑——缓存失忆（长间隙清缓存 / 兔维斯 重启）后
     // Insert 边沿与补偿据此不再复活已读未读卡
     crate::database::dao::unread::mark_read(&agent_type.to_lowercase(), &session_id);
     let _ = app.emit(

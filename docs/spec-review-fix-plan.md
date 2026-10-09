@@ -62,17 +62,17 @@
 - 不立即改结构块，只加这条占位说明，待重构落地后由执行方同步 PATCH。
 
 [A6] [B5] 原则 V 数据目录部分 — MCP 路径复数化统一
-- 若宪法 V 中出现 `~/.mam/mcp/` 之外的路径写法，统一为 `~/.mam/mcp/`；同时补 `~/.mam/plugins/` 作为插件仓库路径（如有提及）。
-- 检查宪法其它段是否提了 `~/.mam/mcps/`，全部改 `~/.mam/mcp/`。
+- 若宪法 V 中出现 `~/.tuvis/mcp/` 之外的路径写法，统一为 `~/.tuvis/mcp/`；同时补 `~/.tuvis/plugins/` 作为插件仓库路径（如有提及）。
+- 检查宪法其它段是否提了 `~/.tuvis/mcps/`，全部改 `~/.tuvis/mcp/`。
 
 ---
 
 ### 文件 B：`AGENTS.md`
 
 [B-A] [B5] 数据目录表
-- 当前 `~/.mam/mcp/` 行保持不变（此即为统一基准）。
-- 新增一行：`| ~/.mam/plugins/ | 全局 Plugin 仓库 |`
-- 检查 AGENTS.md 其它段（如架构概览）是否出现 `~/.mam/mcps/` 或 `~/.mam/plugins/` 缺失的情况，补齐。
+- 当前 `~/.tuvis/mcp/` 行保持不变（此即为统一基准）。
+- 新增一行：`| ~/.tuvis/plugins/ | 全局 Plugin 仓库 |`
+- 检查 AGENTS.md 其它段（如架构概览）是否出现 `~/.tuvis/mcps/` 或 `~/.tuvis/plugins/` 缺失的情况，补齐。
 
 ---
 
@@ -104,9 +104,9 @@
 - 明确现有 `ResourceByKindView`/`ResourceByToolView` 即宪法 V 所述「可视化配置看板」，消除 V 的悬空要求。
 
 [C7] [B5] FR-5.17 — 路径复数化统一
-- 当前：`~/.mam/skills/` + `~/.mam/mcps/` + `~/.mam/plugins/`
-- 改为：`~/.mam/skills/` + `~/.mam/mcp/` + `~/.mam/plugins/`
-- 全文搜索 `~/.mam/mcps/` 全部改为 `~/.mam/mcp/`。确保与 AGENTS.md [B-A] 和宪法 [A6] 一致。
+- 当前：`~/.tuvis/skills/` + `~/.tuvis/mcps/` + `~/.tuvis/plugins/`
+- 改为：`~/.tuvis/skills/` + `~/.tuvis/mcp/` + `~/.tuvis/plugins/`
+- 全文搜索 `~/.tuvis/mcps/` 全部改为 `~/.tuvis/mcp/`。确保与 AGENTS.md [B-A] 和宪法 [A6] 一致。
 
 [C8] [S9] 成功标准 #6
 - 检查是否为「启动不超过 3 秒」。保持不变；本条仅确认无需修改。若写的是 <300ms，改为 ≤3s。
@@ -197,7 +197,7 @@
 - 对接宪法测试要求与 [D8]。
 
 [E4] [B5] FR-3 路径示例 — 跟随 [C7]
-- 若 003 示例里出现 `~/.mam/mcps/`，改为 `~/.mam/mcp/`（少见，仅检查）。
+- 若 003 示例里出现 `~/.tuvis/mcps/`，改为 `~/.tuvis/mcp/`（少见，仅检查）。
 
 ---
 
@@ -230,9 +230,9 @@
 - CLI `mam validate` 单独在 FR-4.3 维持 Phase 2 标注。
 
 [G2] [B5] FR-6.1 路径统一
-- 当前：`~/.mam/skills/<id>/（或 ~/.mam/mcps/<id>/）`
-- 改为：`~/.mam/skills/<id>/（或 ~/.mam/mcp/<id>/）`
-- 全文搜索 `~/.mam/mcps/` 改 `~/.mam/mcp/`，与 [C7] 一致。
+- 当前：`~/.tuvis/skills/<id>/（或 ~/.tuvis/mcps/<id>/）`
+- 改为：`~/.tuvis/skills/<id>/（或 ~/.tuvis/mcp/<id>/）`
+- 全文搜索 `~/.tuvis/mcps/` 改 `~/.tuvis/mcp/`，与 [C7] 一致。
 
 [G3] [S4] FR-7 依赖引用补 FR 编号
 - 当前 FR-7 列「对接 Spec 002 的代码架构」三类目录，无 FR 号。
@@ -247,7 +247,7 @@
 - 不修改。本条仅在执行完成后核对项确认。
 
 [G5] [S3] FR-7 对接 001 三层映射
-- 在 FR-7 第 3 项「对接 Spec 001 的三层映射」补一句：「安装到 Layer 1（SSOT，`~/.mam/skills/<id>/`），manifest 中的 `compatibility` 决定可在哪些工具（Layer 2，`~/.mam/mcp/` 对 MCP 不适用，MCP 直接写入工具配置）启用。MCP 路径在安装时落地为 `~/.mam/mcp/<id>/` 记录，不分 Layer。」
+- 在 FR-7 第 3 项「对接 Spec 001 的三层映射」补一句：「安装到 Layer 1（SSOT，`~/.tuvis/skills/<id>/`），manifest 中的 `compatibility` 决定可在哪些工具（Layer 2，`~/.tuvis/mcp/` 对 MCP 不适用，MCP 直接写入工具配置）启用。MCP 路径在安装时落地为 `~/.tuvis/mcp/<id>/` 记录，不分 Layer。」
 
 ---
 

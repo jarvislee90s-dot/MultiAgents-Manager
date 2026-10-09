@@ -44,10 +44,10 @@
 //!   dialog_log/屏读尾 40 行）先落 evidence 再杀；
 //! - temp 目录**保留**不删（失败现场语义 + 证据；TempDir 以 `std::mem::forget` 丢弃
 //!   清理行为）；
-//! - evidence 落 `~/.mam/create-evidence/<ts>-<tool>.log`（产品态目录 spec §4.4；
-//!   best-effort，写失败不碍断言）——这是对「零接触 ~/.mam」纪律的**明示例外**：
-//!   只写本证据目录，不触 mam.db；
-//! - 零接触真实 ~/.mam 的库路径：不用 DeviceStore/DB，确认语义经生产读路径
+//! - evidence 落 `~/.tuvis/create-evidence/<ts>-<tool>.log`（产品态目录 spec §4.4；
+//!   best-effort，写失败不碍断言）——这是对「零接触 ~/.tuvis」纪律的**明示例外**：
+//!   只写本证据目录，不触 tuvis.db；
+//! - 零接触真实 ~/.tuvis 的库路径：不用 DeviceStore/DB，确认语义经生产读路径
 //!   `read_session_messages`（只读真实 CLI 会话存储——A1 既有口径）。
 //!
 //! ## 运行方式（实机显式跑）
@@ -65,25 +65,25 @@
 //! | 日期 | 用例 | 四家各耗时 | 断言结果 | 证据目录 |
 //! |---|---|---|---|---|
 //! | 2026-10-02 | e2e_create_single_claude_smoke | claude 27.5s | PASS：keys
-//!   ["down","enter"] 红线实机复核；首条 user 逐字节；模型已回复（assistant 2 条） | `~/.mam/create-evidence/` |
+//!   ["down","enter"] 红线实机复核；首条 user 逐字节；模型已回复（assistant 2 条） | `~/.tuvis/create-evidence/` |
 //! | 2026-10-02 | e2e_create_matrix_four_tools | claude 27.6s / codex 22.4s /
 //!   kimi 27.2s / opencode 24.9s | PASS **四家全过**：claude 信任框红线
 //!   ["down","enter"]；codex 无框直 idle（三态域内，模型回合因 CC Switch 代理
 //!   400 未回复——环境态如实记录）；kimi 信任框 ["enter"]；opencode 无框 []；
-//!   四家首条 user 断言全过；claude/kimi/opencode 模型已回复 | `~/.mam/create-evidence/` |
+//!   四家首条 user 断言全过；claude/kimi/opencode 模型已回复 | `~/.tuvis/create-evidence/` |
 //! | 2026-10-02 | e2e_create_http_full_chain（六门禁终跑） | 全链 52.0s | PASS：
-//!   sid 三处一致；第二条消息落地后 assistant 4 条 | `~/.mam/create-evidence/` |
+//!   sid 三处一致；第二条消息落地后 assistant 4 条 | `~/.tuvis/create-evidence/` |
 //! | 2026-10-02 | e2e_create_matrix_four_tools（六门禁终跑）+ 复跑 | claude
 //!   27.4s / codex 22.6s / kimi 26.0s 过；**opencode 锚定失败**——spawn Ok、
 //!   find_tui_pid 30s 超时（两次复现）：上游自升 2.0.22（服务架构，进程无可附加
 //!   控制台）→ 归 opencode2 复验批（验收清单 #26；1.18.32 线上全链两次实机验证
-//!   在案） | `~/.mam/create-evidence/` |
+//!   在案） | `~/.tuvis/create-evidence/` |
 //! | 2026-10-02 | e2e_create_matrix_four_tools（**opencode 2.x 适配批 D2 复跑**）
 //!   | claude 28.0s / codex 22.6s / kimi 26.0s / **opencode 23.8s** | PASS
 //!   **四家全过**：opencode 2.0.22 腿 **锚定恢复**（`--standalone` 修端口竞争陷阱：
 //!   TUI pid 2.5s 内到手，取代此前 30s 超时）；keys=[]；首条 user 逐字节；物化
 //!   stamp 命中（`remote/content.rs` v2 派发修复——此前查冻结 `message`/`part`
-//!   表命不中） | `~/.mam/create-evidence/` |
+//!   表命不中） | `~/.tuvis/create-evidence/` |
 //! | 2026-10-02 | e2e_create_http_full_chain（D2 复跑） | 全链 46.0s | PASS：
 //!   第二条消息落地后 assistant 2 条 | 同上 |
 //! | 2026-10-02 | e2e_create_single_claude_smoke（D2 复跑） | claude 27.6s | PASS：
@@ -99,7 +99,7 @@
 //!   27.3s（enter）/ **opencode 23.8s（2.x 腿）**；http 全链 15.1s（taskId→
 //!   四态→done→sessionId）；claude 冒烟 27.6s | **3 passed 0 failed**——rebase
 //!   携 main 的 capability_table/AUQ 重构后功能零回归；RemoteState 夹具补
-//!   capability_table 初始化为本轮唯一适配 | `~/.mam/create-evidence/` |
+//!   capability_table 初始化为本轮唯一适配 | `~/.tuvis/create-evidence/` |
 //! ### D2 修复（opencode 2.x create 腿）
 //! 1. **起窗命令 `--standalone`**（`inject/resume.rs::CREATE_COMMAND_TABLE`）：2.x
 //!    裸 `opencode` 在已有后台服务占默认端口时不出 TUI（`Starting background
@@ -169,10 +169,10 @@ const FIRST_MESSAGE: &str = "hi";
 const DEVICE_NAME: &str = "C8E2E";
 
 // ============================================================
-// 证据（产品态目录 ~/.mam/create-evidence/，spec §4.4；best-effort）
+// 证据（产品态目录 ~/.tuvis/create-evidence/，spec §4.4；best-effort）
 // ============================================================
 
-/// 单 run 证据句柄：`~/.mam/create-evidence/` 下按 `<ts>-<tool>.log` 追加。
+/// 单 run 证据句柄：`~/.tuvis/create-evidence/` 下按 `<ts>-<tool>.log` 追加。
 struct Ev {
     dir: PathBuf,
     ts: String,
@@ -182,7 +182,7 @@ impl Ev {
     fn new() -> Self {
         let dir = dirs::home_dir()
             .unwrap_or_else(std::env::temp_dir)
-            .join(".mam")
+            .join(".tuvis")
             .join("create-evidence");
         let _ = std::fs::create_dir_all(&dir);
         let ts = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
@@ -910,7 +910,7 @@ async fn e2e_create_http_full_chain() {
     //      复制 c9_running_projects）；
     //    - injector / resume_spawner / screen_probe / confirm_probe / dialog_probe =
     //      生产同源（真注入 / 真起窗 / 真屏读 / 真确认 / 真对话框探针）；
-    //    - store = DeviceStore::memory（零接触真实 mam.db 写路径；审计/设备行全在
+    //    - store = DeviceStore::memory（零接触真实 tuvis.db 写路径；审计/设备行全在
     //      内存库）；
     //    - host_source 必须给 enabledTools（session-create 工具门第二道），故非 m9r
     //      的 Null 桩；其余缝照 m9r 最小假体（本链不触归档/看板隐藏/未读/硬杀）。

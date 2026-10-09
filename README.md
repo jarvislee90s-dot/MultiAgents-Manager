@@ -141,7 +141,7 @@ v0.3.0 起桌宠格式开放，不再只有 Foxbell：
 
 七个工具（Claude Code / Codex / Kimi Code / OpenCode / ZCode / WorkBuddy / dsh）的 token 用量统一记账：
 应用启动后延迟采集一次，并开放 `usage_collect` 供前端按需触发（单飞互斥 + 默认 10 分钟的最小间隔兜底）；
-**采集走独立按需路径，不进入 3 秒会话轮询**。账本落在 `~/.mam/mam.db` 的 4 张表（明细按小时桶、日聚合永久保留、
+**采集走独立按需路径，不进入 3 秒会话轮询**。账本落在 `~/.tuvis/tuvis.db` 的 4 张表（明细按小时桶、日聚合永久保留、
 采集游标、会话维度），明细默认保留 90 天（可配），到期只保留日聚合。
 
 **阶段① 交付范围**：采集与存储底座 + 8 条 IPC——6 条用量命令（`usage_collect` / `usage_dashboard` /
@@ -394,17 +394,17 @@ pnpm tauri:dev
 pnpm tauri:build
 ```
 
-> **helper 构建门（批次丙 T2 固化）**：`mam-hook-listener`（hook 事件监听 helper）
-> 与 `mam-marker`（窗口标题标记）都挂在 Cargo `required-features` 门后——**不带
+> **helper 构建门（批次丙 T2 固化）**：`tuvis-hook-listener`（hook 事件监听 helper）
+> 与 `tuvis-marker`（窗口标题标记）都挂在 Cargo `required-features` 门后——**不带
 > feature 时根本不构建**，应用启动的 `ensure_hook_script` 就找不到同目录 helper、
-> 跳过安装，`~/.mam/bin/` 里那份永远是旧构建（实测故障：事件缺 `tool_name` 载荷 →
+> 跳过安装，`~/.tuvis/bin/` 里那份永远是旧构建（实测故障：事件缺 `tool_name` 载荷 →
 > 问答卡通道 A 永不识别）。
 >
 > - `pnpm tauri:dev` / `pnpm tauri:build` **已内置 feature**（`hook-listener` 与
 >   `marker-helper`，后者蕴含前者），照常用即可；
 > - 单独构建 helper（如跑实机 `#[ignore]` 测试）必须显式带上：
->   `cd src-tauri && cargo build --bin mam-hook-listener --features hook-listener`；
-> - 跑 bin 测试同理：`cargo test --bin mam-hook-listener --features hook-listener`；
+>   `cd src-tauri && cargo build --bin tuvis-hook-listener --features hook-listener`；
+> - 跑 bin 测试同理：`cargo test --bin tuvis-hook-listener --features hook-listener`；
 > - macOS 打包（`release:macos` / release.yml 的 macOS job）走的是裸
 >   `pnpm tauri build` 显式参数，**不受**上述 npm script 影响——额外 bin 会令
 >   universal 打包失败，故 macOS 侧有意不带 feature（helper 为 Windows 通道）。
@@ -422,15 +422,15 @@ pnpm lint:fix     # ESLint 自动修复
 
 ## 配置
 
-应用数据存储在 `~/.mam/`：
+应用数据存储在 `~/.tuvis/`：
 
 | 路径                          | 用途                                        |
 | ----------------------------- | ------------------------------------------- |
-| `~/.mam/mam.db`               | SQLite 数据库（设置、扩展、预设、会话缓存） |
-| `~/.mam/skills/`              | 全局 Skill 仓库                             |
-| `~/.mam/mcp/`                 | 全局 MCP 服务器配置                         |
-| `~/.mam/hooks/status-hook.sh` | 共享 Hook 脚本（状态事件）                  |
-| `~/.mam/events/`              | Hook 事件文件（自动清理，30 秒 TTL）        |
+| `~/.tuvis/tuvis.db`               | SQLite 数据库（设置、扩展、预设、会话缓存） |
+| `~/.tuvis/skills/`              | 全局 Skill 仓库                             |
+| `~/.tuvis/mcp/`                 | 全局 MCP 服务器配置                         |
+| `~/.tuvis/hooks/status-hook.sh` | 共享 Hook 脚本（状态事件）                  |
+| `~/.tuvis/events/`              | Hook 事件文件（自动清理，30 秒 TTL）        |
 
 ### 各工具配置支持
 

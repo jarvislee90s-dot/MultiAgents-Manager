@@ -3,8 +3,8 @@
 //   预设时锁定——bound_tool 是原生技能项的归属标识，改绑会破坏预设身份语义）
 // - 名称必填 + 描述 textarea（备忘录用途）
 // - 套件列表 skill/MCP/plugin 三组复选（数据源 presetExtensions，按 kind 分组）：
-//   通用 = 仅 MAM 资源（非 isNative），专属项带徽标但不禁选；
-//   工具私有 = MAM 资源全列、「不适配」项置灰 + 原因 title（不适配 = 存在 binding 且
+//   通用 = 仅 兔维斯 资源（非 isNative），专属项带徽标但不禁选；
+//   工具私有 = 兔维斯 资源全列、「不适配」项置灰 + 原因 title（不适配 = 存在 binding 且
 //   exclusiveTools 非空且不含绑定工具），并追加「原生技能」组（isNative && sourceTool === boundTool）
 // - 转类型建议：通用模式勾选任一专属资源 → 提示条 + 「转工具私有」快捷按钮
 // - 保存：新建 createPreset / 编辑 updatePreset；名称必填 + ≥1 项校验；
@@ -53,7 +53,7 @@ const parseItemKey = (key: string): [string, string] => {
   return [key.slice(0, i), key.slice(i + 2)];
 };
 
-/** MAM 资源分组顺序与组头文案（组头复用既有 resources.*Count 计数文案，不新增 key） */
+/** 兔维斯 资源分组顺序与组头文案（组头复用既有 resources.*Count 计数文案，不新增 key） */
 const KINDS: { kind: string; countKey: string }[] = [
   { kind: "skill", countKey: "resources.skillsCount" },
   { kind: "mcp", countKey: "resources.mcpsCount" },
@@ -119,7 +119,7 @@ export function PresetEditDialog({
     return m;
   }, [bindings]);
 
-  // 原生项 id 集合：切通用剪除选中键 + 保存兜底过滤共用（spec §3.3 通用 = 仅 MAM 资源）
+  // 原生项 id 集合：切通用剪除选中键 + 保存兜底过滤共用（spec §3.3 通用 = 仅 兔维斯 资源）
   const nativeIds = useMemo(
     () => new Set(presetExtensions.filter((e) => e.isNative).map((e) => e.id)),
     [presetExtensions]
@@ -150,7 +150,7 @@ export function PresetEditDialog({
   const showSwitchHint =
     scope === "universal" && [...selected].some((k) => isExclusive(parseItemKey(k)[0]));
 
-  // MAM 资源（非原生）按 kind 分组，空组不渲染
+  // 兔维斯 资源（非原生）按 kind 分组，空组不渲染
   const mamGroups = KINDS.map(({ kind, countKey }) => ({
     kind,
     countKey,
@@ -188,7 +188,7 @@ export function PresetEditDialog({
       return;
     }
     if (scope === "tool" && !boundTool) return;
-    // 兜底（双保险）：通用预设仅 MAM 资源——即使 selected 残留原生键（如未来新入口漏剪），
+    // 兜底（双保险）：通用预设仅 兔维斯 资源——即使 selected 残留原生键（如未来新入口漏剪），
     // 保存前也按 scope 再次滤除（final review Finding 2）
     const items = [...selected]
       .map(parseItemKey)
@@ -249,7 +249,7 @@ export function PresetEditDialog({
                 checked={scope === "universal"}
                 onChange={() => {
                   setScope("universal");
-                  // 切通用即剪除原生选中键（spec §3.3 通用 = 仅 MAM 资源）：原生组随之隐藏，
+                  // 切通用即剪除原生选中键（spec §3.3 通用 = 仅 兔维斯 资源）：原生组随之隐藏，
                   // 但 selected 里的残留键不可见仍会随保存泄漏进「通用」预设（final review Finding 2）
                   setSelected((prev) => {
                     const s = new Set<string>();
@@ -322,7 +322,7 @@ export function PresetEditDialog({
             </div>
           )}
 
-          {/* 套件列表：skill / MCP / plugin 三组 MAM 资源复选 + 工具私有模式的原生技能组 */}
+          {/* 套件列表：skill / MCP / plugin 三组 兔维斯 资源复选 + 工具私有模式的原生技能组 */}
           <div className="space-y-2">
             {mamGroups.map((group) => (
               <div key={group.kind}>

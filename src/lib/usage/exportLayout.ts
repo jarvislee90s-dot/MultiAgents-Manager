@@ -165,7 +165,7 @@ export interface ExportAnchor {
 
 /** 布局入参：**全部是已格式化的字符串/数字**（格式化口径归装配层，本层不做 i18n、不做千分位） */
 export interface ExportInput {
-  /** `MAM · ${t("usage.title")}` */
+  /** `兔维斯 · ${t("usage.title")}` */
   brand: string;
   /** `${rangeLabelOf(range)} · ${spanLabelOf(trend)}`，如「近 7 天 · 09/27 – 10/03」 */
   rangeLabel: string;

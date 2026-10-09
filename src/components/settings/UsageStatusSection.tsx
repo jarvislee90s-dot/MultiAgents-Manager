@@ -148,8 +148,8 @@ export function UsageStatusSection() {
       try {
         await invoke("reveal_dir", { path });
       } catch (e) {
-        // debug 构建下 `exports_dir()` 认 `MAM_HOME`，而白名单只认 `dirs::home_dir()/.mam`
-        // → 开发机设了 `MAM_HOME` 时这里会失败；**不能**因此把整次导出报成失败
+        // debug 构建下 `exports_dir()` 认 `TUVIS_HOME`，而白名单只认 `dirs::home_dir()/.tuvis`
+        // → 开发机设了 `TUVIS_HOME` 时这里会失败；**不能**因此把整次导出报成失败
         console.error("reveal_dir failed:", e);
         setRevealFailed(true);
       }

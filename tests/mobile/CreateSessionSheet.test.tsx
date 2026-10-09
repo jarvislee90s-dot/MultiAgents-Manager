@@ -507,7 +507,7 @@ describe("CreateSessionSheet 进度轮询", () => {
   it("detail 有值即展示——done 相也展示（codex hooks 信任提示挂在 done.detail，C10 交接）", async () => {
     routes.status = {
       phase: "done",
-      detail: "codex 需在 TUI 内 /hooks 审阅并信任 MAM 钩子一次，事件才会触发",
+      detail: "codex 需在 TUI 内 /hooks 审阅并信任 兔维斯 钩子一次，事件才会触发",
       sessionId: null,
       spawnedPid: 4242,
     };
@@ -515,7 +515,7 @@ describe("CreateSessionSheet 进度轮询", () => {
     await submitWithManualPath();
     expect(screen.getByTestId("create-phase").textContent).toBe("完成");
     expect(screen.getByTestId("create-detail").textContent).toContain(
-      "codex 需在 TUI 内 /hooks 审阅并信任 MAM 钩子一次"
+      "codex 需在 TUI 内 /hooks 审阅并信任 兔维斯 钩子一次"
     );
   });
 

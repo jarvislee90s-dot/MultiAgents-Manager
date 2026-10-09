@@ -133,7 +133,7 @@ export const mockPresetHealthIssues = {
       id: 1,
       toolId: "claude",
       skillName: "legacy-native-skill",
-      stashedPath: "/Users/jarvis/.mam/stash/claude/skills/legacy-native-skill",
+      stashedPath: "/Users/jarvis/.tuvis/stash/claude/skills/legacy-native-skill",
       originalPath: "/Users/jarvis/.claude/skills/legacy-native-skill",
       createdAt: new Date().toISOString(),
       restoredAt: null,
@@ -142,7 +142,7 @@ export const mockPresetHealthIssues = {
   drift: mockLedgerDrift,
   // 空目录（wave33 Item D，与 src/tauri-mock.ts 同构）：mam 仓库 + 工具目录各一
   emptyDirs: [
-    { owner: "mam", path: "/Users/jarvis/.mam/skills/empty-suite-dir" },
+    { owner: "mam", path: "/Users/jarvis/.tuvis/skills/empty-suite-dir" },
     { owner: "tool:claude", path: "/Users/jarvis/.claude/skills/empty-dir" },
   ],
 };
@@ -175,7 +175,7 @@ export const tauriInvokeMock = vi.fn((cmd: string, args?: unknown) => {
     case "pet_scan":
       return Promise.resolve({
         id: "x",
-        dir: "/home/u/.mam/pets/x",
+        dir: "/home/u/.tuvis/pets/x",
         spritesheet: { rel: "spritesheet.webp", exists: true, size: 1 },
         voiceFiles: [],
       });

@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 
 use self::error::PetRpcError;
 
-/// 宠物仓库根目录 ~/.mam/pets
+/// 宠物仓库根目录 ~/.tuvis/pets
 pub fn pets_root() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("pets")
 }
 
@@ -35,7 +35,7 @@ const WINDOWS_RESERVED_DEVICES: [&str; 22] = [
 
 /// IPC 传入的宠物 id 统一白名单校验：id 即文件夹名，`pet_dir` 是裸 join，
 /// 不设卡则 `../`、`..\`、绝对路径均可逃逸出仓库（如 pet_delete_pet("..") 会把
-/// ~/.mam 整目录送回收站）。静态规则与 validate_pet_name 一致（复用 pet-name-* 错误码，
+/// ~/.tuvis 整目录送回收站）。静态规则与 validate_pet_name 一致（复用 pet-name-* 错误码，
 /// 前端码表/i18n 无需新增）；存在性检查留给各命令自身的语义。
 pub fn validate_pet_id(id: &str) -> Result<(), PetRpcError> {
     if id.is_empty() {
@@ -110,7 +110,7 @@ pub fn sweep_staging() {
     }
 }
 
-/// 导入暂存区根目录 ~/.mam/pets/.import-staging（隐藏目录，清单扫描自动跳过）
+/// 导入暂存区根目录 ~/.tuvis/pets/.import-staging（隐藏目录，清单扫描自动跳过）
 pub fn staging_root(root: &Path) -> PathBuf {
     root.join(".import-staging")
 }

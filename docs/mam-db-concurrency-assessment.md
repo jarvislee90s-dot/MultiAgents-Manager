@@ -1,9 +1,9 @@
-# mam.db 并发能力评估与提请（用量功能触发，未实施）
+# tuvis.db 并发能力评估与提请（用量功能触发，未实施）
 
 - 日期：2026-10-03
-- 状态：**仅评估与提请**。说明书 §7.2 明文：该改动会改变整个 `mam.db` 的既有行为，
+- 状态：**仅评估与提请**。说明书 §7.2 明文：该改动会改变整个 `tuvis.db` 的既有行为，
   属【默认裁定】，必须由用户裁决后才可实施。
-- **本任务零生产代码改动**：`mam.db` 的 **WAL / `busy_timeout` / 独立连接一律未实施**
+- **本任务零生产代码改动**：`tuvis.db` 的 **WAL / `busy_timeout` / 独立连接一律未实施**
   （GC 2 的禁令项，一行未动）。本文件只做评估与提请；可执行验收在
   `src-tauri/tests/usage_concurrency_test.rs`。
 - 触发背景：用量采集需要在 3 秒会话轮询之外写库。当前实现（计划①）已经用
@@ -24,19 +24,19 @@
 
 ## 1. 现状（代码事实，逐条已读源码核实）
 
-### 1.1 `mam.db` 只有一把锁、一个连接、无 WAL、无 `busy_timeout`
+### 1.1 `tuvis.db` 只有一把锁、一个连接、无 WAL、无 `busy_timeout`
 
 - `src-tauri/src/database/connection.rs:21` 全局单连接 `pub static DB: Lazy<Mutex<Connection>>`，
-  初始化时 `Connection::open(<MAM_HOME>/.mam/mam.db)` 后直接 `schema::init`；
+  初始化时 `Connection::open(<TUVIS_HOME>/.tuvis/tuvis.db)` 后直接 `schema::init`；
 - **全仓 `src/database/` 内没有任何 `journal_mode` / `busy_timeout` 语句**
   （grep 只命中 `migration.rs` 的 `PRAGMA table_info(...)` 形参探测，与日志模式无关）
-  → `mam.db` 是默认的 **rollback journal** 模式、默认 `busy_timeout = 0`；
+  → `tuvis.db` 是默认的 **rollback journal** 模式、默认 `busy_timeout = 0`；
 - 所有读写（3 秒轮询、托盘、宠物、远程、用量账本、用量查询）**共用这一把进程内 `Mutex` 与这一个连接**。
   写事务在提交前持有 `Mutex` → 同进程内的任何其它读者都要排队等锁。
 
 > 注：`src/monitor/sqlite.rs:18 / :34` 的 `busy_timeout(1000)` 是**工具私有库**
-> （opencode.db / workbuddy.db / zcode.db）只读连接的设置，与 `mam.db` **无关**——
-> 不要把它读成「mam.db 已有 busy_timeout」。
+> （opencode.db / workbuddy.db / zcode.db）只读连接的设置，与 `tuvis.db` **无关**——
+> 不要把它读成「tuvis.db 已有 busy_timeout」。
 
 ### 1.2 用量落库已经用「分批短事务 + 批间让出」压住锁窗口（GC 2）
 
@@ -133,7 +133,7 @@ Task 20 的裁决 F 只修了**用量设置**那一侧（`services/usage/setting
   ⇒ **若将来上独立连接，这条锁序必须重审**：连接从「一把」变「两把」之后，
   ABBA 的判据也跟着变，不能只把 `DB.lock()` 换成 `DB2.lock()` 了事。
 - 导出侧（Task 19/21）：`usage_export_csv` 的 CSV 构建仍在 `DB` 锁内（`query.rs:709-717`），
-  落盘（Task 21 的 `export_save_text` / `export_save_bytes`）**只写文件系统、不碰 `mam.db`**
+  落盘（Task 21 的 `export_save_text` / `export_save_bytes`）**只写文件系统、不碰 `tuvis.db`**
   → 对连接层零影响，不改变本评估的结论。
 
 ---
@@ -166,7 +166,7 @@ Task 20 的裁决 F 只修了**用量设置**那一侧（`services/usage/setting
    的真实读路径）里最慢的一次，含取锁 + 一次极小查询；采样间隔 ≈3 ms，模拟前端 3 秒轮询的取锁行为。
 3. 夹具规模：现状 = 每轮 2,000 条明细（64 个会话行键）；反例 = 一个事务 4,000 条明细。
    **这不是真机 codex 全量（226,035 行）的量级**，绝对数字只用于**同机同比**（见 §2.5 局限）。
-4. 构建形态：`cargo test`（debug）、临时目录里的 `mam.db`（`support::setup()` 重定向 HOME/MAM_HOME）。
+4. 构建形态：`cargo test`（debug）、临时目录里的 `tuvis.db`（`support::setup()` 重定向 HOME/TUVIS_HOME）。
 5. 单位：毫秒（`as_millis()` 截断）。µs 级原始值见 §2.2 的 `[measure-extra]`。
 
 ### 2.2 数据来源（原始输出照抄）
@@ -267,7 +267,7 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; fini
 
 **W-39（跨小时工具调用的 `(0, ms>0)` 条目）**：
 
-1. **真机账本查询（只读）** —— `sqlite3 -readonly ~/.mam/mam.db`：
+1. **真机账本查询（只读）** —— `sqlite3 -readonly ~/.tuvis/tuvis.db`：
 
 ```
 usage_detail 总行数|0
@@ -360,8 +360,8 @@ usage_session 行数|0
    （真正的 `busy_timeout` 场景在**只读工具库**那一侧，`monitor/sqlite.rs` 已设 1000 ms。）
 3. **独立连接 + WAL**：读不阻塞写、写不阻塞读；**但**：
    ① 需要为用量域开第二条连接与连接池策略（谁持哪把锁、跨域事务怎么办）；
-   ② WAL 会在 `~/.mam/` 产生 `-wal` / `-shm` 文件 → **备份/清理/杀进程残留语义全变**
-   （`mam.db` 的复制备份缺 `-wal` 会丢最近提交；进程被 kill 后 `-shm` 残留；用户手册/发布脚本要同步）；
+   ② WAL 会在 `~/.tuvis/` 产生 `-wal` / `-shm` 文件 → **备份/清理/杀进程残留语义全变**
+   （`tuvis.db` 的复制备份缺 `-wal` 会丢最近提交；进程被 kill 后 `-shm` 残留；用户手册/发布脚本要同步）；
    ③ 与既有「全局单连接」假设冲突的代码点需要逐个审计（事务边界、`PRAGMA`、`VACUUM`、
    任何依赖 `Connection` 唯一性的地方）——影响面**远超用量功能本身**；
    ④ 独立连接会**绕过**那把 `Mutex`，于是「写库不阻塞轮询」变成「两把锁 + SQLite 层并发」，

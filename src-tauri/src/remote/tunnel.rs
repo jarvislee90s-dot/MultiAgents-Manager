@@ -29,13 +29,13 @@ pub fn bin_name() -> &'static str {
     }
 }
 
-/// cloudflared 固定放置路径（spec T1d：~/.mam/bin/，手动放置旁路即放这里）。
-/// 数据目录构造沿代码库先例（manifest.rs：dirs::home_dir().unwrap_or_default().join(".mam")，
+/// cloudflared 固定放置路径（spec T1d：~/.tuvis/bin/，手动放置旁路即放这里）。
+/// 数据目录构造沿代码库先例（manifest.rs：dirs::home_dir().unwrap_or_default().join(".tuvis")，
 /// 无统一 helper——不新造，保持散用先例）
 pub fn cloudflared_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("bin")
         .join(bin_name())
 }
@@ -176,7 +176,7 @@ fn try_download(
 }
 
 /// 终态获取失败文案（纯函数）：原因 + 官方下载页 + **完整绝对路径**指引——
-/// 旧文案只给 `~/.mam/bin/` 相对写法，用户无法直接定位放置点
+/// 旧文案只给 `~/.tuvis/bin/` 相对写法，用户无法直接定位放置点
 fn download_failure_message(reason: &str, asset: &str, dest: &Path) -> String {
     format!(
         "cloudflared 自动获取失败: {reason}；可从 \
@@ -1097,7 +1097,7 @@ mod tests {
         assert!(msg.contains("https://github.com/cloudflare/cloudflared/releases"));
         assert!(
             msg.contains(&abs.display().to_string()),
-            "必须含完整绝对路径（不得只有 ~/.mam/bin/ 相对写法）: {msg}"
+            "必须含完整绝对路径（不得只有 ~/.tuvis/bin/ 相对写法）: {msg}"
         );
         assert!(msg.contains(asset_name()));
     }
@@ -1170,7 +1170,7 @@ mod tests {
     }
 
     // ==== Task 5：隧道进程管理（T1b/T1c）纯函数测试 ====
-    // 零网络、零 ~/.mam 红线：以下全部为纯函数断言，不触 DAO / 进程 / 文件系统
+    // 零网络、零 ~/.tuvis 红线：以下全部为纯函数断言，不触 DAO / 进程 / 文件系统
 
     #[test]
     fn quick_url_parses_only_trycloudflare_host() {

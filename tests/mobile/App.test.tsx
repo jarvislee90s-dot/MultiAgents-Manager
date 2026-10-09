@@ -39,14 +39,14 @@ describe("App 配对状态机：探测成功 → 配对页卸载（已配对设�
 
     // 首帧：探测中（paired=null），配对页先出（沿用不闪白口径）；
     // P3-b：探测期渲染连接指示器而非密码表单（区分「探测中」与「未配对」）
-    expect(screen.getByText("MAM 远程接入")).toBeTruthy();
+    expect(screen.getByText("兔维斯 远程接入")).toBeTruthy();
     expect(screen.getByTestId("probe-indicator")).toBeTruthy();
     expect(screen.queryByTestId("pin-input")).toBeNull();
 
     // 首帧快照到达（"2 个会话" 仅在成功数据到达后渲染；首帧 = 探测）
     expect(await screen.findByText("2 个会话")).toBeTruthy();
     // 配对页已卸载 —— Critical 回归锁：删除首帧成功回调后本断言变红
-    expect(screen.queryByText("MAM 远程接入")).toBeNull();
+    expect(screen.queryByText("兔维斯 远程接入")).toBeNull();
   });
 
   it("网络异常（SSE 起不来 + 轮询失败）：不误判已配对，配对页保持且看板提示重试", async () => {
@@ -61,6 +61,6 @@ describe("App 配对状态机：探测成功 → 配对页卸载（已配对设�
     // 等降级轮询的 catch 路径执行完（loadError 横幅渲染在隐藏的 Board 里，DOM 存在即可查）
     expect(await screen.findByText(/网络连接失败/)).toBeTruthy();
     // 配对页仍在：网络异常不得触发 null→true 翻转
-    expect(screen.getByText("MAM 远程接入")).toBeTruthy();
+    expect(screen.getByText("兔维斯 远程接入")).toBeTruthy();
   });
 });

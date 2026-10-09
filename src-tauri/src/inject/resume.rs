@@ -66,7 +66,7 @@ pub enum SpawnSpec {
         /// 归 Mac 后补批。
         env: Vec<(String, String)>,
         /// 新建会话场景专用环境**剥离**前缀（C8 实机定案）：命中前缀的继承变量逐一
-        /// `env_remove`——create 会话是**独立一等会话**，不得继承启动者（MAM 宿主/
+        /// `env_remove`——create 会话是**独立一等会话**，不得继承启动者（兔维斯 宿主/
         /// E2E 测试进程）的 Claude 会话管道变量：冒烟实证 `CLAUDE_CODE_CHILD_SESSION`
         /// 被继承后，起窗的 claude 自认子会话（跳过信任框 + **关闭 transcript 落盘**
         /// → 会话文件永不物化 +「会话卡上板」全链失真）。resume 场景恒空（零行为
@@ -122,7 +122,7 @@ pub const TRUST_PROMPT_REMINDER: &str =
     "重开的会话所在目录未做信任确认，请在主机终端应答信任提示，否则会话将挂起";
 
 /// T3 重开 cwd 信任归一 + 未信任预检（claude 专属；**只读** `~/.claude.json`
-/// （经 `monitor::claude_config`），MAM 永不写该文件）。原地改写
+/// （经 `monitor::claude_config`），兔维斯 永不写该文件）。原地改写
 /// `session.project_path`：命中已信任条款则复用其**精确 casing**（claude 按 cwd
 /// 精确字符串查信任、键存储对盘符大小写脆弱——实证 `E:`=false / `e:`=true 双条
 /// 并存，照抄记录 cwd 会命中 false 条款弹信任 TUI，手机注入答不了 → 重开挂起）；
@@ -310,7 +310,7 @@ fn pick_where_hit(out: &str) -> Option<String> {
 /// 工具名 → 安装绝对路径（`where` 解析；仅 Windows，P1-1）。**每次现查不缓存**：
 /// 工具安装/迁移后立即生效（对照 [`windows_terminal_path`] 的 OnceLock 先例——
 /// wt 位置稳定可缓存，工具 bin 会动）。where 的 cwd 固定 SystemRoot：where 从
-/// 自身 cwd 起搜，不固定会把 MAM 进程 cwd 下的同名可执行体当首命中。
+/// 自身 cwd 起搜，不固定会把 兔维斯 进程 cwd 下的同名可执行体当首命中。
 #[cfg(windows)]
 fn resolve_tool_path(name: &str) -> Option<String> {
     let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
@@ -476,7 +476,7 @@ end tell
 }
 
 // ==== M2（Mac 验收 D-5 根因①处置）：macOS spawn 回执化 ====
-// 实机教训（mac-acceptance-report-55f37e7 §四-B）：MAM dev 二进制（无 bundle id）缺
+// 实机教训（mac-acceptance-report-55f37e7 §四-B）：兔维斯 dev 二进制（无 bundle id）缺
 // TCC 自动化授权时，osascript 以 -1743 失败，旧路径发射后不管 → stderr 被吞、audit
 // 照记 open ok——账实背离。现 macOS 出手等待完成（wait_timeout 10s）+ stderr/退出码
 // 捕获，失败经错误分类给可行动回执（200 failed + 审计 failed，端点既有 Err 臂承接）。

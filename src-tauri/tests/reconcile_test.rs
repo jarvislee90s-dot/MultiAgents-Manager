@@ -79,7 +79,7 @@ fn reconcile_scan_l2_placeholder_dir() {
     let _ = database::delete_assignments_for("skill-v2m2-rc-l2");
 }
 
-/// L3 多链：磁盘有指向 ~/.mam 的 MAM 链接但账本无 enabled 行 → kind "L3"
+/// L3 多链：磁盘有指向 ~/.tuvis 的 兔维斯 链接但账本无 enabled 行 → kind "L3"
 #[test]
 fn reconcile_scan_l3_unmanaged_link() {
     let _guard = acquire_lock();
@@ -91,14 +91,14 @@ fn reconcile_scan_l3_unmanaged_link() {
     let home = dirs::home_dir().unwrap();
     let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
     std::fs::create_dir_all(&tool_dir).unwrap();
-    let ssot = home.join(".mam/skills/v2m2-rc-l3");
+    let ssot = home.join(".tuvis/skills/v2m2-rc-l3");
     std::fs::create_dir_all(&ssot).unwrap();
     let link = tool_dir.join("v2m2-rc-l3");
     std::os::unix::fs::symlink(&ssot, &link).unwrap(); // 无 assignment 行（scan 只读 assignments + 磁盘，无需 extensions 行）
 
     let items = scan_drift();
     let hit = items.iter().find(|d| d.extension_id == "skill-v2m2-rc-l3");
-    let hit = hit.expect("L3 多链应被报告（磁盘 MAM 链接、账本无行）");
+    let hit = hit.expect("L3 多链应被报告（磁盘 兔维斯 链接、账本无行）");
     assert_eq!(hit.kind, "L3");
     assert_eq!(hit.tool_id, tool);
     assert!(
@@ -112,7 +112,7 @@ fn reconcile_scan_l3_unmanaged_link() {
     let _ = std::fs::remove_dir_all(&ssot);
 }
 
-/// L4 外链：磁盘链接指向 ~/.mam 之外 → kind "L4"（只报告不接管，账本无关）
+/// L4 外链：磁盘链接指向 ~/.tuvis 之外 → kind "L4"（只报告不接管，账本无关）
 #[test]
 fn reconcile_scan_l4_external_link() {
     let _guard = acquire_lock();
@@ -130,7 +130,7 @@ fn reconcile_scan_l4_external_link() {
 
     let items = scan_drift();
     let hit = items.iter().find(|d| d.extension_id == "skill-v2m2-rc-l4");
-    let hit = hit.expect("L4 外链应被报告（链接指向 ~/.mam 之外）");
+    let hit = hit.expect("L4 外链应被报告（链接指向 ~/.tuvis 之外）");
     assert_eq!(hit.kind, "L4");
     assert_eq!(hit.tool_id, tool);
     assert!(
@@ -144,7 +144,7 @@ fn reconcile_scan_l4_external_link() {
     let _ = std::fs::remove_dir_all(&outside);
 }
 
-/// L1-a：账本 enabled + 磁盘无条目 → 账本为准修磁盘 → 链接重建（指向 ~/.mam）
+/// L1-a：账本 enabled + 磁盘无条目 → 账本为准修磁盘 → 链接重建（指向 ~/.tuvis）
 #[test]
 fn reconcile_l1_mode_a_rebuilds_link() {
     let _guard = acquire_lock();
@@ -158,7 +158,7 @@ fn reconcile_l1_mode_a_rebuilds_link() {
     let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
     std::fs::create_dir_all(&tool_dir).unwrap();
     // enable 管线要求 SSOT 仓库存在该技能
-    let ssot = home.join(".mam/skills/v2m2-rc-l1a");
+    let ssot = home.join(".tuvis/skills/v2m2-rc-l1a");
     std::fs::create_dir_all(&ssot).unwrap();
     database::upsert_assignment("skill-v2m2-rc-l1a", tool, true, "valid").unwrap();
 
@@ -195,8 +195,8 @@ fn reconcile_l1_mode_a_rebuilds_link() {
     );
     let target = std::fs::read_link(&link).unwrap();
     assert!(
-        target.starts_with(home.join(".mam")),
-        "链接应指向 ~/.mam 之下: {:?}",
+        target.starts_with(home.join(".tuvis")),
+        "链接应指向 ~/.tuvis 之下: {:?}",
         target
     );
 
@@ -222,7 +222,7 @@ fn reconcile_l2_mode_b_disables_assignment_keeps_dir() {
     let home = dirs::home_dir().unwrap();
     database::set_tool_enabled(tool, true);
     let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
-    let ssot = home.join(".mam/skills/v2m2-rc-l2b");
+    let ssot = home.join(".tuvis/skills/v2m2-rc-l2b");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "ssot-content").unwrap();
     let real_dir = tool_dir.join("v2m2-rc-l2b");
@@ -283,7 +283,7 @@ fn reconcile_l2_mode_a_mismatch_needs_manual_keeps_scene() {
     let home = dirs::home_dir().unwrap();
     database::set_tool_enabled(tool, true);
     let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
-    let ssot = home.join(".mam/skills/v2m2-rc-l2a");
+    let ssot = home.join(".tuvis/skills/v2m2-rc-l2a");
     std::fs::create_dir_all(&ssot).unwrap();
     std::fs::write(ssot.join("SKILL.md"), "ssot-content").unwrap();
     let real_dir = tool_dir.join("v2m2-rc-l2a");
@@ -333,7 +333,7 @@ fn reconcile_l2_mode_a_mismatch_needs_manual_keeps_scene() {
     let _ = database::delete_assignments_for("skill-v2m2-rc-l2a");
 }
 
-/// L3-a：磁盘 MAM 链接 + 账本无行 → 账本为准修磁盘 → 链接被清除（目录项消失）
+/// L3-a：磁盘 兔维斯 链接 + 账本无行 → 账本为准修磁盘 → 链接被清除（目录项消失）
 #[test]
 fn reconcile_l3_mode_a_removes_link() {
     let _guard = acquire_lock();
@@ -346,7 +346,7 @@ fn reconcile_l3_mode_a_removes_link() {
     database::set_tool_enabled(tool, true);
     let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
     std::fs::create_dir_all(&tool_dir).unwrap();
-    let ssot = home.join(".mam/skills/v2m2-rc-l3a");
+    let ssot = home.join(".tuvis/skills/v2m2-rc-l3a");
     std::fs::create_dir_all(&ssot).unwrap();
     let link = tool_dir.join("v2m2-rc-l3a");
     std::os::unix::fs::symlink(&ssot, &link).unwrap();
@@ -380,7 +380,7 @@ fn reconcile_l3_mode_a_removes_link() {
     let _ = database::delete_assignments_for("skill-v2m2-rc-l3a");
 }
 
-/// L4：外链（指向 ~/.mam 之外）→ 任意 mode → needs_manual=true 且现场不动
+/// L4：外链（指向 ~/.tuvis 之外）→ 任意 mode → needs_manual=true 且现场不动
 #[test]
 fn reconcile_l4_any_mode_needs_manual() {
     let _guard = acquire_lock();
@@ -455,7 +455,7 @@ fn reconcile_batch_filters_tool_and_l4_manual() {
     std::fs::create_dir_all(&tool_dir).unwrap();
 
     // 植入一条 L1（账本 enabled、磁盘无条目）
-    let ssot = home.join(".mam/skills/v2m2-rc-b-l1");
+    let ssot = home.join(".tuvis/skills/v2m2-rc-b-l1");
     std::fs::create_dir_all(&ssot).unwrap();
     database::upsert_assignment("skill-v2m2-rc-b-l1", tool, true, "valid").unwrap();
     // 植入一条 L4（外链）
@@ -536,8 +536,8 @@ fn drift_scan_uses_flat_names_no_false_l1l3() {
     let tool_dir = multi_agents_manager_lib::adapter::primary_skill_dir(tool).unwrap();
     std::fs::create_dir_all(&tool_dir).unwrap();
 
-    // SSOT 嵌套技能 + 磁盘按拍平名挂好链接（工具目录与 Layer2，均指向 ~/.mam 之下）
-    let ssot = home.join(".mam/skills/v2m2-flat9/inner");
+    // SSOT 嵌套技能 + 磁盘按拍平名挂好链接（工具目录与 Layer2，均指向 ~/.tuvis 之下）
+    let ssot = home.join(".tuvis/skills/v2m2-flat9/inner");
     std::fs::create_dir_all(&ssot).unwrap();
     let flat_name = "v2m2-flat9-inner";
     let tool_link = tool_dir.join(flat_name);
@@ -645,10 +645,10 @@ fn empty_dir_scan_clean_and_aggregate() {
         .unwrap()
         .join("v2m2-ed-t/leaf");
     std::fs::create_dir_all(&tool_leaf).unwrap();
-    let mam_leaf = home.join(".mam/skills/v2m2-ed-m/leaf");
+    let mam_leaf = home.join(".tuvis/skills/v2m2-ed-m/leaf");
     std::fs::create_dir_all(&mam_leaf).unwrap();
     // 含 SKILL.md 的兄弟目录：非空，不得命中、不得被删
-    let sibling = home.join(".mam/skills/v2m2-ed-sib");
+    let sibling = home.join(".tuvis/skills/v2m2-ed-sib");
     std::fs::create_dir_all(&sibling).unwrap();
     std::fs::write(sibling.join("SKILL.md"), "x").unwrap();
 
@@ -663,7 +663,7 @@ fn empty_dir_scan_clean_and_aggregate() {
     let mam_hit = items
         .iter()
         .find(|i| i.path.contains("v2m2-ed-m"))
-        .expect("MAM 根空目录应命中");
+        .expect("兔维斯 根空目录应命中");
     assert_eq!(mam_hit.owner, "mam");
     assert!(
         !items.iter().any(|i| i.path.contains("v2m2-ed-sib")),

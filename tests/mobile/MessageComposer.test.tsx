@@ -238,7 +238,7 @@ class FakeXHR {
       JSON.stringify(
         routes.attachStatus
           ? { error: routes.attachError ?? "too_large" }
-          : (routes.attach ?? { path: "E:/proj/.mam-attachments/s-1/1-a.bin", size: 0 })
+          : (routes.attach ?? { path: "E:/proj/.tuvis-attachments/s-1/1-a.bin", size: 0 })
       )
     );
   }
@@ -941,7 +941,7 @@ describe("移动端附件上传（2026-09-20）", () => {
     installFetch();
     routes.info = sendInfo();
     routes.send = { status: "delivered" };
-    routes.attach = { path: "E:/proj/.mam-attachments/s-1/1-shot.png", size: 2 };
+    routes.attach = { path: "E:/proj/.tuvis-attachments/s-1/1-shot.png", size: 2 };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "看这张图" } });
@@ -959,7 +959,7 @@ describe("移动端附件上传（2026-09-20）", () => {
     const sendCall = sendCalls()[0];
     const sent = JSON.parse(String((sendCall![1] as RequestInit).body)).text as string;
     expect(sent).toContain("看这张图");
-    expect(sent).toContain('<image path="E:/proj/.mam-attachments/s-1/1-shot.png">');
+    expect(sent).toContain('<image path="E:/proj/.tuvis-attachments/s-1/1-shot.png">');
     // 发送成功 → chips 清空
     expect(screen.queryByTestId(/^attach-chip-/)).toBeNull();
     // 上传端点被调用（XHR open URL 含 session_id 与文件名；上行已换 XHR，§C5）
@@ -970,7 +970,7 @@ describe("移动端附件上传（2026-09-20）", () => {
     installFetch();
     routes.info = sendInfo();
     routes.send = { status: "delivered" };
-    routes.attach = { path: "E:/proj/.mam-attachments/s-1/1-报告.docx", size: 9 };
+    routes.attach = { path: "E:/proj/.tuvis-attachments/s-1/1-报告.docx", size: 9 };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "见附件" } });
@@ -984,14 +984,14 @@ describe("移动端附件上传（2026-09-20）", () => {
     await screen.findByTestId("send-receipt-delivered");
     const sendCall = sendCalls()[0];
     const sent = JSON.parse(String((sendCall![1] as RequestInit).body)).text as string;
-    expect(sent).toContain('<file path="E:/proj/.mam-attachments/s-1/1-报告.docx">');
+    expect(sent).toContain('<file path="E:/proj/.tuvis-attachments/s-1/1-报告.docx">');
   });
 
   it("粘贴图片：textarea onPaste 捕获 clipboard 图片文件并走上传链路", async () => {
     installFetch();
     routes.info = sendInfo();
     routes.send = { status: "delivered" };
-    routes.attach = { path: "E:/proj/.mam-attachments/s-1/1-paste.png", size: 2 };
+    routes.attach = { path: "E:/proj/.tuvis-attachments/s-1/1-paste.png", size: 2 };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = await screen.findByTestId("composer-input");
     fireEvent.change(input, { target: { value: "贴图" } });
@@ -1002,7 +1002,7 @@ describe("移动端附件上传（2026-09-20）", () => {
     await screen.findByTestId("send-receipt-delivered");
     const sendCall = sendCalls()[0];
     const sent = JSON.parse(String((sendCall![1] as RequestInit).body)).text as string;
-    expect(sent).toContain('<image path="E:/proj/.mam-attachments/s-1/1-paste.png">');
+    expect(sent).toContain('<image path="E:/proj/.tuvis-attachments/s-1/1-paste.png">');
   });
 
   it("上传中禁发（挂起请求不放行）；放行后 ready 可发送", async () => {
@@ -1250,7 +1250,7 @@ describe("移动端附件上传（2026-09-20）", () => {
     fireEvent.click(screen.getByTestId("attach-help"));
     const hint = screen.getByTestId("attach-hint");
     expect(hint.textContent).toContain("用户项目目录");
-    expect(hint.textContent).toContain(".mam-attachments");
+    expect(hint.textContent).toContain(".tuvis-attachments");
     fireEvent.click(screen.getByTestId("attach-help"));
     expect(screen.queryByTestId("attach-hint")).toBeNull();
   });
@@ -1831,7 +1831,7 @@ describe("卡片在场分流：审批拦截 / 问答转向自由作答 / 不可�
     installFetch();
     routes.info = sendInfo();
     routes.questionInfo = freeTextQuestionInfo();
-    routes.attach = { path: "E:/proj/.mam-attachments/s-1/1-a.png", size: 5 };
+    routes.attach = { path: "E:/proj/.tuvis-attachments/s-1/1-a.png", size: 5 };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = await screen.findByTestId("composer-input");
     await screen.findByTestId("composer-card-presence");

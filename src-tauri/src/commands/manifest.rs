@@ -38,7 +38,7 @@ pub fn install_resource_from_manifest(path: String) -> Result<(), String> {
                 .join("; ")
         })?;
 
-    let mam_dir = dirs::home_dir().unwrap_or_default().join(".mam");
+    let mam_dir = dirs::home_dir().unwrap_or_default().join(".tuvis");
     let dest_dir = match manifest.common.kind {
         crate::services::manifest::Kind::Skill => mam_dir.join("skills").join(&manifest.common.id),
         crate::services::manifest::Kind::Mcp => mam_dir.join("mcp").join(&manifest.common.id),
@@ -84,7 +84,7 @@ pub fn install_resource_from_manifest(path: String) -> Result<(), String> {
 /// SSOT 路径候选：目录类资源 [<name>, <id>]（普通安装用 name，manifest 安装用 id），
 /// MCP 为 <name>.json / <id>.json 文件。取第一个存在者删除。
 fn resolve_ssot_paths(kind: &str, name: &str, record_id: Option<&str>) -> Vec<std::path::PathBuf> {
-    let mam = dirs::home_dir().unwrap_or_default().join(".mam");
+    let mam = dirs::home_dir().unwrap_or_default().join(".tuvis");
     let mut candidates = Vec::new();
     match kind {
         "skill" | "plugin" => {
@@ -114,7 +114,7 @@ pub struct UninstallOutcome {
 }
 
 /// `.agents_dir/<name>` 是否为指向 ssot_path 的直链（spec §4.4；情景 B「保留为共享」的形态：
-/// `.agents/skills/<name>` → `~/.mam/skills/<name>`）。
+/// `.agents/skills/<name>` → `~/.tuvis/skills/<name>`）。
 /// 判据：路径本体是链接（symlink/junction，复用 linker::link_marker_is_present），
 /// 且 read_link 的单跳字面 target 与 ssot_path 经同规则归一化（相对绝对化 + 词法消解 +
 /// Windows 前缀剥离，共用 linker::normalize_link_target）后相等。
@@ -137,8 +137,8 @@ fn agents_link_points_to(
         == crate::linker::normalize_link_target(ssot_path, agents_dir)
 }
 
-/// `.agents/<name>` 是否为 MAM 管理的 Layer 2 投影（review N-1）：链接本体存在，
-/// 单跳字面 target 归一化后位于 active_root（`~/.mam/active`）之下即命中，
+/// `.agents/<name>` 是否为 兔维斯 管理的 Layer 2 投影（review N-1）：链接本体存在，
+/// 单跳字面 target 归一化后位于 active_root（`~/.tuvis/active`）之下即命中，
 /// 无论链路是否可达（断链残链同样需要用户知情确认）。判定与迁移谓词同源
 /// （linker::normalize_link_target 统一归一化 + 组件级前缀比较）
 fn agents_link_targets_layer2(
@@ -174,10 +174,10 @@ fn builtin_uninstall_rejection(name: &str, target: &std::path::Path) -> Option<S
 /// kind == "skill" 时，若 `~/.agents/skills/<name>` 是指向 SSOT 的直链且 force != true，
 /// 返回 needs_confirmation=true 且不做任何变更（在任何破坏性步骤之前中断）；
 /// 前端二级确认后以 force=true 重试走原流程。确认后强制删除时**不碰 .agents 直链**
-/// （spec §4.2：MAM 永不写共享目录，§4.3 迁移对话框是唯一例外）——删除 SSOT 后直链将悬空，
+/// （spec §4.2：兔维斯 永不写共享目录，§4.3 迁移对话框是唯一例外）——删除 SSOT 后直链将悬空，
 /// 这是用户确认后的预期结果，不做清理。
 ///
-/// review N-1：迁移窗口期内的遗留链指向 Layer 2（`~/.mam/active/…`）而非 Layer 1，
+/// review N-1：迁移窗口期内的遗留链指向 Layer 2（`~/.tuvis/active/…`）而非 Layer 1，
 /// 同样触发确认——无提示卸载会连带删掉 Layer 1/Layer 2，经 `.agents` 消费该技能的
 /// 外部工具（zcode 等）静默失效，且事后对话框的「保留为共享」因 Layer 1 缺失只能
 /// skip，用户失去知情选择权。
@@ -214,7 +214,7 @@ pub fn uninstall_resource(
 
     // 0) SSOT 删除保护（spec §4.4 + review N-1）：在任何破坏性步骤（逐工具清理）之前，
     //    检查 ~/.agents/skills/<name> 是否为指向 SSOT 的直链（情景 B「保留为共享」形态）
-    //    或指向 Layer 2 的 MAM 遗留投影（迁移窗口期形态）；命中且未强制 → 零改动要求确认。
+    //    或指向 Layer 2 的 兔维斯 遗留投影（迁移窗口期形态）；命中且未强制 → 零改动要求确认。
     //    SSOT 候选选取与下方 SSOT 删除循环同规则（第一个 is_file/is_dir 者）。
     if kind == "skill" && force != Some(true) {
         let home = dirs::home_dir().unwrap_or_default();
@@ -224,7 +224,7 @@ pub fn uninstall_resource(
             .find(|p| p.is_file() || p.is_dir())
             .is_some_and(|ssot_path| agents_link_points_to(&agents_dir, &name, &ssot_path));
         let layer2_hit =
-            agents_link_targets_layer2(&agents_dir, &name, &home.join(".mam").join("active"));
+            agents_link_targets_layer2(&agents_dir, &name, &home.join(".tuvis").join("active"));
         if ssot_hit || layer2_hit {
             log::info!(
                 "SSOT 技能 {} 仍被 ~/.agents/skills 引用（{}），需用户确认后卸载",
@@ -301,12 +301,12 @@ pub fn uninstall_resource(
         }
     }
 
-    // 2.1) manifest 安装的 MCP 以目录形式存放于 ~/.mam/mcp/<id>/（而非 <name>.json 文件），
+    // 2.1) manifest 安装的 MCP 以目录形式存放于 ~/.tuvis/mcp/<id>/（而非 <name>.json 文件），
     //      上面文件/目录候选循环不会命中，这里按 manifest 安装布局补充目录清理
     if kind == "mcp" {
         let mam_mcp = dirs::home_dir()
             .unwrap_or_default()
-            .join(".mam")
+            .join(".tuvis")
             .join("mcp");
         let mut dir_candidates = vec![mam_mcp.join(&name)];
         if let Some(r) = record.as_ref() {
@@ -359,15 +359,15 @@ mod uninstall_tests {
     #[test]
     fn resolves_dir_candidates_in_order() {
         let ps = resolve_ssot_paths("skill", "foo", Some("foo-1.0"));
-        assert!(norm(&ps[0]).ends_with(".mam/skills/foo"));
-        assert!(norm(&ps[1]).ends_with(".mam/skills/foo-1.0"));
+        assert!(norm(&ps[0]).ends_with(".tuvis/skills/foo"));
+        assert!(norm(&ps[1]).ends_with(".tuvis/skills/foo-1.0"));
     }
 
     #[test]
     fn resolves_mcp_json_file_only() {
         let ps = resolve_ssot_paths("mcp", "firecrawl", None);
         assert_eq!(ps.len(), 1);
-        assert!(norm(&ps[0]).ends_with(".mam/mcp/firecrawl.json"));
+        assert!(norm(&ps[0]).ends_with(".tuvis/mcp/firecrawl.json"));
     }
 
     #[test]
@@ -486,7 +486,7 @@ mod uninstall_tests {
         std::fs::create_dir_all(&agents_dir).unwrap();
         let active = active_root_of(&tmp);
 
-        // 外部无关链接（target 不在 ~/.mam/active 下）→ 不命中（直链分支另行处理）
+        // 外部无关链接（target 不在 ~/.tuvis/active 下）→ 不命中（直链分支另行处理）
         let elsewhere = tmp.path().join("elsewhere");
         std::fs::create_dir_all(&elsewhere).unwrap();
         make_dir_link(&elsewhere, &agents_dir.join("ext"));

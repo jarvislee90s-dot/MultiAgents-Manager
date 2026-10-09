@@ -2,7 +2,7 @@
 //
 // 背景：claude 按 cwd 的**精确字符串**在 `~/.claude.json` 的 `projects` 键里查目录
 // 信任（`hasTrustDialogAccepted`），而该键存储对盘符大小写/分隔符**脆弱**——实证
-// 场景同目录双条并存：`E:/…Test2 = false` 与 `e:/…Test2 = true`。MAM 远程重开以
+// 场景同目录双条并存：`E:/…Test2 = false` 与 `e:/…Test2 = true`。兔维斯 远程重开以
 // 会话记录的 cwd（大写 `E:\…`）spawn → claude 查到 false 条款 → 弹**交互式信任
 // TUI**（手机注入答不了）→ 重开挂起。
 //
@@ -10,7 +10,7 @@
 // 命中多条时**优先取 `hasTrustDialogAccepted=true` 条款**复用其精确 casing（命中
 // false 条款则归一白做）；全 false / 未命中 → 原样（全新目录的首次信任属正常流程）。
 //
-// **红线：MAM 只读该文件，永不写**（写面完全归 claude 本体；本模块无任何写路径）。
+// **红线：兔维斯 只读该文件，永不写**（写面完全归 claude 本体；本模块无任何写路径）。
 
 /// 归一 projects 键 / cwd 用于匹配（**纯函数**）：
 /// - `\` 与 `/` 等价（claude 键存正斜杠形态，会话记录可能是反斜杠）；

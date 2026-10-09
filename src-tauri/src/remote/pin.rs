@@ -232,8 +232,8 @@ mod tests {
     // ==== KV 薄封装 ====
 
     /// KV 薄封装冒烟：键名 = 用户裁决的 `remote.access_pin`（外部契约，防漂移）。
-    /// 直调 get_pin/set_pin 会锁全局 DB 连接（真实 ~/.mam/mam.db）——零污染红线禁止，
-    /// 与 hooks.rs 测试「MAM_HOME 重定向不可行」同一结论；读写往返语义由 settings DAO
+    /// 直调 get_pin/set_pin 会锁全局 DB 连接（真实 ~/.tuvis/tuvis.db）——零污染红线禁止，
+    /// 与 hooks.rs 测试「TUVIS_HOME 重定向不可行」同一结论；读写往返语义由 settings DAO
     /// 自身测试（settings_kv_roundtrip_and_overwrite）覆盖，本层只锁定键名契约
     /// （先例：remote/mod.rs 的 setting_keys_are_stable）
     #[test]

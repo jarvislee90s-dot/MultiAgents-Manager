@@ -19,7 +19,7 @@
 //!   Drop 守卫兜底清场；
 //! - 日志/证据追加式带 run-id，落 `%USERPROFILE%\mam-probe-m6r\evidence\m9r-e2e\`；
 //!   临时 .ps1 一律 CRLF + UTF-8 BOM；
-//! - 零接触真实 `~/.mam` 的写路径：服务器用内存库（`DeviceStore::memory`）；
+//! - 零接触真实 `~/.tuvis` 的写路径：服务器用内存库（`DeviceStore::memory`）；
 //!   读路径（`read_session_messages` 确认轮询）只读真实 CLI 会话存储——这是
 //!   A1 确认层「会话文件命中」语义所需，只读合规。
 //!
@@ -1036,7 +1036,7 @@ async fn e2e_http_full_chain() {
                 waiting_count: 0,
             },
         ),
-        store: DeviceStore::memory(), // 内存库——零接触真实 ~/.mam/mam.db
+        store: DeviceStore::memory(), // 内存库——零接触真实 ~/.tuvis/tuvis.db
         injector: Arc::new(multi_agents_manager_lib::inject::engine::RealInjector),
         resume_spawner: Arc::new(|_: &multi_agents_manager_lib::inject::resume::SpawnSpec| Ok(())),
         // C6：create 缝束（任务簿+发现/pid/工具探测/步距缝）——本 E2E 不触

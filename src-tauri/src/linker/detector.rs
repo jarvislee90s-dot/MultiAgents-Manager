@@ -59,8 +59,8 @@ fn cli_available(adapter: &dyn AgentAdapter) -> bool {
 /// 工具已安装判定（issue #36-7 口径演进：dir OR CLI）
 ///
 /// - CLI 半边：首个进程名在有效 PATH（方案 B，见 `effective_path`）可达
-/// - dir 半边：base 目录存在**且**含非 MAM 自建内容（方案 A，见
-///   `base_dir_has_native_content`）。演进背景：MAM 会单方面往 base_dir 写入
+/// - dir 半边：base 目录存在**且**含非 兔维斯 自建内容（方案 A，见
+///   `base_dir_has_native_content`）。演进背景：兔维斯 会单方面往 base_dir 写入
 ///   skill/plugin 链接与 MCP/hook 配置（如 `~/.openclaw/skills/skill-creator`、
 ///   `~/.openclaw/openclaw.json`），旧口径「目录存在」被这些自建内容污染，
 ///   未安装工具误判为已安装（installed 徽标假阳性）
@@ -69,9 +69,9 @@ pub fn is_tool_installed(adapter: &dyn AgentAdapter) -> bool {
     base_dir_has_native_content(adapter) || cli_available(adapter)
 }
 
-/// 方案 A 薄包装：base 目录中是否存在非 MAM 自建内容（安装证据）。
-/// mam_root 固定 `~/.mam`（home 取不到 → false 防御）；managed_files 由 adapter
-/// 声明的「MAM 单方面可写」配置文件展平而来。base 目录不存在直接 false
+/// 方案 A 薄包装：base 目录中是否存在非 兔维斯 自建内容（安装证据）。
+/// mam_root 固定 `~/.tuvis`（home 取不到 → false 防御）；managed_files 由 adapter
+/// 声明的「兔维斯 单方面可写」配置文件展平而来。base 目录不存在直接 false
 /// （无内容即无证据）
 fn base_dir_has_native_content(adapter: &dyn AgentAdapter) -> bool {
     let base = adapter.base_dir();
@@ -79,15 +79,15 @@ fn base_dir_has_native_content(adapter: &dyn AgentAdapter) -> bool {
         return false;
     }
     let mam_root = match dirs::home_dir() {
-        Some(home) => home.join(".mam"),
+        Some(home) => home.join(".tuvis"),
         None => return false,
     };
     has_native_content(&base, &mam_root, &adapter_managed_files(adapter))
 }
 
-/// adapter 声明的「MAM 单方面可写」配置文件全集：MCP 配置 + plugin 配置 +
+/// adapter 声明的「兔维斯 单方面可写」配置文件全集：MCP 配置 + plugin 配置 +
 /// hook 配置（trait 统一方法 `hook_config_path`：claude=settings.json、
-/// codex=hooks.json）。这些文件由 MAM 写入 ≠ 工具自安装，不构成安装证据
+/// codex=hooks.json）。这些文件由 兔维斯 写入 ≠ 工具自安装，不构成安装证据
 fn adapter_managed_files(adapter: &dyn AgentAdapter) -> Vec<PathBuf> {
     let mut files = Vec::new();
     if let Some(p) = adapter.mcp_config_path() {
@@ -100,20 +100,20 @@ fn adapter_managed_files(adapter: &dyn AgentAdapter) -> Vec<PathBuf> {
     files
 }
 
-/// 方案 A 纯核（可测）：递归扫描 base_dir，判定是否存在「非 MAM 自建」内容。
+/// 方案 A 纯核（可测）：递归扫描 base_dir，判定是否存在「非 兔维斯 自建」内容。
 /// 扫描深度上限 [`NATIVE_SCAN_MAX_DEPTH`] 层，命中即早退
 fn has_native_content(base_dir: &Path, mam_root: &Path, managed_files: &[PathBuf]) -> bool {
     has_native_content_at(base_dir, mam_root, managed_files, 0)
 }
 
-/// 扫描深度上限（base_dir 本身为第 0 层）：MAM 写入的链接最深形态为
+/// 扫描深度上限（base_dir 本身为第 0 层）：兔维斯 写入的链接最深形态为
 /// `skills/subagents/<sub>/<name>`（第 3 层），覆盖实际污染面即可，防深树拖慢
 const NATIVE_SCAN_MAX_DEPTH: usize = 3;
 
 /// has_native_content 的递归实现，判定规则：
 /// - 链接项（`file_type().is_symlink()`，Windows junction 亦为 true）：read_link
-///   目标解析后位于 mam_root 下 → MAM 自建，跳过不递归；指向其他位置或解析失败
-///   → 保守计为原生内容（只排除确定是 MAM 建的）
+///   目标解析后位于 mam_root 下 → 兔维斯 自建，跳过不递归；指向其他位置或解析失败
+///   → 保守计为原生内容（只排除确定是 兔维斯 建的）
 /// - 空目录不算内容；目录递归（有界）；read_dir 失败按无内容处理（防御）
 /// - 文件项：路径在 managed_files 集合内（比较见 `is_managed_file`）→ 跳过
 ///   （配置文件 ≠ 安装证据）；否则原生内容，返回 true
@@ -138,7 +138,7 @@ fn has_native_content_at(
             match std::fs::read_link(&path) {
                 Ok(target) => {
                     if link_target_in_mam_root(&path, &target, mam_root) {
-                        continue; // MAM 自建链接，不构成安装证据
+                        continue; // 兔维斯 自建链接，不构成安装证据
                     }
                     return true;
                 }
@@ -163,7 +163,7 @@ fn has_native_content_at(
 fn link_target_in_mam_root(link_path: &Path, link_target: &Path, mam_root: &Path) -> bool {
     // canonicalize 结果带 `\\?\` 前缀，须与解析后的链接落点同样剥前缀再比
     let Some(mam_norm) = mam_root.canonicalize().ok().map(strip_verbatim_prefix) else {
-        return false; // mam_root 不存在/解析失败：无「MAM 自建」可言（保守）
+        return false; // mam_root 不存在/解析失败：无「兔维斯 自建」可言（保守）
     };
     let Some(resolved) = resolve_link_target(link_path, link_target) else {
         return false;
@@ -173,7 +173,7 @@ fn link_target_in_mam_root(link_path: &Path, link_target: &Path, mam_root: &Path
 
 /// 解析链接的最终落点：优先对链接本体 canonicalize（穿透链接）；目标不存在
 /// （悬空链接）时退化为 read_link 字面量剥 `\\?\` 前缀的宽松归一——SSOT 被删后
-/// canonicalize 必败，若因此计为「原生内容」会把 MAM 自建的悬空链接误判成
+/// canonicalize 必败，若因此计为「原生内容」会把 兔维斯 自建的悬空链接误判成
 /// 安装证据，违背方案 A 初衷
 fn resolve_link_target(link_path: &Path, link_target: &Path) -> Option<PathBuf> {
     if let Ok(resolved) = link_path.canonicalize() {
@@ -212,7 +212,7 @@ fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
 /// 大小写不敏感的路径前缀判定（Windows 文件系统大小写不敏感；Unix 上 mam_root
 /// 归属判定用小写比较同样正确，统一处理减少平台分叉）。比较前双侧统一分隔符
 /// 为 `\`（吸收正/反斜杠混写），并带分隔符边界检查：前缀命中后剩余部分必须
-/// 为空或以 `\` 开头，防止 `C:\u\.mambot` 被误判在 `C:\u\.mam` 下
+/// 为空或以 `\` 开头，防止 `C:\u\.tuvisbot` 被误判在 `C:\u\.tuvis` 下
 fn path_starts_with_ci(path: &Path, prefix: &Path) -> bool {
     let norm = |p: &Path| p.to_string_lossy().replace('/', "\\").to_lowercase();
     let p_norm = norm(path);
@@ -554,7 +554,7 @@ mod has_native_content_tests {
             .starts_with(r"\\?\"));
         assert!(!has_native_content(&base, &mam, &[]));
 
-        // 悬空 junction：canonicalize 失败，退化归一仍须判定为 MAM 自建
+        // 悬空 junction：canonicalize 失败，退化归一仍须判定为 兔维斯 自建
         std::fs::remove_dir_all(&ssot).unwrap();
         assert!(!has_native_content(&base, &mam, &[]));
     }
@@ -685,8 +685,8 @@ mod path_starts_with_ci_tests {
     #[test]
     fn exact_prefix_hits() {
         assert!(path_starts_with_ci(
-            Path::new(r"C:\Users\u\.mam"),
-            Path::new(r"C:\Users\u\.mam")
+            Path::new(r"C:\Users\u\.tuvis"),
+            Path::new(r"C:\Users\u\.tuvis")
         ));
     }
 
@@ -694,26 +694,26 @@ mod path_starts_with_ci_tests {
     #[test]
     fn subpath_hits_case_insensitive() {
         assert!(path_starts_with_ci(
-            Path::new(r"C:\Users\U\.mam\skills\x"),
-            Path::new(r"c:\users\u\.mam")
+            Path::new(r"C:\Users\U\.tuvis\skills\x"),
+            Path::new(r"c:\users\u\.tuvis")
         ));
         // 正斜杠形态同样命中
         assert!(path_starts_with_ci(
-            Path::new("C:/Users/u/.mam/skills/x"),
-            Path::new(r"C:\Users\u\.mam")
+            Path::new("C:/Users/u/.tuvis/skills/x"),
+            Path::new(r"C:\Users\u\.tuvis")
         ));
     }
 
-    /// 反例：兄弟目录 `.mambot` 不在 `.mam` 下（朴素 starts_with 会误判）
+    /// 反例：兄弟目录 `.tuvisbot` 不在 `.tuvis` 下（朴素 starts_with 会误判）
     #[test]
     fn sibling_dir_with_shared_prefix_does_not_hit() {
         assert!(!path_starts_with_ci(
-            Path::new(r"C:\Users\u\.mambot\skills"),
-            Path::new(r"C:\Users\u\.mam")
+            Path::new(r"C:\Users\u\.tuvisbot\skills"),
+            Path::new(r"C:\Users\u\.tuvis")
         ));
         assert!(!path_starts_with_ci(
-            Path::new(r"C:\Users\u\.mamx"),
-            Path::new(r"C:\Users\u\.mam")
+            Path::new(r"C:\Users\u\.tuvisx"),
+            Path::new(r"C:\Users\u\.tuvis")
         ));
     }
 
@@ -722,7 +722,7 @@ mod path_starts_with_ci_tests {
     fn unrelated_path_does_not_hit() {
         assert!(!path_starts_with_ci(
             Path::new(r"D:\tools\bin"),
-            Path::new(r"C:\Users\u\.mam")
+            Path::new(r"C:\Users\u\.tuvis")
         ));
     }
 }

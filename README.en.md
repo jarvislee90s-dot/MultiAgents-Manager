@@ -126,7 +126,7 @@ Token usage from seven tools (Claude Code / Codex / Kimi Code / OpenCode / ZCode
 for in one ledger: the app collects once shortly after startup, and `usage_collect` lets the frontend trigger a
 collection on demand (single-flight mutex + a default minimum interval of 10 minutes);
 **collection runs on its own on-demand path and never enters the 3-second session polling loop**. The ledger
-lives in 4 tables in `~/.mam/mam.db` (hourly detail, permanently kept daily aggregates, collection cursors,
+lives in 4 tables in `~/.tuvis/tuvis.db` (hourly detail, permanently kept daily aggregates, collection cursors,
 session dimension); detail is kept for 90 days by default (configurable), and after expiry only the daily
 aggregates remain.
 
@@ -378,15 +378,15 @@ pnpm lint:fix     # ESLint auto-fix
 
 ## Configuration
 
-The app stores its data in `~/.mam/`:
+The app stores its data in `~/.tuvis/`:
 
 | Path                          | Purpose                                                        |
 | ----------------------------- | -------------------------------------------------------------- |
-| `~/.mam/mam.db`               | SQLite database (settings, extensions, presets, session cache) |
-| `~/.mam/skills/`              | Global skill repository                                        |
-| `~/.mam/mcp/`                 | Global MCP server configs                                      |
-| `~/.mam/hooks/status-hook.sh` | Shared Hook script for status events                           |
-| `~/.mam/events/`              | Hook event files (auto-cleaned, 30s TTL)                       |
+| `~/.tuvis/tuvis.db`               | SQLite database (settings, extensions, presets, session cache) |
+| `~/.tuvis/skills/`              | Global skill repository                                        |
+| `~/.tuvis/mcp/`                 | Global MCP server configs                                      |
+| `~/.tuvis/hooks/status-hook.sh` | Shared Hook script for status events                           |
+| `~/.tuvis/events/`              | Hook event files (auto-cleaned, 30s TTL)                       |
 
 ### Supported Tool Configs
 

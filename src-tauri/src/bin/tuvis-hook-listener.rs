@@ -1,4 +1,4 @@
-//! mam-hook-listener — 原生 hook 事件监听 helper（批次甲 T1 · issue #74 根因 2）
+//! tuvis-hook-listener — 原生 hook 事件监听 helper（批次甲 T1 · issue #74 根因 2）
 //!
 //! 使命：替代 hooks.rs 生成的 bash 版 status-hook.sh——三家 CLI 的 hook 脚本现为
 //! bash，在 codex 原生 shell（cmd 包装+清环境）下裸 `bash` 不可解析，钩子从未运行
@@ -26,18 +26,18 @@
 //!    与旧版一致。
 //!
 //! 逻辑本体在共享内核 [`hook_listener`]（`#[path]` 引入同一源文件，lib 侧
-//! `monitor::hook_listener` 同源可测；独立编译单元不链接整个 lib——mam-marker
+//! `monitor::hook_listener` 同源可测；独立编译单元不链接整个 lib——tuvis-marker
 //! 先例，保证体积小、启动毫秒级）。bin 主体 = 读 stdin → 内核 → 写文件 → exit 0。
 //!
 //! 分发：应用启动时由 `monitor::hooks::ensure_hook_script` 把与主程序同目录的本
-//! exe 拷到 `~/.mam/bin/`（mam-marker 同一管道，无条件覆盖保证升级生效）；helper
+//! exe 拷到 `~/.tuvis/bin/`（tuvis-marker 同一管道，无条件覆盖保证升级生效）；helper
 //! 未构建/未随包分发是合法状态——注册侧检测不到即回落 bash 形态（零回归）。
 //!
 //! 构建：本 bin 挂 `required-features = ["hook-listener"]` 门（Cargo.toml；
 //! marker-helper 蕴含本 feature，release.yml / CI 已显式携带 marker-helper，
-//! 发行与门禁自动构建，macOS universal 打包不受影响——mam-marker 同款门控理由）。
-//! 事件目录经 `hook_listener::default_events_dir()`（MAM_HOME debug 重定向同
-//! connection.rs 先例），测试一律 tempdir 直注（零接触真实 ~/.mam）。
+//! 发行与门禁自动构建，macOS universal 打包不受影响——tuvis-marker 同款门控理由）。
+//! 事件目录经 `hook_listener::default_events_dir()`（TUVIS_HOME debug 重定向同
+//! connection.rs 先例），测试一律 tempdir 直注（零接触真实 ~/.tuvis）。
 
 #[path = "../monitor/hook_listener.rs"]
 mod hook_listener;

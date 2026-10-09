@@ -9,7 +9,7 @@
 //! （lib 单测构建不走这条路：`CollectContext::new` 注入空规则 → 采集器不读设置库，
 //! 见 GC 21 / §3.2.3 FIX-6。）
 // `setup()` 被两条用例调用（全局入口冒烟 + Task 11 的 claude 三态落库）：全局 `DB` 是 `Lazy`，
-// 不重定向 HOME/MAM_HOME 就会读写开发机真实 `~/.mam/mam.db`（D-07）；其余用例全走私有库、
+// 不重定向 HOME/TUVIS_HOME 就会读写开发机真实 `~/.tuvis/tuvis.db`（D-07）；其余用例全走私有库、
 // 不碰 `setup()`，因此 `INIT` / `setup` 在本 target 有调用方、不产生 dead_code 告警（零新告警门禁）。
 mod support;
 
@@ -305,7 +305,7 @@ fn same_row_key_merges_samples_across_transactions() {
 ///
 /// GC 19 口径：断言全部取自**入参增量与 `LedgerWriteStats`**（不读共享库的行数、不用下标），
 /// 属「自洽/相对式」断言，因此可以走 `setup()` 的共享库；`setup()` 是 `Once`，
-/// 与同二进制里那些只碰私有库的用例互不干扰（HOME/MAM_HOME 只被重定向一次）。
+/// 与同二进制里那些只碰私有库的用例互不干扰（HOME/TUVIS_HOME 只被重定向一次）。
 #[test]
 fn global_entry_point_writes_the_same_batches_and_yields() {
     support::setup();
@@ -568,7 +568,7 @@ fn cursor_row_write_failure_keeps_the_watermark_unadvanced() {
 #[test]
 fn claude_provider_kind_is_persisted_to_usage_detail() {
     // 全局设置库：本用例要 settings::save(...)，且**集成构建**下采集器经 `ctx.provider_rules()`
-    // 回落到 `settings::load()` → 必须先重定向 HOME/MAM_HOME（否则写/读开发机真实库）
+    // 回落到 `settings::load()` → 必须先重定向 HOME/TUVIS_HOME（否则写/读开发机真实库）
     // （lib 单测构建不走这条路：`CollectContext::new` 注入空规则，见 §3.2.3 FIX-6）
     support::setup();
     // 账本库：**本用例私有**（不用全局 DB —— 见 Global Constraints 19 / §3.2.2 阻塞 2）
@@ -646,8 +646,8 @@ fn claude_provider_kind_is_persisted_to_usage_detail() {
 #[test]
 fn kimi_provider_kind_measured_is_persisted() {
     // 全局设置库：**集成构建**下采集器经 `ctx.provider_rules()` 回落到 `settings::load()`
-    // → 读**全局 DB**，因此必须先重定向 HOME/MAM_HOME（否则读/首次创建开发机真实
-    // `~/.mam/mam.db`）。lib 单测构建不读设置库（§3.2.3 FIX-6）。
+    // → 读**全局 DB**，因此必须先重定向 HOME/TUVIS_HOME（否则读/首次创建开发机真实
+    // `~/.tuvis/tuvis.db`）。lib 单测构建不读设置库（§3.2.3 FIX-6）。
     support::setup();
     // 账本库：**本用例私有**（Global Constraints 19 / §3.2.2 阻塞 2）
     let mut conn = support::open_ledger_db("kimi_provider_kind");

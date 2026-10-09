@@ -83,7 +83,7 @@ pub fn list_extensions() -> Vec<ExtensionRecord> {
 
 /// 登记的原生技能名集合（`is_native=1 AND source_tool=tool_id` 行的 name 列）——
 /// 预设扫描的「登记线」兜底数据源（用户裁决 2026-09-16）：磁盘原生目录只有
-/// 登记在案（经理 MAM 导入）才参与快照/暂存，未登记者视为常驻不参与
+/// 登记在案（经理 兔维斯 导入）才参与快照/暂存，未登记者视为常驻不参与
 pub fn list_registered_native_names(tool_id: &str) -> Vec<String> {
     let conn = DB.lock().unwrap();
     conn.prepare(

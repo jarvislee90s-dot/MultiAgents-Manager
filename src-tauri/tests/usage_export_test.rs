@@ -6,15 +6,15 @@
 //! ① 把 `export_save_text` 改调 `save_bytes_file`（类型合法、可编译）→ 生产路径**丢 BOM**，
 //! 13 条 lib 用例**全绿**；② 把 `save_text_file` 的目录由 `exports_dir()` 换成 `/tmp` → 同样全绿。
 //! 而本任务第一个可观测事实正是「写进导出目录」。**2026-10-07 裁决 A2 后该目录 = 系统「下载」文件夹**
-//! （原 `~/.mam/exports/`；本文件随之把期望值从 `<home>/.mam/exports` 改为 `<home>/Downloads`）。
+//! （原 `~/.tuvis/exports/`；本文件随之把期望值从 `<home>/.tuvis/exports` 改为 `<home>/Downloads`）。
 //!
-//! 本文件用 `support::setup()` 把 `HOME` / `MAM_HOME` 指到 tempdir
+//! 本文件用 `support::setup()` 把 `HOME` / `TUVIS_HOME` 指到 tempdir
 //! （**绝不写用户真实下载目录**，与 GC 19 同一条纪律），再调**生产入口**，
 //! 断言的是**磁盘事实**（路径形状 / 绝对性 / 真存在 / BOM 三字节 / 字节数 / 逐字节相等）。
 //!
 //! 顺带锁上 **reveal 覆盖退让的一半**：白名单根含**导出目录本身**（A2 后 = 下载目录；
 //! 见 `resource.rs::reveal_allowed_roots()`），`setup()` 重定向后
-//! 落盘路径**存在** ⇒ `ensure_reveal_allowed` 可判定（不再依赖开发机真实 `~/.mam` 状态）。
+//! 落盘路径**存在** ⇒ `ensure_reveal_allowed` 可判定（不再依赖开发机真实 `~/.tuvis` 状态）。
 //! 仍**不**断言 `reveal_dir` 的真实系统打开（那属 Task 24 的人工目验）。
 //!
 //! 隔离说明：本文件不触发采集（零 `DSH_HOME` / `KIMI_CODE_HOME` 暴露），也不需要串行锁——
@@ -27,11 +27,11 @@ use multi_agents_manager_lib::commands::export::{
 };
 use std::path::PathBuf;
 
-/// 生产导出目录 `exports_dir()` 的形状：`<home>/Downloads`（A2 后的系统下载目录；原 `.mam/exports`）。
-/// `support::setup()` 把 `HOME` 与 `MAM_HOME` 同时指到同一个 tempdir；生产代码在 debug/test
-/// 构建下认 `MAM_HOME`（Windows 的 `dirs::home_dir()` 会忽略 `HOME`，故必须两者都看）。
+/// 生产导出目录 `exports_dir()` 的形状：`<home>/Downloads`（A2 后的系统下载目录；原 `.tuvis/exports`）。
+/// `support::setup()` 把 `HOME` 与 `TUVIS_HOME` 同时指到同一个 tempdir；生产代码在 debug/test
+/// 构建下认 `TUVIS_HOME`（Windows 的 `dirs::home_dir()` 会忽略 `HOME`，故必须两者都看）。
 fn expected_exports_dir() -> PathBuf {
-    let home = std::env::var_os("MAM_HOME")
+    let home = std::env::var_os("TUVIS_HOME")
         .filter(|h| !h.is_empty())
         .map(PathBuf::from)
         .or_else(dirs::home_dir)
@@ -115,7 +115,7 @@ fn production_bytes_entry_writes_exact_bytes_into_downloads() {
 }
 
 /// **reveal 覆盖退让的一半**（fix round 1 新增的锁）：`setup()` 重定向 `HOME` 后，
-/// 两条生产入口的落盘路径都能过既有 `ensure_reveal_allowed`（白名单根 `home_dir()/.mam`）。
+/// 两条生产入口的落盘路径都能过既有 `ensure_reveal_allowed`（白名单根 `home_dir()/.tuvis`）。
 /// 另一半（`reveal_dir` 真的把目录在系统文件管理器里打开）仍需 **Task 24 人工目验**。
 ///
 /// **Windows 上不可判定**：`dirs::home_dir()` 在 Windows 忽略 `HOME`（见 `tests/support.rs` 的注释），

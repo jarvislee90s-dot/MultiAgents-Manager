@@ -322,7 +322,7 @@ cat ~/.kimi-code/mcp.json   # 应出现 mcpServers.<name>
 | Windows 交叉 | `cargo check --target x86_64-pc-windows-gnu` | ✅ Finished（本机工具链） |
 | 前端检查 | `pnpm check`（format:check + lint + check:i18n + build） | ✅ i18n 497 键对齐 |
 | 前端测试 | `pnpm test` | ✅ 46 文件 228 测试（基线 44 文件 224 测试 + 新增 2 文件 4 用例，既有测试文件零改动） |
-| 数据安全 | — | 本轮**新增**的 67 lib + 4 前端用例全部 tempdir fixture，零真实路径访问（Z4.2-9 附 grep 证据）；既有基线活机扫描测试 `test_get_all_sessions`（先于本轮存在、本文件历史内容保持原样不改）在 ZCode 运行时按产品路径**只读**打开真实 `~/.zcode` 并写 MAM 自身 `~/.mam/mam.db`——该 DB 写入为基线既有行为（六工具同机制），缓解手段（宿主门控 + `MAM_HOME` 重定向，已实测）见 Z4.2-9 |
+| 数据安全 | — | 本轮**新增**的 67 lib + 4 前端用例全部 tempdir fixture，零真实路径访问（Z4.2-9 附 grep 证据）；既有基线活机扫描测试 `test_get_all_sessions`（先于本轮存在、本文件历史内容保持原样不改）在 ZCode 运行时按产品路径**只读**打开真实 `~/.zcode` 并写 兔维斯 自身 `~/.tuvis/tuvis.db`——该 DB 写入为基线既有行为（六工具同机制），缓解手段（宿主门控 + `TUVIS_HOME` 重定向，已实测）见 Z4.2-9 |
 
 提交序列（整合分支按功能模块重组为语义化提交，实际序列以 git log 为准）：
 
@@ -370,7 +370,7 @@ ZCode 进程数量与任务数无关（app-server 池化、子代理与主会话
    索引缺行视为未归档未删除——索引是加速源不是真相源）；
 5. 单行类型不符（time_updated 非整型等）→ 行级跳过。
 
-`unread_at`/`last_unread_at`（ZCode 侧栏自己的未读标记）不使用——与 MAM 未读池
+`unread_at`/`last_unread_at`（ZCode 侧栏自己的未读标记）不使用——与 兔维斯 未读池
 语义不同步（任务事实 1）。
 
 ### Z1.3 状态推导：消息流尾部按 sequence 倒扫（任务事实 4 的翻译）
@@ -440,7 +440,7 @@ ZCode 侧数据源：`session.parent_id` 分组聚合（COUNT + MAX(time_updated
 ### Z1.5 提醒与未读（D2）：复用 W4 管线 + P1-3 门通用化
 
 - 转绿（Idle/Finished，含 error→Finished）→ 既有 `sync_unread_sessions`
-  迁移触发插行，跨 MAM 重启保留（DB 持久）；已读信号三类不变（跳转成功且前台
+  迁移触发插行，跨 兔维斯 重启保留（DB 持久）；已读信号三类不变（跳转成功且前台
   验证通过 / 手动 X / 24h 过期）；宿主退出 → `dead_tools_from_pool` 清池 +
   `filter_host_dead_cards` 清活跃卡（host.rs zcode 分支供判）。
 - ZCode 卡片是**数据驱动持久绿卡**（time_updated 24h 窗口内完成态持续出卡，
@@ -497,7 +497,7 @@ ZCode 侧数据源：`session.parent_id` 分组聚合（COUNT + MAX(time_updated
   不落盘；键序与未知键保留（serde_json preserve_order）；条目形态
   `{"command","args","env"}` 与既有一致。`enable:false`（ZCode 自有停用标记，
   无字段 = 启用）：SSOT 扫描不把停用条目计入该工具启用列，`read_mcp_servers`
-  原样透传条目（含 enable 字段）如实展示为停用；MAM 写入不携带 enable 字段
+  原样透传条目（含 enable 字段）如实展示为停用；兔维斯 写入不携带 enable 字段
   （= 启用），不破坏 ZCode 语义。删除路径与写入**对称**：段路径任一层被非对象
   值占用 → 报错且不落盘（不静默吞损坏形态）；段或条目不存在 → 幂等成功且
   **不重写文件**（避免无谓 pretty 化扰动用户主配置的键序与格式，
@@ -629,12 +629,12 @@ $ pnpm test                                   # 46 files, 228 tests ✅
 
 - **采用 Plan A**：按官方文档声明的用户级目录实现（skill_dirs =
   `~/.zcode/skills`，首启建目录）。理由：唯一有文档依据的每工具独立目录；
-  MAM 的启用/禁用/还原语义（Layer2 建链删链）在该目录下完整成立。
+  兔维斯 的启用/禁用/还原语义（Layer2 建链删链）在该目录下完整成立。
 - **不确定性**：双平台实测该目录尚不存在（首装时创建），ZCode 是否真实读取
   未经确认；本轮按任务约束**未在本机在线实测**。
 - **备选方案（不采用）及其处理思路**：跨工具共享目录 `~/.agents/skills/` 已
   实测确认 ZCode 会读取，但该目录 Codex 等工具同读——在其中做「ZCode 专属
-  启用/禁用」会同时开关其他工具，与 MAM「每工具独立激活」模型直接冲突（禁用
+  启用/禁用」会同时开关其他工具，与 兔维斯「每工具独立激活」模型直接冲突（禁用
   ZCode 的链接会断掉 Codex 的技能）。若后续实测证伪 Plan A（ZCode 不读
   `~/.zcode/skills`），处理思路：① 首选向 ZCode 官方确认配置项（是否存在
   skill 目录设置或 env 重定向）；② 若只能走共享目录，则把 ZCode 的 skill
@@ -657,8 +657,8 @@ $ pnpm test                                   # 46 files, 228 tests ✅
 4. **task_status 仅 error 参与判定**：Windows 上 running/completed 本可加速，
    但为保证 macOS（恒旧值）双平台同一套语义，一律以尾部推导为主源——加速
    收益（至多一轮轮询间隔）不值得平台分叉。
-5. **ZCode 侧栏未读标记不使用**：`unread_at`/`last_unread_at` 与 MAM 未读池
-   语义不同步（用户在 ZCode 内查看不清 MAM 卡，反之亦然）——任务事实直接采信。
+5. **ZCode 侧栏未读标记不使用**：`unread_at`/`last_unread_at` 与 兔维斯 未读池
+   语义不同步（用户在 ZCode 内查看不清 兔维斯 卡，反之亦然）——任务事实直接采信。
 6. **子代理仲裁窗口 = 300s**：后代 `time_updated` 距 now <300s 记活跃。子代理
    单次模型请求实测最长 204s、无超 300s 样本，窗口覆盖；若 ZCode 未来出现
    超长单请求，会短暂误判疑似卡住（下轮自愈）。
@@ -676,19 +676,19 @@ $ pnpm test                                   # 46 files, 228 tests ✅
    test_get_all_sessions`（Kimi 轮起的仓库惯例，本文件历史内容保持原样不改）：
    它执行产品路径 `get_all_sessions()`，当本机 ZCode 主进程在跑时，
    zcode adapter 会以 `SQLITE_OPEN_READ_ONLY` 打开真实 `~/.zcode` 两库（与
-   出货应用每轮轮询完全相同的行为，绝不写入），并把状态缓存/未读池写入 MAM
-   自身 `~/.mam/mam.db`（该 DB 写入是基线对全部工具一致的既有行为，非本轮
+   出货应用每轮轮询完全相同的行为，绝不写入），并把状态缓存/未读池写入 兔维斯
+   自身 `~/.tuvis/tuvis.db`（该 DB 写入是基线对全部工具一致的既有行为，非本轮
    引入）。两项已实测的缓解：① **宿主门控**——ZCode 未运行时 `get_zcode_sessions`
    在打开任何数据库之前即返回空（关闭 ZCode 后跑 `cargo test` 则零 `~/.zcode`
-   触达）；② **MAM_HOME 重定向**——debug 构建尊重 `MAM_HOME`
-   （connection.rs::app_data_home），`MAM_HOME=$(mktemp -d) cargo test` 可使
-   `~/.mam` 零写入（本轮取证已按此口径执行）。全量跑测试建议采用
-   `MAM_HOME=$(mktemp -d) cargo test` 或关闭 ZCode 后运行。
+   触达）；② **TUVIS_HOME 重定向**——debug 构建尊重 `TUVIS_HOME`
+   （connection.rs::app_data_home），`TUVIS_HOME=$(mktemp -d) cargo test` 可使
+   `~/.tuvis` 零写入（本轮取证已按此口径执行）。全量跑测试建议采用
+   `TUVIS_HOME=$(mktemp -d) cargo test` 或关闭 ZCode 后运行。
 
 ## Z5. GUI 手动验收清单（macOS 为主，Windows 项单列）
 
-前置：`pnpm tauri:dev` 启动 MAM；本机安装 ZCode 且有历史任务（日常使用环境）。
-**注意：验收会读取真实 `~/.zcode/`（只读）与写入 `~/.mam/`（MAM 自身数据目录，
+前置：`pnpm tauri:dev` 启动 兔维斯；本机安装 ZCode 且有历史任务（日常使用环境）。
+**注意：验收会读取真实 `~/.zcode/`（只读）与写入 `~/.tuvis/`（兔维斯 自身数据目录，
 产品行为）——与开发/测试阶段的「严禁读写」约束不同，属正常运行时语义。**
 
 1. **工具管理**：设置 → 工具管理出现 ZCode 行（蓝紫渐变 Z 图标 + 「已安装」
@@ -697,7 +697,7 @@ $ pnpm test                                   # 46 files, 228 tests ✅
 2. **会话出卡**：ZCode 开着且有 24h 内活动任务 → 首页每会话一张卡（标题 =
    ZCode 侧栏同款任务标题；项目名 = 工作区目录名；徽标 ZCode）。归档/删除的
    任务不出卡；超过 24h 无活动的任务不出卡。
-3. **状态灯**：在 ZCode 里发一条消息 → MAM 卡变黄（Thinking）；agent 调工具
+3. **状态灯**：在 ZCode 里发一条消息 → 兔维斯 卡变黄（Thinking）；agent 调工具
    期间保持黄（Processing）；回复正文完成 → 转绿（Idle）并弹完成提醒（浮窗/
    系统通知/声音/桌宠气泡按既有通知面策略）。
 4. **子代理仲裁**：触发一个长时子代理任务（如「用子代理分析整个仓库」）→
@@ -706,7 +706,7 @@ $ pnpm test                                   # 46 files, 228 tests ✅
 5. **疑似卡住**：任务运行中强杀 ZCode 的网络（或构造停更）→ 停更超 5 分钟且
    无活跃子代理 → 卡变红（Waiting）。（可选，构造成本高可跳过）
 6. **error 转绿**：构造一个失败任务（如无效 API key 触发 error）→ ZCode 侧栏
-   显示失败后，MAM 卡转绿（Finished）进未读池并弹提醒。
+   显示失败后，兔维斯 卡转绿（Finished）进未读池并弹提醒。
 7. **跳转与已读**：点击绿色未读卡 → ZCode 被激活且**同一主窗口内切换到该项目
    工作区**（不新开窗口、其他后台任务不受影响）。已读口径按平台区分（与
    WorkBuddy/Codex 一致的 P1-2 分层防御）：**Windows** 深链派发后前台验证通过
@@ -720,11 +720,11 @@ $ pnpm test                                   # 46 files, 228 tests ✅
    ZCode 列不显示为启用（如实展示为停用）。把 config.json 改成非法 JSON →
    MCP 写入报错且文件原样保留（不被写坏）。
 9. **Skill 分发**：资源页 → Skill → 对 ZCode 启用 → `~/.zcode/skills/<name>`
-   出现符号链接（指向 `~/.mam/active/zcode/<name>`），SSOT 真身保留；禁用 →
+   出现符号链接（指向 `~/.tuvis/active/zcode/<name>`），SSOT 真身保留；禁用 →
    链接删除、SSOT 仍在。（ZCode 是否真实加载该目录见 Z4.1 开放问题）
-10. **宿主清理**：MAM 运行中完全退出 ZCode（Cmd+Q）→ 下一轮扫描（≤30s）
+10. **宿主清理**：兔维斯 运行中完全退出 ZCode（Cmd+Q）→ 下一轮扫描（≤30s）
     ZCode 全部卡片（含未读）消失；重开 ZCode → 24h 内会话卡恢复。
-11. **跨重启保留**：ZCode 开着、MAM 有绿色未读卡 → 重启 MAM → 未读卡仍在
+11. **跨重启保留**：ZCode 开着、兔维斯 有绿色未读卡 → 重启 兔维斯 → 未读卡仍在
     （宿主存活前提）；若重启前 ZCode 已关 → 重启后残留未读卡被清。
 12. **Windows 专项**（Windows 实机）：① 任务栏关窗驻留托盘 → 卡片照常（宿主
     以进程存活判定）；② 点击卡片 → `zcode://workspace/open?path=E%3A%5C…`
@@ -744,9 +744,9 @@ $ pnpm test                                   # 46 files, 228 tests ✅
 | 决策 | 内容 |
 |---|---|
 | codex 激活目标切换 | `skill_dir_for_tool("codex")`：`~/.agents/skills` → **`~/.codex/skills`**（私有目录）。`.agents` 是 Agent Skills 开放标准的跨工具共享目录（codex 与 zcode 都读，spec F1/F3），把它当 codex 专属激活目标会让「仅对 codex 启停」泄露给所有遵循该标准的工具 |
-| `.agents` 降级为只读通用导入源 | `auto_import_extensions` 扫描源显式追加 `~/.agents/skills`，来源标签 **`agents-shared`**：手装技能照常入库，但 `source_tool=None`（不归属工具、不补链）；MAM 从此永不写该目录（唯一例外是迁移对话框对「MAM 自建链接」的处置） |
-| 遗留链接一次性迁移对话框 | 识别谓词 = `.agents/skills` 下 target 规范化后位于 `~/.mam/active/codex/` 的 MAM 自建链接（手装真目录/外部链接/断链不命中）；启动后台检测，命中即弹二选一——「迁移到 .codex/skills」（在 `.codex/skills` 重建链接、删旧链，DB assignments 与 Layer 2 完全不动 = 启停无损；同名冲突跳过并报告）或「保留为共享」（`.agents` 侧 target 改指 Layer 1 `~/.mam/skills/`，脱钩 codex 启停、继续服务未适配工具）；两种结局谓词均不再命中，对话框自熄灭，无需持久化开关 |
-| SSOT 删除保护 | 删除 `~/.mam/skills/<name>` 前若 `.agents/skills/<name>` 存在指向它的直链，删除请求返回需确认提示（防止「保留为共享」后误删 SSOT 导致依赖共享目录的未适配工具失效） |
+| `.agents` 降级为只读通用导入源 | `auto_import_extensions` 扫描源显式追加 `~/.agents/skills`，来源标签 **`agents-shared`**：手装技能照常入库，但 `source_tool=None`（不归属工具、不补链）；兔维斯 从此永不写该目录（唯一例外是迁移对话框对「兔维斯 自建链接」的处置） |
+| 遗留链接一次性迁移对话框 | 识别谓词 = `.agents/skills` 下 target 规范化后位于 `~/.tuvis/active/codex/` 的 兔维斯 自建链接（手装真目录/外部链接/断链不命中）；启动后台检测，命中即弹二选一——「迁移到 .codex/skills」（在 `.codex/skills` 重建链接、删旧链，DB assignments 与 Layer 2 完全不动 = 启停无损；同名冲突跳过并报告）或「保留为共享」（`.agents` 侧 target 改指 Layer 1 `~/.tuvis/skills/`，脱钩 codex 启停、继续服务未适配工具）；两种结局谓词均不再命中，对话框自熄灭，无需持久化开关 |
+| SSOT 删除保护 | 删除 `~/.tuvis/skills/<name>` 前若 `.agents/skills/<name>` 存在指向它的直链，删除请求返回需确认提示（防止「保留为共享」后误删 SSOT 导致依赖共享目录的未适配工具失效） |
 
 ## X1. 证据引用（spec F1–F6 摘引）
 
@@ -762,7 +762,7 @@ $ pnpm test                                   # 46 files, 228 tests ✅
 - **F6** codex adapter 的 `skill_dirs()` fallback 本就是 `base_dir().join("skills")` = `~/.codex/skills`。
 
 残留风险（spec §2 / §8 V1）：`.codex/skills` 中符号链接被 codex 跟随目前只有 F2 的
-文档背书 + codex 已在 `.agents/skills` 跟随 MAM 链接的旁证，发布前需按 spec §8 实机验证。
+文档背书 + codex 已在 `.agents/skills` 跟随 兔维斯 链接的旁证，发布前需按 spec §8 实机验证。
 
 ## X2. 方案选型
 

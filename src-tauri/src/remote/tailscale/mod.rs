@@ -12,7 +12,7 @@
 //!   起停生命周期（**运行态**，常驻线程与 CLI 派生都在这里）；
 //! - [`wizard`]：首次配置引导（§C2）——平台步骤表、**安装包下载与特权安装触发**
 //!   （**供应链**，与运行态分开）、逐步探测与 `run_step` 单入口；
-//! - [`reach`]：强制可达性校验与自愈（§C3）——DoH 解析、钉 IP 探测、MAM 特征判据、自愈；
+//! - [`reach`]：强制可达性校验与自愈（§C3）——DoH 解析、钉 IP 探测、兔维斯 特征判据、自愈；
 //! - 本文件：模块文档、**跨子模块再导出**（crate 内消费方只用 `tailscale::X` 这一条路）
 //!   与**测试缝/测试模块**（零网络零进程纪律的集中登记处）。
 //!
@@ -106,7 +106,7 @@ mod tests {
         "CertDomains": ["jarvismac-mini.example-tailnet.ts.net"]
     }"#;
 
-    /// 待登录形态：AuthURL 带链接（MAM 要把它做成按钮）
+    /// 待登录形态：AuthURL 带链接（兔维斯 要把它做成按钮）
     const STATUS_NEEDS_LOGIN: &str = r#"{
         "BackendState": "NeedsLogin",
         "AuthURL": "https://login.tailscale.com/a/abc123",
@@ -116,7 +116,7 @@ mod tests {
 
     /// **⑤ 新装未发起过登录的形态**（2026-10-07 诊断所得，用户实测场景）：
     /// `NeedsLogin` **但 AuthURL 为空**——授权链接由尾网在**发起一次交互式登录**时才生成
-    /// （`tailscale login` / GUI 的「Log in」按钮），MAM 此前从不发起 ⇒ 链接永远不出现，
+    /// （`tailscale login` / GUI 的「Log in」按钮），兔维斯 此前从不发起 ⇒ 链接永远不出现，
     /// 而前端只在 `probe.authUrl` 非空时才渲染「去登录」，于是登录步成为**死胡同**：
     /// 行里有"需要你操作：去浏览器登录"的文案，却没有任何可点的东西。
     const STATUS_NEEDS_LOGIN_NO_URL: &str = r#"{
@@ -196,8 +196,8 @@ mod tests {
         assert_eq!(board_url_from_dns_name("."), "");
     }
 
-    /// 「不覆盖用户既有 serve 配置」守卫：空表（未开通）与 MAM 自己那份（指向本机
-    /// MAM 端口）放行；指向别的端口的活配置 = 外来，拒绝开通——`funnel reset` 会
+    /// 「不覆盖用户既有 serve 配置」守卫：空表（未开通）与 兔维斯 自己那份（指向本机
+    /// 兔维斯 端口）放行；指向别的端口的活配置 = 外来，拒绝开通——`funnel reset` 会
     /// 清掉整份 serve 配置，静默清掉用户自建配置是不可接受的副作用
     #[test]
     fn foreign_serve_config_flags_only_foreign_active_configs() {
@@ -207,7 +207,7 @@ mod tests {
             r#"{"Web":{"x.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8080"}}}}}"#;
         // 本来就没有配置 → 不算外来
         assert!(!foreign_serve_config("{}", 9420));
-        // MAM 自己的配置（指向本机 MAM 端口）→ 不算外来
+        // 兔维斯 自己的配置（指向本机 兔维斯 端口）→ 不算外来
         assert!(!foreign_serve_config(OURS, 9420));
         // 指向别的端口 → 外来（哪怕同在 127.0.0.1）
         assert!(foreign_serve_config(OTHER_PORT, 9420), "端口不同即外来");
@@ -225,12 +225,12 @@ mod tests {
         assert!(!foreign_serve_config("", 9420));
     }
 
-    /// B-M4/B-I5 **变异锚点**：判据从「序列化后**包含** MAM 那路」改为「逐条 handler 的
-    /// Proxy **精确**指向本机 MAM 端口」。两个已实测隐患：
-    /// ① 端口前缀撞车——MAM 在 80、外来配置指向 8080 时旧判据（子串）判成自己人，
+    /// B-M4/B-I5 **变异锚点**：判据从「序列化后**包含** 兔维斯 那路」改为「逐条 handler 的
+    /// Proxy **精确**指向本机 兔维斯 端口」。两个已实测隐患：
+    /// ① 端口前缀撞车——兔维斯 在 80、外来配置指向 8080 时旧判据（子串）判成自己人，
     ///    于是 `funnel reset` 会清掉别人的配置；
-    /// ② 叠加形态（MAM 那路 + 用户自建）——旧判据也判成自己人。**本实现仍放行**（加严会让
-    ///    公开暴露撤不掉，失败模式更糟，评审确认权衡成立），但把「将一并被清除的非 MAM
+    /// ② 叠加形态（兔维斯 那路 + 用户自建）——旧判据也判成自己人。**本实现仍放行**（加严会让
+    ///    公开暴露撤不掉，失败模式更糟，评审确认权衡成立），但把「将一并被清除的非 兔维斯
     ///    条目数」如实算出来供回执/日志明示（B-I5 ②）。
     /// 变异自证：判据退回子串包含 → ①档必红；Mixed 改判 Foreign → ②档必红。
     #[test]
@@ -239,19 +239,19 @@ mod tests {
             r#"{"Web":{"x.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:9420"}}}}}"#;
         const PROXY_8080: &str =
             r#"{"Web":{"x.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:8080"}}}}}"#;
-        // ① 端口前缀撞车：MAM 在 808，外来配置指向 8080 —— 不得判成自己人
+        // ① 端口前缀撞车：兔维斯 在 808，外来配置指向 8080 —— 不得判成自己人
         assert!(
             foreign_serve_config(PROXY_8080, 808),
             "端口前缀不得撞车（旧子串判据在此判成自己人）"
         );
-        // ② 叠加形态：MAM 那路 + 用户自建 /media → 归类 Mixed，**不拒绝**（见测试注释）
+        // ② 叠加形态：兔维斯 那路 + 用户自建 /media → 归类 Mixed，**不拒绝**（见测试注释）
         const MIXED: &str = r#"{"Web":{"x.ts.net:443":{"Handlers":{
             "/":{"Proxy":"http://127.0.0.1:9420"},
             "/media":{"Proxy":"http://127.0.0.1:7000"}}}}}"#;
         assert_eq!(
             serve_ownership(MIXED, 9420),
             ServeOwnership::Mixed { others: 1 },
-            "叠加形态要如实数出「将被一并清除」的非 MAM 条目"
+            "叠加形态要如实数出「将被一并清除」的非 兔维斯 条目"
         );
         assert!(
             !foreign_serve_config(MIXED, 9420),
@@ -340,7 +340,7 @@ mod tests {
         assert!(!s.running);
         assert!(s.error.unwrap().contains("Funnel"));
 
-        // 活配置不指向本机 MAM 端口 → 他人配置，不宣称地址
+        // 活配置不指向本机 兔维斯 端口 → 他人配置，不宣称地址
         let s = map_status(Ok(running_ts()), Ok(foreign.into()), 9420);
         assert!(!s.running);
         assert_eq!(s.url, None);
@@ -599,10 +599,10 @@ mod tests {
         let r = stop_channel();
         let e = r.unwrap_err();
         assert!(
-            e.contains("检测到非 MAM") && e.contains("funnel reset"),
+            e.contains("检测到非 兔维斯") && e.contains("funnel reset"),
             "拒绝文案须沿用 start_channel 守卫口径（说清被拒原因与手动出口）: {e}"
         );
-        // 本地宣称先收口（无论守卫结果如何，MAM 不再宣称运行）
+        // 本地宣称先收口（无论守卫结果如何，兔维斯 不再宣称运行）
         assert_eq!(*DESIRED.lock().unwrap(), None, "期望态必须已清空");
         let s = ts_snapshot();
         assert!(!s.running, "快照必须已复位（running 不再宣称）");
@@ -633,7 +633,7 @@ mod tests {
 
         let r = run_step("disable", 9420);
         let e = r.unwrap_err();
-        assert!(e.contains("检测到非 MAM"), "向导撤销同样拒外来配置: {e}");
+        assert!(e.contains("检测到非 兔维斯"), "向导撤销同样拒外来配置: {e}");
         assert_eq!(*DESIRED.lock().unwrap(), None, "向导停同样收口期望态");
         assert!(
             calls
@@ -648,9 +648,9 @@ mod tests {
     }
 
     /// B-I5 ② + B-M4 **变异锚点**：
-    /// ① 叠加形态（MAM 那路 + 用户自建）撤销**不拒绝**，但回执必须如实报出「另有 N 条
-    ///    非 MAM 条目将一并被清除」——这是用户唯一能看到"你的 /media 也没了"的地方；
-    /// ② 完全外来（含端口被改后 MAM 旧配置变"外来"的死局）给一条**显式强制撤销**出口：
+    /// ① 叠加形态（兔维斯 那路 + 用户自建）撤销**不拒绝**，但回执必须如实报出「另有 N 条
+    ///    非 兔维斯 条目将一并被清除」——这是用户唯一能看到"你的 /media 也没了"的地方；
+    /// ② 完全外来（含端口被改后 兔维斯 旧配置变"外来"的死局）给一条**显式强制撤销**出口：
     ///    `disable_force` 跳过归属守卫但仍如实回报条目数（不静默）。没有这条出口，用户
     ///    会遇到「Funnel 留在公网且 UI 无出路」。
     /// 变异自证：把 Mixed 也判 Foreign → ①档 Err 必红；删掉 disable_force 分支 → ②档必红。
@@ -667,7 +667,7 @@ mod tests {
         assert_eq!(r["ok"], true);
         assert_eq!(
             r["clearedExtraServeEntries"], 1,
-            "必须明示「另有 1 条非 MAM 条目被一并清除」: {r}"
+            "必须明示「另有 1 条非 兔维斯 条目被一并清除」: {r}"
         );
         // M-1：回执要带上**被清除的条目本身**（不只是条数）——前端卡面「N 条」与列表
         // 由此**同源**（都来自这次撤销的实际条目表），不再「确认框列预览条目、toast 报
@@ -675,7 +675,7 @@ mod tests {
         assert_eq!(
             r["clearedEntries"],
             serde_json::json!([{ "ours": false, "label": "x.ts.net:443 /media → http://127.0.0.1:7000" }]),
-            "回执必须逐条报出被一并清除的非 MAM 条目（与条数同源）: {r}"
+            "回执必须逐条报出被一并清除的非 兔维斯 条目（与条数同源）: {r}"
         );
         assert!(
             calls
@@ -792,7 +792,7 @@ mod tests {
         let r = disable_step_with(
             9420,
             false,
-            |_, _| Err("检测到非 MAM 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
+            |_, _| Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
             || panic!("撤销失败不得落开关位（否则就是『开关说已关、实际公网还开着』）"),
             |_, _| panic!("撤销失败不得发审计（专测见 failed_revoke_emits_no_audit）"),
             |_, _| {
@@ -811,7 +811,7 @@ mod tests {
     /// 公网暴露的安全动作，与暴露出去同量级——更必须留痕。
     /// 本测试锁三件事：① 成功后**恰有一条**审计；② 动作名与开通路径**同源**
     /// （`channel_toggled`，`channel=tailscale` 一把 grep 就可拉出完整开/关序列）；
-    /// ③ 明细带上 `forced`（是否走了强制撤销）与 `cleared_others`（连带清掉几条非 MAM
+    /// ③ 明细带上 `forced`（是否走了强制撤销）与 `cleared_others`（连带清掉几条非 兔维斯
     /// 条目）两个事实字段——「强制撤销」与「顺带清了用户配置」正是最需要留痕的两种情况。
     /// **变异锚点：删掉 `disable_step_with` 里的 audit 调用 → 本测试必红。**
     #[test]
@@ -861,7 +861,7 @@ mod tests {
         );
         assert!(
             detail.contains("cleared_others=2"),
-            "连带清掉几条非 MAM 条目必须入账（清用户配置最需要留痕）: {detail}"
+            "连带清掉几条非 兔维斯 条目必须入账（清用户配置最需要留痕）: {detail}"
         );
     }
 
@@ -878,7 +878,7 @@ mod tests {
         let r = disable_step_with(
             9420,
             false,
-            |_, _| Err("检测到非 MAM 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
+            |_, _| Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
             || {
                 panic!(
                     "撤销失败不得落开关位（防线见 failed_revoke_does_not_land_the_channel_flag）"
@@ -957,7 +957,7 @@ mod tests {
         let r = disable_step_with(
             9420,
             false,
-            |_, _| Err("检测到非 MAM 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
+            |_, _| Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
             || {
                 panic!(
                     "撤销失败不得落开关位（防线见 failed_revoke_does_not_land_the_channel_flag）"
@@ -1017,7 +1017,7 @@ mod tests {
             );
             assert!(
                 detail.contains("cleared_others=0"),
-                "连带清掉的非 MAM 条目数如实入账（无连带记 0）: {detail}"
+                "连带清掉的非 兔维斯 条目数如实入账（无连带记 0）: {detail}"
             );
             assert!(
                 !detail.contains("forced"),
@@ -1039,7 +1039,7 @@ mod tests {
         assert!(!ts_snapshot().running, "快照必须已复位（不再宣称运行）");
         teardown_globals();
 
-        // ② 叠加形态（MAM 那路 + 用户自建）：连带清掉的条数如实入账
+        // ② 叠加形态（兔维斯 那路 + 用户自建）：连带清掉的条数如实入账
         const MIXED: &str = r#"{"Web":{"x.ts.net:443":{"Handlers":{
             "/":{"Proxy":"http://127.0.0.1:9420"},
             "/media":{"Proxy":"http://127.0.0.1:7000"}}}}}"#;
@@ -1052,7 +1052,7 @@ mod tests {
         assert_eq!(lines2.len(), 1, "叠加形态同样恰一条: {lines2:?}");
         assert!(
             lines2[0].contains("cleared_others=1"),
-            "连带清掉 1 条非 MAM 条目必须如实入账（同字段同口径）: {lines2:?}"
+            "连带清掉 1 条非 兔维斯 条目必须如实入账（同字段同口径）: {lines2:?}"
         );
         drop(lines2);
         teardown_globals();
@@ -1136,7 +1136,7 @@ mod tests {
         teardown_globals();
     }
 
-    /// 守卫正路：配置为空（`{}` 实测形态）或本就是 MAM 自己那份 → 正常撤销
+    /// 守卫正路：配置为空（`{}` 实测形态）或本就是 兔维斯 自己那份 → 正常撤销
     /// （`funnel reset` 恰好发出一次）；DESIRED 为 None（本就没开）时 stop_all 零 CLI
     /// 调用直接返回——三处停机路径（修复轮 2 接线）依赖这条「无事可做不悬挂」
     #[test]
@@ -1249,7 +1249,7 @@ mod tests {
     }
 
     /// **2026-10-08 缺口锚点（用户实测）**：Windows 走 MSI，**安装向导会让用户选安装路径**
-    /// （MAM 执行 `msiexec /i` **刻意不加 /qn**——选择权本就该给用户）⇒ 安装步的动作文案
+    /// （兔维斯 执行 `msiexec /i` **刻意不加 /qn**——选择权本就该给用户）⇒ 安装步的动作文案
     /// 必须**逐平台分叉**：Windows 那份要事前点明「用默认路径最省事 / 装到别处也可以，
     /// 请记住那个路径」；macOS 那份**不得夹带**（.pkg 由 `installer` 固定装到
     /// /Applications，用户根本无从选择，套 Windows 的话就是张冠李戴的谎报）。
@@ -1471,7 +1471,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("缺步骤 {id}"))
                 .clone()
         };
-        // 场景一：全部就绪（Running + shields 关 + Funnel 活且指向本机 MAM 端口）
+        // 场景一：全部就绪（Running + shields 关 + Funnel 活且指向本机 兔维斯 端口）
         // 校验态是全局：先钉回 Unverified，隔离兄弟用例崩溃时泄漏的状态
         set_reachability(Reachability::Unverified);
         const OURS: &str =
@@ -1501,7 +1501,7 @@ mod tests {
             !verify.done && verify.blocked_reason.is_none(),
             "{verify:?}"
         );
-        // autostart = MAM 自身行为，恒 done
+        // autostart = 兔维斯 自身行为，恒 done
         assert!(state_of(&v, "autostart").done);
         // macOS：sys_ext 判据 = 可解析且 BackendState != Stopped → Running 命中
         #[cfg(target_os = "macos")]
@@ -1562,7 +1562,7 @@ mod tests {
                     .as_deref()
                     .unwrap_or_default()
                     .contains("占用"),
-            "外来配置在先：funnel 对 MAM 不算完成且须点名占用: {funnel:?}"
+            "外来配置在先：funnel 对 兔维斯 不算完成且须点名占用: {funnel:?}"
         );
         teardown_globals();
     }
@@ -1589,7 +1589,7 @@ mod tests {
         assert_eq!(p["platform"], expected_platform);
         // I-3 → ②（2026-10-07 用户实机确认）：Windows 验证位仍**按覆盖面如实派生**，
         // 但覆盖面已经**从第一步起**了——用户在本机 Windows 上卸载 Tailscale 后**从零
-        // 走完 MAM 向导全程**（下载 → 安装 UAC → 登录 → 关 shields-up → 开通 Funnel →
+        // 走完 兔维斯 向导全程**（下载 → 安装 UAC → 登录 → 关 shields-up → 开通 Funnel →
         // 可达性校验），全程正常，故 detect/download/install/login 四步的**流程**已被
         // 端到端实机跑过（此前记录的 shields_up 起点是更早一次、从第 6 步起的探测）。
         // 验证位仍然由清单派生（不是硬编码 true）——机制与派生关系见下方
@@ -1597,7 +1597,7 @@ mod tests {
         let win = windows_verification_for(Platform::Windows);
         assert_eq!(
             win["windowsVerified"], true,
-            "用户 2026-10-07 实机走完 MAM 向导全程 ⇒ 整条 Windows 流程已实测: {win}"
+            "用户 2026-10-07 实机走完 兔维斯 向导全程 ⇒ 整条 Windows 流程已实测: {win}"
         );
         assert_eq!(
             win["windowsVerifiedFrom"], "detect",
@@ -1645,7 +1645,7 @@ mod tests {
         // NeedsLogin 形态：authUrl 透传给前端「去登录」按钮
         assert_eq!(
             p["authUrl"], "https://login.tailscale.com/a/abc123",
-            "待登录授权链接必须透出（MAM 不代登录，只递链接）"
+            "待登录授权链接必须透出（兔维斯 不代登录，只递链接）"
         );
         // M4（2026-10-07 评审）：每个 state 都带 **blockedTone**（rose|amber）——非恢复窗口
         // 的一切卡点都是真故障档
@@ -1706,13 +1706,13 @@ mod tests {
     }
 
     // ============================================================
-    // ⑤ 登录步：MAM 不代登录，但**必须主动把链接取来**（2026-10-07 用户实测诊断）
+    // ⑤ 登录步：兔维斯 不代登录，但**必须主动把链接取来**（2026-10-07 用户实测诊断）
     // ============================================================
     //
     // 根因（读码 + 注入缝复现，见 STATUS_NEEDS_LOGIN_NO_URL 的注释）：新装机器上
     // `status --json` 是 `NeedsLogin ∧ AuthURL=""`——授权链接要**发起一次交互式登录**
     // 才由尾网生成，而全仓 `run_cli` 调用点里**从来没有 `up` / `login`**（只有
-    // status / get / funnel status / funnel --bg / set / funnel reset），MAM 从不发起
+    // status / get / funnel status / funnel --bg / set / funnel reset），兔维斯 从不发起
     // ⇒ 链接永远不出现；前端又只在 `probe.authUrl` 非空时才渲染链接 ⇒ 登录步无可点之物。
     // 修法（**不越合规红线**：只递链接、不代登录、不持凭据）：后台发起 `tailscale login`
     //（与 GUI「Log in」按钮同义，**只让尾网生成授权链接**）+ 有界轮询 status 取 AuthURL。
@@ -1761,7 +1761,7 @@ mod tests {
         );
         assert_eq!(
             r["authUrl"], "https://login.tailscale.com/a/abc123",
-            "拿到链接必须原样递出（MAM 只递链接，不代登录）: {r}"
+            "拿到链接必须原样递出（兔维斯 只递链接，不代登录）: {r}"
         );
         assert_eq!(r["done"], false, "还没登录完，不得报 done: {r}");
         assert!(
@@ -1898,7 +1898,7 @@ mod tests {
     // ============================================================
     //
     // 评审三条：① 只 spawn + 收尸线程 ⇒ 每次点击泄漏 1 进程 + 1 阻塞线程；② `login` 的
-    // `--timeout` 默认 0s = 一直等 ⇒ 用户不登录它就一直活着；③ 轮询失败后无清理 ⇒ MAM
+    // `--timeout` 默认 0s = 一直等 ⇒ 用户不登录它就一直活着；③ 轮询失败后无清理 ⇒ 兔维斯
     // 退出后成孤儿进程（本仓纪律：不留孤儿进程）。修法 = 评审给的 a+b：`--timeout 15s`
     // 有界 + 模块级 `Mutex<Option<Child>>` 单飞 + 窗尽/应用退出 kill + wait。
     //
@@ -1923,7 +1923,7 @@ mod tests {
             login_cleanup_decision(false, false),
             LoginCleanup::Kill,
             "窗尽且没拿到链接：再等下去也不会有链接（默认 0s 会一直等）⇒ 必须杀 + 收尸，\n\
-             否则 MAM 退出后就是一个孤儿进程"
+             否则 兔维斯 退出后就是一个孤儿进程"
         );
     }
 
@@ -2295,7 +2295,7 @@ mod tests {
 
     /// **应用退出不留孤儿**：`lib.rs` 的 `RunEvent::Exit` 钩子此前只 `tunnel::stop_all` +
     /// `tailscale::stop_all`（隧道/通道），而 `tailscale login` 的等待者**不是通道**——
-    /// 它是本模块唯一的长期子进程（`--timeout 15s` 有界，但 15 秒内 MAM 退出就是孤儿）。
+    /// 它是本模块唯一的长期子进程（`--timeout 15s` 有界，但 15 秒内 兔维斯 退出就是孤儿）。
     /// 形态针：退出钩子里必须出现 `tailscale::cancel_login_attempt()`。
     /// 变异：删掉 lib.rs 里那一行 → 必红。
     #[test]
@@ -2309,7 +2309,7 @@ mod tests {
         assert!(
             hook.contains("tailscale::cancel_login_attempt()"),
             "退出钩子必须收掉 `tailscale login` 的等待者（kill + wait）——\n\
-             否则 MAM 退出后它就是一个孤儿进程: {hook}"
+             否则 兔维斯 退出后它就是一个孤儿进程: {hook}"
         );
     }
 
@@ -2404,7 +2404,7 @@ mod tests {
         );
         teardown_globals();
 
-        // funnel 步：同一生命周期 + 批准链接（若有）随回执递出（MAM 不代点）
+        // funnel 步：同一生命周期 + 批准链接（若有）随回执递出（兔维斯 不代点）
         let c2 = calls.clone();
         set_run_cli_override(Some(Box::new(move |args: &[&str]| {
             let v: Vec<String> = args.iter().map(|s| s.to_string()).collect();
@@ -2754,7 +2754,7 @@ mod tests {
         assert_eq!(r["done"], false);
         let reason = r["reach"]["reason"].as_str().unwrap_or_default();
         assert!(
-            reason.contains("检测到非 MAM"),
+            reason.contains("检测到非 兔维斯"),
             "守卫拒绝必须如实上墙: {reason}"
         );
         assert!(
@@ -3222,12 +3222,12 @@ mod tests {
         );
         assert_eq!(
             r["wouldClear"], 1,
-            "必须如实报出会一并被清除的非 MAM 条目数: {r}"
+            "必须如实报出会一并被清除的非 兔维斯 条目数: {r}"
         );
         let entries = r["entries"].as_array().expect("必须逐条列出条目");
         assert_eq!(entries.len(), 2, "两条 handler 都要列出: {r}");
         let ours: Vec<&serde_json::Value> = entries.iter().filter(|e| e["ours"] == true).collect();
-        assert_eq!(ours.len(), 1, "本机 MAM 那一路标 ours: {r}");
+        assert_eq!(ours.len(), 1, "本机 兔维斯 那一路标 ours: {r}");
         let others: Vec<&serde_json::Value> =
             entries.iter().filter(|e| e["ours"] == false).collect();
         assert_eq!(others.len(), 1, "用户自建那一路标非 ours: {r}");
@@ -3255,7 +3255,7 @@ mod tests {
 
     /// A6 **变异锚点**（2026-10-07 Windows 实测）：**`--bg` 是必需的**——不加 `--bg` 时
     /// `tailscale funnel <port>` 会打印横幅 + `Press Ctrl+C to exit.` 后**一直阻塞终端**。
-    /// MAM 是 GUI 应用，任何阻塞调用线程的形态都不可接受，故本模块**一律带 `--bg`**。
+    /// 兔维斯 是 GUI 应用，任何阻塞调用线程的形态都不可接受，故本模块**一律带 `--bg`**。
     /// 本测试把整条起停 + 自愈链路跑一遍，逐条核对 CLI 调用形状：凡 `funnel` 且非
     /// status/reset 的调用必须带 `--bg`，且绝不出现 `["funnel", "<端口>"]` 这种会阻塞的形态。
     /// 变异：把 enable_funnel 的 `["funnel", "--bg", port]` 改成 `["funnel", port]` → 必红。
@@ -3344,11 +3344,11 @@ mod tests {
 
     // ==== 2026-10-08：CLI 发现链补「服务登记」第二来源（治本）====
     //
-    // **缺口（用户实测）**：Windows MSI 让用户自选安装路径（MAM 执行 `msiexec /i <包>`，
+    // **缺口（用户实测）**：Windows MSI 让用户自选安装路径（兔维斯 执行 `msiexec /i <包>`，
     // **刻意不加 /qn**——选择权本就该给用户），而 find_cli 只在
     // `C:\Program Files\Tailscale` 找。用户装到 `D:\软件\Tailscale`（带中文）⇒ 找不到
     // ⇒ detect 判「没装」⇒ 向导又下载又安装 ⇒ 装完还是找不到（可能死循环）。
-    // 讽刺之处：路径选择框是 MAM 自己弹出来的，用户照做之后 MAM 就瞎了。
+    // 讽刺之处：路径选择框是 兔维斯 自己弹出来的，用户照做之后 兔维斯 就瞎了。
     //
     // **治本判据**：服务登记 `HKLM\SYSTEM\CurrentControlSet\Services\Tailscale\ImagePath`
     // 指向**真实安装位置**，与盘符/目录名/中文都无关。**为什么选注册表而不是 `sc qc`**：
@@ -4276,7 +4276,7 @@ mod tests {
     }
 
     /// B-I6 **变异锚点**：探针判据从「拿到**任意** HTTP 响应即算通」收紧为「响应带
-    /// **MAM 特征**」——TUN / 透明重定向式 MITM 返回的拦截页（用户把自签 CA 装进系统
+    /// **兔维斯 特征**」——TUN / 透明重定向式 MITM 返回的拦截页（用户把自签 CA 装进系统
     /// 信任库时 TLS 仍"成功"）必须判失败。§C3 的事故正是「本地信号全绿」型误判。
     /// 变异自证：把 `mam_response_ok` 改回「只看状态码/只看能否拿到响应」→ 本测试必红。
     #[test]
@@ -4286,15 +4286,15 @@ mod tests {
         // 判据层真值表
         assert!(
             mam_response_ok(200, Some(marker)).is_ok(),
-            "200 + MAM 特征头 = 通"
+            "200 + 兔维斯 特征头 = 通"
         );
         assert!(
             mam_response_ok(200, None).is_err(),
-            "无特征头 = 不是 MAM 答的"
+            "无特征头 = 不是 兔维斯 答的"
         );
         assert!(
             mam_response_ok(200, Some("nginx/1.25")).is_err(),
-            "外来特征值同样不是 MAM 答的"
+            "外来特征值同样不是 兔维斯 答的"
         );
         assert!(
             mam_response_ok(403, Some(marker)).is_err(),
@@ -4309,7 +4309,7 @@ mod tests {
             matches!(r, Reachability::Failed { .. }),
             "拦截页不得判可用（§C3 残余风险）: {r:?}"
         );
-        // 真 MAM 特征 → 通（成功路径不受影响）
+        // 真 兔维斯 特征 → 通（成功路径不受影响）
         set_http_probe_override(Some(Box::new(|_h, _ip| mam_response_ok(200, Some(marker)))));
         assert_eq!(
             verify_reachability("a.ts.net", &|_h| Ok(vec!["203.0.113.10".into()])),
@@ -4433,14 +4433,14 @@ mod tests {
         *DESIRED.lock().unwrap() = None;
         set_ts_snapshot(|s| {
             s.running = false;
-            s.error = Some("检测到非 MAM 的 serve 配置".into());
+            s.error = Some("检测到非 兔维斯 的 serve 配置".into());
         });
         let mut d = DESIRED.lock().unwrap();
         assert!(retire_if_still_off(&mut d), "确实还关着 → 可以退役");
         drop(d);
         assert_eq!(
             ts_snapshot().error.as_deref(),
-            Some("检测到非 MAM 的 serve 配置"),
+            Some("检测到非 兔维斯 的 serve 配置"),
             "调用方写入的诊断（守卫拒绝/CLI 失败）不得被退役清零擦掉"
         );
         teardown_globals();
@@ -4654,7 +4654,7 @@ mod tests {
     }"#;
 
     /// 实测形态（真机重启 T+73s）：tailscaled 把 Funnel 配置**逐字段原样恢复**——
-    /// MAM 什么都不必做，更不该重开。
+    /// 兔维斯 什么都不必做，更不该重开。
     const FUNNEL_RESTORED_AFTER_REBOOT: &str = r#"{"Web":{"jarvismac-mini.example-tailnet.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:9420"}}}}}"#;
 
     /// 记录 CLI 调用的替身（逐命令应答，便于断言"哪条命令**没有**被发出"）
@@ -5279,10 +5279,10 @@ mod tests {
     // 判据必须可证（不编判据）：
     //  ① 开机恢复 = 后端初始化窗口（W-A 已埋点：见过 `NoState/Starting` → 首个 Running
     //     后 3 分钟宽限窗内"解析得到但连不通"）；
-    //  ② 重新开通 = **本进程内 MAM 自己执行过 `funnel reset`**（`disable_funnel` 是
+    //  ② 重新开通 = **本进程内 兔维斯 自己执行过 `funnel reset`**（`disable_funnel` 是
     //     reset 的唯一调用点，故这个事实可证），且验过（Verified）后翻页；
     //  ③ 其余（默认）= 记录尚未发布：文案**两界都给**（首次实测 5–6 分钟 / 此前开通过
-    //     通常 1 分钟内）——"是不是首次"在「MAM 关着时被人手动 reset」的情形下无法证实，
+    //     通常 1 分钟内）——"是不是首次"在「兔维斯 关着时被人手动 reset」的情形下无法证实，
     //     宁可给区间也不编判据。
     // ============================================================
 
@@ -5347,7 +5347,7 @@ mod tests {
         );
         assert!(
             first.contains("1 分钟"),
-            "同时给出「此前开通过」的下界（MAM 关着时被手动 reset 的情形无法证实，给区间不编判据）: {first}"
+            "同时给出「此前开通过」的下界（兔维斯 关着时被手动 reset 的情形无法证实，给区间不编判据）: {first}"
         );
         assert!(
             again.contains("重新开通") && again.contains("1 分钟"),

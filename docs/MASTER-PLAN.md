@@ -1,4 +1,6 @@
-# MAM 远程接入与操控平台 · 总需求说明书（项目宪法）
+# 兔维斯（Tuvis）远程接入与操控平台 · 总需求说明书（项目宪法）
+
+> **品牌更名（2026-10）**：项目原名 "MAM"（MultiAgents-Manager），经用户裁决更名为 **兔维斯（Tuvis）**，数据目录同步由 `~/.mam` 迁移为 `~/.tuvis`；本文及下位文档中的"兔维斯"均指同一项目。
 
 > **文档地位**：本文档是本项目最高权威设计依据（"项目宪法"）。任何设计文档、实现、任务列表、spec 与本文档冲突时，一律以本文档为准。**未经用户在场明确同意，任何人（含任何 AI agent）不得修改本文档**；发现冲突时应停下向用户报告，由用户裁决改宪法还是改实现。
 > 版本：v1.0（2026-09-09）· 依据：《手机端远程访问技术路线调研》（research/ 根目录，判定 A–F）与用户对账结论。
@@ -8,7 +10,7 @@
 
 ## 0. 总目标与分期
 
-把 MAM 从"桌面监控看板"升级为**多 Agent 统一远程接入与操控平台**：手机/外部浏览器经安全通道接入本机 MAM，实现跨互联网的会话监控、消息提醒、消息注入、会话操控，最终支持**任务在无头端/手机端/桌面端、以及不同 harness 之间流转**。
+把 兔维斯 从"桌面监控看板"升级为**多 Agent 统一远程接入与操控平台**：手机/外部浏览器经安全通道接入本机 兔维斯，实现跨互联网的会话监控、消息提醒、消息注入、会话操控，最终支持**任务在无头端/手机端/桌面端、以及不同 harness 之间流转**。
 
 | 期 | 主题 | 能力等级 | 一句话 |
 |---|---|---|---|
@@ -18,7 +20,7 @@
 
 **分期递进原则**：只读 → 白名单消息 → 受控操控，每次扩权独立设计评审；token 门禁覆盖一切端点；通道只是入口不是信任边界。
 
-**竞品对标（2026-09-12 复核）**：ChatGPT App 已把 Codex 单工具做到"等级 3"（全线程管理/审批/切模型/看 diff/推送，openai.com/index/work-with-codex-from-anywhere）；ZCode 仍为"扫码远控 + Bot Channel"双轨（远控页无切模型、无设备管理、单设备连接）。MAM 的差异化 = 多工具统一（八工具）、跨 harness 任务流转（社区空白带）、已开窗口会话的管理（上述产品均只管自家实例）。
+**竞品对标（2026-09-12 复核）**：ChatGPT App 已把 Codex 单工具做到"等级 3"（全线程管理/审批/切模型/看 diff/推送，openai.com/index/work-with-codex-from-anywhere）；ZCode 仍为"扫码远控 + Bot Channel"双轨（远控页无切模型、无设备管理、单设备连接）。兔维斯 的差异化 = 多工具统一（八工具）、跨 harness 任务流转（社区空白带）、已开窗口会话的管理（上述产品均只管自家实例）。
 
 ## 0.1 贯穿三期的共用底座
 
@@ -80,7 +82,7 @@
 | F2.4 | Claude/Codex/Kimi 无头通道 | `claude -p --resume --output-format stream-json` / `codex exec`·app-server / `kimi -p -S <id>`；AionCore 进程管理骨架（Spawner trait、进程注册表、空闲挂起、版本门控） |
 | F2.5 | 注入路由表 | 会话宿主 → 通道映射（tmux/iTerm/Terminal/ZCode 无头/通用无头），有头可见性预期标注 |
 | F2.6 | 移动端发消息 | 会话详情页输入框 + 队列状态指示 + 发送回执 |
-| F2.7 | 会话流转 v1 | `session.export`：规则摘要 + 模板渲染 → `~/.mam/handoffs/`（HANDOFF.md 格式见 §4.2） |
+| F2.7 | 会话流转 v1 | `session.export`：规则摘要 + 模板渲染 → `~/.tuvis/handoffs/`（HANDOFF.md 格式见 §4.2） |
 | F2.8 | keystroke 应急预案（文档级） | AppleScript keystroke/accessibility 作为"不承诺、不默认"的应急手段记录在案，非正式功能 |
 | F2.9 | 审批应答（TUI 会话） | 等待用户输入且解析器识别为审批提示时，推送结构化选项卡；选择后注入对应按键（每 CLI 按键映射表一次探测入库 + 版本探针，见 D12） |
 | F2.10 | 写操作审计 | 注入/无头驱动逐条记录（设备、时间、目标会话、内容摘要）入 SQLite 审计表 |
@@ -103,8 +105,8 @@
 | F3.2 | 完整对话界面 | 读渲染（一期基座）+ 写注入（二期基座）→ 移动端聊天体验，含流式 |
 | F3.3 | 协议客户端矩阵 | ZCode Protocol（session/send/setModel/setMode/events）、codex app-server（thread/start·resume·turn/start；先 generate-json-schema）、ACP（SDK 2.0.0，收编多数 CLI 工具）；全部带版本门控+探针+降级；**审批事件原生化**（app-server 审批 / ACP request_permission → 移动端审批卡，D12 第一层）。**参考实现：happy（slopus/happy，MIT）**——claude SDK 托管（canUseTool 审批应答 / setPermissionMode 编程切档）+ codex app-server JSON-RPC + ACP 三路先行，其审批/问答/plan 交互 UI 与状态机、统一模式枚举+各工具映射、兜底渲染原则可整段借鉴（2026-09-21 用户同意点名；调研归档 `research/refs/phase2-消息注入/2026-09-21-happy项目审批与模式切换调研.md`） |
 | F3.4 | 会话切换/跳转 | 会话列表 + "回电脑后点哪张卡"的远程跳转指引（复用现有聚焦/深链） |
-| F3.5 | 配置代理 | 模型/MCP/skill 配置的移动端读写（MAM 已有全部配置写能力，暴露到移动 API） |
-| F3.6 | 设置直达 | 按工具降级：深度链接 → MAM 代理配置 |
+| F3.5 | 配置代理 | 模型/MCP/skill 配置的移动端读写（兔维斯 已有全部配置写能力，暴露到移动 API） |
+| F3.6 | 设置直达 | 按工具降级：深度链接 → 兔维斯 代理配置 |
 | F3.7 | 会话流转 v2 | ImportService：同 cwd 目标会话选择 → 投递（注入/无头/attach 路由）→ 首轮确认回执；跨 harness 闭环 |
 | F3.8 | 工作区在册感知 | 各 harness 在册工作区判定（ZCode=recentProjects；其余待查）→ 有头可见性预期管理 |
 | F3.9 | （可选，另行立项）原生 APP | 复用移动 API（token+REST+SSE），PWA 不满足需求时启动 |
@@ -138,8 +140,8 @@
 | F2.2 队列 | 注入请求 + 会话当前状态（Watcher 提供） | 状态黄：入队（SQLite 队列表，含设备花名/时间戳）；回到可输入态：逐条 flush〔D19〕；移动端可查队列/撤回未发 |
 | F2.3 ZCode 无头 | session_id + 文本；工作区在册校验 | spawn `zcode --resume <id> --prompt <text> --cwd <项目> --json`；stdout 的 sessionId/turn 结果回执；副作用=db.sqlite 追加消息（同会话，判定 A） |
 | F2.4 通用无头 | session_id + 文本 | 对应 CLI 无头进程一次 turn；回执=末条 assistant 消息 + token 用量；进程按 AionCore 骨架管理（挂起/重生） |
-| F2.5 路由表 | 会话的宿主形态（MAM 已区分 CLI/APP/终端类型） | 通道决策 + 有头可见性预期（实时/刷新后/不可见）返回给移动端展示 |
-| F2.7 导出 | 会话卡"交接"按钮（选择：规则摘要 or LLM 摘要） | `~/.mam/handoffs/<ts>-<from>-<to>-<项目>.md`（HANDOFF v0 格式）+ 索引表登记 |
+| F2.5 路由表 | 会话的宿主形态（兔维斯 已区分 CLI/APP/终端类型） | 通道决策 + 有头可见性预期（实时/刷新后/不可见）返回给移动端展示 |
+| F2.7 导出 | 会话卡"交接"按钮（选择：规则摘要 or LLM 摘要） | `~/.tuvis/handoffs/<ts>-<from>-<to>-<项目>.md`（HANDOFF v0 格式）+ 索引表登记 |
 | F2.11 新建会话 | `/m/api/session-create`（tool、projectPath、firstMessage?） | 起终端（裸命令+DISABLE_AUTOUPDATER=1）→ 屏读锚点处置弹窗 → 首句注入（发起设备签名）→ 新会话文件物化；回执 taskId → phase 流转 → sessionId；审计 create/dialog/send 三类行 |
 
 ### 2.3 三期
@@ -174,12 +176,12 @@
 
 ### 3.(b) 选型依据
 
-- **axum**：tokio 生态第一公民（MAM 已依赖 tokio full）；tower middleware 天然适合门禁层；类型安全。社区/dsh 生态同类实现均为现代 async 框架。
+- **axum**：tokio 生态第一公民（兔维斯 已依赖 tokio full）；tower middleware 天然适合门禁层；类型安全。社区/dsh 生态同类实现均为现代 async 框架。
 - **rust-embed**：Tauri 打包单二进制的自然选择，移动页面随应用分发无外部文件依赖。
 - **SSE 而非 WebSocket**：单向推送场景（状态跃迁）SSE 足够；自动重连内建；dsh 生态实测隧道对 SSE 偶有不透传→轮询降级兜底即可，不需要 WS 的双向复杂度（写操作是低频 POST）。
 - **自研配对移植而非现成 auth 库**：需求特殊（一次性配对码语义），dsh 状态机语义已被生态验证且 Apache-2.0 可抄，比套 JWT/OAuth 更小更可控。
 - **cloudflared 子进程**：生态 104 插件验证的主流路径；免账号 quick tunnel 是"其他用户零配置"的唯一成熟解。
-- **终端注入三件套**：各自终端的唯一官方远程写入 API；MAM 已有定位链路，边际成本最小。
+- **终端注入三件套**：各自终端的唯一官方远程写入 API；兔维斯 已有定位链路，边际成本最小。
 - **无头通道用官方 CLI**：唯一不破版权/逆向风险的路；AionCore 已验证可行性与坑清单。
 - **协议客户端三期才做**：非公开 API 的维护成本高（版本门控+探针），只在注入通道覆盖不了时引入（能力补全：setModel/events 流）。
 
@@ -199,8 +201,8 @@
 | D10 | **固定地址优先**：有公网域名的用户一律固定地址（直连反代 / named tunnel）；quick tunnel 仅作无域名用户的临时入口，UI 明示地址漂移并引导升级 | 2026-09-12 |
 | D11 | **配对模型双模**：审批配对（默认——新设备需桌面端批准或输入桌面显示的 4 位确认码，固定地址不再是秘密、批准才是）+ 直通配对（可选，dsh 式一次性二维码）；设备 cookie 有效期 180 天；设备满员（默认 3）需手动腾位，不静默淘汰 | 2026-09-12 |
 | D12 | **审批通道两层**：协议原生优先（Claude control 通道 / codex app-server 审批事件 / ACP request_permission / OpenCode API，三期随协议矩阵接入）；已开 TUI 会话用注入应答（机制通用，按键映射每 CLI 一次探测入库+版本探针，二期）；一期只做"等待用户"通知 | 2026-09-12 |
-| D13 | **电源策略**：远程开启时 MAM 持有系统电源锁（macOS caffeinate / Windows SetThreadExecutionState；阻止系统+磁盘休眠，显示器可睡；Windows 可代设电源计划的硬盘休眠项），开关默认开；界面明示合盖/电池限制 | 2026-09-12 |
-| D14 | **dsh（DeepSeek harness）纳入第八受管工具**：一期只读监控（读其 storages/sessions；它本身是本地 web 架构，读其 HTTP API 亦可评估），写通道视其 web API/插件生态另评。**2026-09-14 用户裁决补充**：Skill 符号链接管理（写 `~/.dsh/skills`）纳入一期——属 MAM 资源管理能力而非消息写通道；未读语义对齐全工具口径（红/blocked 不挂角标，绿卡走通用未读池） | 2026-09-12（09-14 补裁决） |
+| D13 | **电源策略**：远程开启时 兔维斯 持有系统电源锁（macOS caffeinate / Windows SetThreadExecutionState；阻止系统+磁盘休眠，显示器可睡；Windows 可代设电源计划的硬盘休眠项），开关默认开；界面明示合盖/电池限制 | 2026-09-12 |
+| D14 | **dsh（DeepSeek harness）纳入第八受管工具**：一期只读监控（读其 storages/sessions；它本身是本地 web 架构，读其 HTTP API 亦可评估），写通道视其 web API/插件生态另评。**2026-09-14 用户裁决补充**：Skill 符号链接管理（写 `~/.dsh/skills`）纳入一期——属 兔维斯 资源管理能力而非消息写通道；未读语义对齐全工具口径（红/blocked 不挂角标，绿卡走通用未读池） | 2026-09-12（09-14 补裁决） |
 | D15 | **移动端交付形态**：网页版 + 推送网关为一期主体。**2026-09-15 用户修订：APK 壳（Capacitor 壳 + 内置长连接推送 + 通知点击直达）移至二期收尾**。**2026-09-18 用户再修订：APK 壳与推送网关（D17）一并移至三期收尾**——网页版体验已足够好，套壳与系统级推送不紧急；原「二期触发条件」条款作废；原则不变：链路做稳，套壳收尾 | 2026-09-12（09-15/09-18 修订） |
 | D16 | **远期路线 · 桌面大操作台套壳回 Tauri**（三期后评估）：当三期「会话在智能体之间流转」（F3.7）落地且功能逐步完善后，把电脑端的整体控制交互面板套壳回 Tauri 体系——默认轻量化入口仍是消息看板（现有主窗），特殊通道（快捷键/托盘/设置入口）打开**大看板操作台**（完整操控面板，复用远程 Web 面板套壳集成）。在此之前桌面主窗维持现状 | 2026-09-15 |
 | D17 | **系统级推送移期**：F1.6 推送网关（Bark/ntfy，页面关时的系统通知出口）原移至二期。**2026-09-18 用户再修订：随 APK 壳（D15）一并移至三期收尾**——网页版体验已足够好，系统级推送不紧急；页面开着的实时提醒已由 F1.5 SSE（M3 交付）覆盖；一期验收「2s 内收到提醒」以页面开时的 SSE 提醒为口径。移动端构建分包（manualChunks）同批随 APK 计入三期收尾 | 2026-09-16（09-18 修订） |
@@ -293,15 +295,15 @@
 
 **载体**：HANDOFF.md（v1 九段式：Objective/Work Completed/Current State/Decisions & Rationale/Next Steps/Environment & File Context/Session Log/Smart Defaults/Verification Steps + 原始会话指引），格式基线 = qdhenry/Claude-Command-Suite handoff 命令模板（社区最成熟，与本仓库 `.handoff/日期-handoff.md` 实践命名独立撞车）+ Claude `/export`（原文附录）`/compact`（聚焦摘要）语义。
 
-**双路径**：**内容式交接**（跨 harness 主路径，HANDOFF.md 携带语义）与**指针式交接**（同 harness 快路径，仅携带会话标识+恢复方式，如 `--resume <id>`、OpenClaw versioned handoff——无损）；MAM 路由规则：同 harness 优先指针式，跨 harness 走内容式，两者可叠加。流转状态字段采用 A2A 式状态机（9 态、终态封闭、contextId 聚合）。
+**双路径**：**内容式交接**（跨 harness 主路径，HANDOFF.md 携带语义）与**指针式交接**（同 harness 快路径，仅携带会话标识+恢复方式，如 `--resume <id>`、OpenClaw versioned handoff——无损）；兔维斯 路由规则：同 harness 优先指针式，跨 harness 走内容式，两者可叠加。流转状态字段采用 A2A 式状态机（9 态、终态封闭、contextId 聚合）。
 
 **导入**：按目标工具能力路由——注入"读取 handoff 并继续"（qdhenry handoff-continue 同模式）、`--attach`（zcode CLI 已验证）、@文件 引用。
 
-**SSOT 原则**：MAM 自有 DB 只做缓存索引，各 harness 原始会话文件永远是事实源（codex 索引滞后教训，openai/codex#28259）。
+**SSOT 原则**：兔维斯 自有 DB 只做缓存索引，各 harness 原始会话文件永远是事实源（codex 索引滞后教训，openai/codex#28259）。
 
 ### 4.(c) 系统设计需求
 
-六件套：**HandoffStore**（`~/.mam/handoffs/` + 索引表 + 审计）、**ExportService**（全量读→摘要→模板，双档规则/LLM）、**ImportService**（目标选择→投递→首轮确认回执）、**工作区在册感知**（有头可见性预期）、**触发与 UI**（手动交接按钮 + 自动规则）、**可选自动化 watcher**。依赖关系见 §5 基座矩阵——Export 的读取基座=一期 F1.4，LLM 摘要执行器与 Import 的投递通道=二期 F2.1–F2.5。
+六件套：**HandoffStore**（`~/.tuvis/handoffs/` + 索引表 + 审计）、**ExportService**（全量读→摘要→模板，双档规则/LLM）、**ImportService**（目标选择→投递→首轮确认回执）、**工作区在册感知**（有头可见性预期）、**触发与 UI**（手动交接按钮 + 自动规则）、**可选自动化 watcher**。依赖关系见 §5 基座矩阵——Export 的读取基座=一期 F1.4，LLM 摘要执行器与 Import 的投递通道=二期 F2.1–F2.5。
 
 ---
 
@@ -327,14 +329,14 @@
 
 - **一期**：外网手机扫码→看到八工具会话状态与内容；杀掉一个 agent 会话状态跃迁→手机 2s 内收到提醒；配对码刷新旧码失效；"停止远程"后所有设备 403；quick tunnel 断网自动恢复。（2026-09-15：APK 验收项随 D15 修订移出；2026-09-16：页面关系统推送随 D17 移出，"2s 提醒"以页面开时 SSE 为验收口径；2026-09-18：二者随 D15/D17 再修订最终移至三期收尾）
 - **二期**：手机对 tmux/iTerm2/Terminal 里的会话发消息→终端出现 `[mobile]` 标记输入；黄状态消息排队、回到可输入态 flush〔D19〕；对 ZCode 在册会话无头发消息→桌面刷新后可见（判定 F 复现）；导出 HANDOFF.md 人可读、agent 可续；Windows 终端注入同口径实机复验（D18）。
-- **三期**：移动端切换 Claude Code 模型生效；移动端与 ZCode 会话流式对话；HANDOFF 从 ZCode 会话导出→导入到同 cwd 的 Claude 会话→首轮确认回执；协议探针失败时降级路径可用；**三期收尾（2026-09-18 D15/D17 再修订移入）**：页面关系统推送到达（Bark/ntfy，华为机实测）+ APK 在华为机收到 MAM 自有通知并点击直达会话。
+- **三期**：移动端切换 Claude Code 模型生效；移动端与 ZCode 会话流式对话；HANDOFF 从 ZCode 会话导出→导入到同 cwd 的 Claude 会话→首轮确认回执；协议探针失败时降级路径可用；**三期收尾（2026-09-18 D15/D17 再修订移入）**：页面关系统推送到达（Bark/ntfy，华为机实测）+ APK 在华为机收到 兔维斯 自有通知并点击直达会话。
 
 ### 5.(c) 横切原则（宪法条款）
 
 1. 安全递进：只读→白名单消息→受控操控；每次扩权独立评审；token 门禁覆盖一切端点
 2. 通道无关：功能不绑定网络通道，四模式等价
 3. 能力差异显式化：按工具支持矩阵降级呈现，不假装统一（矩阵见 research/README 与流转调研）
-4. MAM 渲染为默认可视化：桌面宿主 UI 不可见的会话 MAM 必须能看
+4. 兔维斯 渲染为默认可视化：桌面宿主 UI 不可见的会话 兔维斯 必须能看
 5. 桌面体验不回退：新增能力不得影响现有监控/通知/资源管理
 6. 版本漂移受控：无头/协议通道均非公开稳定 API，实现必须带版本门控+探针+降级
 7. 文档权威：本文档最高；修改需用户在场明确同意；冲突时停下报告

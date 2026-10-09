@@ -1,7 +1,7 @@
 // 升级传输层（prerelease 渠道，2026-10-07 设计定案）：
 // - 检查：Rust 侧 GitHub Releases 发现层（semver 挑最大，含 prerelease）
 // - 安装：Rust 侧动态端点 + tauri-plugin-updater（签名校验与平台行为不变）
-// - 进度：mam-updater-progress 事件广播（安装中 Windows 由插件退出进程、
+// - 进度：tuvis-updater-progress 事件广播（安装中 Windows 由插件退出进程、
 //   macOS 由 Rust 重启，invoke 的 resolve 仅在失败/非重启路径有意义）
 // 浏览器/Playwright 渲染走 tauri-mock.ts 的同名 case。
 import { invoke } from "@tauri-apps/api/core";
@@ -52,7 +52,7 @@ export async function downloadAndInstall(
   onProgress?: (progress: UpdateProgress) => void
 ): Promise<{ ok: boolean; message?: string }> {
   const unlisten: UnlistenFn = await listen<ProgressEventPayload>(
-    "mam-updater-progress",
+    "tuvis-updater-progress",
     (event) => {
       onProgress?.({
         event: event.payload.event,

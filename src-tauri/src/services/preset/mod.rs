@@ -16,13 +16,13 @@ pub struct ApplyResult {
     pub conflicts: Vec<String>,
     /// 本次被暂存的原生技能名
     pub stashed: Vec<String>,
-    /// 本次被停用的 MAM 资源 extension_id
+    /// 本次被停用的 兔维斯 资源 extension_id
     pub disabled: Vec<String>,
     /// 预设原生技能项从暂存区接回的名（ensure-present 语义）
     pub restored_native: Vec<String>,
 }
 
-/// 统一的 MAM 资源启停分派（DRY，缺口表 #28 / Minor#7）：apply_preset 与
+/// 统一的 兔维斯 资源启停分派（DRY，缺口表 #28 / Minor#7）：apply_preset 与
 /// restore_tool 里三处按 kind 路由 enable/disable 的 match 块收敛到此。
 /// name = extension_id 剥掉 "<kind>-" 前缀（无前缀则原样）；plugin 的子类型
 /// 参数取 extensions.tags（历史约定），缺省 "file"。未知 kind 返回 Err——
@@ -102,7 +102,7 @@ pub fn apply_preset(preset_id: &str, tool_id: &str) -> Result<ApplyResult, Strin
     result.stashed = stashed;
     result.failures.extend(sweep_failures);
 
-    // 4) 启用预设项：MAM 走既有服务；原生技能 = 确保在场（spec §3.3）
+    // 4) 启用预设项：兔维斯 走既有服务；原生技能 = 确保在场（spec §3.3）
     for (ext_id, kind) in &apply_items {
         let name = ext_id.strip_prefix(&format!("{}-", kind)).unwrap_or(ext_id);
         let is_native_item = kind == "skill"
@@ -166,7 +166,7 @@ pub struct ApplyPreview {
     pub to_enable: Vec<String>,
     /// 被专属绑定过滤的项 "id: 原因"
     pub filtered: Vec<String>,
-    /// 将停用的 MAM 资源 extension_id
+    /// 将停用的 兔维斯 资源 extension_id
     pub to_disable: Vec<String>,
     /// 将暂存的原生技能名
     pub to_stash: Vec<String>,
@@ -232,7 +232,7 @@ pub fn restore_tool(tool_id: &str) -> Result<RestoreResult, String> {
     out.restored_native = restored_native;
     out.conflicts = conflicts;
 
-    // 2) MAM 资源精确重建到基底集合（spec §5.2 步骤3）：
+    // 2) 兔维斯 资源精确重建到基底集合（spec §5.2 步骤3）：
     //    快照 mam 集 = 目标；当前 enabled 集 = 现状；差异双向处理
     let target: Vec<(String, String)> = base_items
         .iter()
@@ -507,7 +507,7 @@ pub struct PresetHealth {
     pub stash_pending: Vec<crate::database::StashEntryRecord>,
     /// 账本-磁盘漂移（scan_drift，L1-L4）
     pub drift: Vec<crate::services::resource::reconcile::DriftItem>,
-    /// 空目录（wave33 Item 2）：MAM 仓库与启用工具 skill 目录中的可清理空目录
+    /// 空目录（wave33 Item 2）：兔维斯 仓库与启用工具 skill 目录中的可清理空目录
     pub empty_dirs: Vec<crate::services::resource::reconcile::EmptyDirItem>,
 }
 

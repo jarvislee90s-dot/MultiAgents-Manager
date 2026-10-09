@@ -512,7 +512,7 @@ describe("UsageStatusSection 导出与打开所在目录（Task 24）", () => {
   });
 
   // I2：`export.rs` 明文「定位失败只 warn——文件已落盘，定位失败不该让导出算失败」。
-  // 开发机设了 `MAM_HOME` 时白名单必然拒绝（`exports_dir()` 认 `MAM_HOME`，白名单只认 home/.mam）
+  // 开发机设了 `TUVIS_HOME` 时白名单必然拒绝（`exports_dir()` 认 `TUVIS_HOME`，白名单只认 home/.tuvis）
   // → 这一支在验收环境里**会真的发生**，误报「导出失败」会直接把用户带偏。
   it("落盘成功 + reveal 失败 → **不**报导出失败，路径仍显示，只提示未能自动打开目录", async () => {
     invokeMock.mockImplementation(async (cmd: string) => {

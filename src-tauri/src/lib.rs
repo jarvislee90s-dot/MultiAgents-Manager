@@ -59,13 +59,13 @@ fn refresh_tray(
 pub fn run() {
     // 日志**写文件**而非 stderr（2026-10-03 终端污染事故）：debug exe 以分离方式
     // 启动时没有自己的控制台，AttachConsole 读屏/注入期间其它线程的 stderr 写入
-    // 会落进**被附加的外部终端**（活体实证：claude TUI 表单行被 MAM WARN 日志
-    // 覆盖 → 屏读解析失败 → 自由作答中止）。写 ~/.mam/logs/mam.log 彻底杜绝，
+    // 会落进**被附加的外部终端**（活体实证：claude TUI 表单行被 兔维斯 WARN 日志
+    // 覆盖 → 屏读解析失败 → 自由作答中止）。写 ~/.tuvis/logs/mam.log 彻底杜绝，
     // 且日志可回查。文件打不开（权限等）→ 回落 stderr（旧行为）。
     let mut builder =
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
     let opened = dirs::home_dir().and_then(|h| {
-        let dir = h.join(".mam").join("logs");
+        let dir = h.join(".tuvis").join("logs");
         let _ = std::fs::create_dir_all(&dir);
         let log = dir.join("mam.log");
         // **5MB 轮转**（评审 M4）：info 级每轮扫描都有行，无上限会无限膨胀——
@@ -89,7 +89,7 @@ pub fn run() {
     };
     // **panic 消息也写日志文件**（评审 M3）：默认 panic hook 写 stderr，AttachConsole
     // 竞态下同样会污染外部终端。包一层：先落文件再交还原 hook。
-    let panic_target = dirs::home_dir().map(|h| h.join(".mam").join("logs").join("mam.log"));
+    let panic_target = dirs::home_dir().map(|h| h.join(".tuvis").join("logs").join("mam.log"));
     // 默认 hook 在**非 panicking 时**先取下保存——hook 内调用 take_hook 在新版
     // Rust 会 panic（cannot modify the panic hook from a panicking thread），
     // 递归 panic 直接 abort 且吞掉真实错误（12:47 启动实录）
@@ -346,7 +346,7 @@ pub(crate) fn exit_cleanup() {
     crate::remote::tailscale::stop_all();
     // I1（2026-10-08 架构评审）：`tailscale login` 的等待者**不是通道**，
     // stop_all 收不到它——它是本模块唯一长期存在的子进程（`--timeout 15s` 有界，
-    // 但 15 秒内 MAM 退出就是一个孤儿进程）。kill + wait 收掉；并进
+    // 但 15 秒内 兔维斯 退出就是一个孤儿进程）。kill + wait 收掉；并进
     // exit_cleanup 后升级安装路径（on_before_exit）同样不孤儿化它。
     crate::remote::tailscale::cancel_login_attempt();
     crate::remote::power::release();

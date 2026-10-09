@@ -200,9 +200,9 @@ pub fn device_cookie(device_id: &str) -> String {
     )
 }
 
-/// 设备存储注入缝：生产走全局 DB，测试注入内存库（绝不写真实 ~/.mam）
+/// 设备存储注入缝：生产走全局 DB，测试注入内存库（绝不写真实 ~/.tuvis）
 pub enum DeviceStore {
-    /// 生产：全局 `~/.mam/mam.db`（`crate::database::connection::DB`）
+    /// 生产：全局 `~/.tuvis/tuvis.db`（`crate::database::connection::DB`）
     Global,
     /// 测试：注入自建库（内存库，绝不落盘真实数据目录）
     Owned(std::sync::Arc<std::sync::Mutex<rusqlite::Connection>>),

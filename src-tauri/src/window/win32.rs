@@ -90,7 +90,7 @@ fn normalize_title_for_project(title: &str) -> String {
 /// 跳转消歧的会话侧身份线索包（由 focus_session IPC 透传组装）。
 /// 收拢为结构体避免 resolve_and_focus 参数超过 clippy too_many_arguments 阈值（7）
 pub struct JumpHints<'a> {
-    /// 跳转前按需注入（inject_marker_on_demand）贴入的标题标记（如 "MAM:1ba8e2f7"）
+    /// 跳转前按需注入（inject_marker_on_demand）贴入的标题标记（如 "TUVIS:1ba8e2f7"）
     pub session_marker: Option<&'a str>,
     /// 工具 id 小写（"kimi"/"opencode"…），认领判定与打分用
     pub agent_keyword: Option<&'a str>,
@@ -715,16 +715,16 @@ pub fn focus_hwnd(hwnd_val: isize) -> Result<(), String> {
     }
 }
 
-/// spawn mam-marker helper（helper 在场检查 + CREATE_NO_WINDOW 防闪窗 + null
+/// spawn tuvis-marker helper（helper 在场检查 + CREATE_NO_WINDOW 防闪窗 + null
 /// stdio）。返回是否成功派发：helper 缺失（未随包分发/被清理，合法状态）或
 /// spawn 失败（如 AV 拦截执行）均静默 false，调用方自行决定是否回落
 fn spawn_marker_helper(args: &[&str]) -> bool {
     use std::os::windows::process::CommandExt;
     let helper = dirs::home_dir()
         .unwrap_or_default()
-        .join(".mam")
+        .join(".tuvis")
         .join("bin")
-        .join("mam-marker.exe");
+        .join("tuvis-marker.exe");
     if !helper.is_file() {
         return false;
     }

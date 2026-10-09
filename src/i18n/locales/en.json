@@ -422,7 +422,7 @@
       "cleanConfirm": "Delete all attachments of this project? The whole folder will be removed and cannot be recovered",
       "cleaned": "Cleaned",
       "overThreshold": "Large usage, consider cleaning",
-      "hint": "Attachments = images/docs uploaded from mobile messages, stored in each project's .mam-attachments/<session>/ (locally git-excluded)",
+      "hint": "Attachments = images/docs uploaded from mobile messages, stored in each project's .tuvis-attachments/<session>/ (locally git-excluded)",
       "loadError": "Failed to load data management list, please refresh"
     },
     "usageStatus": {
@@ -605,12 +605,12 @@
     "openMcpConfig": "Open {{tool}}'s MCP config file",
     "migration": {
       "title": "Legacy skill links detected",
-      "description": "Found {{n}} legacy links in the shared folder ~/.agents/skills that were created by Tuvis and point to the codex activation directory (~/.mam/active/codex). Choose how to handle them:",
+      "description": "Found {{n}} legacy links in the shared folder ~/.agents/skills that were created by Tuvis and point to the codex activation directory (~/.tuvis/active/codex). Choose how to handle them:",
       "listTitle": "Affected skills",
       "migrateBtn": "Migrate to .codex/skills",
       "migrateDesc": "The codex private folder (~/.codex/skills) takes over these links; enable/disable states in Tuvis stay unchanged and the shared folder becomes clean again.",
       "keepBtn": "Keep as shared",
-      "keepDesc": "Links are re-pointed to the Tuvis shared repository (~/.mam/skills), decoupled from codex enable/disable, and keep serving un-adapted tools that read the shared folder.",
+      "keepDesc": "Links are re-pointed to the Tuvis shared repository (~/.tuvis/skills), decoupled from codex enable/disable, and keep serving un-adapted tools that read the shared folder.",
       "cancel": "Not now",
       "resultTitle": "Results",
       "statusOk": "OK",

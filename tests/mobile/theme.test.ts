@@ -51,13 +51,13 @@ afterEach(() => {
 describe("mobile theme：getInitialTheme 优先级", () => {
   it("localStorage saved 优先于 matchMedia：saved=light + 系统非浅色 → light", () => {
     installMatchMedia(false);
-    localStorage.setItem("mam-theme", "light");
+    localStorage.setItem("tuvis-theme", "light");
     expect(getInitialTheme()).toBe("light");
   });
 
   it("localStorage saved 优先于 matchMedia：saved=dark + 系统浅色 → dark", () => {
     installMatchMedia(true);
-    localStorage.setItem("mam-theme", "dark");
+    localStorage.setItem("tuvis-theme", "dark");
     expect(getInitialTheme()).toBe("dark");
   });
 
@@ -80,7 +80,7 @@ describe("mobile theme：getInitialTheme 优先级", () => {
 
   it("saved 非法值（既非 light 也非 dark）：按无 saved 处理", () => {
     installMatchMedia(true);
-    localStorage.setItem("mam-theme", "blue");
+    localStorage.setItem("tuvis-theme", "blue");
     expect(getInitialTheme()).toBe("light");
   });
 
@@ -95,17 +95,17 @@ describe("mobile theme：getInitialTheme 优先级", () => {
 });
 
 describe("mobile theme：toggleTheme 翻转 + 持久化 + 类切换", () => {
-  it("当前 dark → 翻转为 light：写 mam-theme=light 且移除 documentElement.dark 类", () => {
+  it("当前 dark → 翻转为 light：写 tuvis-theme=light 且移除 documentElement.dark 类", () => {
     document.documentElement.classList.add("dark");
     expect(toggleTheme()).toBe("light");
-    expect(localStorage.getItem("mam-theme")).toBe("light");
+    expect(localStorage.getItem("tuvis-theme")).toBe("light");
     expect(document.documentElement.classList.contains("dark")).toBe(false);
   });
 
-  it("当前 light → 翻转为 dark：写 mam-theme=dark 且添加 documentElement.dark 类", () => {
+  it("当前 light → 翻转为 dark：写 tuvis-theme=dark 且添加 documentElement.dark 类", () => {
     installMatchMedia(true); // 系统浅色且无 saved ⇒ 当前 light
     expect(toggleTheme()).toBe("dark");
-    expect(localStorage.getItem("mam-theme")).toBe("dark");
+    expect(localStorage.getItem("tuvis-theme")).toBe("dark");
     expect(document.documentElement.classList.contains("dark")).toBe(true);
   });
 
@@ -150,7 +150,7 @@ describe("mobile theme：toggleTheme 翻转 + 持久化 + 类切换", () => {
 
 describe("mobile theme：applyInitialTheme 初始应用", () => {
   it("初始 dark：加 documentElement.dark 类", () => {
-    localStorage.setItem("mam-theme", "dark");
+    localStorage.setItem("tuvis-theme", "dark");
     applyInitialTheme();
     expect(document.documentElement.classList.contains("dark")).toBe(true);
   });
@@ -162,7 +162,7 @@ describe("mobile theme：applyInitialTheme 初始应用", () => {
   });
 
   it("重复调用幂等（切换后再调用按当前存储值收敛）", () => {
-    localStorage.setItem("mam-theme", "dark");
+    localStorage.setItem("tuvis-theme", "dark");
     applyInitialTheme();
     toggleTheme(); // → light
     applyInitialTheme();
@@ -213,14 +213,14 @@ describe("mobile theme：mobile.html 内联脚本与 mobile.css 策略一致性"
       // 内联脚本（首帧防闪白）结果
       localStorage.clear();
       document.documentElement.classList.remove("dark");
-      if (saved !== null) localStorage.setItem("mam-theme", saved);
+      if (saved !== null) localStorage.setItem("tuvis-theme", saved);
       installMatchMedia(prefersLight);
       runInlineScript();
       const inlineDark = document.documentElement.classList.contains("dark");
       // theme.ts（权威应用点）结果
       localStorage.clear();
       document.documentElement.classList.remove("dark");
-      if (saved !== null) localStorage.setItem("mam-theme", saved);
+      if (saved !== null) localStorage.setItem("tuvis-theme", saved);
       installMatchMedia(prefersLight);
       applyInitialTheme();
       const themeTsDark = document.documentElement.classList.contains("dark");

@@ -3,7 +3,7 @@
 // 背景 bug：原实现以 localStorage 为事实源，跨窗口同步依赖 storage 事件；但 Tauri
 // 各窗口是独立 WebView，storage 事件不跨窗口——设置窗口（独立子窗口）永远读不到
 // 主窗口写入的 localStorage，恒为浅色。修复：主题事实源上移为 DB settings KV
-// （ui_theme，Rust set_theme 命令写库并广播全局事件 mam-theme-changed）。
+// （ui_theme，Rust set_theme 命令写库并广播全局事件 tuvis-theme-changed）。
 // 所有窗口（主窗口/设置窗口/其他子窗口）加载同一 SPA：模块加载时应用首帧缓存 +
 // 模块级 initTheme() 从 DB 拉取当前主题校正 + 订阅全局事件实时跟随——无论从哪个
 // 窗口切换，都写同一 SSOT、广播同一事件。localStorage 降级为首帧缓存（消除闪白）。
@@ -16,7 +16,7 @@ export type Theme = "dark" | "light" | "system";
 // 主题 SSOT 的 DB settings key（Rust set_theme 命令读写同一 key）
 const THEME_SETTING_KEY = "ui_theme";
 // 全局主题变更事件（Rust set_theme 广播；前端各窗口订阅）
-const THEME_EVENT = "mam-theme-changed";
+const THEME_EVENT = "tuvis-theme-changed";
 // 首帧缓存 key（localStorage 降级：仅作启动首帧缓存，非事实源）
 const STORAGE_KEY = "tauri-ui-theme";
 // 模块加载后用户是否已手动切换过主题：若已切换（缓存+广播已生效且为最新意图），

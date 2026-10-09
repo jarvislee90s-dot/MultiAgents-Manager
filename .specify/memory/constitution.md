@@ -74,7 +74,7 @@ Hook 失败时必须有回退策略：monitor 模块的轮询逻辑同时检查 
 
 ### V. 统一资源管理
 
-Skill、MCP 服务器和插件必须存储在单一全局仓库中（默认：`~/.mam/skills/`），通过符号链接（Unix）或 Junction/copy 模式（Windows）映射到各工具。
+Skill、MCP 服务器和插件必须存储在单一全局仓库中（默认：`~/.tuvis/skills/`），通过符号链接（Unix）或 Junction/copy 模式（Windows）映射到各工具。
 
 **Windows 强制要求：** Windows 上目录必须使用 Junction（`mklink /J`），文件必须使用 copy 模式（带 `.skills-manager-source.json` 元数据）。不得依赖 symlink（需要管理员权限）。检测 Junction 通过 reparse point 标志（`FILE_ATTRIBUTE_REPARSE_POINT = 0x0400`）。
 

@@ -4,16 +4,16 @@
 
 ### 1. 生成签名密钥
 ```bash
-mkdir -p ~/.mam
-pnpm tauri signer generate -w ~/.mam/tauri.key   # 密码直接回车留空
+mkdir -p ~/.tuvis
+pnpm tauri signer generate -w ~/.tuvis/tauri.key   # 密码直接回车留空
 ```
 把打印的 `public key:` 公钥填入 `src-tauri/tauri.conf.json` 的 `plugins.updater.pubkey`。
 
 ### 2. 配置 GitHub Secrets
 仓库 Settings → Secrets and variables → Actions → New repository secret：
-- `TAURI_SIGNING_PRIVATE_KEY`：`~/.mam/tauri.key` 文件内容（base64）→ 填之前先 base64 编码：
+- `TAURI_SIGNING_PRIVATE_KEY`：`~/.tuvis/tauri.key` 文件内容（base64）→ 填之前先 base64 编码：
   ```bash
-  base64 < ~/.mam/tauri.key | tr -d '\n' | pbcopy
+  base64 < ~/.tuvis/tauri.key | tr -d '\n' | pbcopy
   ```
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`：仅当生成时设了密码才需要
 

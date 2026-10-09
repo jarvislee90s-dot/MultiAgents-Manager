@@ -172,7 +172,7 @@ fn build_pet_window(app: &AppHandle) -> Result<tauri::WebviewWindow, String> {
         // 原设计是「隐藏建窗 → 前端按 localStorage 决定显隐」，动机是「避免启动闪现」。
         // 但实测（本机日志，同一晚连续 4 次启动，每次都是同一形状）：隐藏态建出来的宠物窗口
         // **页面根本不会执行** —— 建窗成功、`is_visible=false`，此后**一次 `set_pet_visible`
-        // 都没有**（那是页面唯一会发出的调用）；而 MAM 其余窗口都是**可见态**建窗，页面全都正常。
+        // 都没有**（那是页面唯一会发出的调用）；而 兔维斯 其余窗口都是**可见态**建窗，页面全都正常。
         // 更关键：**事后 `show()` 也救不回来** —— E2 的启动兜底 `show()` 确实执行了
         // （日志有「建窗 5000ms 后仍隐藏 → 启动兜底 show()」），页面依旧没跑。
         // ⇒ 页面必须在**建窗那一刻**就允许加载；隐藏建成之后没有第二次机会。
@@ -275,7 +275,7 @@ pub async fn set_pet_always_on_top(app: AppHandle, on_top: bool) -> Result<(), S
 
 // ===== 外部宠物 IPC（spec 2026-09-03-external-pet-import §5.1）=====
 // id 类参数一律先过 validate_pet_id：pet_dir 是裸 join，不设卡可经 ../ 或绝对路径
-// 逃逸出仓库（如 pet_delete_pet("..") 会把 ~/.mam 整目录送回收站，P0-1）
+// 逃逸出仓库（如 pet_delete_pet("..") 会把 ~/.tuvis 整目录送回收站，P0-1）
 use crate::services::pet::{self, error::PetRpcError, import, manifest, petdex, scan};
 
 fn root() -> std::path::PathBuf {

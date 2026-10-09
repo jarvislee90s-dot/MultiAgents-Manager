@@ -31,7 +31,7 @@ use std::sync::Mutex;
 
 /// 用户 X 掉的卡（T2「暂离不提示」）：key = (tool_id, session_id, status 小写)，
 /// App 与 CLI 形态通用。同一会话状态变化后 key 不匹配 → 卡片自然重现
-/// （绿→黄/红或产生新未读）；进程内语义，MAM 重启清空（重启后全部重现，可接受）。
+/// （绿→黄/红或产生新未读）；进程内语义，兔维斯 重启清空（重启后全部重现，可接受）。
 /// 不碰 unread_sessions 表——未读卡的 X 走已读（mark_session_read），
 /// 本集合只服务活跃卡的「隐藏」语义
 pub static SESSION_DISMISALS: Lazy<Mutex<HashSet<(String, String, String)>>> =
@@ -82,7 +82,7 @@ mod dismissed_filter_tests {
     }
 
     /// T2 语义：写入 (tool, session, status) → 过滤剔除；状态变化 → key 不匹配重现；
-    /// CLI 卡不参与；重启语义 = SESSION_DISMISALS 为进程内集合，MAM 重启清空后全部重现。
+    /// CLI 卡不参与；重启语义 = SESSION_DISMISALS 为进程内集合，兔维斯 重启清空后全部重现。
     #[test]
     fn dismissed_app_card_filtered_until_status_changes() {
         let mut sessions = vec![
@@ -140,7 +140,7 @@ mod dismissed_filter_tests {
             "状态变化后 key 不匹配，卡片应重现"
         );
 
-        // 重启语义（文档化）：SESSION_DISMISALS 为 Lazy 进程内集合，MAM 重启即清空，
+        // 重启语义（文档化）：SESSION_DISMISALS 为 Lazy 进程内集合，兔维斯 重启即清空，
         // 全部卡片重现；本纯函数测试经注入闭包模拟「空集合」即可覆盖
         filter_dismissed_cards(&mut changed, &|_, _, _| false);
         assert_eq!(changed.len(), 1);

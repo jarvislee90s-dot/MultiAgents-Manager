@@ -423,11 +423,11 @@ export function ResourceByKindView() {
     }
   };
 
-  /** 快捷跳转（用户反馈 wave33 Item B）：用系统文件管理器打开 MAM 仓库 /
+  /** 快捷跳转（用户反馈 wave33 Item B）：用系统文件管理器打开 兔维斯 仓库 /
    *  ~/.agents skill 目录。reveal_dir 后端白名单做词法前缀 + canonicalize 校验
    *  且不展开 ~，必须传绝对路径——homeDir() 取平台 home 现拼；目录不存在时
    *  后端 Err（message 含路径）→ formatInvokeError toast */
-  const revealQuickJump = async (rel: ".mam/skills" | ".agents/skills") => {
+  const revealQuickJump = async (rel: ".tuvis/skills" | ".agents/skills") => {
     try {
       const home = await homeDir();
       // homeDir() 平台带尾斜杠不一（macOS 带 / Windows 不带），兼容两种拼接
@@ -925,14 +925,14 @@ export function ResourceByKindView() {
               onChange={(e) => setSearch(e.currentTarget.value)}
               className="h-7 w-40 rounded border px-2 text-xs"
             />
-            {/* 快捷跳转（用户反馈 wave33 Item B）：MAM 仓库 / ~/.agents 目录直达 */}
+            {/* 快捷跳转（用户反馈 wave33 Item B）：兔维斯 仓库 / ~/.agents 目录直达 */}
             <Button
               size="sm"
               variant="ghost"
               className="h-6 px-1.5 text-[10px]"
               title={t("resources.openMamRepo")}
               aria-label={t("resources.openMamRepo")}
-              onClick={() => void revealQuickJump(".mam/skills")}
+              onClick={() => void revealQuickJump(".tuvis/skills")}
             >
               <FolderOpen className="mr-1 h-3 w-3" />
               {t("resources.openMamRepo")}

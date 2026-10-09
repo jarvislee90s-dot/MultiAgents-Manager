@@ -510,10 +510,10 @@ export function RemoteSection() {
   };
 
   // B1+M-1：撤销 tailscale 通道的**收口路径**——`funnel reset` 清的是**整份** serve 配置：
-  // 叠加形态（MAM 那路 + 用户自建 /media 等）下普通撤销**照常放行**，用户条目会被一起
-  // 清掉。故撤销前先取只读预览，只要「有非 MAM 条目会被清」或「普通撤销会被守卫拒绝」
+  // 叠加形态（兔维斯 那路 + 用户自建 /media 等）下普通撤销**照常放行**，用户条目会被一起
+  // 清掉。故撤销前先取只读预览，只要「有非 兔维斯 条目会被清」或「普通撤销会被守卫拒绝」
   // 就弹确认框**逐条列出**，用户点头后才走 `disable_force`
-  //（我们刻意不加严守卫：加严 = MAM 撤不掉自己的 Funnel = 公网暴露撤不掉，代价就是
+  //（我们刻意不加严守卫：加严 = 兔维斯 撤不掉自己的 Funnel = 公网暴露撤不掉，代价就是
   // 叠加形态下会多清条目——所以必须让用户知情）。
   // **M-1：弹框与不弹框两条路都经向导步并消费回执**——唯一能拿到「实际被清条目」的出口是
   // run_step 回执（走 remote_toggle_channel 那条路 stop_channel() 会把 ServeResetReport
@@ -1052,7 +1052,7 @@ export function RemoteSection() {
         )}
         {selected === "tailscale" && (
           <div data-testid="ts-phase" data-phase={tsPhase}>
-            {/* B1 卡面呈现：撤销时被一并清除的非 MAM 条目（不静默——用户必须能回看
+            {/* B1 卡面呈现：撤销时被一并清除的非 兔维斯 条目（不静默——用户必须能回看
                 「我的 /media 那次是被谁清的」） */}
             {tsCleared && (
               <div
