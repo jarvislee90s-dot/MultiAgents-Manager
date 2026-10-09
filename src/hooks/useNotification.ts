@@ -14,6 +14,11 @@ import { addHistory } from "@/lib/notificationHistory";
 import { sessionTitleOrUndefined } from "@/lib/sessionTitle";
 import { petSoundTakeover, petSuppressPopup } from "@/components/pet/petConfig";
 import type { Session } from "@/types/session";
+import {
+  directionKey,
+  isSameDirectionThrottled,
+  sessionNotifyKey,
+} from "@/lib/notification-throttle";
 
 const STATUS_LABELS: Record<string, string> = {
   waiting: "等待操作",
@@ -57,29 +62,6 @@ export const GREEN_STABLE_MS = 3000;
 // F2a 同方向跃迁节流窗（终审发现 C / 决策 4）：同会话同一 from→to 颜色对的跃迁
 // 60s 内不重复通知。teammate 子 agent 运行期主会话合法地在黄↔绿间抖动，每次抖边
 // 都会弹浮窗/响铃——按方向分存记账（交替抖动的两个边各自压 60s），红/waiting 豁免
-export const SAME_DIRECTION_NOTIFY_MS = 60_000;
-
-/** F2a 方向记账键：from→to 颜色对（手机端 Board 的镜像实现用同一口径） */
-export function directionKey(from: string, to: string): string {
-  return `${from}>${to}`;
-}
-
-/** F2a 同方向节流判定（纯函数，单测锚点）：该会话该方向上次实际通知距今 < 60s → 节流。
- *  红/waiting 双向豁免（等待提醒不延迟，既有语义）；fromColor 未知（首见未读补发）
- *  不节流。dirMap 缺该方向键（首见该方向 / 反方向）= 不节流 */
-export function isSameDirectionThrottled(
-  dirMap: Map<string, number> | undefined,
-  fromColor: string,
-  toColor: string,
-  nowMs: number = Date.now()
-): boolean {
-  if (!dirMap) return false;
-  if (fromColor === "red" || toColor === "red") return false;
-  if (!fromColor) return false;
-  const lastAt = dirMap.get(directionKey(fromColor, toColor));
-  if (lastAt === undefined) return false;
-  return nowMs - lastAt < SAME_DIRECTION_NOTIFY_MS;
-}
 
 export function isFreshFirstSeenUnread(
   session: Pick<Session, "unread" | "status" | "lastActivityAt">,
@@ -272,13 +254,18 @@ export function useNotification() {
         // 宠物开启即接管完成提示音（静音则整体静默，spec D3）
         if (currColor === "green" && !petSoundTakeover()) playCompletionSound(session.agentType);
         // 记录本次通知用于时间去重
-        lastNotified.current.set(session.id, { color: currColor, at: Date.now() });
+        lastNotified.current.set(sessionNotifyKey(session.agentType, session.id), {
+          color: currColor,
+          at: Date.now(),
+        });
         // F2a 方向记账（只在真实通知时落账）：同方向 60s 节流的判定依据。
         // fromColor 未知（首见未读补发）不落账——那不是一次「跃迁通知」
         if (fromColor) {
-          const dirMap = lastDirectionNotify.current.get(session.id) ?? new Map<string, number>();
+          const dirMap =
+            lastDirectionNotify.current.get(sessionNotifyKey(session.agentType, session.id)) ??
+            new Map<string, number>();
           dirMap.set(directionKey(fromColor, currColor), Date.now());
-          lastDirectionNotify.current.set(session.id, dirMap);
+          lastDirectionNotify.current.set(sessionNotifyKey(session.agentType, session.id), dirMap);
         }
 
         // 发送通知：应用内浮窗为主路径，失败降级系统 toast（两者都在宠物压制守卫内）
@@ -357,7 +344,9 @@ export function useNotification() {
             );
             return;
           }
-          const notified = lastNotified.current.get(session.id);
+          const notified = lastNotified.current.get(
+            sessionNotifyKey(session.agentType, session.id)
+          );
           if (notified && notified.color === "green" && Date.now() - notified.at < 5000) {
             console.debug("[notif] gate:dedup5s:greenWin", session.id, Date.now());
             return;
@@ -365,7 +354,7 @@ export function useNotification() {
           // F2a：同方向（from→绿）60s 内已弹过 → 节流（红边天然豁免——红不进稳定窗）
           if (
             isSameDirectionThrottled(
-              lastDirectionNotify.current.get(session.id),
+              lastDirectionNotify.current.get(sessionNotifyKey(session.agentType, session.id)),
               fromColor,
               "green"
             )
@@ -379,14 +368,14 @@ export function useNotification() {
       };
 
       for (const session of sessions) {
-        const prev = prevStatuses.current.get(session.id);
+        const prev = prevStatuses.current.get(sessionNotifyKey(session.agentType, session.id));
         const currColor = statusToColor(session.status);
 
         // 首次加载不通知——除非是「未读绿卡」：补偿/重启场景下它从未被观测过转绿，
         // 需补一次完成通知（spec W4）。绿播报统一过稳定窗（与常规翻色同路径）；
         // fromColor 未知（首见）→ F2a 方向记账不落账、节流不命中
         if (!prev) {
-          prevStatuses.current.set(session.id, {
+          prevStatuses.current.set(sessionNotifyKey(session.agentType, session.id), {
             status: session.status,
             color: currColor,
             at: Date.now(),
@@ -398,7 +387,7 @@ export function useNotification() {
           continue;
         }
 
-        prevStatuses.current.set(session.id, {
+        prevStatuses.current.set(sessionNotifyKey(session.agentType, session.id), {
           status: session.status,
           color: currColor,
           at: Date.now(),
@@ -418,7 +407,7 @@ export function useNotification() {
         clearGreenTimer(session.id);
 
         // 时间去重：5 秒内同目标颜色不重复弹（兜底状态抖动）
-        const notified = lastNotified.current.get(session.id);
+        const notified = lastNotified.current.get(sessionNotifyKey(session.agentType, session.id));
         if (notified && notified.color === currColor && Date.now() - notified.at < 5000) {
           console.debug("[notif] gate:dedup5s", session.id, currColor, Date.now());
           continue;
@@ -428,7 +417,7 @@ export function useNotification() {
         // （红/waiting 双向豁免在 isSameDirectionThrottled 内）
         if (
           isSameDirectionThrottled(
-            lastDirectionNotify.current.get(session.id),
+            lastDirectionNotify.current.get(sessionNotifyKey(session.agentType, session.id)),
             prev.color,
             currColor
           )
@@ -447,7 +436,7 @@ export function useNotification() {
       }
 
       // 清理已消失的会话（含未到点的绿稳定窗定时器）
-      const activeIds = new Set(sessions.map((s) => s.id));
+      const activeIds = new Set(sessions.map((s) => `${s.agentType}-${s.id}`));
       for (const id of prevStatuses.current.keys()) {
         if (!activeIds.has(id)) {
           prevStatuses.current.delete(id);

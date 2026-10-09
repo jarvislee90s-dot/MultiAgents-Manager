@@ -368,7 +368,7 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     expect(preview.getAttribute("data-mode")).toBe("fullscreen");
     expect((await screen.findByTestId("preview-code")).textContent).toContain("fn main() {}");
     // 切分屏：data-mode 翻转（split = 上对话下文件由布局类承担，此处锁语义切换）
-    // —— 切换器唯一实例在预览页头（2026-09-16 裁决：详情页头那份已删）
+    // —— 切换器唯一实例在顶栏 sheet bar（T1 审查 S5 裁决：组件内部实例已删）
     fireEvent.click(screen.getByTestId("preview-toggle-split"));
     expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split");
     // 关闭预览：对话仍在（同一组件树内状态保持）
@@ -389,8 +389,8 @@ describe("SessionDetail：文件链接化与预览联动", () => {
     // 默认全屏浮层（jsdom 无 matchMedia → 窄屏默认；宽屏自适应由 openFile 判定）
     const preview = await screen.findByTestId("file-preview");
     expect(preview.getAttribute("data-mode")).toBe("fullscreen");
-    // 全屏浮层 fixed inset-0 盖住 SessionDetail 页头 → 页头切换器不可达；
-    // FilePreview 页头自带的切换控件是全屏态唯一入口
+    // 全屏浮层 fixed inset-0：顶栏 sheet bar 在浮层顶部可达（唯一实例）；
+    // FilePreview 内部切换器仅显式传 onModeChange 的直用场景渲染
     fireEvent.click(screen.getByTestId("preview-toggle-split"));
     expect(screen.getByTestId("file-preview").getAttribute("data-mode")).toBe("split");
     // 分屏容器出现（上对话下文件布局，Task 8 裁决）

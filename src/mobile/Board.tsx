@@ -27,6 +27,11 @@ import {
   type ToolFilter,
 } from "./board-logic";
 import { ToolIcon } from "@/components/common/ToolIcon";
+import {
+  directionKey,
+  isSameDirectionThrottled,
+  sessionNotifyKey,
+} from "@/lib/notification-throttle";
 import type { AgentType, Session, SessionsResponse, TransitionEvent } from "@/types/session";
 
 const POLL_MS = 3000;
@@ -51,27 +56,8 @@ const BANNER_TTL_MS = 4000;
 const MAX_BANNERS = 3;
 
 // ==== F2a/F2b（终审发现 C / 决策 4）：提醒三件套的静默门与同方向节流 ====
-// 口径照抄桌面 hooks/useNotification（isSameDirectionThrottled 同款语义）。该模块带
-// Tauri 依赖不可进移动 bundle，故本地镜像实现——与 lastChimed 照抄桌面 lastNotified
-// 的既有先例一致；两端常量/键口径必须同步改
-/** F2a 同方向节流窗：同会话同一 from→to 颜色对 60s 内不重复提醒（黄↔绿两个边都算） */
-const SAME_DIRECTION_NOTIFY_MS = 60_000;
-/** F2a 方向记账键：from→to 颜色对（与桌面 directionKey 同一口径） */
-const flapDirectionKey = (from: string, to: string) => `${from}>${to}`;
-/** F2a 同方向节流判定：该会话该方向上次提醒距今 < 60s → 节流；
- *  红/waiting 双向豁免（等待提醒不延迟，既有语义） */
-function isSameDirectionThrottled(
-  dirMap: Map<string, number> | undefined,
-  fromColor: string,
-  toColor: string,
-  nowMs: number
-): boolean {
-  if (!dirMap) return false;
-  if (fromColor === "red" || toColor === "red") return false;
-  const lastAt = dirMap.get(flapDirectionKey(fromColor, toColor));
-  if (lastAt === undefined) return false;
-  return nowMs - lastAt < SAME_DIRECTION_NOTIFY_MS;
-}
+// 节流/记账口径抽在 @/lib/notification-throttle（桌面 useNotification 与本组件
+// 双端同源，零依赖可进移动 bundle）
 
 // P8e 折叠高度上限（溢出判定与裁剪样式的单一来源，fix round 1）：
 // 36px = 单行 chips（24px）+ 行纵距（12px）——恰容纳一行、第二行起点恰在 36px 被完全裁掉
@@ -272,7 +258,7 @@ export default function Board({
       if (ev.flapFromSubagentActivity) return;
       // F2a 同方向节流：同会话同一 from→to 颜色对 60s 内不重复提醒（横幅/提示音/
       // 振动三件套同门）；红/waiting 双向豁免在 isSameDirectionThrottled 内
-      const flapKey = `${ev.agentType}-${ev.sessionId}`;
+      const flapKey = sessionNotifyKey(ev.agentType, ev.sessionId);
       const fromColor = STATUS_COLOR_KIND[ev.from];
       const toColor = STATUS_COLOR_KIND[ev.to];
       const nowMs = Date.now();
@@ -283,7 +269,7 @@ export default function Board({
       }
       // 落账（只在真实提醒时记）：后续同方向 60s 内的跃迁由此被压住
       const dirMap = lastFlapNotified.current.get(flapKey) ?? new Map<string, number>();
-      dirMap.set(flapDirectionKey(fromColor, toColor), nowMs);
+      dirMap.set(directionKey(fromColor, toColor), nowMs);
       lastFlapNotified.current.set(flapKey, dirMap);
       pushBanner(ev);
       maybeChime(ev);
