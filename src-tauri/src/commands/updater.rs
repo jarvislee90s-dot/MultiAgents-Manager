@@ -18,8 +18,6 @@ const GITHUB_REPO: &str = "jarvislee90s-dot/tuvis";
 /// 而新 latest.json 里的资产 URL 用新仓名——校验必须双前缀兼容，否则存量用户
 /// 拉到新清单会因前缀不符被直接拒升（自动更新断链）
 const LEGACY_GITHUB_REPO: &str = "jarvislee90s-dot/MultiAgents-Manager";
-const RELEASES_API_URL: &str =
-    "https://api.github.com/repos/jarvislee90s-dot/tuvis/releases?per_page=30";
 /// 钉 IP 直连的域名（resolve 只对**直连**生效；兜底客户端必须 no_proxy，见下）
 const GITHUB_API_HOST: &str = "api.github.com";
 /// GitHub API 强制要求 User-Agent，否则 403
@@ -151,19 +149,33 @@ fn flatten_error_chain(e: &(dyn std::error::Error + 'static)) -> String {
 
 /// 默认管道一次请求（reqwest 默认读环境变量与 Windows/macOS 系统代理——挂 VPN
 /// 时走的就是它；hyper-util 注册表读取链路 2026-10-08 独立探针实证可用）
+/// Release 发现双仓回退（品牌改名过渡，见 LEGACY_GITHUB_REPO）：仓库改名前新仓名
+/// 404 → 落回旧仓名；改名后新仓名直接命中。配合 validate_latest_json_url 的
+/// 双前缀校验，发现与校验两侧对改名顺序都不敏感。
 async fn fetch_releases_with_client(client: reqwest::Client) -> Result<Vec<GithubRelease>, String> {
-    let resp = client
-        .get(RELEASES_API_URL)
-        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("GitHub API 请求失败: {}", flatten_error_chain(&e)))?;
-    if !resp.status().is_success() {
-        return Err(format!("GitHub API 状态异常: {}", resp.status()));
+    let mut last_err = String::new();
+    for repo in [GITHUB_REPO, LEGACY_GITHUB_REPO] {
+        let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
+        let resp = client
+            .get(&url)
+            .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| format!("GitHub API 请求失败: {}", flatten_error_chain(&e)))?;
+        if !resp.status().is_success() {
+            last_err = format!("GitHub API 状态异常: {}（{repo}）", resp.status());
+            continue;
+        }
+        let list: Vec<GithubRelease> = resp
+            .json()
+            .await
+            .map_err(|e| format!("GitHub API 响应解析失败: {e}"))?;
+        if !list.is_empty() {
+            return Ok(list);
+        }
+        last_err = format!("{repo}: releases 列表为空");
     }
-    resp.json::<Vec<GithubRelease>>()
-        .await
-        .map_err(|e| format!("GitHub API 响应解析失败: {e}"))
+    Err(last_err)
 }
 
 /// DoH 解析 + 钉 IP 直连兜底：**绕开本地 DNS 污染与失效代理**。

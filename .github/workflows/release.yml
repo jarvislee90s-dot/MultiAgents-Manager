@@ -66,7 +66,7 @@ jobs:
             fi
           else
             echo "::warning::TAURI_SIGNING_PRIVATE_KEY not set. Disabling updater artifacts for this build."
-            echo "::warning::Generate one with: pnpm tauri signer generate -w ~/.tauri/multiagents-manager.key"
+            echo "::warning::Generate one with: pnpm tauri signer generate -w ~/.tauri/tuvis.key"
             echo "::warning::Then add the private key to GitHub Secrets as TAURI_SIGNING_PRIVATE_KEY."
             jq '.bundle.createUpdaterArtifacts = false' src-tauri/tauri.conf.json > src-tauri/tauri.conf.json.tmp
             mv src-tauri/tauri.conf.json.tmp src-tauri/tauri.conf.json

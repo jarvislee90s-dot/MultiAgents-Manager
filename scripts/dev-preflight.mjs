@@ -57,7 +57,8 @@ function isOurVite(pid) {
   }
 }
 
-/** 本仓的 **dev app 孤儿**（`target/debug/multi-agents-manager`）：dev 会话被 Ctrl+C 之后它常常活下来，
+/** 本仓的 **dev app 孤儿**（`target/debug/tuvis`，含改名前的 `multi-agents-manager` 旧产物）：
+ *  dev 会话被 Ctrl+C 之后它常常活下来，
  *  而它此时已经**加载不到任何页面**（dev server 没了）⇒ 所有窗口空白，且占着托盘/SQLite。
  *  只杀 dev 构建产物，**不碰** Release 安装版（路径不同）。 */
 function killStaleDevApp() {
@@ -65,7 +66,7 @@ function killStaleDevApp() {
   let pids = "";
   try {
     pids = execSync(
-      `pgrep -f "${ROOT}/src-tauri/target/debug/multi-agents-manager"`,
+      `pgrep -f "${ROOT}/src-tauri/target/debug/(multi-agents-manager|tuvis)"`,
       { encoding: "utf8" }
     ).trim();
   } catch {

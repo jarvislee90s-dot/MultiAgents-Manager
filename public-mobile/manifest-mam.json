@@ -1,7 +1,7 @@
 {
-  "name": "MAM 远程",
-  "short_name": "MAM",
-  "description": "MAM 移动会话看板",
+  "name": "兔维斯远程",
+  "short_name": "Tuvis",
+  "description": "兔维斯移动会话看板",
   "start_url": ".",
   "display": "standalone",
   "background_color": "#0f172a",

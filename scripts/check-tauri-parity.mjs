@@ -32,7 +32,7 @@ const read = (rel) => readFileSync(path.join(repoRoot, rel), "utf8");
 
 const CARGO_LOCK = "src-tauri/Cargo.lock";
 const PNPM_LOCK = "pnpm-lock.yaml";
-const WORKSPACE_PACKAGE = "multi-agents-manager";
+const WORKSPACE_PACKAGE = "tuvis";
 const NPM_SCOPE = "@tauri-apps/";
 
 function die(msg) {
