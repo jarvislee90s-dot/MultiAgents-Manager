@@ -270,7 +270,7 @@ export function useMessageRenderers({
           return <div className="text-sm">{m.content}</div>;
       }
     },
-    [renderLinkifiedText, renderMarkdown]
+    [renderLinkifiedText, renderMarkdown, openFile]
   );
   return { renderMarkdown, renderLinkifiedText, renderBody };
 }

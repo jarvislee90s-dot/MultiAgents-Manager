@@ -8857,6 +8857,9 @@ enum InjectAttempt {
     Plain,
     /// Menu 路：三/四段全部完成，`receipt_seen` = 是否屏读到工具的成功回执行
     /// （`None` = 非 Windows 无屏读 → 无法核验；回执据此如实说明）
+    /// Linux CI 的 clippy -D warnings 下本变体构造点（Windows 菜单路径）被 cfg 掉
+    /// → 按上方注释的先例条件化 allow（2026-10-10 首次 Linux run 实证）。
+    #[cfg_attr(not(windows), allow(dead_code))]
     Menu { receipt_seen: Option<bool> },
     /// codex 模式组 Key 路（T4-F3）：`run_codex_mode_toggle_stages` 的编排产物——
     /// 前读/核验/observed 全在 outcome 里，回执组装消费它

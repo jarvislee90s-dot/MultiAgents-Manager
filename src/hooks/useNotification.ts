@@ -98,9 +98,11 @@ export function useNotification() {
 
   // 卸载时清掉所有未到点的稳定窗定时器（应用生命周期内本 hook 不卸载，防御性收尾）
   useEffect(() => {
+    // 卸载清理读的是快照（cleanup 执行时 ref 可能已被替换——react-hooks 警告正解）
+    const timers = greenTimers.current;
     return () => {
-      greenTimers.current.forEach((t) => clearTimeout(t));
-      greenTimers.current.clear();
+      timers.forEach((t) => clearTimeout(t));
+      timers.clear();
     };
   }, []);
 

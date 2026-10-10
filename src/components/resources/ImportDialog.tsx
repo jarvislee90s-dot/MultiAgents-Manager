@@ -34,6 +34,8 @@ export function ImportDialog({ open, onClose, onImported }: Props) {
       setSuggestion(null);
       loadAllResources();
     }
+    // loadAllResources 是每渲染重建的普通函数，入依赖会退化成 open 期间每渲染重载
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 意图=仅随 open 翻转重载
   }, [open]);
 
   const loadAllResources = async () => {
