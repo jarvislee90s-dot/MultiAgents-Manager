@@ -268,6 +268,23 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
         None => eligible.last(),
     };
     let best = chosen.map(|(_, c)| c)?;
+    // **多选问题面板不冒充审批对话框**（2026-10-10 21:55 实机）：claude 2.1.287 的
+    // AskUserQuestion（多选）不再把待答问题写进 transcript（attachment 快照替代）
+    // → 问题卡缺席，本屏读把「1. [✔] 太阳呼吸感」编号行读成了对话框选项 → 二元
+    // 审批卡，误批准风险。选项 label 带复选框记号 = 多选问题面板 → 不出对话框
+    // 选项（审批卡缺位，用户到终端作答——「未验不出手」）。
+    if best.iter().any(|o| {
+        let squeezed = o.label.replace(' ', "");
+        squeezed.contains("[ ]")
+            || squeezed.contains("[]")
+            || squeezed.contains("[x]")
+            || squeezed.contains("[X]")
+            || squeezed.contains("[✔]")
+            || squeezed.contains("[✓]")
+            || squeezed.contains("[v]")
+    }) {
+        return None;
+    }
     // 编号必须严格连续（1..=len）——簇的构造已保证，此处为显式不变式断言
     if best
         .iter()

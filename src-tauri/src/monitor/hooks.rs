@@ -273,6 +273,17 @@ fn ours_markers(script_path_str: &str, spec: &HookCommandSpec) -> Vec<String> {
             }
         }
     }
+    // **改名前版本的孤儿条目迁移标记**（2026-10-10 实机）：rebrand（.mam→.tuvis）
+    // 之前注册的条目指向 `~/.mam/` 老家 + 老监听器名 `mam-hook-listener.exe`——
+    // 新版本按新路径认不出它们是自家的，迁移步跳过 → 孤儿条目永远指向不存在的
+    // 文件，每次工具调用报 hook error 且问题通道（富事件）静默失效。老家路径与
+    // 老监听器名也认作自家，让迁移步把它们原地改写成新规格。`contains` 语义下
+    // 新命令（tuvis-hook-listener.exe）不含这些片段，无误伤。
+    markers.extend([
+        ".mam/hooks/status-hook.sh".to_string(),
+        ".mam/bin/mam-hook-listener.exe".to_string(),
+        "mam-hook-listener.exe".to_string(),
+    ]);
     markers
 }
 
