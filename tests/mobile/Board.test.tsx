@@ -634,7 +634,7 @@ describe("Board 提示音触发口径（仅转绿 + 5 秒去重）", () => {
 
 // M3 Task 1：页头品牌行（P8a 版本号 + P8b 本机名）
 describe("Board 页头品牌行", () => {
-  it("挂载时拉一次 /host，品牌行显示 兔维斯 + v{version} + 本机名；host 403 不踢回配对页", async () => {
+  it("挂载时拉一次 /host，品牌行显示 Tuvis + v{version} + 本机名；host 403 不踢回配对页", async () => {
     installSse(okSessions(3));
     const fetchMock = vi.fn(async (url: string) => {
       if (url === "/m/api/v1/host") {
@@ -660,7 +660,7 @@ describe("Board 页头品牌行", () => {
     await advance(POLL_MS + 100);
     expect(fetchMock.mock.calls.filter(([u]) => u === "/m/api/v1/host").length).toBe(hostCalls);
 
-    expect(screen.getByText("兔维斯")).toBeInTheDocument();
+    expect(screen.getByText("Tuvis")).toBeInTheDocument();
     expect(screen.getByText("v0.4.1")).toBeInTheDocument();
     expect(screen.getByText("JARVIS-Win")).toBeInTheDocument();
     // 看板标题行保留（品牌行在其上一行）

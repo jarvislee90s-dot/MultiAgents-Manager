@@ -1700,10 +1700,9 @@ describe("卡片在场分流：审批拦截 / 问答转向自由作答 / 不可�
     };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
-    await screen.findByTestId("composer-card-presence");
-    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
-      "questionBlocked"
-    );
+    // 提示去重（2026-10-10 用户指令）：questionBlocked 段不再渲染——同一条指引由
+    // ModeBar 提示与输入框占位语各承载一次，不再三处堆叠
+    expect(screen.queryByTestId("composer-card-presence")).toBeNull();
     expect(input.placeholder).toContain("本题请到卡片或终端作答");
     fireEvent.change(input, { target: { value: "回答" } });
     fireEvent.click(screen.getByTestId("composer-send"));
@@ -1725,10 +1724,9 @@ describe("卡片在场分流：审批拦截 / 问答转向自由作答 / 不可�
     };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
-    await screen.findByTestId("composer-card-presence");
-    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
-      "questionBlocked"
-    );
+    // 提示去重（2026-10-10 用户指令）：questionBlocked 段不再渲染——同一条指引由
+    // ModeBar 提示与输入框占位语各承载一次，不再三处堆叠
+    expect(screen.queryByTestId("composer-card-presence")).toBeNull();
     fireEvent.change(input, { target: { value: "回答" } });
     fireEvent.click(screen.getByTestId("composer-send"));
     await screen.findByTestId("send-receipt-blocked");
@@ -1747,10 +1745,9 @@ describe("卡片在场分流：审批拦截 / 问答转向自由作答 / 不可�
     };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
-    await screen.findByTestId("composer-card-presence");
-    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
-      "questionBlocked"
-    );
+    // 提示去重（2026-10-10 用户指令）：questionBlocked 段不再渲染——同一条指引由
+    // ModeBar 提示与输入框占位语各承载一次，不再三处堆叠
+    expect(screen.queryByTestId("composer-card-presence")).toBeNull();
     fireEvent.change(input, { target: { value: "回答" } });
     fireEvent.click(screen.getByTestId("composer-send"));
     await screen.findByTestId("send-receipt-blocked");
@@ -1772,10 +1769,9 @@ describe("卡片在场分流：审批拦截 / 问答转向自由作答 / 不可�
     };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
-    await screen.findByTestId("composer-card-presence");
-    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
-      "questionBlocked"
-    );
+    // 提示去重（2026-10-10 用户指令）：questionBlocked 段不再渲染——同一条指引由
+    // ModeBar 提示与输入框占位语各承载一次，不再三处堆叠
+    expect(screen.queryByTestId("composer-card-presence")).toBeNull();
     fireEvent.change(input, { target: { value: "回答" } });
     fireEvent.click(screen.getByTestId("composer-send"));
     await screen.findByTestId("send-receipt-blocked");
@@ -1817,10 +1813,9 @@ describe("卡片在场分流：审批拦截 / 问答转向自由作答 / 不可�
     };
     render(<MessageComposer session={{ id: "sess-1" }} />);
     const input = (await screen.findByTestId("composer-input")) as HTMLTextAreaElement;
-    await screen.findByTestId("composer-card-presence");
-    expect(screen.getByTestId("composer-card-presence").getAttribute("data-presence")).toBe(
-      "questionBlocked"
-    );
+    // 提示去重（2026-10-10 用户指令）：questionBlocked 段不再渲染——同一条指引由
+    // ModeBar 提示与输入框占位语各承载一次，不再三处堆叠
+    expect(screen.queryByTestId("composer-card-presence")).toBeNull();
     fireEvent.change(input, { target: { value: "回答" } });
     fireEvent.click(screen.getByTestId("composer-send"));
     await screen.findByTestId("send-receipt-blocked");

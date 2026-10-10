@@ -51,7 +51,7 @@ fn at(hay: &str, needle: &str, what: &str) -> usize {
 // =============================================================================
 
 /// `src/database/connection.rs`：
-/// ① `cfg(test)` 兜底分支**存在**且落到 `std::env::temp_dir()/mam-test-<pid>`；
+/// ① `cfg(test)` 兜底分支**存在**且落到 `std::env::temp_dir()/tuvis-test-<pid>`；
 /// ② 它在 `cfg!(debug_assertions)` 门控**之内**（否则 release 会被重定向 ⇒ 真机 app 的
 ///    数据目录被劫持）；
 /// ③ 真实 home 兜底 `dirs::home_dir()` 仍**在门控之外**（release 的出路）。
@@ -72,10 +72,10 @@ fn connection_cfg_test_home_fallback_is_inside_the_debug_gate() {
         "`dirs::home_dir()` 兜底必须在 `cfg!(debug_assertions)` 门控**之后**（release 的出路）"
     );
 
-    // 归一化后的逐字形态：`#[cfg(test)] return std::env::temp_dir().join(format!("mam-test-{}", std::process::id()));`
+    // 归一化后的逐字形态：`#[cfg(test)] return std::env::temp_dir().join(format!("tuvis-test-{}", std::process::id()));`
     let wanted = concat!(
         "#[cfg(test)]\n",
-        "returnstd::env::temp_dir().join(format!(\"mam-test-{}\",std::process::id()));"
+        "returnstd::env::temp_dir().join(format!(\"tuvis-test-{}\",std::process::id()));"
     );
     let branch = at(rest, wanted, "cfg(test) temp 目录兜底分支");
     assert!(

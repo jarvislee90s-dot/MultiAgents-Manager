@@ -1168,7 +1168,7 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
   it("codex advance 回执 questionIdx=0（2026-10-09 评审 F3）：末题 ▶ 环形回首题——卡面停第 1 题而非确认卡", async () => {
     installFetch();
     const info = twoQuestionInteractive();
-    // GET 快照：终端已环形回第 1 题（codex 快照形状）
+    // 挂载 GET 快照：终端停在第 2 题（末题）
     info.screen = {
       questionIdx: 1,
       questionTotal: 2,
@@ -1178,7 +1178,29 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
       focused: 0,
       heading: "Second?",
     };
-    routes.question = info;
+    // **动作后读屏**（2026-10-10「每次操作后都读一次屏」）：advance 成功后组件会
+    // 重拉一次 GET——第 1 次 GET（挂载）供翻题前屏，第 2 次起供回首题真值
+    // （questionIdx=0/unanswered=1，环形回首的终端事实）。按调用次数翻转。
+    let questionGets = 0;
+    const wrappedInfo = {
+      ...info,
+      screen: {
+        questionIdx: 0,
+        questionTotal: 2,
+        unanswered: 1,
+        isLast: false,
+        options: ["a1", "a2"],
+        focused: 0,
+        heading: "First?",
+      },
+    };
+    Object.defineProperty(routes, "question", {
+      configurable: true,
+      get() {
+        questionGets += 1;
+        return questionGets === 1 ? info : wrappedInfo;
+      },
+    });
     // advance 回执：questionIdx=0（环形回首题）+ unanswered=1
     routes.answer = {
       status: "key_sent",
