@@ -9,7 +9,7 @@ export default defineConfig({
   base: "/m/",
   // 移动页不用桌面静态资源（public/ 下的 pet 动效与提示音约 9.5MB）：
   // 不能指回 public/，否则桌面资源会被拷进 dist-mobile 再被 rust-embed 嵌进二进制；
-  // 专用目录只放 PWA 资产（manifest-mam.json + icon-mobile.png），构建时拷入 dist-mobile 根
+  // 专用目录只放 PWA 资产（manifest.json + icon-mobile.png），构建时拷入 dist-mobile 根
   publicDir: "public-mobile",
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },

@@ -6,8 +6,24 @@ export function TuvisLogoMark({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" role="img" aria-label="Tuvis">
       {/* 兔耳 ×2（微外张） */}
-      <rect x="6" y="1" width="3.6" height="9.4" rx="1.8" fill="#AEB9C6" transform="rotate(-9 7.8 5.7)" />
-      <rect x="14.4" y="1" width="3.6" height="9.4" rx="1.8" fill="#AEB9C6" transform="rotate(9 16.2 5.7)" />
+      <rect
+        x="6"
+        y="1"
+        width="3.6"
+        height="9.4"
+        rx="1.8"
+        fill="#AEB9C6"
+        transform="rotate(-9 7.8 5.7)"
+      />
+      <rect
+        x="14.4"
+        y="1"
+        width="3.6"
+        height="9.4"
+        rx="1.8"
+        fill="#AEB9C6"
+        transform="rotate(9 16.2 5.7)"
+      />
       {/* 头（银白） */}
       <circle cx="12" cy="14.2" r="8.1" fill="#E8EDF3" />
       {/* 目镜：白框 + 蓝镜片 */}

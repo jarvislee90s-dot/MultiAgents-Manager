@@ -1315,14 +1315,14 @@ mod tests {
             "/m 应返回入口 HTML，实际 {body:?}"
         );
         assert!(
-            body.contains("兔维斯远程"),
-            "入口应是 mobile.html 产物（含移动端标题）"
+            body.contains("tuvis"),
+            "入口应是 mobile.html 产物（含品牌标识；标题文案随品牌批在「兔维斯远程/Tuvis 远程」间合法变动，不写死）"
         );
 
-        // (2) PWA manifest → 200 + application/json
+        // (2) PWA manifest → 200 + application/json（文件名随品牌批 manifest-mam → manifest）
         let r = app
             .clone()
-            .oneshot(req("GET", "/m/manifest-mam.json", None, None))
+            .oneshot(req("GET", "/m/manifest.json", None, None))
             .await
             .unwrap();
         assert_eq!(r.status(), 200);
