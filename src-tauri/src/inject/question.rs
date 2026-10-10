@@ -1338,6 +1338,9 @@ pub const CODEX_NOTES_OPEN_FOOTER: &str = "tab to add notes";
 /// codex 弹窗**备注态** footer 锚（`tab or esc to clear notes | …`）——已在备注态时
 /// 不再发 Tab（否则清空备注，戊探C footer 语义）。
 pub const CODEX_NOTES_OPENED_FOOTER: &str = "tab or esc to clear notes";
+/// codex 面板 **Other 行** label 锚（`None of the above`，不区分大小写子串匹配）——
+/// 自由作答走位目标（按屏实读定位，不假设恒在：Other 按题开关，底料定案 12/5）。
+pub const CODEX_OTHER_ROW_LABEL: &str = "none of the above";
 /// codex 提交完成**终态锚**（摘要头 `• Questions 1/1 answered`，戊探C 原件；
 /// 落账侧另有 rollout `answers.<qid>` 对账——见 [`codex_user_note_from_output`]）。
 ///
@@ -1379,82 +1382,357 @@ pub fn codex_receipt_present(lines: &[String]) -> bool {
     })
 }
 
-/// codex **备注自由作答阶段机**：Tab 切备注态 → 打字（字符通道）→ Enter 一次提交
-/// 「当前高亮项 + 备注」并自动推进（戊探C ③：备注态 Enter **无未答确认屏**）。
+/// codex **备注自由作答阶段机**（2026-10-10 复活批，0.162.1 四取样复验全通——
+/// 落卷实锤 N1-N3 + esc 红线 N4；档案 `research/refs/phase2-消息注入/
+/// 2026-10-10-codex-0162-notes链复验.md`）：
+/// **走位 Other → tab 开 notes → 打字（屏读验文本上屏）→ Enter 提交「Other + 备注」**。
 ///
-/// # 各段与中止点
+/// # 各段与中止点（每步屏读核验，不盲发）
 ///
-/// 1. **弹窗在场判读**：屏上须含 [`CODEX_NOTES_OPEN_FOOTER`]（答案态）或
-///    [`CODEX_NOTES_OPENED_FOOTER`]（备注态）之一——都不在 = 弹窗不在场，**中止
-///    零按键**（Tab 落在 composer 上会插入制表符）；已开过备注（第二次自由作答）
-///    则跳过 Tab（再按一次 = 清空备注，戊探C footer 语义）；
-/// 2. 打字（字符通道——用户文本绝不进键通道；框内含数字全进文本，CX-5）；
-/// 3. **Enter 提交**（唯一回车点：高亮默认在选项 1，净效果 = 默认项+备注）；
-/// 4. **终态段**：轮询 [`codex_answered_present`]——未见不是失败（`Some(false)`，
-///    如实请人工核对；落账侧以 rollout `user_note:` 对账为准）。
+/// 1. **入口闸**：读屏解析面板（[`codex_question_screen_snapshot`]）——解析不出
+///    但见确认屏锚 → 中止「前序动作已错位」；身份闸（屏上题号=手机卡题号）+
+///    题数交叉核对，与 select 阶段机同款；
+/// 2. **Other 行定位**：选项 label 含 `none of the above`（不区分大小写）——缺席
+///    → 零键中止（Other 按题开关，底料定案 5「按屏实读不假设恒在」）；
+/// 3. **残留守卫（仅发送路径）**：入场 footer 已是备注态 → 中止（发送会追加在
+///    旧文后）；**清空/覆盖写入不拦**——「备注态有字」正是它们的操作对象；
+/// 4. **清空段（overwrite，两线路共用）**：**tab 循环 ≤2 下、每下后读屏，note 行
+///    字消失即提前终止**（2026-10-10 用户规格「默认按两下，第一下后有字变无字就
+///    终止」）；终判无字后，若停在空 notes 态（第二下 tab 落答案态会重开空 notes）
+///    → esc 退回答案态。text 空 = 清空请求，到此返回（不发 Enter）；
+/// 5. **发送段（发送线路直入；覆盖写入=清空段拼本段）**：Other 行定位（按屏实读）
+///    → 改答守卫（已答 ∧ 焦点≠Other → 中止；**豁免：覆盖 ∧ 入场有 note**——note
+///    只能经 Other-notes 流产生，旧答案必是 Other，走位+ensure 是选回同一行）→
+///    vim j/k 最短环绕走位（每步复读）→ tab 开 notes → 4 拍轮询 footer 翻转；
+/// 7. **打字 + 上屏核验**：字符通道打字后有界 4 拍屏读——剥空白归一化后全文必须
+///    在屏上（0.162.1 字符层回显可见；**这道闸就是 0.160.0「打字不可见+静默丢失」
+///    事故的复防线**：文本没上屏绝不发 Enter）；
+/// 8. **Enter 提交 + 终态**：回车提交「Other + 备注」（备注态 Enter 无未答确认屏，
+///    戊探C ③ + 复验 N1 三重实证；**发送与覆盖写入两线路的提交键都是回车**——
+///    2026-10-10 用户裁决，备注态 tab 是清空+退出不是提交）；终态轮询
+///    [`codex_answered_present`]——未见不是失败（`Some(false)` 如实请人工核对；
+///    落账侧 rollout `user_note:` 对账）。
 ///
-/// **2026-10-09 取证回填：本编排已从 dispatch 停用**（0.160.0 实测 notes 文本不随卷
-/// 提交，回车把焦点行提交为答案、用户文本静默丢失——底料
-/// `2026-10-08-codex-160-question-屏读底料.md` §5；路由侧改为具名中止
-/// `StagePlan::CodexFreeTextRetired`，见 remote/api.rs）。函数保留备用（未来版本若
-/// 恢复 notes 落卷，重接前须按该技能工作流复验注入与屏读规格）。
-pub fn run_codex_notes_stages<Rd, Q, T>(
+/// **形态门**：本编排只对单题卡放行（多题 notes 归属未在 0.162.1 复采，留白见
+/// 复验档案 §4——多题流端点侧已拒，进不到这里）。
+pub fn run_codex_notes_stages<T: FreeTextTerminal>(
+    q_idx: usize,
+    expected_total: usize,
     text: &str,
     overwrite: bool,
-    mut read: Rd,
-    mut poll_receipt: Q,
+    mut poll: impl FnMut() -> Result<Option<Vec<String>>, String>,
     terminal: &mut T,
-) -> Result<FreeTextOutcome, StageAbort>
-where
-    Rd: FnMut() -> Option<Vec<String>>,
-    Q: FnMut() -> Result<Option<Vec<String>>, String>,
-    T: FreeTextTerminal,
-{
+) -> Result<FreeTextOutcome, StageAbort> {
+    use crate::inject::anchor_ledger::{self, scenario, slot};
+    use crate::inject::question_screen_oc::codex_question_screen_snapshot;
+
     if text.trim().is_empty() && !overwrite {
         return Err(StageAbort::screen(
             "自由作答文本为空（清空请用覆盖写入）——已中止，未发任何键",
         ));
     }
     let mut sent_keys: Vec<String> = Vec::new();
-    // 1. 弹窗在场判读（两 footer 锚任一在场才动手）
-    let first = read().ok_or_else(|| {
+    let notes_footer = |lines: &[String]| {
+        lines
+            .iter()
+            .any(|l| l.to_lowercase().contains(CODEX_NOTES_OPENED_FOOTER))
+    };
+
+    // 1. 入口闸：读屏 + 面板解析（确认屏与「解析不出」分开点名，§3.6）
+    let first = terminal.read().ok_or_else(|| {
         StageAbort::screen("codex 备注：读不到屏幕——已中止，未发任何键；请人工核对终端")
     })?;
-    let lower: Vec<String> = first.iter().map(|l| l.to_lowercase()).collect();
-    let notes_opened = lower.iter().any(|l| l.contains(CODEX_NOTES_OPENED_FOOTER));
-    let notes_available = notes_opened || lower.iter().any(|l| l.contains(CODEX_NOTES_OPEN_FOOTER));
-    if !notes_available {
+    let snap = match codex_question_screen_snapshot(&first) {
+        Some(s) => s,
+        None => {
+            let lowered: Vec<String> = first.iter().map(|l| l.to_lowercase()).collect();
+            if anchor_ledger::detect(&lowered, "codex", scenario::QUESTION_REVIEW, slot::TITLE)
+                .is_some()
+            {
+                return Err(StageAbort::screen(
+                    "codex：屏上是未答完确认屏（Submit with unanswered questions?）——前序动作已错位，兔维斯 不代答；请到终端人工处置",
+                ));
+            }
+            return Err(StageAbort::screen(
+                "codex 备注：屏上解析不出问答面板（题号头/footer 锚不成立）——已中止，未发任何键；请人工核对终端",
+            ));
+        }
+    };
+    // 身份闸 + 题数交叉核对（与 select 阶段机同款——错卷发键 = 打错题）
+    if snap.question_idx != q_idx {
+        return Err(StageAbort::screen(format!(
+            "codex 身份闸：屏上第 {} 题与手机卡第 {} 题不一致——已中止，未发任何键；请核对终端当前题",
+            snap.question_idx + 1,
+            q_idx + 1
+        )));
+    }
+    if snap.question_total != expected_total {
+        return Err(StageAbort::screen(format!(
+            "codex 身份闸：终端问卷共 {} 题与手机卡 {} 题不一致——已中止，未发任何键；请核对终端",
+            snap.question_total, expected_total
+        )));
+    }
+
+    // 2. note 行在态记录 + 残留守卫（**仅发送路径**——清空/覆盖写入的入口就是
+    //    备注态有字，「残留」正是操作对象，不拦）
+    let note_present =
+        |lines: &[String]| crate::inject::question_screen_oc::codex_notes_row_text(lines).is_some();
+    let had_note = note_present(&first);
+    if !overwrite && notes_footer(&first) {
         return Err(StageAbort::screen(
-            "屏读未见到 request_user_input 弹窗（footer 锚缺席）——已中止，未发任何键（Tab 不能落在弹窗之外）；请人工核对终端",
+            "codex 备注：终端已在备注输入态（上次编排半程残留）——已中止，未发任何键；请人工核对终端（esc 可清备注退出）",
         ));
     }
-    // 2. 未在备注态 → Tab 开备注行；已在备注态：
-    //    - overwrite → **再按一次 Tab = 清空备注**（footer 活体明文
-    //      「tab or esc to clear note」，戊探C 取证 + 2026-10-06 复用定案）
-    //      → 清后重打全文（覆盖写入）/ 保持清空（text 空 = 清空请求）
-    //    - !overwrite → 跳过（此时打字只会追加在旧备注后）
-    if !notes_opened || overwrite {
-        terminal
-            .send("tab")
-            .map_err(|e| StageAbort::delivery(format!("Tab 投递失败（{e}）")))?;
-        sent_keys.push("tab".to_string());
-        terminal.settle();
+
+    // 3. 清空段（覆盖写入/清空共用；0.162.1 语义：notes 态 tab = 清空+退出）：
+    //    **tab 循环 ≤2 下，每下之后读屏，note 行字消失即提前终止**（2026-10-10
+    //    用户规格：「默认按两下，第一下后有字变无字就终止」）
+    if overwrite {
+        for _ in 0..2 {
+            let Some(l) = terminal.read() else {
+                return Err(StageAbort::screen(
+                    "codex 备注：清空段读不到屏——已中止；请核对终端",
+                ));
+            };
+            if !note_present(&l) {
+                break; // 已无字（含占位态）——清空目标达成
+            }
+            terminal
+                .send("tab")
+                .map_err(|e| StageAbort::delivery(format!("清空 Tab 投递失败（{e}）")))?;
+            sent_keys.push("tab".to_string());
+            terminal.settle();
+            poll_until(&mut poll, 4, |ls| !note_present(ls));
+            // 本下是否清掉由循环顶部重读终判（读竞态不在这里下结论）
+        }
+        // 清空终判：note 行必须无字
+        let Some(l) = terminal.read() else {
+            return Err(StageAbort::screen(
+                "codex 备注：清空终判读不到屏——已中止；请核对终端",
+            ));
+        };
+        if note_present(&l) {
+            return Err(StageAbort::screen(
+                "codex 备注：两下清空 Tab 后 note 行仍有残字——已中止，未发提交键；请人工核对终端",
+            ));
+        }
+        // 若停在空 notes 态（第二下 tab 落在答案态会「重开空 notes」）→ esc 退回，
+        // 给发送段一个干净的答案态入口
+        if notes_footer(&l) {
+            terminal
+                .send("esc")
+                .map_err(|e| StageAbort::delivery(format!("退出 esc 投递失败（{e}）")))?;
+            sent_keys.push("esc".to_string());
+            terminal.settle();
+            if !poll_until(&mut poll, 4, |ls| !notes_footer(ls)) {
+                return Err(StageAbort::screen(
+                    "codex 备注：esc 后备注态未退出——已中止；请核对终端",
+                ));
+            }
+        }
+        if text.is_empty() {
+            // **清空请求完成**：note 行无字即目标达成（不发 Enter——codex 无「只存
+            // 不交」键，本题提交走卡面提交按钮/后续动作）
+            return Ok(FreeTextOutcome {
+                sent_keys,
+                receipt_seen: None,
+                advanced: false,
+                review_reached: false,
+                screen_text: None,
+                screen_checked: None,
+            });
+        }
     }
-    // 3. 打字（字符通道；清空路径 text 空 = 跳过）
+
+    // 4. 发送段（发送线路直入；覆盖写入=清空段拼本段）：Other 行定位 + 改答守卫
+    //    + 走位 + tab 开 notes
+    // 覆盖路径清空段发过键，入口快照已陈旧——重读重析（身份闸一并复核）
+    let snap = if overwrite {
+        let l = terminal
+            .read()
+            .ok_or_else(|| StageAbort::screen("codex 备注：发送段读不到屏——已中止；请核对终端"))?;
+        let s = codex_question_screen_snapshot(&l).ok_or_else(|| {
+            StageAbort::screen("codex 备注：发送段解析不出问答面板——已中止；请核对终端")
+        })?;
+        if s.question_idx != q_idx {
+            return Err(StageAbort::screen(format!(
+                "codex 身份闸：屏上第 {} 题与手机卡第 {} 题不一致——已中止，未发任何键；请核对终端当前题",
+                s.question_idx + 1,
+                q_idx + 1
+            )));
+        }
+        s
+    } else {
+        snap
+    };
+    let other_idx = snap
+        .options
+        .iter()
+        .position(|o| o.to_lowercase().contains(CODEX_OTHER_ROW_LABEL))
+        .ok_or_else(|| {
+            StageAbort::screen(
+                "codex 备注：屏上没有 Other 行（None of the above）——本题面板不支持自由作答，已中止，未发任何键；请到终端作答",
+            )
+        })?;
+    // 改答守卫（P1-2 同源保守）：已答 ∧ 焦点≠Other → tab 的 ensure 会换选，不冒进。
+    // **豁免**：覆盖写入 ∧ 入场有 note——note 只能经 Other-notes 流产生，旧答案必是
+    // Other，走位+ensure 是「选回同一行」，不存在换选（2026-10-10 用户规格：覆盖
+    // 写入正是「有字时改字」的主路径）
+    if snap.unanswered == 0 && snap.focused != Some(other_idx) && !(overwrite && had_note) {
+        return Err(StageAbort::screen(
+            "codex 备注：本题已作答且焦点不在 Other 行——tab 的 ensure 选中会把答案换到 Other（0.162.1 未复采该路径），远程代答不冒进；已中止，未发任何键；请到终端人工操作",
+        ));
+    }
+
+    // 走位到 Other（vim j/k 最短环绕、每步复读——镜像 select 末题段）
+    let Some(f0) = snap.focused else {
+        return Err(StageAbort::screen(
+            "codex 备注：读不到焦点行（› 缺席）——不猜起点，已中止，未发任何键；请核对终端",
+        ));
+    };
+    let m = snap.options.len();
+    let down = (other_idx + m - f0) % m;
+    let up = (f0 + m - other_idx) % m;
+    let walk_key = if up < down { "k" } else { "j" };
+    let mut focused = f0;
+    for _ in 0..down.min(up) {
+        terminal
+            .send(walk_key)
+            .map_err(|e| StageAbort::delivery(format!("走位键 {walk_key} 投递失败（{e}）")))?;
+        sent_keys.push(walk_key.to_string());
+        terminal.settle();
+        match terminal
+            .read()
+            .as_deref()
+            .and_then(codex_question_screen_snapshot)
+        {
+            Some(s) => match s.focused {
+                Some(f) if f == other_idx => {
+                    focused = f;
+                    break;
+                }
+                _ => focused = s.focused.unwrap_or(focused),
+            },
+            None => {
+                return Err(StageAbort::screen(
+                    "codex 备注：走位中读屏失败或面板形态崩——已中止；请核对终端",
+                ))
+            }
+        }
+    }
+    if focused != other_idx {
+        return Err(StageAbort::screen(
+            "codex 备注：走位有界耗尽仍未到 Other 行——已中止；请核对终端",
+        ));
+    }
+
+    // tab 开 notes + 有界轮询 footer 翻转
+    terminal
+        .send("tab")
+        .map_err(|e| StageAbort::delivery(format!("Tab 投递失败（{e}）")))?;
+    sent_keys.push("tab".to_string());
+    terminal.settle();
+    if !poll_until(&mut poll, 4, |lines| notes_footer(lines)) {
+        return Err(StageAbort::screen(
+            "codex 备注：Tab 后未见备注态（footer 未翻转出「tab or esc to clear notes」）——已中止；请核对终端",
+        ));
+    }
+    // **输入行就绪门**（2026-10-10 20:55 实机：footer 翻转后立刻打字，字符落在
+    // notes 输入行挂载完成之前——末帧 notes 关闭、字消失）。等 `› Add notes`/
+    // `› <文本>` 行出现（输入行挂载的可见标记）才许打字。
+    if !poll_until(&mut poll, 4, |lines| {
+        crate::inject::question_screen_oc::codex_notes_input_ready(lines)
+    }) {
+        return Err(StageAbort::screen(
+            "codex 备注：备注态已开但输入行未就绪（未见 › 行）——已中止，未打字；请核对终端",
+        ));
+    }
+
+    // 7. 打字 + 上屏核验（0.160.0「打字不可见静默丢失」的复防线：文本没上屏绝不发 Enter）
     if !text.is_empty() {
         terminal
             .send_text(text)
             .map_err(|e| StageAbort::delivery(format!("备注文本投递失败（{e}）")))?;
         sent_keys.push("<text>".to_string());
         terminal.settle();
-        // 4. Enter 提交（当前高亮项 + 备注，自动推进）
+        // 证据自带失败（闸门 2）：核验各拍实读帧留存，误拦/真丢两可时日志是物证
+        // （2026-10-10 19:25 实机：文字已上屏仍被瞬发拍误拦——无帧留证只能靠推测归因）
+        let mut last_frame: Option<Vec<String>> = None;
+        let seen = poll_until(&mut poll, 10, |lines| {
+            last_frame = Some(lines.to_vec());
+            screen_contains_text(lines, text)
+        });
+        if !seen {
+            // 证据自带失败（闸门 2）：末拍实读帧的归一化尾 400 字——足够看出
+            // 「文字其实在屏上」或「真没上屏」（2026-10-10 19:25/19:49 实机教训）
+            if let Some(frame) = &last_frame {
+                let joined = frame.join(" ");
+                let tail: String = joined
+                    .chars()
+                    .rev()
+                    .take(400)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                log::warn!(
+                    "codex-notes 上屏核验未命中（text_len={}）——末拍实读帧 {} 行，归一化尾 400 字：{tail}",
+                    text.chars().count(),
+                    frame.len()
+                );
+            } else {
+                log::warn!("codex-notes 上屏核验未命中——窗内一帧屏都没读到（读屏失败/窗尽）");
+            }
+            // **notes 态在打字后意外关闭**（19:49 实机形态：覆盖双 tab 重开核验通过后
+            // notes 又关了）→ 文本落空是状态问题不是重绘问题，重试只会雪上加霜——
+            // 点名中止；notes 态还在 → 文本可能被 TUI 吃掉（送达抖动），**整段重试
+            // 一次**（清空重打语义：先 esc 清掉可能落了一半的残文，再重走 tab+打字）
+            let notes_still_open = last_frame.as_ref().is_some_and(|f| notes_footer(f));
+            if notes_still_open {
+                log::warn!("codex-notes 上屏核验未命中但备注态仍在——清残重打一次（送达抖动重试）");
+                terminal
+                    .send("esc")
+                    .map_err(|e| StageAbort::delivery(format!("清残 esc 投递失败（{e}）")))?;
+                sent_keys.push("esc".to_string());
+                terminal.settle();
+                terminal
+                    .send("tab")
+                    .map_err(|e| StageAbort::delivery(format!("重试 tab 投递失败（{e}）")))?;
+                sent_keys.push("tab".to_string());
+                terminal.settle();
+                if !poll_until(&mut poll, 4, |lines| notes_footer(lines)) {
+                    return Err(StageAbort::screen(
+                        "codex 备注：重试重开备注态失败——已中止，未发提交键；请人工核对终端",
+                    ));
+                }
+                terminal
+                    .send_text(text)
+                    .map_err(|e| StageAbort::delivery(format!("备注文本重投失败（{e}）")))?;
+                sent_keys.push("<text>".to_string());
+                terminal.settle();
+                let retried = poll_until(&mut poll, 10, |lines| {
+                    last_frame = Some(lines.to_vec());
+                    screen_contains_text(lines, text)
+                });
+                if !retried {
+                    return Err(StageAbort::screen(
+                        "codex 备注：重试打字后屏上仍未见到备注文本——已中止，未发提交键；请人工核对终端",
+                    ));
+                }
+            } else {
+                return Err(StageAbort::screen(
+                    "codex 备注：打字后备注态意外关闭且屏上未见备注文本（覆盖重开竞态或文本未被通道送达）——已中止，未发提交键；请人工核对终端后重试",
+                ));
+            }
+        }
+        // 8. Enter 提交 + 终态（未见不是失败——如实 Some(false)）
         terminal
             .send("enter")
             .map_err(|e| StageAbort::delivery(format!("提交回车投递失败（{e}）")))?;
         sent_keys.push("enter".to_string());
         terminal.settle();
-        // 5. 终态（未见不是失败）
-        let receipt_seen = stage_receipt_seen(&mut poll_receipt, codex_answered_present);
+        let receipt_seen = stage_receipt_seen(&mut poll, codex_answered_present);
+        log::info!("codex-notes 键序列={sent_keys:?} receipt_seen={receipt_seen:?}");
         Ok(FreeTextOutcome {
             sent_keys,
             receipt_seen,
@@ -1464,17 +1742,57 @@ where
             screen_checked: None,
         })
     } else {
-        // **清空路径不发 Enter**：codex 的 Enter=提交整卷（无"只保存不提交"键），
-        // 空备注提交行为未取证——清空止于 Tab，提交走卡面提交按钮。
-        Ok(FreeTextOutcome {
-            sent_keys,
-            receipt_seen: None,
-            advanced: false,
-            review_reached: false,
-            screen_text: None,
-            screen_checked: None,
-        })
+        // text 空 ∧ !overwrite 已在函数头拒绝；到这里必是 overwrite ∧ 空文本，
+        // 在覆盖段已返回——防御性兜底（不应可达）
+        Err(StageAbort::screen(
+            "codex 备注：内部状态异常（空文本落到打字段）——已中止",
+        ))
     }
+}
+
+/// 有界轮询谓词（`beats` 拍；任一拍命中即真，窗尽/读屏失败=假）。
+///
+/// **拍间必须有真实时距**（2026-10-10 19:25 实机二次误拦根因）：`poll()` 读屏成功
+/// 即立即返回，若拍间不 sleep，`beats` 拍背靠背在几十毫秒内瞬发打完——所谓「重绘
+/// 等待窗」实际不存在，全部落在 TUI 重绘之前（首拍前有 `terminal.settle()` 的
+/// 150ms，但只保护首拍）。拍间 `POLL_STEP_MS`（100ms）时距让 10 拍成为真实的
+/// ~1s 重绘窗口。
+fn poll_until(
+    poll: &mut impl FnMut() -> Result<Option<Vec<String>>, String>,
+    beats: usize,
+    mut pred: impl FnMut(&[String]) -> bool,
+) -> bool {
+    for i in 0..beats {
+        if i > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::inject::timing::POLL_STEP_MS,
+            ));
+        }
+        match poll() {
+            Ok(Some(lines)) if pred(&lines) => return true,
+            Ok(Some(_)) => { /* 屏在但未命中——下一拍再验（真实时距窗） */ }
+            _ => return false, // 窗尽 / 读屏失败
+        }
+    }
+    false
+}
+
+/// 屏面是否包含目标文本（**整屏剥空白归一化**后子串判定——备注文本折行显示时
+/// 会跨屏行断开，按单行 contains 会漏判（2026-10-10 实机误拦教训：备注已上屏仍被
+/// 判「未上屏」误中止）；整屏拼接归一化后折行/缩进不再影响匹配）。
+fn screen_contains_text(lines: &[String], text: &str) -> bool {
+    let squash = |s: &str| {
+        s.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_lowercase()
+    };
+    let needle = squash(text);
+    if needle.is_empty() {
+        return false;
+    }
+    let screen = squash(&lines.join(""));
+    screen.contains(&needle)
 }
 
 /// codex rollout **user_note 对账解析**（纯函数）：`function_call_output.output`
@@ -5168,22 +5486,16 @@ where
     Ok(sent_keys)
 }
 
-/// 自由作答的**工具支持面**（v1 只对 claude 放行，§2.4）：
+/// 自由作答的**工具支持面**：
 /// - claude：K4–K7 实机定案（数字定位 → 文本 → 回车）；
-/// - 其余工具的自由作答序列**未定案**（§2.4 列的 opencode
-///   `own answer` / kimi `Other` 之外——codex 见下方取证回填）→ 端点按 §2.8 降级：
-///   前端渲染「请在终端作答」，**不假装能发**。
+/// - kimi（Other 行，戊探B E-B8 全链）/ opencode（own answer 形态）：批次戊实机定案；
+/// - codex：**2026-10-10 复活**——0.160.0 曾因「notes 不落卷」停用（2026-10-09
+///   取证回填），0.162.1 四取样复验全通（落卷实锤 + 覆盖双 tab 语义 + esc 红线；
+///   档案 `research/refs/phase2-消息注入/2026-10-10-codex-0162-notes链复验.md`），
+///   编排 [`run_codex_notes_stages`] 按 0.162.1 语义修订后重新接线（单题卡形态门
+///   把守——多题 notes 归属未复采，不放开）。
 pub fn free_text_supported(tool: &str) -> bool {
-    // 批次戊 E4/E6 更新：kimi（Other 行，戊探B E-B8 全链）与 opencode（own answer
-    // 形态）均已实机定案；形态门仍只放单选（kimi 多选 Other 无编号）——
-    // 见 [`free_text_shape_supported`]。
-    //
-    // **codex 0.160.0 取证回填（2026-10-09）移除**：notes 文本不随卷提交——notes 态
-    // 打字后回车，实测摘要屏 `answer` 落在焦点行，用户备注被静默丢弃（底料
-    // `2026-10-08-codex-160-question-屏读底料.md` §5）。Tab→打字→Enter 链的净效果 =
-    // 把焦点行提交为答案，违反「屏读为准 / 不假装能发」——远程自由作答停用，
-    // 路由侧具名中止（[`StagePlan::CodexFreeTextRetired`]，见 remote/api.rs）。
-    matches!(tool, "claude" | "kimi" | "opencode")
+    matches!(tool, "claude" | "kimi" | "opencode" | "codex")
 }
 
 /// 自由作答的**题目形态支持面**（复评 F6-3：多选卡不提供自由作答）。
@@ -5232,9 +5544,16 @@ pub fn free_text_shape(tool: &str) -> Result<FreeTextShape, String> {
     if !free_text_supported(tool) {
         return Err(format!("{tool} 自由作答序列未实测，请在终端作答"));
     }
+    // codex 的形状 = 走位 Other 行（`None of the above`）→ tab 开备注 → 文本 →
+    // 回车——定位判据与 claude 系（裸 `Type something` 行）不同族，按工具分派。
+    let (locate_label, submit_key) = if tool == "codex" {
+        (CODEX_OTHER_ROW_LABEL, "enter")
+    } else {
+        (FREE_TEXT_ROW_LABEL, "enter")
+    };
     Ok(FreeTextShape {
-        locate_label: FREE_TEXT_ROW_LABEL,
-        submit_key: "enter",
+        locate_label,
+        submit_key,
         // **题目形态限制**（复评 F6-3）：本形态只对单题卡成立——多选屏的自由作答行
         // 带勾选框（`4. [ ] Type something`），与 locate_label 的前缀判据不符。
         // 消费方必须同时过 [`free_text_shape_supported`]（端点已如此）。
@@ -5372,9 +5691,10 @@ pub fn action_supported(
             //   编辑 + 勾选自动置上 + 回车会取消勾选——ClaudeMultiFreeText 闭环）；
             // - opencode：own answer 方言单/多选皆可（戊探A E-A2/E-A3 双形态实测 +
             //   2026-10-04 用户活体双段 toggle 语义定案——OpencodeOwnAnswer 编排）；
-            // - codex：**已移除**（2026-10-09 取证回填，0.160.0 notes 不落卷——
-            //   `free_text_supported` 已拒，codex 在上方检查即返回 ToolUnverified，
-            //   本豁免名单若仍留 codex 会误导后来者以为可用）；
+            // - codex：**2026-10-10 复活**（0.160.0「notes 不落卷」在 0.162.1 四取样
+            //   复验未复现）——过 `free_text_supported` 首查后：单题**过门**（走
+            //   CodexFreeText 活编排），多题/多选落 shape 兜底门拒绝（多题 notes
+            //   归属未复采，本豁免名单不开——多选形态走编排屏读的只有上面三家）；
             // - kimi：2026-10-06 用户指令点亮（推翻探测批 K「多选不接入」裁决，
             //   multiFreeText 旗标同批点亮）：走 KimiFreeText 阶段机——Other 行
             //   编号**按屏自适应**（显示编号 `[N]` 优先；多选无编号形态按 checkbox
@@ -6073,9 +6393,10 @@ mod tests {
     /// `multiFreeText` 同面——opencode（own answer 方言）多选放行；kimi（2026-10-06
     /// 点亮）多选放行。此前豁免面漏了 opencode/codex：GET 渲染输入框、POST 必撞
     /// 409 tool_readonly（用户实机撞线：输入框打字点发送 →「该工具的远程作答尚未
-    /// 实测」）。**codex 2026-10-09 取证回填移除**：0.160.0 notes 不落卷（底料 §5）
-    /// ——`free_text_supported` 已拒，单/多选两形态都须 409（回执文案引导终端作答，
-    /// 不是静默失败）。**codex 多选切勾接线锁**（2026-10-05 探测批 C 定案 C2 接线）：
+    /// 实测」）。**codex 面沿革**：2026-10-09 取证回填曾整体停用（0.160.0 notes
+    /// 不落卷，底料 §5）→ **2026-10-10 notes 链复活**（0.162.1 四取样复验全通）：
+    /// 单题卡过门走活编排，多选面维持 409（回执文案引导终端作答，不是静默失败）。
+    /// **codex 多选切勾接线锁**（2026-10-05 探测批 C 定案 C2 接线）：
     /// 多选 Toggle = ↓×(index) 前向走位 + Space（选中不前进，作用于高亮行）；
     /// index 越界拒绝；单选不经过此路径（toggle 仅多选题）。
     #[test]
@@ -6098,11 +6419,17 @@ mod tests {
         let m = multi();
         assert!(action_supported("claude", AnswerAction::FreeText, None, &m).is_ok());
         assert!(action_supported("opencode", AnswerAction::FreeText, None, &m).is_ok());
-        // codex 2026-10-09 取证回填：free_text_supported 已拒 → 门在 FreeText 首查
-        // 即 ToolUnverified（单/多选同拒）——路由侧具名中止 CodexFreeTextRetired
-        assert!(
-            action_supported("codex", AnswerAction::FreeText, None, &m).is_err(),
-            "codex 自由作答停用（notes 不落卷）后门必须先拒"
+        // codex 2026-10-10 复活：free_text_supported 已放开 → **多选卡仍拒**
+        // （走 shape 兜底分支——多题/多选 notes 归属未在 0.162.1 复采，文案引导
+        // 终端完成；路由侧走 CodexFreeText 活编排仅接单题卡）
+        let refusal = action_supported("codex", AnswerAction::FreeText, None, &m)
+            .expect_err("codex 多选自由作答仍须门拒");
+        assert_eq!(
+            refusal,
+            ActionRefusal::ToolUnverified(
+                "多选题的自由作答请到终端完成（远程入口仅支持单题卡）".to_string()
+            ),
+            "多选拒绝走 shape 兜底分支，文案引导终端：{refusal:?}"
         );
         // GET multiFreeText 旗标**同面**是本测试的存在意义：旗标开而门拒 = 用户
         // 必撞 409（2026-10-05 实机回归即此形态）
@@ -6110,12 +6437,12 @@ mod tests {
             action_supported("kimi", AnswerAction::FreeText, None, &m).is_ok(),
             "kimi 多选 freeText 与 multiFreeText 旗标同面放行（可达性由阶段机屏读把守）"
         );
-        // 单选面（codex 同步收口；其余各家单选自由作答的既有定案维持放行）
+        // 单选面（codex notes 链复活 → 单题卡**过门**；其余各家既有定案维持放行）
         let s = single();
         assert!(action_supported("kimi", AnswerAction::FreeText, None, &s).is_ok());
         assert!(
-            action_supported("codex", AnswerAction::FreeText, None, &s).is_err(),
-            "codex 单选自由作答同样停用（具名中止，引导终端作答）"
+            action_supported("codex", AnswerAction::FreeText, None, &s).is_ok(),
+            "codex 单题自由作答过门（notes 链复活，走 CodexFreeText 活编排）"
         );
         assert!(action_supported("opencode", AnswerAction::FreeText, None, &s).is_ok());
         assert!(action_supported("claude", AnswerAction::FreeText, None, &s).is_ok());
@@ -7033,118 +7360,578 @@ mod tests {
         assert!(parse_opencode_answers(r#"{"answers":"oops"}"#).is_none());
     }
 
-    // ==== 批次戊 E5：codex Tab 备注（阶段机脚本锁 + rollout 对账夹具）====
+    // ==== 批次戊 E5（2026-10-10 复活批重写）：codex notes 链编排序列锁 ====
+    // 旧「answer_footer 三行夹具 + 旧五参签名」脚本锁随 0.162.1 语义重写作废——
+    // 新编排 [`run_codex_notes_stages`] 每步屏读核验（入口闸解析真面板帧 → 走位
+    // Other → tab footer 翻转 → 打字上屏 → enter 终态），夹具必须用
+    // `codex_question_screen_snapshot` 能解析的完整面板帧（真机基底
+    // `live_fixtures::codex_s1_q2*`——4 选项屏，Other 行 = 第 4 项）。
 
-    /// **codex 备注阶段机脚本锁（三态）**：
-    /// ① 答案态 footer（`tab to add notes`）→ tab → 文本 → enter；
-    /// ② 已在备注态（`tab or esc to clear notes`）→ **零 tab**（再按 = 清空备注）；
-    /// ③ 弹窗不在场 → 第 1 段中止零按键（Tab 不能落在弹窗之外）。
-    #[test]
-    fn e5_codex_notes_stage_scripted() {
-        let answer_footer = lines(&[
-            "  › 1. MIT (Recommended)",
-            "  tab to add notes | enter to submit answer",
-        ]);
-        let opened_footer = lines(&[
-            "  › 1. MIT (Recommended)",
-            "  › NOTE-TEXT",
-            "  tab or esc to clear notes | enter to submit answer",
-        ]);
-        let receipt = lines(&["• Questions 1/1 answered"]);
-        let run = |screen: &[String], texts: &mut Vec<String>, sent: &mut Vec<String>| {
-            let scr = screen.to_vec();
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: || Some(scr.clone()),
-                send: |k: &str| {
-                    sent.push(k.to_string());
-                    Ok(())
-                },
-                send_text: |t: &str| {
-                    texts.push(t.to_string());
-                    Ok(())
-                },
-                settle: || {},
-            };
-            run_codex_notes_stages(
-                "NOTE-XYZ",
-                false,
-                || Some(screen.to_vec()),
-                || Ok(Some(receipt.clone())),
-                &mut terminal,
-            )
-        };
-        // ① 答案态：tab → 文本 → enter
-        let mut texts = Vec::new();
-        let mut sent = Vec::new();
-        let out = run(&answer_footer, &mut texts, &mut sent).expect("答案态 footer → 全链");
-        assert_eq!(out.sent_keys, vec!["tab", "<text>", "enter"]);
-        assert_eq!(texts, vec!["NOTE-XYZ"], "备注走字符通道");
-        assert_eq!(out.receipt_seen, Some(true));
-        // ② 已在备注态：跳过 tab
-        let mut texts2 = Vec::new();
-        let mut sent2 = Vec::new();
-        let out2 = run(&opened_footer, &mut texts2, &mut sent2).expect("备注态 → 不重复 Tab");
-        assert_eq!(out2.sent_keys, vec!["<text>", "enter"], "零 tab");
-        // ③ 弹窗不在场 → 中止零按键
-        let bare = lines(&["some composer screen"]);
-        let mut texts3 = Vec::new();
-        let mut sent3 = Vec::new();
-        let err = run(&bare, &mut texts3, &mut sent3).expect_err("无 footer 锚 → 中止");
-        assert!(err.message.contains("request_user_input 弹窗"), "{err:?}");
-        assert!(sent3.is_empty(), "中止零按键");
+    /// 帧派生：footer 的 `tab to add notes` 段翻成备注态词形
+    /// `tab or esc to clear notes`（0.162.1 复验 N3 的 footer 翻转形态）。footer
+    /// 其余段不动——配对锚（submit 段 / navigate 段）仍在场，快照解析不受影响。
+    fn codex_notes_footer_frame(base: &[String]) -> Vec<String> {
+        base.iter()
+            .map(|l| l.replace("tab to add notes", "tab or esc to clear notes"))
+            .collect()
     }
 
-    /// **codex 覆盖写入/清空脚本锁**（2026-10-06 复用批）：备注态 + overwrite =
-    /// **Tab 清空旧备注**（footer 活体明文「tab or esc to clear note」）→ 重打
-    /// 全文 → enter；text 空 = 纯清空，**不发 Enter**（codex Enter=提交整卷，
-    /// 空备注提交未取证，提交走卡面提交按钮）。
-    #[test]
-    fn e5_codex_notes_overwrite_and_clear_scripted() {
-        let opened_footer = lines(&[
-            "  › 1. MIT (Recommended)",
-            "  › OLD-NOTE",
-            "  tab or esc to clear notes | enter to submit answer",
-        ]);
-        let receipt = lines(&["• Questions 1/1 answered"]);
-        let run = |text: &str, overwrite: bool, texts: &mut Vec<String>, sent: &mut Vec<String>| {
-            let scr = opened_footer.clone();
-            let mut terminal = crate::inject::question::FreeTextClosures {
-                read: move || Some(scr.clone()),
-                send: |k: &str| {
-                    sent.push(k.to_string());
-                    Ok(())
-                },
-                send_text: |t: &str| {
-                    texts.push(t.to_string());
-                    Ok(())
-                },
-                settle: || {},
-            };
-            run_codex_notes_stages(
-                text,
-                overwrite,
-                || Some(opened_footer.clone()),
-                || Ok(Some(receipt.clone())),
-                &mut terminal,
-            )
+    /// 帧派生：备注态帧 + 已上屏的备注文本行（打字后屏读形态——0.162.1 字符层
+    /// 回显可见；行只需包含全文，`screen_contains_text` 做剥空白归一化子串判定）。
+    fn codex_notes_typed_frame(base: &[String], text: &str) -> Vec<String> {
+        let mut v = codex_notes_footer_frame(base);
+        let pos = v
+            .iter()
+            .rposition(|l| l.contains("tab or esc to clear notes"))
+            .expect("基底必须是备注态帧（footer 已翻转）");
+        v.insert(pos, format!("  {text}"));
+        v
+    }
+
+    /// 帧派生：备注态帧 + **有字的 note 行**（`› OLD-NOTE` 形态——`codex_notes_row_text`
+    /// 判据：题号头下首个 `› ` 前缀非选项行，非 `Add notes` 占位即有字）。插在选项区
+    /// 之后、footer 之前：快照解析在该行 break（选项区已收口），note 判定恰好命中。
+    fn codex_notes_with_text_frame(base: &[String], note: &str) -> Vec<String> {
+        let mut v = codex_notes_footer_frame(base);
+        let pos = v
+            .iter()
+            .rposition(|l| l.contains("tab or esc to clear notes"))
+            .expect("基底必须是备注态帧（footer 已翻转）");
+        v.insert(pos, format!("  › {note}"));
+        v
+    }
+
+    /// codex notes 编排脚本驱动器（同 `run_codex_select_script` 的抽法）：screens
+    /// 逐帧出队，`terminal.read()` 与 `poll()` 共用同一队列——出队序 = 编排调用序；
+    /// 队空 = read None / poll Ok(None)（窗尽）。send / send_text 双轨记账
+    /// （sent_keys 的 `<text>` 占位与文本通道互证）。
+    fn run_codex_notes_script(
+        q_idx: usize,
+        expected_total: usize,
+        text: &str,
+        overwrite: bool,
+        screens: Vec<Vec<String>>,
+    ) -> (
+        Result<FreeTextOutcome, StageAbort>,
+        Vec<String>,
+        Vec<String>,
+    ) {
+        use std::cell::RefCell;
+        let screens = RefCell::new(std::collections::VecDeque::from(screens));
+        let sent = RefCell::new(Vec::<String>::new());
+        let texts = RefCell::new(Vec::<String>::new());
+        let mut terminal = crate::inject::question::FreeTextClosures {
+            read: || screens.borrow_mut().pop_front(),
+            send: |k: &str| {
+                sent.borrow_mut().push(k.to_string());
+                Ok(())
+            },
+            send_text: |t: &str| {
+                texts.borrow_mut().push(t.to_string());
+                Ok(())
+            },
+            settle: || {},
         };
-        // ① 覆盖写入：Tab 清空 → 新文 → enter（footer 清空语义复用）
-        let mut texts = Vec::new();
-        let mut sent = Vec::new();
-        let out = run("NEW-NOTE", true, &mut texts, &mut sent).expect("覆盖写入全链");
-        assert_eq!(out.sent_keys, vec!["tab", "<text>", "enter"]);
-        assert_eq!(texts, vec!["NEW-NOTE"]);
-        // ② 清空：Tab 后**不发 Enter**、不打字
-        let mut texts2 = Vec::new();
-        let mut sent2 = Vec::new();
-        let out2 = run("", true, &mut texts2, &mut sent2).expect("清空 = 仅 Tab");
-        assert_eq!(out2.sent_keys, vec!["tab"], "清空只发 Tab");
-        assert!(texts2.is_empty(), "清空零文本");
-        // ③ 空文本且非 overwrite → 原样拒绝
-        let mut texts3 = Vec::new();
-        let mut sent3 = Vec::new();
-        let err = run("", false, &mut texts3, &mut sent3).expect_err("空文本拒绝");
-        assert!(err.message.contains("覆盖写入"), "{err:?}");
+        let poll = || Ok(screens.borrow_mut().pop_front());
+        (
+            run_codex_notes_stages(q_idx, expected_total, text, overwrite, poll, &mut terminal),
+            sent.into_inner(),
+            texts.into_inner(),
+        )
+    }
+
+    /// **① 答案态全链**（场景锁主路径）：`codex_s1_q2_focused(1)` 入场（Question
+    /// 2/2，1 未答，焦点 Memcached=选项 2）→ 走位 Other（m=4、目标 idx 3：
+    /// down=(3+4-1)%4=2、up=(1+4-3)%4=2 平手 → j 默认方向 ×2，每步复读焦点推进）
+    /// → tab 开 notes（poll footer 翻转 + **输入行就绪门**——`› Add notes` 占位
+    /// 也算就绪，2026-10-10 20:55 实机后新增）→ 打字（poll 验文本上屏）→ enter
+    /// （poll 终态回执）。sent_keys = ["j","j","tab","<text>","enter"]（就绪门零键），
+    /// receipt Some(true)。
+    #[test]
+    fn e5_codex_notes_full_chain_scripted() {
+        let notes = codex_notes_footer_frame(&live_fixtures::codex_s1_q2_focused(3));
+        let ready =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(3), "Add notes");
+        let (r, sent, texts) = run_codex_notes_script(
+            1,
+            2,
+            "NOTE-XYZ",
+            false,
+            vec![
+                live_fixtures::codex_s1_q2_focused(1), // 入口闸 read：焦点 1
+                live_fixtures::codex_s1_q2_focused(2), // j 走位复读：焦点 2（未到）
+                live_fixtures::codex_s1_q2_focused(3), // j 走位复读：焦点 3 = Other → 停
+                notes.clone(),                         // tab 后 poll：footer 翻出备注态
+                ready, // 输入行就绪门：› Add notes 占位即就绪（零键）
+                codex_notes_typed_frame(&notes, "NOTE-XYZ"), // 打字后 poll：文本上屏
+                live_fixtures::codex_answered_summary(), // enter 后 poll：终态回执
+            ],
+        );
+        let out = r.expect("答案态全链必须成功");
+        assert_eq!(
+            out.sent_keys,
+            vec!["j", "j", "tab", "<text>", "enter"],
+            "{sent:?}"
+        );
+        assert_eq!(texts, vec!["NOTE-XYZ"], "备注走字符通道");
+        assert_eq!(out.receipt_seen, Some(true), "终态回执在场");
+        assert!(!out.advanced);
+    }
+
+    /// **② 身份闸不匹配中止零键**：屏上题号 ≠ 手机卡题号（第 2 题 vs 第 1 题）、
+    /// 屏上问卷题数 ≠ 手机卡题数（2 vs 3）——两臂都中止且零按键（错卷发键 =
+    /// 打错题，与 select 阶段机同款闸）。
+    #[test]
+    fn e5_codex_notes_identity_gate_aborts_zero_keys() {
+        for (q_idx, expected_total) in [(0, 2), (1, 3)] {
+            let (r, sent, texts) = run_codex_notes_script(
+                q_idx,
+                expected_total,
+                "NOTE",
+                false,
+                vec![live_fixtures::codex_s1_q2()],
+            );
+            let err = r.expect_err("身份闸不匹配必须中止");
+            assert!(
+                err.message.contains("身份闸") && err.message.contains("未发任何键"),
+                "{err:?}"
+            );
+            assert!(
+                sent.is_empty() && texts.is_empty(),
+                "中止零按键零文本：{sent:?} / {texts:?}"
+            );
+        }
+    }
+
+    /// **③ Other 行缺席中止零键**：4 选项屏去掉 `None of the above` 行（编号仍
+    /// 连续可解析）→ 本题面板不支持自由作答，零键中止引导终端。
+    #[test]
+    fn e5_codex_notes_other_row_absent_aborts_zero_keys() {
+        let no_other = live_fixtures::codex_s1_q2()
+            .into_iter()
+            .filter(|l| !l.contains("None of the above"))
+            .collect::<Vec<_>>();
+        let (r, sent, texts) = run_codex_notes_script(1, 2, "NOTE", false, vec![no_other]);
+        let err = r.expect_err("无 Other 行必须中止");
+        assert!(
+            err.message.contains("没有 Other 行") && err.message.contains("未发任何键"),
+            "{err:?}"
+        );
+        assert!(sent.is_empty() && texts.is_empty(), "中止零按键：{sent:?}");
+    }
+
+    /// **④ 入场备注态残留中止零键（仅发送路径）**：2026-10-10 用户规格后守卫收窄——
+    /// 发送路径（!overwrite）入场 footer 已是 `tab or esc to clear notes` → 中止
+    /// （发送会追加在旧文后，编排不接手别人的半程状态）；**清空/覆盖写入不拦**
+    /// （备注态有字正是操作对象）——用同一入场形态 + overwrite 走进清空段证明
+    /// 守卫没拦（中止点变为清空段读屏，文案不再是「备注输入态」）。
+    #[test]
+    fn e5_codex_notes_residual_notes_state_aborts_zero_keys() {
+        // 臂 1（发送路径）：残留中止零键
+        let residue = codex_notes_footer_frame(&live_fixtures::codex_s1_q2_focused(1));
+        let (r, sent, texts) = run_codex_notes_script(1, 2, "NOTE", false, vec![residue]);
+        let err = r.expect_err("发送路径入场备注态残留必须中止");
+        assert!(
+            err.message.contains("备注输入态") && err.message.contains("未发任何键"),
+            "{err:?}"
+        );
+        assert!(sent.is_empty() && texts.is_empty(), "中止零按键：{sent:?}");
+
+        // 臂 2（守卫收窄）：同款入场（有字备注态）+ overwrite → 守卫不拦，进入
+        // 清空段——队列即空 → 清空段读不到屏中止（证明走到清空段而非守卫拦下）
+        let residue_with_note =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(1), "OLD-NOTE");
+        let (r2, sent2, _) = run_codex_notes_script(1, 2, "NEW", true, vec![residue_with_note]);
+        let err2 = r2.expect_err("队列即空，清空段必在读屏处中止");
+        assert!(
+            err2.message.contains("清空段") && !err2.message.contains("备注输入态"),
+            "守卫只拦发送路径——overwrite 进入清空段：{err2:?}"
+        );
+        assert!(sent2.is_empty(), "中止零按键：{sent2:?}");
+    }
+
+    /// **⑤ 已答 ∧ 焦点≠Other 的改答守卫三臂**（2026-10-10 用户规格后新增
+    /// had_note 豁免）：归零词形入场（`Question 2/2` 计数段消失 = unanswered 0）
+    /// 且焦点在 Memcached（≠ Other）——tab 的 ensure 选中会把答案**换到 Other**
+    /// （换选路径 0.162.1 未复采）。
+    /// - 臂 A（发送路径，无豁免）：中止零键；
+    /// - 臂 B（覆盖 ∧ 入场有 note → **豁免**）：note 只能经 Other-notes 流产生，
+    ///   旧答案必是 Other，走位+ensure 是选回同一行——守卫放行（用清空+esc 后
+    ///   「Other 行缺席」的可区分中止点证明守卫确实过了）；
+    /// - 臂 C（覆盖 ∧ 入场无 note → **不豁免**）：豁免以 note 为证，无 note 仍中止。
+    #[test]
+    fn e5_codex_notes_answered_non_other_focus_aborts() {
+        // 臂 A：发送路径，守卫原样拦下
+        let (r, sent, texts) =
+            run_codex_notes_script(1, 2, "NOTE", false, vec![live_fixtures::codex_s1_q2_zero()]);
+        let err = r.expect_err("已答且焦点不在 Other 必须中止");
+        assert!(
+            err.message.contains("已作答") && err.message.contains("未发任何键"),
+            "{err:?}"
+        );
+        assert!(sent.is_empty() && texts.is_empty(), "中止零按键：{sent:?}");
+
+        // 臂 B：覆盖 + 有 note → 豁免放行。帧序：入场有字备注态 → 清空段一下 tab
+        // → 空备注态终判 → esc 退回答案态 → 发送段重读（去掉 Other 行的已答屏）
+        // → 走过守卫、落在 Other 行缺席的中止点（≠「已作答」即豁免证明）。
+        let with_note = codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_zero(), "OLD-NOTE");
+        let empty_notes = codex_notes_footer_frame(&live_fixtures::codex_s1_q2_zero());
+        let no_other = live_fixtures::codex_s1_q2_zero()
+            .into_iter()
+            .filter(|l| !l.contains("None of the above"))
+            .collect::<Vec<_>>();
+        let (rb, sentb, _) = run_codex_notes_script(
+            1,
+            2,
+            "NEW",
+            true,
+            vec![
+                with_note.clone(),                 // 入口闸 read：有字备注态（had_note=true）
+                with_note,                         // 清空段 read#1：note 有字 → tab#1
+                empty_notes.clone(),               // tab#1 后 poll：note 行已无字
+                empty_notes.clone(),               // 清空段 read#2：无字 → 循环终止
+                empty_notes,                       // 终判 read：无字 ✓ 且 footer 仍备注态 → esc
+                live_fixtures::codex_s1_q2_zero(), // esc 后 poll：退回答案态
+                no_other, // 发送段 read：已答屏但无 Other 行 → 守卫后中止点
+            ],
+        );
+        let errb = rb.expect_err("队列尾帧无 Other 行，必在发送段落到具名中止");
+        assert!(
+            errb.message.contains("没有 Other 行") && !errb.message.contains("已作答"),
+            "豁免放行（否则先撞「已作答」）：{errb:?}"
+        );
+        assert_eq!(sentb, vec!["tab", "esc"], "清空一下 + esc 已发：{sentb:?}");
+
+        // 臂 C：覆盖 + 无 note → 豁免不成立，守卫照拦（清空段零 tab 即无字直达终判）
+        let zero = live_fixtures::codex_s1_q2_zero();
+        let (rc, sentc, _) = run_codex_notes_script(
+            1,
+            2,
+            "NEW",
+            true,
+            vec![zero.clone(), zero.clone(), zero.clone(), zero],
+        );
+        let errc = rc.expect_err("无 note 的覆盖不豁免，守卫必须拦");
+        assert!(
+            errc.message.contains("已作答") && errc.message.contains("未发任何键"),
+            "{errc:?}"
+        );
+        assert!(sentc.is_empty(), "中止零按键：{sentc:?}");
+    }
+
+    /// **⑥ tab 后 footer 不翻转 → 中止且未打字未 enter**：tab 后 poll 队列只给
+    /// 旧帧（答案态 footer，备注态始终未出现）→ 窗尽中止——打字与提交都不发生
+    /// （notes 输入态没确认就打字 = 打进答案屏）。
+    #[test]
+    fn e5_codex_notes_tab_footer_not_flipped_aborts_before_typing() {
+        let (r, sent, texts) = run_codex_notes_script(
+            1,
+            2,
+            "NOTE-XYZ",
+            false,
+            vec![
+                live_fixtures::codex_s1_q2_focused(1), // 入口闸 read
+                live_fixtures::codex_s1_q2_focused(2), // j 走位复读
+                live_fixtures::codex_s1_q2_focused(3), // j 走位复读 → 到 Other
+                live_fixtures::codex_s1_q2_focused(3), // tab 后 poll 拍 1：旧帧
+                live_fixtures::codex_s1_q2_focused(3), // tab 后 poll 拍 2：旧帧（后队空 = 窗尽）
+            ],
+        );
+        let err = r.expect_err("footer 不翻转必须中止");
+        assert!(err.message.contains("未见备注态"), "{err:?}");
+        assert_eq!(sent, vec!["j", "j", "tab"], "中止在打字之前：{sent:?}");
+        assert!(texts.is_empty(), "未打字：{texts:?}");
+    }
+
+    /// **⑦ 覆盖写入 = 清空循环 + esc + 发送段锁**（2026-10-10 用户最终规格；
+    /// 旧「三连 tab」序列随清空段重构作废）：入场有字备注态（had_note）→ 清空段
+    /// 一下 tab（note 行无字即循环终止）→ 终判停在空备注态（footer 仍备注态）→
+    /// **esc 退回答案态** → 发送段重读重析（身份闸复核）→ 焦点已在 Other 零走位 →
+    /// tab 开 notes → 打字（上屏核验）→ enter。sent_keys =
+    /// ["tab","esc","tab","<text>","enter"]。
+    #[test]
+    fn e5_codex_notes_overwrite_clear_then_send_scripted() {
+        let with_note =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(3), "OLD-NOTE");
+        let empty_notes = codex_notes_footer_frame(&live_fixtures::codex_s1_q2_focused(3));
+        let ready =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(3), "Add notes");
+        let answer = live_fixtures::codex_s1_q2_focused(3);
+        let (r, sent, texts) = run_codex_notes_script(
+            1,
+            2,
+            "NEW-NOTE",
+            true,
+            vec![
+                with_note.clone(),   // 入口闸 read：有字备注态（had_note=true）
+                with_note,           // 清空段 read#1：note 有字 → tab#1
+                empty_notes.clone(), // tab#1 后 poll：note 行已无字
+                empty_notes.clone(), // 清空段 read#2：无字 → 循环提前终止（只发一下）
+                empty_notes.clone(), // 终判 read：无字 ✓ 且 footer 仍备注态 → esc
+                answer.clone(),      // esc 后 poll：退回答案态
+                answer,              // 发送段 read：重读重析（焦点已在 Other，零走位）
+                empty_notes.clone(), // 发送段 tab 后 poll：备注态
+                ready,               // 输入行就绪门：› Add notes 占位即就绪（零键）
+                codex_notes_typed_frame(&empty_notes, "NEW-NOTE"), // 打字后 poll：新文上屏
+                live_fixtures::codex_answered_summary(), // enter 后 poll：终态回执
+            ],
+        );
+        let out = r.expect("覆盖写入清空+发送全链必须成功");
+        assert_eq!(
+            out.sent_keys,
+            vec!["tab", "esc", "tab", "<text>", "enter"],
+            "{sent:?}"
+        );
+        assert_eq!(texts, vec!["NEW-NOTE"], "覆盖重打全文走字符通道");
+        assert_eq!(out.receipt_seen, Some(true));
+    }
+
+    /// **⑦b 覆盖路径发送段 tab 后 footer 不翻转 → 中止且未打字未 enter**（⑦ 的
+    /// 镜像失败臂，随清空段重构移位）：清空 + esc 都正常走完，发送段 tab 后 poll
+    /// 只给旧帧（备注态始终未出现）→ 窗尽中止「Tab 后未见备注态」——打字资格
+    /// 来自屏读确认，没确认就打字 = 打进已退出的答案态。
+    #[test]
+    fn e5_codex_notes_overwrite_send_tab_not_flipped_aborts() {
+        let with_note =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(3), "OLD-NOTE");
+        let empty_notes = codex_notes_footer_frame(&live_fixtures::codex_s1_q2_focused(3));
+        let answer = live_fixtures::codex_s1_q2_focused(3);
+        let (r, sent, texts) = run_codex_notes_script(
+            1,
+            2,
+            "NEW-NOTE",
+            true,
+            vec![
+                with_note.clone(),   // 入口闸 read：有字备注态
+                with_note,           // 清空段 read#1 → tab#1
+                empty_notes.clone(), // poll：note 无字
+                empty_notes.clone(), // 清空段 read#2 → 终止
+                empty_notes,         // 终判 read → esc
+                answer.clone(),      // esc 后 poll：答案态
+                answer.clone(),      // 发送段 read：焦点在 Other
+                answer.clone(),      // 发送段 tab 后 poll 拍 1：旧帧（答案态 footer）
+                answer,              // 发送段 tab 后 poll 拍 2：旧帧（后队空 = 窗尽）
+            ],
+        );
+        let err = r.expect_err("发送段 footer 不翻转必须中止");
+        assert!(err.message.contains("Tab 后未见备注态"), "{err:?}");
+        assert_eq!(
+            sent,
+            vec!["tab", "esc", "tab"],
+            "清空+esc+开 notes 已发但止步于打字之前：{sent:?}"
+        );
+        assert!(texts.is_empty(), "未打字：{texts:?}");
+    }
+
+    /// **⑧ 清空请求（空文本 + overwrite）停在空备注态 → esc 退出后返回**：清空
+    /// 一下 tab 后 note 已无字但 footer 仍备注态（空 notes 态）→ 终判 → esc 退回
+    /// 答案态 → 清空请求至此完成：零文本零 enter（codex 无「只存不交」键，本题
+    /// 提交走卡面提交按钮/后续动作）。sent_keys = ["tab","esc"]。
+    #[test]
+    fn e5_codex_notes_clear_empty_text_returns_without_enter() {
+        let with_note =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(3), "OLD-NOTE");
+        let empty_notes = codex_notes_footer_frame(&live_fixtures::codex_s1_q2_focused(3));
+        let (r, sent, texts) = run_codex_notes_script(
+            1,
+            2,
+            "",
+            true,
+            vec![
+                with_note.clone(),                     // 入口闸 read：有字备注态
+                with_note,                             // 清空段 read#1：note 有字 → tab#1
+                empty_notes.clone(),                   // tab#1 后 poll：note 行已无字
+                empty_notes.clone(),                   // 清空段 read#2：无字 → 终止
+                empty_notes,                           // 终判 read：无字 ✓ 且 footer 仍备注态 → esc
+                live_fixtures::codex_s1_q2_focused(3), // esc 后 poll：答案态 → 返回
+            ],
+        );
+        let out = r.expect("清空路径必须成功返回");
+        assert_eq!(out.sent_keys, vec!["tab", "esc"], "{sent:?}");
+        assert!(texts.is_empty(), "清空零文本：{texts:?}");
+        assert!(!out.sent_keys.contains(&"enter".to_string()), "不发 Enter");
+        assert_eq!(out.receipt_seen, None, "清空不提交 → 无终态回执");
+    }
+
+    /// **⑧a 清空循环·第一下 tab 后字消失即终止**（2026-10-10 用户规格「默认按
+    /// 两下，第一下后有字变无字就终止」的前半）：第一下 tab 直接清+退到答案态
+    /// （note 无字、footer 已非备注态）→ 循环在第二轮读屏处终止，**只发一下
+    /// tab**，无需 esc。
+    #[test]
+    fn e5_codex_notes_clear_first_tab_suffices_single_tab() {
+        let with_note =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(3), "OLD-NOTE");
+        let answer = live_fixtures::codex_s1_q2_focused(3);
+        let (r, sent, texts) = run_codex_notes_script(
+            1,
+            2,
+            "",
+            true,
+            vec![
+                with_note.clone(), // 入口闸 read：有字备注态
+                with_note,         // 清空段 read#1：note 有字 → tab#1
+                answer.clone(),    // tab#1 后 poll：note 无字（且已退回答案态）
+                answer.clone(),    // 清空段 read#2：无字 → 循环终止（只发一下）
+                answer,            // 终判 read：无字 ✓ footer 答案态 → 无需 esc → 返回
+            ],
+        );
+        let out = r.expect("第一下清掉即终止");
+        assert_eq!(
+            out.sent_keys,
+            vec!["tab"],
+            "只发一下 tab（第二轮读屏即终止，无 esc）：{sent:?}"
+        );
+        assert!(texts.is_empty() && out.receipt_seen.is_none());
+    }
+
+    /// **⑧b 清空循环·第一下没清掉补第二下**（规格后半）：第一下 tab 后 poll 4 拍
+    /// 仍见 note 有字（清空未生效/屏未刷新）→ 第二轮读屏仍有字 → 补第二下 tab →
+    /// 这次清掉并退回答案态 → 两轮耗尽后终判通过。sent_keys = ["tab","tab"]。
+    /// 帧序要点：poll 窗一须给足 4 张有字帧**拍尽**（有字帧对 `!note_present` 恒
+    /// miss），否则窗提前命中后续答案帧、打乱第二轮读屏的对位。
+    #[test]
+    fn e5_codex_notes_clear_second_tab_when_first_misses() {
+        let with_note =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(3), "OLD-NOTE");
+        let answer = live_fixtures::codex_s1_q2_focused(3);
+        let mut frames = vec![
+            with_note.clone(), // 入口闸 read：有字备注态
+            with_note.clone(), // 清空段 read#1：有字 → tab#1
+        ];
+        for _ in 0..4 {
+            frames.push(with_note.clone()); // tab#1 后 poll 4 拍：全有字（拍尽 = 本下未清掉）
+        }
+        frames.push(with_note); // 清空段 read#2（第二轮）：仍有字 → 补 tab#2
+        frames.push(answer.clone()); // tab#2 后 poll：清掉且退回答案态
+        frames.push(answer); // 终判 read：无字 ✓ → 返回
+        let (r, sent, texts) = run_codex_notes_script(1, 2, "", true, frames);
+        let out = r.expect("第二下补清后必须成功");
+        assert_eq!(
+            out.sent_keys,
+            vec!["tab", "tab"],
+            "第一下没清掉，第二轮读屏仍有字才补第二下：{sent:?}"
+        );
+        assert!(texts.is_empty() && out.receipt_seen.is_none());
+    }
+
+    /// **⑨ 打字后文本不在屏上 → 清残重打一次，仍不上屏才中止且绝不发 enter**
+    /// （0.160.0「打字不可见 + 静默丢失」复防线锁；重试分支 2026-10-10 19:25 实机
+    /// 追加）：tab 后备注态正常翻转、打字照发（字符通道有记账），poll 未见文本时
+    /// 按**末帧形态**分叉——备注态仍在（送达抖动）→ esc 清残 + tab 重开 + 重打 +
+    /// 二次核验，仍不上屏才中止；末帧 footer 已退回答案态（备注态意外关闭，
+    /// 19:49 实机形态）→ 点名中止不重试。两臂共同不变量：**全序列无 enter**
+    /// （0.160.0 的回车把焦点行提交为答案、用户文本静默丢失）。本例走位取 k
+    /// 最短环绕臂（焦点 0 → Other 3：up=1 < down=3 → k×1），与 ① 的 j 臂互补。
+    #[test]
+    fn e5_codex_notes_typed_text_not_on_screen_never_enters() {
+        let notes = codex_notes_footer_frame(&live_fixtures::codex_s1_q2_focused(3));
+        let ready =
+            codex_notes_with_text_frame(&live_fixtures::codex_s1_q2_focused(3), "Add notes");
+        // 臂 A（备注态仍在 → 清残重打一次，二次核验仍不上屏 → 中止）：
+        // 键序 = k 走位 + tab 开 notes + 打字 + esc 清残 + tab 重开 + 重打。
+        // 帧序要点：①翻转帧后须有**就绪帧**（输入行就绪门——重试路径无此门，
+        // 只在主路径打字前消费一帧）；②首次打字核验窗是 **10 拍**，拍尽才返回
+        // false——须给足 10 张旧帧，重开核验帧排在窗后（否则被首窗吞掉，重开
+        // poll 落空走错臂）。
+        let mut frames = vec![
+            live_fixtures::codex_s1_q2(),          // 入口闸 read：焦点 0（k 环绕臂）
+            live_fixtures::codex_s1_q2_focused(3), // k 走位复读 → 到 Other
+            notes.clone(),                         // tab 后 poll：备注态
+            ready.clone(),                         // 输入行就绪门：› Add notes 占位即就绪（零键）
+        ];
+        for _ in 0..10 {
+            frames.push(notes.clone()); // 首次打字核验窗：10 拍全旧帧（拍尽 = 未命中，末帧备注态仍在）
+        }
+        frames.push(notes.clone()); // 重开 tab 后 poll：备注态回来（重试路径无就绪门）
+        frames.push(notes.clone()); // 重打后 poll 拍 1：仍无文本
+        frames.push(notes.clone()); // 重打后 poll 拍 2：仍无（后队空 = 窗尽）
+        let (r, sent, texts) = run_codex_notes_script(1, 2, "NOTE-XYZ", false, frames);
+        let err = r.expect_err("重试后仍不上屏必须中止");
+        assert!(
+            err.message.contains("重试打字后屏上仍未见到备注文本")
+                && err.message.contains("未发提交键"),
+            "{err:?}"
+        );
+        assert_eq!(
+            sent,
+            vec!["k", "tab", "esc", "tab"],
+            "键序含 esc+tab 重试段，且全序列无 enter：{sent:?}"
+        );
+        assert_eq!(
+            texts,
+            vec!["NOTE-XYZ", "NOTE-XYZ"],
+            "重打一次（字符通道两度记账）：{texts:?}"
+        );
+
+        // 臂 B（末帧 footer 已退回答案态 = 备注态意外关闭 → 点名中止，不重试）：
+        // 19:49 实机形态的锁——状态问题不是重绘问题，重试只会雪上加霜。
+        let (r2, sent2, texts2) = run_codex_notes_script(
+            1,
+            2,
+            "NOTE-XYZ",
+            false,
+            vec![
+                live_fixtures::codex_s1_q2(),          // 入口闸 read
+                live_fixtures::codex_s1_q2_focused(3), // k 走位复读 → 到 Other
+                notes.clone(),                         // tab 后 poll：备注态
+                ready,                                 // 输入行就绪门：占位即就绪（零键）
+                notes,                                 // 打字后 poll 拍 1：备注态但无文本
+                live_fixtures::codex_s1_q2_focused(3), // 打字后 poll 拍 2：footer 退回答案态（后队空 = 窗尽）
+            ],
+        );
+        let err2 = r2.expect_err("备注态意外关闭必须点名中止");
+        assert!(
+            err2.message.contains("备注态意外关闭") && err2.message.contains("未发提交键"),
+            "{err2:?}"
+        );
+        assert_eq!(
+            sent2,
+            vec!["k", "tab"],
+            "不重试（无 esc/tab 重试段）、无 enter：{sent2:?}"
+        );
+        assert_eq!(texts2, vec!["NOTE-XYZ"], "只打过一次，未重打：{texts2:?}");
+    }
+
+    /// **⑩ 空文本 + 非 overwrite → 函数头拒绝**（「点了发送但输入框空」防呆；
+    /// 清空语义须显式 overwrite）——发生在任何读屏发键之前。
+    #[test]
+    fn e5_codex_notes_empty_text_without_overwrite_rejected() {
+        let (r, sent, texts) = run_codex_notes_script(1, 2, "", false, vec![]);
+        let err = r.expect_err("空文本非覆盖必须拒绝");
+        assert!(
+            err.message.contains("自由作答文本为空") && err.message.contains("覆盖写入"),
+            "{err:?}"
+        );
+        assert!(
+            sent.is_empty() && texts.is_empty(),
+            "拒绝零投递：{sent:?} / {texts:?}"
+        );
+    }
+
+    /// **入口闸具名中止**（镜像 select 阶段机 §3.6 的「解析不出 / 确认屏」两态）：
+    /// 裸屏（无题号头无 footer 锚）→ 中止点名「解析不出问答面板」；确认屏锚
+    /// （`Submit with unanswered questions?`）在场 → 中止点名「前序动作已错位」
+    /// （兔维斯 不代答确认屏）。两态都零按键。
+    #[test]
+    fn e5_codex_notes_entry_parse_failure_named_aborts() {
+        let (r, sent, _) =
+            run_codex_notes_script(0, 1, "NOTE", false, vec![lines(&["some composer screen"])]);
+        let err = r.expect_err("裸屏必须中止");
+        assert!(err.message.contains("解析不出问答面板"), "{err:?}");
+        assert!(sent.is_empty(), "中止零按键：{sent:?}");
+
+        let confirm = lines(&[
+            "  Submit with unanswered questions?",
+            "  › 1. Submit",
+            "  › 2. Cancel",
+        ]);
+        let (r2, sent2, _) = run_codex_notes_script(0, 1, "NOTE", false, vec![confirm]);
+        let err2 = r2.expect_err("确认屏必须具名中止");
+        assert!(
+            err2.message.contains("确认屏") && err2.message.contains("不代答"),
+            "{err2:?}"
+        );
+        assert!(sent2.is_empty(), "中止零按键：{sent2:?}");
     }
 
     /// **rollout user_note 对账夹具**（戊探C ⑤ 原件：双题各挂各 qid 的
@@ -8220,20 +9007,27 @@ mod tests {
         }
     }
 
-    /// 形态门（§2.4/§2.8）：只有 claude 的自由作答序列已定案；其余工具返回 Err
-    /// （端点据此降级为「请在终端作答」，**不假装能发**）。
+    /// 形态门（§2.4/§2.8）· 支持面现状：claude（K4–K7 数字定位定案）→ 批次戊
+    /// kimi（Other 行）/ opencode（own answer）→ **codex 2026-10-10 notes 链复活**
+    /// （0.162.1 四取样复验全通）；黑盒/无头家仍未定案返回 Err（端点据此降级为
+    /// 「请在终端作答」，**不假装能发**）。
     /// 还原动作：把 `free_text_supported` 改成恒 true → 循环里的断言先红。
     #[test]
-    fn free_text_supported_only_for_claude() {
+    fn free_text_supported_surface_by_tool() {
+        for tool in ["claude", "kimi", "opencode", "codex"] {
+            assert!(free_text_supported(tool), "{tool} 自由作答必须放行");
+            assert!(
+                free_text_shape(tool).is_ok(),
+                "{tool} 支持面与形态描述必须同面"
+            );
+        }
         let shape = free_text_shape("claude").expect("claude 自由作答已实机定案");
         assert_eq!(shape.locate_label, "Type something");
         assert_eq!(
             shape.submit_key, "enter",
             "文本之后唯一按键是回车（不带数字不带 Esc）"
         );
-        // E4/E6：kimi（Other 行）/opencode（own answer）已升格为支持；
-        // codex 2026-10-09 取证回填回撤（notes 不落卷，底料 §5）；仍未定案的只剩
-        // 黑盒/无头家
+        // 仍未定案的只剩黑盒/无头家
         for tool in ["zcode", "dsh", "workbuddy", ""] {
             let err =
                 free_text_shape(tool).expect_err(&format!("{tool} 的自由作答序列未定案，必须拒绝"));
@@ -8249,19 +9043,31 @@ mod tests {
         assert_eq!(spec.verified_with, "2.1.251");
     }
 
-    /// **codex 自由作答停用锁**（2026-10-09 取证回填，0.160.0 notes 不落卷——底料
-    /// `2026-10-08-codex-160-question-屏读底料.md` §5）：Tab→打字→Enter 的净效果 =
-    /// 提交焦点行、用户文本静默丢失——违反「屏读为准 / 不假装能发」，从支持面移除。
-    /// 还原动作：把 `"codex"` 加回 `free_text_supported` 名单 → 本用例先红。
+    /// **codex 自由作答复活锁**（2026-10-10，0.162.1 四取样复验全通——落卷实锤
+    /// N1-N3 + esc 红线 N4；档案 `research/refs/phase2-消息注入/
+    /// 2026-10-10-codex-0162-notes链复验.md`）：0.160.0 的「notes 不落卷」形态
+    /// 在 0.162.1 未复现——走位 Other + tab 开备注 + 打字上屏核验 + enter 的编排
+    /// 重新接线。还原动作：把 `"codex"` 移出 `free_text_supported` 名单 → 本用例
+    /// 先红。
     #[test]
-    fn codex_free_text_no_longer_supported() {
+    fn codex_free_text_revived_with_other_row_shape() {
         assert!(
-            !free_text_supported("codex"),
-            "codex 0.160.0 实测 notes 文本不随卷提交——远程自由作答必须停用"
+            free_text_supported("codex"),
+            "codex notes 链已复活（0.162.1 复验），远程自由作答必须放行"
         );
-        // 形态描述同步拒绝（端点据此降级，不假装能发）
-        let err = free_text_shape("codex").expect_err("停用后 free_text_shape 必须拒绝");
-        assert!(err.contains("codex"), "拒绝原因带工具名：{err}");
+        let shape = free_text_shape("codex").expect("复活后 free_text_shape 必须 Ok");
+        assert_eq!(
+            shape.locate_label, CODEX_OTHER_ROW_LABEL,
+            "定位判据 = Other 行（None of the above，不区分大小写子串）"
+        );
+        assert_eq!(
+            shape.submit_key, "enter",
+            "提交键 = enter（备注态 enter 提交「Other + 备注」并交卷）"
+        );
+        assert!(
+            shape.single_question_only,
+            "形态门：多题 notes 归属未复采，仅单题卡放行"
+        );
     }
 
     /// wire ↔ 动作：`freeText` 可解析（camelCase）+ 审计摘要只记动作名（**不记正文**）。

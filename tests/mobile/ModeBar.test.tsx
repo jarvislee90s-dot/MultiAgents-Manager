@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import ModeBar from "@/mobile/ModeBar";
-import type { SessionModeView } from "@/mobile/api";
+import type { MamMode, SessionModeView } from "@/mobile/api";
 
 // 批次丙 T6 + 丁T4：模式栏。覆盖——
 // ① 显示当前档（屏读回显成功时）；② 档未知时**必须**显示人工核对提示（红线 4）；
@@ -9,8 +9,10 @@ import type { SessionModeView } from "@/mobile/api";
 // 丁T4 新增：⑤ 二维家（codex/kimi）两组按钮与各自的当前档；⑥ 单轴家切换钮 + 回显；
 // ⑦ 裁6 opencode「默认」（Build 已术语对齐）；⑧ 裁7 退役档不作可点按钮；
 // ⑨ 旧后端（无 groups 字段）回落单轴渲染且 POST 不带 group；
-// 2026-10-10 用户指令：⑩ codex 模式组三段 [计划][◀▶][操作]（无零投递闸）、
-// ⑪ 权限组四档 chips 常驻直选（生效档高亮框）+ picker 兜底入口。
+// 2026-10-10 二版用户指令：⑩ codex 模式组两档 chips 即按钮（当前档高亮**禁用**、
+// 另一档可点 = 发一次 shift+tab，无零投递闸）；⑪ 权限组四档 chips 常驻直选（生效档
+// 高亮框），「切换权限」picker 入口/菜单面板与「已退役」说明行**已删**（chips 高亮
+// 已承载全部状态信息）。picker 菜单端点（/session-mode/menu）的交互用例随之删除。
 
 interface Routes {
   mode?: SessionModeView;
@@ -18,13 +20,6 @@ interface Routes {
   modeNetworkFail?: boolean;
   switchBody?: Record<string, unknown>;
   switchStatus?: number;
-  /** 2026-09-23 picker：/session-mode/menu 的响应体（open/pick/GET 重读同形） */
-  menuBody?: Record<string, unknown>;
-  menuStatus?: number;
-  /** T5：菜单端点的**按次响应队列**——每次菜单 fetch 先消费一项，取尽后回落
-   *  `menuBody` 静态值。confirm-cancelled 的「pick 回执 → 自动重开菜单」在同一条
-   *  异步链里连发两次菜单请求，静态单值无法区分两次响应，故加队列。 */
-  menuBodyQueue?: Record<string, unknown>[];
 }
 
 let routes: Routes;
@@ -41,19 +36,6 @@ afterEach(() => {
 function installFetch() {
   fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
-    // 长路径必须先判（否则被 `/session-mode` 前缀吞）：picker 的菜单端点在 switch 之前
-    if (url.includes("/session-mode/menu")) {
-      const queued = routes.menuBodyQueue?.shift();
-      const body = queued ?? routes.menuBody;
-      if (routes.menuStatus) {
-        return new Response(JSON.stringify(body ?? { error: "internal" }), {
-          status: routes.menuStatus,
-        });
-      }
-      return new Response(JSON.stringify(body ?? { status: "none", options: [] }), {
-        status: 200,
-      });
-    }
     if (url.includes("/session-mode/switch")) {
       if (routes.switchStatus) {
         return new Response(JSON.stringify(routes.switchBody ?? { error: "internal" }), {
@@ -113,15 +95,17 @@ function opencodeSingleAxis(): SessionModeView {
   };
 }
 
-/** 丁T4 新后端形态：二维（codex）。2026-09-23 codex 模式切换改造 + 2026-10-10
- *  用户指令改版后：模式组 = 三段 [计划][◀▶][操作]（shift+tab 双向，无零投递闸）；
- *  权限组 = 四档 chips 常驻直选 + 单选面板兜底（picker：后端读回终端菜单选项，
- *  用户点选哪项就敲哪个数字键）。
- *  `modeCurrent` 驱动 toggle 的高亮与翻转方向；`permissionCurrent` 用来测 chips
+/** 丁T4 新后端形态：二维（codex）。2026-10-10 二版用户指令改版后：
+ *  模式组 = 两档 chips 即按钮（[计划][操作]——当前档高亮禁用，另一档可点 = 向终端
+ *  发一次 shift+tab，无零投递闸）；权限组 = 四档 chips 常驻直选（「切换权限」picker
+ *  面板与退役说明行已删）。
+ *  `modeCurrent` 驱动 toggle chips 的高亮与禁用；`permissionCurrent` 用来测 chips
  *  高亮与「上次切换」记忆标注（null = 无记忆 → 模式未知）。
  *  终审 P1-2 mock 改写：权限组回读源 2026-10-09 起 readback=true（最新回执行），
  *  旧 mock 的 `readback: false` 过期；「上次切换」标注改由 `currentSource` 驱动
- *  （默认：有记忆 = "memory"、无 = "null"；可显式传 "screen" 测屏读来源不标注）。 */
+ *  （默认：有记忆 = "memory"、无 = "null"；可显式传 "screen" 测屏读来源不标注）。
+ *  legacy 数组**保留** untrusted/on-failure 两条——二版起前端不消费但后端仍下发，
+ *  用它锁「给了退役数据也不渲染」。 */
 function codexTwoAxis(opts?: {
   modeCurrent?: MamMode;
   permissionCurrent?: MamMode | null;
@@ -182,14 +166,6 @@ async function flushAsync() {
   for (let i = 0; i < 6; i += 1) {
     await Promise.resolve();
   }
-}
-
-/** picker 的 fetch 链比切档长（async 回调里再 await + setState），6 轮微任务不够
- *  ——用一轮宏任务（0ms 定时器）等 React 把面板状态刷完。 */
-async function flushPanel() {
-  await flushAsync();
-  await new Promise((res) => setTimeout(res, 0));
-  await flushAsync();
 }
 
 describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
@@ -281,7 +257,8 @@ describe("ModeBar：模式显示与切档（批次丙 T6）", () => {
     routes.switchStatus = 409;
     routes.switchBody = { error: "no_mechanism" };
     render(<ModeBar session={{ id: "s7" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
+    // 二版 chips：current=plan → 点另一档「操作」chip 发切换
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-default"));
     expect((await screen.findByTestId("mode-error")).textContent).toContain("未实测");
   });
 });
@@ -331,7 +308,7 @@ describe("乙T3 对话框在场拒绝对接（blocked_by_dialog）", () => {
 
 // ==== 丁T4 §2.6：二维结构 / 单轴 / 裁6 / 裁7 ====
 describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
-  it("二维家（codex）：渲染模式组 + 权限组两组，各自显示当前档；权限组 current=null（屏上无回执行）→ 人工核对", async () => {
+  it("二维家（codex）：渲染模式组 + 权限组两组；模式组当前档 chip data-current，权限组 current=null（屏上无回执行）→ 人工核对", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "t1" }} />);
@@ -341,17 +318,18 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     // 两组都在
     expect(screen.getByTestId("mode-group-mode")).toBeTruthy();
     expect(screen.getByTestId("mode-group-permission")).toBeTruthy();
-    // 模式组：回读命中「计划」（tabs 高亮承载，2026-10-10 用户指令移除文本回显）；
+    // 模式组：回读命中「计划」（chips 高亮承载，2026-10-10 二版移除文本回显）；
     // 权限组：屏上无回执行（current=null）→ 模式未知 + 人工核对
-    expect(
-      screen.getByTestId("mode-toggle-label-mode-plan").getAttribute("data-current")
-    ).toBe("true");
+    expect(screen.getByTestId("mode-switch-mode-plan").getAttribute("data-current")).toBe("true");
+    expect(screen.getByTestId("mode-switch-mode-default").getAttribute("data-current")).toBe(
+      "false"
+    );
     expect(screen.getByTestId("mode-unknown-hint-permission").textContent).toContain("人工核对");
     // 组标题可见（两组才显示，帮助用户区分两个轴）
     expect(screen.getByTestId("mode-group-permission").textContent).toContain("权限");
   });
 
-  it("二维家：权限组 = 四档 chips 常驻直选 +「切换权限」picker 兜底入口（2026-10-10）", async () => {
+  it("二维家：权限组 = 四档 chips 常驻直选；「切换权限」picker 入口已删（2026-10-10 二版）", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "t2" }} />);
@@ -361,53 +339,58 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     expect(screen.getByTestId("mode-switch-permission-default")).toBeTruthy();
     expect(screen.getByTestId("mode-switch-permission-acceptEdits")).toBeTruthy();
     expect(screen.getByTestId("mode-switch-permission-bypass")).toBeTruthy();
-    // 「切换权限」picker 入口保留为兜底；面板未点开时不出
-    expect(screen.getByTestId("mode-picker-permission-open")).toBeTruthy();
+    // 二版指令：picker 入口按钮与菜单面板不再渲染（chips 高亮已承载全部状态信息）
+    expect(screen.queryByTestId("mode-picker-permission-open")).toBeNull();
     expect(screen.queryByTestId("mode-menu-panel")).toBeNull();
   });
 
-  it("裁7：codex 退役旧档（untrusted/on-failure）**不渲染为可点按钮**，只作说明", async () => {
+  it("裁7 + 二版：codex 退役旧档（untrusted/on-failure）**不渲染**——既无可点按钮也无「已退役」说明行（legacy 数据仍下发）", async () => {
     installFetch();
-    routes.mode = codexTwoAxis();
+    routes.mode = codexTwoAxis(); // mock 的 legacy 数组仍带 untrusted/on-failure 两条
     render(<ModeBar session={{ id: "t3" }} />);
     await screen.findByTestId("mode-bar");
-    // 没有任何按钮的 testid 含 untrusted / on-failure
+    // 没有任何元素的 testid 含 untrusted / on-failure
     const ids = Array.from(document.querySelectorAll("[data-testid]")).map((el) =>
       el.getAttribute("data-testid")
     );
     expect(ids.some((id) => id !== null && /untrusted|on-failure/i.test(id))).toBe(false);
-    // 但必须如实说明「已退役」（用户看得见为什么没有这两个档）
-    expect(screen.getByTestId("mode-legacy-permission").textContent).toContain("untrusted");
-    expect(screen.getByTestId("mode-legacy-permission").textContent).toContain("on-failure");
+    // 二版指令：说明行 mode-legacy-permission 已删——后端仍下发 legacy，前端不消费
+    expect(screen.queryByTestId("mode-legacy-permission")).toBeNull();
   });
 
-  it("2026-10-10：codex 模式组 = [计划] [◀▶] [操作] 三段（标签指示器 + 切换钮，无逐档按钮）", async () => {
+  it("2026-10-10 二版：codex 模式组 = 两档 chips 即按钮（[计划][操作]），三段 [◀▶] 形态已删", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "t4" }} />);
     await screen.findByTestId("mode-bar");
-    // 双标签指示器在（计划在左、操作在右）
-    expect(screen.getByTestId("mode-toggle-label-mode-plan").textContent).toBe("计划");
-    expect(screen.getByTestId("mode-toggle-label-mode-default").textContent).toBe("操作");
-    // ◀▶ 切换钮在（旧「计划 ⇄ 操作」单钮文案退役）
-    expect(screen.getByTestId("mode-switch-mode-toggle")).toBeTruthy();
-    // 不再有逐档直达按钮，也不再有「不可用」说明档
-    expect(screen.queryByTestId("mode-switch-mode-default")).toBeNull();
-    expect(screen.queryByTestId("mode-switch-mode-plan")).toBeNull();
+    // 两颗 chip 按钮（标签来自后端 tiers 的屏显标签）
+    expect(screen.getByTestId("mode-switch-mode-plan").textContent).toBe("计划");
+    expect(screen.getByTestId("mode-switch-mode-default").textContent).toBe("操作");
+    // 旧三段形态的元素全部退役：「切换模式」钮 + 双标签指示器 + 文本回显 + 「不可用」档
+    expect(screen.queryByTestId("mode-switch-mode-toggle")).toBeNull();
+    expect(screen.queryByTestId("mode-toggle-label-mode-plan")).toBeNull();
+    expect(screen.queryByTestId("mode-toggle-label-mode-default")).toBeNull();
+    expect(screen.queryByTestId("mode-current-mode")).toBeNull();
     expect(screen.queryByTestId("mode-tier-disabled-mode-default")).toBeNull();
   });
 
-  it("2026-10-10：模式组当前档高亮——current=plan 时计划标签 data-current=true、操作标签 false", async () => {
+  it("二版：模式组当前档 chip 高亮且禁用（data-current=true + disabled），另一档 enabled", async () => {
     installFetch();
     routes.mode = codexTwoAxis(); // mode 组 current = plan
     render(<ModeBar session={{ id: "t4-hl" }} />);
     await screen.findByTestId("mode-bar");
-    expect(screen.getByTestId("mode-toggle-label-mode-plan").getAttribute("data-current")).toBe(
-      "true"
-    );
-    expect(screen.getByTestId("mode-toggle-label-mode-default").getAttribute("data-current")).toBe(
-      "false"
-    );
+    const plan = screen.getByTestId("mode-switch-mode-plan") as HTMLButtonElement;
+    const op = screen.getByTestId("mode-switch-mode-default") as HTMLButtonElement;
+    expect(plan.getAttribute("data-current")).toBe("true");
+    expect(plan.disabled).toBe(true, "当前档 chip 不可点（点另一档=切过去）");
+    expect(op.getAttribute("data-current")).toBe("false");
+    expect(op.disabled).toBe(false);
+    // 样式统一（chipClass）：当前档高亮框 + 加粗——toggle/picker 两组同款
+    expect(plan.className).toContain("font-semibold");
+    expect(op.className).not.toContain("font-semibold");
+    // 评审 P2-1：disabled 降透明只压**非当前档**——当前档高亮不被 40% 压暗
+    expect(plan.className).not.toContain("disabled:opacity-40");
+    expect(op.className).toContain("disabled:opacity-40");
   });
 
   it("裁6 + 单轴：opencode 两档渲染「默认」/「计划」+ 切换钮 + 当前档回显", async () => {
@@ -495,7 +478,8 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
       error: "codex 运行中不接受模式切换（shift+tab），请等回合结束后重试",
     };
     render(<ModeBar session={{ id: "t10" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
+    // 二版 chips：current=plan → 点另一档「操作」chip 发切换
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-default"));
     const err = await screen.findByTestId("mode-error");
     expect(err.textContent).toContain("运行中不接受模式切换");
     expect(screen.queryByTestId("mode-receipt")).toBeNull();
@@ -504,7 +488,7 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
 
 // ==== 批次戊 E3④：当前档高亮 + 问答待决置灰 ====
 describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
-  it("当前档高亮：toggle 标签 data-current=当前档；权限组生效档 chips 高亮框选中（memory 来源仍标「上次切换」）", async () => {
+  it("当前档高亮：toggle 当前 chip data-current=true；权限组生效档 chips 高亮框选中（memory 来源仍标「上次切换」）", async () => {
     installFetch();
     // 终审 P1-2：标注判据 = currentSource === "memory"（显式传入驱动本用例）
     routes.mode = codexTwoAxis({
@@ -512,12 +496,12 @@ describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
       permissionCurrentSource: "memory",
     });
     render(<ModeBar session={{ id: "s-e3-hl" }} />);
-    await screen.findByTestId("mode-picker-permission-open");
-    // 模式组双标签：当前档（plan）标签高亮；◀▶ 钮 data-current 承载当前档
-    expect(screen.getByTestId("mode-toggle-label-mode-plan").getAttribute("data-current")).toBe(
-      "true"
+    await screen.findByTestId("mode-switch-permission-readOnly");
+    // 模式组：当前档（plan）chip 高亮，另一档不高亮（chips 即指示器，二版）
+    expect(screen.getByTestId("mode-switch-mode-plan").getAttribute("data-current")).toBe("true");
+    expect(screen.getByTestId("mode-switch-mode-default").getAttribute("data-current")).toBe(
+      "false"
     );
-    expect(screen.getByTestId("mode-switch-mode-toggle").getAttribute("data-current")).toBe("plan");
     // 权限组 chips：生效档（只读）高亮框选中（data-current）；其余不选中
     expect(screen.getByTestId("mode-switch-permission-readOnly").getAttribute("data-current")).toBe(
       "true"
@@ -536,52 +520,59 @@ describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
     render(<ModeBar session={{ id: "s-e3-pending" }} />);
     await screen.findByTestId("mode-question-pending-hint");
     expect(screen.getByTestId("mode-bar").getAttribute("data-question-pending")).toBe("true");
-    expect((screen.getByTestId("mode-switch-mode-toggle") as HTMLButtonElement).disabled).toBe(
+    // 模式组：另一档「操作」（平时可点）也禁用；权限组 chips 全禁用
+    expect((screen.getByTestId("mode-switch-mode-default") as HTMLButtonElement).disabled).toBe(
       true
     );
-    expect((screen.getByTestId("mode-picker-permission-open") as HTMLButtonElement).disabled).toBe(
-      true
-    );
+    expect(
+      (screen.getByTestId("mode-switch-permission-readOnly") as HTMLButtonElement).disabled
+    ).toBe(true);
   });
 
   it("非待决（questionPending 缺省/ false）不置灰不显文案", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "s-e3-normal" }} />);
-    await screen.findByTestId("mode-switch-mode-toggle");
+    // 用**非当前档** chip 验不置灰（当前档 plan 的禁用来自 isCurrent，与此判据无关）
+    await screen.findByTestId("mode-switch-mode-default");
     expect(screen.queryByTestId("mode-question-pending-hint")).toBeNull();
-    expect((screen.getByTestId("mode-switch-mode-toggle") as HTMLButtonElement).disabled).toBe(
+    expect((screen.getByTestId("mode-switch-mode-default") as HTMLButtonElement).disabled).toBe(
       false
     );
   });
 });
 
-// ==== 2026-09-23 codex 模式切换改造：toggle 翻转 / bypass 二次确认 / 档位记忆 ====
-describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", () => {
-  it("toggle 点击 = shift+tab 语义：current=plan 时发 {group:'mode', target:'default'}", async () => {
+// ==== 2026-09-23 codex 模式切换改造 / 2026-10-10 二版 chips 化：toggle 直选 / bypass 二次确认 ====
+describe("ModeBar：codex toggle chips 与完全信任二次确认（2026-09-23 / 2026-10-10 二版）", () => {
+  it("toggle 点另一档 chip = shift+tab 语义：current=plan 时点「操作」**恰好一次** {group:'mode', target:'default'}", async () => {
     installFetch();
-    routes.mode = codexTwoAxis(); // mode 组 current = plan
+    routes.mode = codexTwoAxis(); // mode 组 current = plan → 「操作」chip 是可点档
     routes.switchBody = { status: "key_sent", verified: true, hint: null };
     render(<ModeBar session={{ id: "mc-t1" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-default"));
     await flushAsync();
-    const call = fetchMock.mock.calls.find((c: unknown[]) =>
+    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
       String(c[0]).includes("/session-mode/switch")
     );
-    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(calls.length).toBe(1, "点一颗 chip 只发一次 switch（无零投递闸，也不多发）");
+    const body = JSON.parse(String((calls[0]![1] as RequestInit).body));
+    expect(body.sessionId).toBe("mc-t1");
     expect(body.group).toBe("mode");
-    expect(body.target).toBe("default", "当前是计划 → 点击切到操作");
+    expect(body.target).toBe("default", "当前是计划 → 点操作 chip 切到操作");
   });
 
-  it("权限组 current 有值时 toggle 翻转方向相反：current=default → 发 target=plan", async () => {
+  it("current=default 时可点档对调：「计划」chip 可点 → 发 target=plan；当前档「操作」禁用", async () => {
     installFetch();
-    // mode 组 current = 操作（default）→ 点击应发 target=plan（切到计划）
+    // mode 组 current = 操作（default）→ 「计划」chip 是可点档
     routes.mode = codexTwoAxis({ modeCurrent: "default" });
     routes.switchBody = { status: "key_sent", verified: true, hint: null };
     render(<ModeBar session={{ id: "mc-t2" }} />);
-    const toggle = await screen.findByTestId("mode-switch-mode-toggle");
-    expect(toggle.getAttribute("data-current")).toBe("default");
-    fireEvent.click(toggle);
+    const op = await screen.findByTestId("mode-switch-mode-default");
+    const plan = screen.getByTestId("mode-switch-mode-plan");
+    expect(op.getAttribute("data-current")).toBe("true");
+    expect((op as HTMLButtonElement).disabled).toBe(true, "当前档（操作）chip 不可点");
+    expect(plan.getAttribute("data-current")).toBe("false");
+    fireEvent.click(plan);
     await flushAsync();
     const call = fetchMock.mock.calls.find((c: unknown[]) =>
       String(c[0]).includes("/session-mode/switch")
@@ -590,9 +581,9 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     expect(body.target).toBe("plan");
   });
 
-  it("当前档未知（2026-10-10 无零投递闸）：◀▶ 不再禁用，点击照发（target=plan 仅作核验预期兜底）", async () => {
+  it("当前档未知（纵深防御）：两档 chip 都可点、都不高亮，点击照发（target 仅作核验预期兜底）", async () => {
     installFetch();
-    // 权限组记忆不影响模式组——用旧后端回落形态让 mode 组 current=null
+    // 权限组记忆不影响模式组——构造 mode 组 current=null 的 toggle 形态
     routes.mode = {
       tool: "codex",
       current: null,
@@ -619,19 +610,17 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     };
     routes.switchBody = { status: "key_sent", verified: true, hint: "已切换（屏读核验命中）" };
     render(<ModeBar session={{ id: "mc-t2b" }} />);
-    const toggle = await screen.findByTestId("mode-switch-mode-toggle");
-    // 旧语义「未知即禁用（盲按会 50% 误切）」随零投递闸一并退役：动作无条件，
-    // 落点由后端屏读核验（前读不可判 → 前端 target 兜底），卡面跟随屏读结果。
-    expect((toggle as HTMLButtonElement).disabled).toBe(false);
-    expect(toggle.getAttribute("data-current")).toBe("unknown");
-    // 双标签在、都不高亮（未知档无从高亮——如实）
-    expect(screen.getByTestId("mode-toggle-label-mode-plan").getAttribute("data-current")).toBe(
-      "false"
-    );
-    expect(screen.getByTestId("mode-toggle-label-mode-default").getAttribute("data-current")).toBe(
-      "false"
-    );
-    fireEvent.click(toggle);
+    const plan = await screen.findByTestId("mode-switch-mode-plan");
+    const op = screen.getByTestId("mode-switch-mode-default");
+    // 用户裁决：屏读必有解，未知态实际不存在——这里只作纵深防御：两档都可点，
+    // 落点由后端屏读核验（前端 target 兜底），卡面跟随屏读结果。
+    expect(plan.getAttribute("data-current")).toBe("false");
+    expect(op.getAttribute("data-current")).toBe("false");
+    expect((plan as HTMLButtonElement).disabled).toBe(false);
+    expect((op as HTMLButtonElement).disabled).toBe(false);
+    // 未知态仍如实给「人工核对」提示（红线 4 不因 chips 化放松）
+    expect(screen.getByTestId("mode-unknown-hint-mode").textContent).toContain("人工核对");
+    fireEvent.click(plan);
     await flushAsync();
     const call = fetchMock.mock.calls.find((c: unknown[]) =>
       String(c[0]).includes("/session-mode/switch")
@@ -641,205 +630,14 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     expect(body.target).toBe("plan", "当前档未知 → 兜底 target=plan（仅核验预期用）");
   });
 
-  it("picker：点「切换权限」→ POST {action:'open'} → 渲染终端菜单选项（编号+屏上原文）", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.menuBody = {
-      status: "menu",
-      options: [
-        { number: 1, label: "Read Only", highlighted: false },
-        { number: 2, label: "Ask for approval (non-admin sandbox) (current)", highlighted: true },
-        { number: 3, label: "Approve for me", highlighted: false },
-        { number: 4, label: "Full Access", highlighted: false },
-      ],
-    };
-    render(<ModeBar session={{ id: "mc-p1" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    const call = fetchMock.mock.calls.find((c: unknown[]) =>
-      String(c[0]).includes("/session-mode/menu")
-    );
-    const body = JSON.parse(String((call![1] as RequestInit).body));
-    expect(body.action).toBe("open");
-    // 选项渲染：编号徽标 = 屏上编号；文本 = 屏上原文（含内联后缀原样展示）
-    expect(screen.getByTestId("mode-menu-option-1").textContent).toContain("1");
-    expect(screen.getByTestId("mode-menu-option-2").textContent).toContain(
-      "Ask for approval (non-admin sandbox) (current)"
-    );
-    expect(screen.getByTestId("mode-menu-option-2").getAttribute("data-highlighted")).toBe("true");
-    expect(screen.getByTestId("mode-menu-option-4")).toBeTruthy();
-    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("menu");
-  });
-
-  it("picker：点选项 → POST {action:'pick', number}（发的是**屏上编号**）", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.menuBody = {
-      status: "menu",
-      options: [
-        { number: 1, label: "Read Only", highlighted: false },
-        { number: 3, label: "Approve for me", highlighted: false },
-      ],
-    };
-    render(<ModeBar session={{ id: "mc-p2" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    // 点第 3 项 → 发 number=3（**不是前端算的「第 2 项」**——屏上印的是 3，就敲 3）
-    routes.menuBody = {
-      status: "done",
-      verified: true,
-      hint: "终端回执：Permissions updated to Approve for me",
-    };
-    fireEvent.click(screen.getByTestId("mode-menu-option-3"));
-    await flushPanel();
-    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
-      String(c[0]).includes("/session-mode/menu")
-    );
-    const pickBody = JSON.parse(String((calls[calls.length - 1]![1] as RequestInit).body));
-    expect(pickBody.action).toBe("pick");
-    expect(pickBody.number).toBe(3);
-  });
-
-  it("picker：done + verified → 收起面板 + 显示后端回执原文（含终端回执行）", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.menuBody = {
-      status: "menu",
-      options: [{ number: 1, label: "Read Only", highlighted: false }],
-    };
-    render(<ModeBar session={{ id: "mc-p3" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    routes.menuBody = {
-      status: "done",
-      verified: true,
-      hint: "终端回执：Permissions updated to Read Only",
-    };
-    fireEvent.click(screen.getByTestId("mode-menu-option-1"));
-    const receipt = await screen.findByTestId("mode-receipt");
-    expect(receipt.textContent).toContain("Permissions updated to Read Only");
-    expect(screen.queryByTestId("mode-menu-panel")).toBeNull();
-  });
-
-  it("picker：done + **verified=false** → 不假装成功（原样透出后端文案 + 显红色错误位）", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.menuBody = {
-      status: "menu",
-      options: [{ number: 1, label: "Read Only", highlighted: false }],
-    };
-    render(<ModeBar session={{ id: "mc-p4" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    routes.menuBody = {
-      status: "done",
-      verified: false,
-      hint: "已按你点选的编号投递，但未在屏上读到成功回执——请人工核对终端",
-    };
-    fireEvent.click(screen.getByTestId("mode-menu-option-1"));
-    const err = await screen.findByTestId("mode-error");
-    expect(err.textContent).toContain("请人工核对终端");
-    expect(screen.queryByTestId("mode-receipt")).toBeNull();
-  });
-
-  it("picker 二阶段：pick 返回 confirm → 面板切为确认框选项（由用户再点，兔维斯 不代按）", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.menuBody = {
-      status: "menu",
-      options: [{ number: 4, label: "Full Access", highlighted: false }],
-    };
-    render(<ModeBar session={{ id: "mc-p5" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    routes.menuBody = {
-      status: "confirm",
-      options: [
-        { number: 1, label: "Yes, continue anyway", highlighted: true },
-        { number: 2, label: "Cancel", highlighted: false },
-      ],
-    };
-    fireEvent.click(screen.getByTestId("mode-menu-option-4"));
-    await flushPanel();
-    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("confirm");
-    expect(screen.getByTestId("mode-menu-option-1").textContent).toContain("Yes, continue anyway");
-    // 确认框选项也要用户点——**第二次请求前不发任何东西**
-    const before = fetchMock.mock.calls.filter((c: unknown[]) =>
-      String(c[0]).includes("/session-mode/menu")
-    ).length;
-    expect(before).toBe(2, "open + pick 两次；确认键尚未发");
-  });
-
-  it("picker：关闭按钮只收起面板，零请求", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.menuBody = {
-      status: "menu",
-      options: [{ number: 1, label: "Read Only", highlighted: false }],
-    };
-    render(<ModeBar session={{ id: "mc-p6" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    const before = fetchMock.mock.calls.length;
-    fireEvent.click(screen.getByTestId("mode-menu-close"));
-    expect(screen.queryByTestId("mode-menu-panel")).toBeNull();
-    expect(fetchMock.mock.calls.length).toBe(before);
-  });
-
-  it("picker：「重新读取」用 GET（零注入）重同步", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.menuBody = {
-      status: "menu",
-      options: [{ number: 1, label: "Read Only", highlighted: false }],
-    };
-    render(<ModeBar session={{ id: "mc-p7" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    routes.menuBody = {
-      status: "menu",
-      options: [{ number: 2, label: "Ask for approval (current)", highlighted: true }],
-    };
-    fireEvent.click(screen.getByTestId("mode-menu-reload"));
-    await flushPanel();
-    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
-      String(c[0]).includes("/session-mode/menu")
-    );
-    const last = calls[calls.length - 1]!;
-    const init = last[1] as RequestInit | undefined;
-    expect(init?.method ?? "GET").toBe("GET");
-    expect(screen.getByTestId("mode-menu-option-2")).toBeTruthy();
-  });
-
-  it("picker：failed → 保留面板 + 显示后端失败原文（用户可重读或重选）", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    routes.menuBody = {
-      status: "menu",
-      options: [{ number: 1, label: "Read Only", highlighted: false }],
-    };
-    render(<ModeBar session={{ id: "mc-p8" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    routes.menuBody = {
-      status: "failed",
-      error: "屏上没有权限菜单或确认框——零投递（面板数据可能已过期，请点「重新读取」）",
-    };
-    fireEvent.click(screen.getByTestId("mode-menu-option-1"));
-    const note = await screen.findByTestId("mode-menu-note");
-    expect(note.textContent).toContain("零投递");
-    // 面板**不收起**（不逼用户重新开菜单）
-    expect(screen.getByTestId("mode-menu-panel")).toBeTruthy();
-  });
-
-  it("权限组记忆标注：currentSource=memory → 显示档名 +「（上次切换）」+ 生效档 chip 高亮；screen 来源不标注", async () => {
+  it("权限组记忆标注：currentSource=memory → 「（上次切换）」+ 生效档 chip 高亮；screen 来源不标注", async () => {
     installFetch();
     routes.mode = codexTwoAxis({
       permissionCurrent: "readOnly",
       permissionCurrentSource: "memory",
     });
     const { unmount } = render(<ModeBar session={{ id: "mc-t6" }} />);
-    await screen.findByTestId("mode-picker-permission-open");
+    await screen.findByTestId("mode-switch-permission-readOnly");
     expect(screen.getByTestId("mode-current-source-permission").textContent).toBe("（上次切换）");
     expect(screen.queryByTestId("mode-unknown-hint-permission")).toBeNull();
     // 生效档 chip 高亮（chips 常驻直选，2026-10-10）
@@ -856,7 +654,7 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
       permissionCurrentSource: "screen",
     });
     render(<ModeBar session={{ id: "mc-t6-screen" }} />);
-    await screen.findByTestId("mode-picker-permission-open");
+    await screen.findByTestId("mode-switch-permission-readOnly");
     expect(screen.queryByTestId("mode-current-source-permission")).toBeNull();
   });
 
@@ -894,9 +692,7 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     await flushAsync();
     // 未确认前零请求，确认条先出
     expect(
-      fetchMock.mock.calls.filter((c: unknown[]) =>
-        String(c[0]).includes("/session-mode/switch")
-      )
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-mode/switch"))
     ).toHaveLength(0);
     expect(screen.getByTestId("mode-bypass-confirm")).toBeTruthy();
     fireEvent.click(screen.getByTestId("mode-bypass-confirm-yes"));
@@ -908,13 +704,57 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     expect(body.group).toBe("permission");
     expect(body.target).toBe("bypass");
   });
+
+  it("权限组当前档 chip **可点**（与 toggle 组的有意不对称，评审 P2-3）：点生效档「只读」恰好发一次 {group:'permission', target:'readOnly'}", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis({
+      permissionCurrent: "readOnly",
+      permissionCurrentSource: "screen",
+    });
+    routes.switchBody = { status: "key_sent", verified: true, hint: null };
+    render(<ModeBar session={{ id: "mc-chips-current" }} />);
+    const chip = await screen.findByTestId("mode-switch-permission-readOnly");
+    // 权限组 chip 只有 disabled={busy}（无 isCurrent 禁用）——生效档也 enabled；
+    // toggle 组才是「当前档禁用」。防止将来被无声统一成同款。
+    expect(chip.getAttribute("data-current")).toBe("true");
+    expect((chip as HTMLButtonElement).disabled).toBe(false, "权限组当前档不禁用（toggle 组才禁）");
+    fireEvent.click(chip);
+    await flushAsync();
+    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    expect(calls.length).toBe(1, "点当前档 chip 恰好发一次 switch（重申/核验语义）");
+    const body = JSON.parse(String((calls[0]![1] as RequestInit).body));
+    expect(body.group).toBe("permission");
+    expect(body.target).toBe("readOnly");
+  });
+
+  it("当前档是完全信任且可点：点它先武装确认条（不直接发）——零请求 + mode-bypass-confirm 在场", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis({
+      permissionCurrent: "bypass",
+      permissionCurrentSource: "screen",
+    });
+    routes.switchBody = { status: "key_sent", verified: true, hint: null };
+    render(<ModeBar session={{ id: "mc-chips-bypass-current" }} />);
+    const chip = await screen.findByTestId("mode-switch-permission-bypass");
+    expect(chip.getAttribute("data-current")).toBe("true");
+    expect((chip as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(chip);
+    await flushAsync();
+    // 当前档也要走二次确认防线——未确认前零请求，确认条先出
+    expect(
+      fetchMock.mock.calls.filter((c: unknown[]) => String(c[0]).includes("/session-mode/switch"))
+    ).toHaveLength(0);
+    expect(screen.getByTestId("mode-bypass-confirm")).toBeTruthy();
+  });
 });
 
 // ==== T5（spec §3.1/§3.2/§6-T5）：codex 模式/权限两链的回执消费 ====
 // （2026-10-10 用户指令：「已在目标档（零投递）」态删除——点切换必然发键，
-// 后端 hint 只剩命中/不符/未生效三态；原零投递回执用例随之删除。）
-describe("ModeBar：T5 codex 回执消费（observed / confirm-cancelled）", () => {
-
+// 后端 hint 只剩命中/不符/未生效三态；原零投递回执用例随之删除。
+// 同日二版：picker 菜单链（confirm-cancelled 自动重开）随面板删除，用例一并移除。）
+describe("ModeBar：T5 codex 回执消费（observed）", () => {
   it("codex 模式切换 verified=false 带 observed → 回执原样透出「屏已切换至 X（预期 Y）」，不重复拼接 observed 档名", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
@@ -927,57 +767,10 @@ describe("ModeBar：T5 codex 回执消费（observed / confirm-cancelled）", ()
       currentLabel: "操作",
     };
     render(<ModeBar session={{ id: "t5-obs" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
+    // 二版 chips：current=plan → 点另一档「操作」chip 发切换
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-default"));
     const receipt = await screen.findByTestId("mode-receipt");
     // 整串等值 = 前端只透传未拼接（observed 档名已并入后端 hint，前端不再叠一次）
     expect(receipt.textContent).toBe("屏已切换至 操作（预期 计划）——请人工核对终端");
-  });
-
-  it("codex picker confirm-cancelled（Cancel 回菜单）→ 显示 hint + 自动重拉菜单选项表（既有 open 流程），面板回菜单态", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    // 菜单端点按次响应：open→menu、pick(4)→confirm、pick(2)→confirm-cancelled、
-    // 自动重开（open）→menu
-    const menuOptions = [
-      { number: 1, label: "Read Only", highlighted: false },
-      { number: 4, label: "Full Access", highlighted: false },
-    ];
-    routes.menuBodyQueue = [
-      { status: "menu", options: menuOptions },
-      {
-        status: "confirm",
-        options: [
-          { number: 1, label: "Yes, continue anyway", highlighted: true },
-          { number: 2, label: "Cancel", highlighted: false },
-        ],
-      },
-      { status: "confirm-cancelled", hint: "已取消 Full Access 确认，菜单已回到屏上" },
-      { status: "menu", options: menuOptions },
-    ];
-    render(<ModeBar session={{ id: "t5-cc" }} />);
-    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
-    await flushPanel();
-    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("menu");
-    // 选 Full Access → 二阶段确认框
-    fireEvent.click(screen.getByTestId("mode-menu-option-4"));
-    await flushPanel();
-    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("confirm");
-    // 点 Cancel（2）→ confirm-cancelled → 前端自动重开菜单
-    fireEvent.click(screen.getByTestId("mode-menu-option-2"));
-    await flushPanel();
-    await flushPanel();
-    // 面板回到菜单态（用户不用手点「重新读取」）
-    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("menu");
-    // 取消回执保留为面板 note
-    expect(screen.getByTestId("mode-menu-note").textContent).toContain("已取消 Full Access 确认");
-    // 重开的选项表渲染出来（第 4 项回来可选）
-    expect(screen.getByTestId("mode-menu-option-4")).toBeTruthy();
-    // 第 4 次菜单请求 = 自动重开（POST action=open）
-    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
-      String(c[0]).includes("/session-mode/menu")
-    );
-    expect(calls.length).toBe(4);
-    const lastBody = JSON.parse(String((calls[calls.length - 1]![1] as RequestInit).body));
-    expect(lastBody.action).toBe("open");
   });
 });

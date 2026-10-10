@@ -873,6 +873,29 @@ fn resolve_target(pid: u32) -> Result<u32, String> {
 mod tests {
     use super::*;
 
+    /// **CJK 文本注入活体探针**（2026-10-10 notes 复活批，实机诊断工具）：
+    /// 对 `MAM_PROBE_PID` 指定的 codex 进程用**生产路径** `inject_text_spec` 打一段
+    /// 中文（vk=0 字符流形态）+ 尾部回车——配合屏读 dump 验证三件事：①WriteConsoleInput
+    /// 层实写数（PS 探针 ConIn.ps1 在 CJK 上封送炸 0x8007007A 写 0，Rust 平铺布局
+    /// 是另一条路，须单独实证）；②crossterm 对 vk=0 中文事件收不收；③整链落卷。
+    /// 跑法：`MAM_PROBE_PID=<codex pid> cargo test --lib cjk_text_inject_live_probe
+    /// -- --ignored --nocapture`（前置：目标面板已开 notes 态——本探针会打字+回车提交）。
+    #[ignore = "实机 CJK 注入探针：会向目标面板打字并回车提交（前置=MAM_PROBE_PID=<codex pid>）"]
+    #[test]
+    fn cjk_text_inject_live_probe() {
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（红线：只碰显式指定的进程）");
+            return;
+        };
+        let spec = families::family_for("codex").unwrap();
+        let stats = inject_text_spec(pid, "中文备注八字实测", &spec)
+            .unwrap_or_else(|e| panic!("CJK 注入失败（生产路径）：{e}"));
+        println!("CJK inject stats: {stats:?}——请配合 codex_question_live_probe dump 屏面核验");
+    }
+
     /// P2-2 键域校验单测：域外键报错（不回退文本+回车），且**域校验必须在
     /// attach 之前快速失败**——假 pid 424242 不触发任何控制台附加（无真控制台
     /// 也可稳定跑，常规 cargo test 门禁内执行）。

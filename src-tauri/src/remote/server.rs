@@ -8223,10 +8223,10 @@ mod tests {
     }
 
     /// **能力位契约逐工具断言**（2026-10-05 推广批 T8/F6）：GET 载荷的
-    /// `multiFreeText` / `screen` 按取证状态给值——**codex 2026-10-09 取证回填
-    /// 关闭**（0.160.0 notes 不落卷——回车把焦点行提交为答案、用户文本静默丢失，
-    /// 底料 §5；freeText 入口随路由一并具名中止）；kimi 多选关（Other 无编号，
-    /// 单选走旗标同面）；快照失败保守 None。
+    /// `multiFreeText` / `screen` 按取证状态给值——**codex `freeText` 单题旗标已
+    /// 点亮（2026-10-10 notes 链复活，0.162.1 四取样复验全通），multiFreeText /
+    /// freeTextOverwrite 维持 false**（多题 notes 面未复采，本用例锁的就是这两个
+    /// 多题面旗标）；kimi 多选关（Other 无编号，单选走旗标同面）；快照失败保守 None。
     /// **codex 旗标面 2026-10-09 扩充**：多题载荷 → advance=true + navBoth=true
     /// （0.160.0 h/l 双向环形）；单题载荷 → advance=false（无切题面）但 navBoth
     /// 仍 true（旗标与题数解耦，前端按 advance 分流渲染）。wire 的 `screen` 断言
@@ -13444,7 +13444,8 @@ mod tests {
     }
 
     /// POST：**显式 group 路由**（丁T4 新增字段）——codex 权限组「完全信任」→ 走
-    /// `/permissions` 两段式的**第一段**（文本 + 回车；第二段无真屏读 → 中止并如实回执）
+    /// `/permissions` 两段式的**第一段**（文本 + tab——提交键 2026-10-10 3787fa7d
+    /// 用户实测指令 enter→tab；第二段无真屏读 → 中止并如实回执）
     /// 平台门控（2026-10-07 存量债清理）：本测断言的是「两段式的**第一段照常投递**」，
     /// 而第一段之后的菜单定位/导航**必须屏读**，屏读是 **Windows 能力**——
     /// `remote/api.rs::menu_stages` 在 `not(windows)` 下按设计恒回
@@ -13481,7 +13482,7 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), 200);
         let body = body_string(r).await;
-        // 第一段已投递：`/permissions` 文本 + enter 键
+        // 第一段已投递：`/permissions` 文本 + tab 键
         assert_eq!(
             fake.recorded(),
             vec![(85u32, "/permissions".to_string())],
@@ -13489,8 +13490,8 @@ mod tests {
         );
         assert_eq!(
             fake.recorded_keys(),
-            vec![(85u32, "enter".to_string())],
-            "斜杠命令需回车提交"
+            vec![(85u32, "tab".to_string())],
+            "斜杠命令提交键 = tab（3787fa7d 用户实测指令 enter→tab）"
         );
         // 第二段（CI 无屏读）→ 中止 + 如实回执（**不是**「已切换」）
         assert!(
@@ -13782,7 +13783,11 @@ mod tests {
             vec![(91u32, "/permissions".to_string())],
             "第一段照常投递"
         );
-        assert_eq!(fake.recorded_keys(), vec![(91u32, "enter".to_string())]);
+        assert_eq!(
+            fake.recorded_keys(),
+            vec![(91u32, "tab".to_string())],
+            "提交键 = tab（3787fa7d enter→tab）"
+        );
     }
 
     /// **第一段之前有真对话框 → 仍被守卫拒**（回归锁：守卫位置不得因为两段式改造

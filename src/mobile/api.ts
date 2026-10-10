@@ -847,6 +847,9 @@ export interface QuestionInfoView {
     isLast?: boolean;
     options?: string[];
     focused?: number | null;
+    /** codex notes 行文本（2026-10-10 用户指令：note 位置但凡有输入必须显示在
+     *  远端页面上——GET 屏读同帧解析，占位/无备注 → null） */
+    noteText?: string | null;
   } | null;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
@@ -938,6 +941,8 @@ export type QuestionAnswerResult =
         isLast?: boolean;
         options?: string[];
         focused?: number | null;
+        /** codex notes 行文本（2026-10-10，与 GET screen 同名同义） */
+        noteText?: string | null;
       };
       /** codex select 回执旗标（2026-10-09 设计 §3.7 wire 契约）：
        *  `reanswered` = 改答分支（题号推进而计数未减）；`alreadySubmitted` =
@@ -1164,6 +1169,10 @@ export async function sessionModeSwitch(
 }
 
 // ==== 2026-09-23：codex 权限组的「终端菜单单选题」（用户方案）====
+// **前端消费方状态（2026-10-10 二版）**：唯一 UI 消费方 ModeBar 的 PermissionPicker
+// 已随「四 chips 直选」改版删除（评审 P2-2）——以下导出降级为 /session-mode/menu
+// 活端点的 TS 契约镜像（后端 src-tauri remote/api.rs 的 menu 端点仍在、switch 端点
+// 的 Menu 编排不经过这些函数）。恢复 picker 或端点退役时随批处置，勿在别处新消费。
 
 /** 终端菜单里的一项。`number` = **屏上实读的编号**（用户点它 → 兔维斯 敲同一个数字键）；
  *  `label` = 屏上原文（原样展示，供用户与终端核对）；`highlighted` = 终端当前高亮项。 */

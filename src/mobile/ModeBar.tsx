@@ -3,14 +3,10 @@ import { toneTokens } from "./InteractiveCard";
 import {
   ApiError,
   fetchSessionMode,
-  fetchSessionModeMenu,
-  sessionModeMenuOpen,
-  sessionModeMenuPick,
   sessionModeSwitch,
   type MamMode,
   type ModeGroupId,
   type ModeGroupView,
-  type ModeMenuOption,
   type SessionModeView,
 } from "./api";
 
@@ -31,8 +27,9 @@ import {
  *   **不声称已切到目标档**。
  *
  * **裁7（codex 退役旧档不作可选）**：`groups[].tiers[]` 里 `selectable=false` 的档
- * 不渲染为可点按钮（它的 `reason` 会作为灰字提示显示，让用户知道为什么点不了）；
- * `groups[].legacy[]`（untrusted/on-failure）只渲染为一行说明文本——**不是按钮**。
+ * 不渲染为可点按钮；`groups[].legacy[]`（untrusted/on-failure）**不渲染**（2026-10-10
+ * 二版用户指令：chips 高亮已承载全部状态信息，退役说明行纯文本已删——后端仍下发，
+ * 前端不消费）。
  */
 export default function ModeBar({ session }: { session: { id: string } }) {
   const [view, setView] = useState<SessionModeView | null>(null);
@@ -160,24 +157,7 @@ export default function ModeBar({ session }: { session: { id: string } }) {
           group={g}
           showGroupLabel={groups.length > 1}
           busy={busy || questionPending}
-          sessionId={session.id}
           onSwitch={(target) => handleSwitch(target, g.id)}
-          onPicked={(hint, ok) => {
-            // picker 走完：ok=true 时刷新视图（后端可能已改档，重拉 GET 拿权威结构），
-            // 否则只显示后端原样文案——**不假装成功**（与 handleSwitch 同红线）
-            if (ok) {
-              setError(null);
-              setReceipt(hint);
-              void fetchSessionMode(session.id)
-                .then(setView)
-                .catch(() => {
-                  /* 重拉失败保留原视图——如实，不是把旧值刷成新值 */
-                });
-            } else {
-              setReceipt(null);
-              setError(hint);
-            }
-          }}
         />
       ))}
       {questionPending && (
@@ -244,17 +224,33 @@ function modeGroups(view: SessionModeView): ModeGroupView[] {
   ];
 }
 
-/** 单组渲染：组标题（仅二维时显示）+ 当前档 + 切换入口。
- *  E3④：当前档按钮**高亮**（data-current + 反色样式）；问答待决时全组禁用。
- *  2026-09-23 codex 模式切换改造 / **2026-10-10 用户指令改版**：
- *  - `layout === "toggle"`（codex 模式组）→ 三段 **[计划] [◀▶] [操作]**——两个标签是
- *    **指示器**（当前档高亮，来自屏读回读的 group.current），中间 ◀▶ 按钮点击 =
- *    向终端发一次 shift+tab（**无零投递闸**：卡面档位过期时点按钮也必然动作——
- *    这正是「切换不了」的修复面；后端按前读翻转核验，卡面跟随屏读结果高亮）；
+/** 组内档位 chip 的统一外观——模式组（toggle）与权限组（picker）**同款**
+ *  （2026-10-10 用户指令「风格统一」三版：不高亮 = 灰底正常字体；高亮 =
+ *  **黑色边缘 + 字体加粗**，无底色——与「完全信任」高亮观感一致）。
+ *  当前档不压暗（disabled 是「不可点」语义不是置灰，评审 P2-1）；
+ *  非当前档 disabled（含问答待决置灰）时降透明度。 */
+function chipClass(isCurrent: boolean): string {
+  return `rounded-full border px-2 py-0.5 text-[11px] ${
+    isCurrent
+      ? "border-[var(--tx)] bg-transparent font-semibold text-[var(--tx)]"
+      : "border-transparent bg-[var(--cb)] text-[var(--tx)] disabled:opacity-40"
+  }`;
+}
+
+/** 单组渲染：组标题（仅二维时显示）+ 切换 chips。
+ *  E3④：当前档 chip **高亮**（data-current + 反色样式）；问答待决时全组禁用。
+ *  2026-09-23 codex 模式切换改造 / **2026-10-10 用户指令改版（二版）**：
+ *  - `layout === "toggle"`（codex 模式组）→ **两档 chips 即按钮**：当前档高亮
+ *    **不可点**，另一档可点，点击 = 向终端发一次 shift+tab（**无零投递闸**：卡面
+ *    档位过期时点按钮也必然动作——这正是「切换不了」的修复面；后端按前读翻转
+ *    核验，卡面跟随屏读结果高亮）。档位未知（current=null）时两档都可点——
+ *    点哪个都是发一次 shift+tab，落点以屏读为准（用户裁决：屏读必有解，未知态
+ *    实际不存在，这里只作纵深防御）；上一版的 [◀▶]「切换模式」按钮已删；
  *  - `layout === "picker"`（codex 权限组）→ **四档 chips 常驻**（只读/默认/自动审批/
  *    完全信任，来自 tiers 里 selectable 档；生效档高亮框选中），点 chip = 走 switch
- *    端点既有 Menu 编排（数字直达 + Full Access 确认框代按）；「完全信任」保留
- *    先武装二次确认条的前端防线；既有「切换权限」picker 入口**保留为兜底**；
+ *    端点既有 Menu 编排（数字直达 + Full Access 确认框阶段代按）；「完全信任」保留
+ *    先武装二次确认条的前端防线；既有「切换权限」picker 入口与「已退役：…」说明行
+ *    **已删**（用户指令：四 chips 高亮已承载全部状态信息，二级入口不再保留）；
  *  - 「完全信任」二次确认（2026-09-23 用户裁决，chips 同样遵守）：点完全信任先出
  *    确认条，确认后才发——codex 会连发两次按键（4→1）并代按终端的风险确认框；
  *  - 权限组 current 来源 = **记忆回落**（`currentSource === "memory"`，终审 P1-2：
@@ -266,19 +262,13 @@ function ModeGroupRow({
   group,
   showGroupLabel,
   busy,
-  sessionId,
   onSwitch,
-  onPicked,
 }: {
   group: ModeGroupView;
   showGroupLabel: boolean;
   /** E3④：busy 含问答待决置灰（父层合并——待决时全组按钮禁用） */
   busy: boolean;
-  /** 单选面板（picker）要用会话 id 调 /session-mode/menu */
-  sessionId: string;
   onSwitch: (target: MamMode) => void;
-  /** picker 走完（done/failed）→ 父层刷新视图与回执 */
-  onPicked: (hint: string, ok: boolean) => void;
 }) {
   const currentText = group.currentLabel ?? "模式未知";
   const unknown = group.current === null;
@@ -327,54 +317,43 @@ function ModeGroupRow({
         </span>
       )}
       {group.layout === "picker" ? (
-        <>
-          {/* **四档 chips 常驻**（2026-10-10 用户指令）：只读/默认/自动审批/完全信任
-              直选——生效档（GET current，屏读→记忆→未知三级回落）**高亮框选中**；
-              点 chip = 走 switch 端点既有 Menu 编排（/permissions → 屏读定位数字 →
-              发数字 → Full Access 确认框阶段代按）。编号猜测仍不在前端——档位→数字
-              的映射由后端屏读完成。 */}
-          <span className="flex flex-wrap items-center gap-1">
-            {group.tiers
-              .filter((t) => t.selectable)
-              .map((t) => {
-                const isCurrent = group.current !== null && group.current === t.mode;
-                return (
-                  <button
-                    key={t.mode}
-                    type="button"
-                    data-testid={`mode-switch-${group.id}-${t.mode}`}
-                    data-current={isCurrent ? "true" : "false"}
-                    disabled={busy}
-                    onClick={() => {
-                      if (t.mode === "bypass") {
-                        setBypassArmed(true); // 不直接发——等「确认启用」（二次确认防线 chips 同守）
-                      } else {
-                        onSwitch(t.mode);
-                      }
-                    }}
-                    className={`rounded-full border px-2 py-0.5 text-[11px] disabled:opacity-40 ${
-                      isCurrent
-                        ? "border-[var(--btnp)] bg-[var(--btnp)]/10 font-semibold text-[var(--tx)]"
-                        : "border-transparent bg-[var(--cb)] text-[var(--tx)]"
-                    }`}
-                  >
-                    {t.label}
-                  </button>
-                );
-              })}
-          </span>
-          {/* 「切换权限」picker 入口**保留为兜底**（2026-10-10 用户指令）：Menu 编排
-              意外失败（档位漂移/屏读形态变化）时由用户在终端菜单上直接点编号。 */}
-          <PermissionPicker sessionId={sessionId} disabled={busy} onDone={onPicked} />
-        </>
-      ) : group.layout === "toggle" ? ( // codex 模式组三段（2026-10-10 用户指令）：
-        // [计划] [◀▶] [操作]——两个标签是**指示器**（当前档高亮，来自屏读回读），
-        // 中间按钮点击 = 向终端发一次 shift+tab；**无零投递闸**——卡面档位过期时
-        // 点按钮也必然动作，落点由后端屏读核验（前读翻转），卡面跟随屏读结果高亮。
+        // **四档 chips 常驻**（2026-10-10 用户指令）：只读/默认/自动审批/完全信任
+        // 直选——生效档（GET current，屏读→记忆→未知三级回落）**高亮框选中**；
+        // 点 chip = 走 switch 端点既有 Menu 编排（/permissions → 屏读定位数字 →
+        // 发数字 → Full Access 确认框阶段代按）。编号猜测仍不在前端——档位→数字
+        // 的映射由后端屏读完成。「切换权限」二级入口已删（二版指令）——Menu 编排
+        // 失败时走 mode-error 文案引导，不再保留面板兜底。
+        <span className="flex flex-wrap items-center gap-1">
+          {group.tiers
+            .filter((t) => t.selectable)
+            .map((t) => {
+              const isCurrent = group.current !== null && group.current === t.mode;
+              return (
+                <button
+                  key={t.mode}
+                  type="button"
+                  data-testid={`mode-switch-${group.id}-${t.mode}`}
+                  data-current={isCurrent ? "true" : "false"}
+                  disabled={busy}
+                  onClick={() => {
+                    if (t.mode === "bypass") {
+                      setBypassArmed(true); // 不直接发——等「确认启用」（二次确认防线 chips 同守）
+                    } else {
+                      onSwitch(t.mode);
+                    }
+                  }}
+                  className={chipClass(isCurrent)}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+        </span>
+      ) : group.layout === "toggle" ? ( // codex 模式组两档 chips 即按钮（2026-10-10 二版指令）：
+        // 当前档高亮不可点，另一档可点 = 发一次 shift+tab；**无零投递闸**——卡面
+        // 档位过期时点按钮也必然动作，落点由后端屏读核验（前读翻转），卡面跟随
+        // 屏读结果高亮。上一版三段 [计划][◀▶][操作] 的「切换模式」按钮已删。
         (() => {
-          // 切换目标 = 卡面当前档的翻转（仅作后端前读不可判时的核验预期兜底；
-          // 当前档未知时兜底发 plan——动作无条件，最终落点以屏读为准）
-          const toggleTarget: MamMode = group.current === "plan" ? "default" : "plan";
           const labelFor = (m: MamMode): string =>
             group.tiers.find((x) => x.mode === m)?.label ?? (m === "plan" ? "计划" : "操作");
           return (
@@ -382,31 +361,22 @@ function ModeGroupRow({
               {(["plan", "default"] as const).map((m) => {
                 const isCurrent = group.current === m;
                 return (
-                  <span
+                  <button
                     key={m}
-                    data-testid={`mode-toggle-label-${group.id}-${m}`}
+                    type="button"
+                    data-testid={`mode-switch-${group.id}-${m}`}
                     data-current={isCurrent ? "true" : "false"}
-                    className={`rounded-full px-2 py-0.5 text-[11px] ${
-                      isCurrent
-                        ? "bg-[var(--cb)] font-semibold text-[var(--tx)]"
-                        : "text-[var(--mut)]"
-                    }`}
+                    // 当前档不可点（用户指令：高亮的那档禁用，点另一档=切过去）；
+                    // 档位未知时两档都可点（纵深防御，落点以屏读为准）
+                    disabled={busy || isCurrent}
+                    title="向终端发送一次 shift+tab，切档结果以终端屏读为准（卡面跟随高亮）"
+                    onClick={() => onSwitch(m)}
+                    className={chipClass(isCurrent)}
                   >
                     {labelFor(m)}
-                  </span>
+                  </button>
                 );
               })}
-              <button
-                type="button"
-                data-testid={`mode-switch-${group.id}-toggle`}
-                data-current={group.current ?? "unknown"}
-                disabled={busy}
-                title="向终端发送一次 shift+tab，切档结果以终端屏读为准（卡面跟随高亮）"
-                onClick={() => onSwitch(toggleTarget)}
-                className="rounded-full bg-[var(--btnp)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--btnpt)] disabled:opacity-40"
-              >
-                切换模式
-              </button>
             </span>
           );
         })()
@@ -466,12 +436,9 @@ function ModeGroupRow({
           })}
         </span>
       )}
-      {/* 裁7：退役旧档**只作说明**，不渲染为可点按钮 */}
-      {group.legacy !== undefined && group.legacy.length > 0 && (
-        <span data-testid={`mode-legacy-${group.id}`} className="text-[11px] text-[var(--mut)]">
-          已退役：{group.legacy.map((l) => l.label).join(" / ")}
-        </span>
-      )}
+      {/* 裁7 退役旧档说明行已删（2026-10-10 二版用户指令）：chips 高亮已承载全部
+          状态信息，「已退役：untrusted / on-failure」纯文本不再渲染（后端仍下发
+          legacy 字段，前端不消费——档位表单一真源不变） */}
       {/* 完全信任二次确认条（2026-09-23 用户裁决的前端防线；未确认不发任何请求） */}
       {hasBypass && bypassArmed && (
         <span
@@ -504,261 +471,4 @@ function ModeGroupRow({
       )}
     </span>
   );
-}
-
-/** **终端菜单单选面板**（codex 权限组的**兜底入口**，2026-09-23 用户方案；
- *  2026-10-10 起四档 chips 直选为主入口——本面板保留给「Menu 编排意外失败/用户
- *  想直接在终端菜单上点编号」的场景）。
- *
- * 交互：单钮「切换权限」→ 点开后后端注入 `/permissions` + 回车并**读回终端菜单的
- * 选项表**（编号 = 屏上实读值、文本 = 屏上原文）→ 这里渲染成一列编号按钮 →
- * 用户点哪项，兔维斯 就敲哪个数字键。
- *
- * # 为什么这样比「后端自己敲」好（用户实机走查的结论）
- *
- * 旧路径是后端按目标档**猜**屏上编号（前端文案还硬编码「4→1」）。而档位编号会随
- * Guardian 配置前移（`Approve for me` 缺席时 `Full Access` 从 4 变 3）——猜错的
- * 后果是切到**别的档**（用户点只读、实际启用完全信任）。本面板把这一步交给用户：
- * 编号来自屏幕实读，兔维斯 只是投递，**不猜**。
- *
- * # 两阶段
- *
- * 切 Full Access 时终端会弹风险确认框 → 后端返回 `status:"confirm"` → 面板切为
- * 确认框的选项（同样读自终端原文），由用户再点一次。**兔维斯 不代按**。
- *
- * # 面板形态
- *
- * 内联展开（不引入遮罩/portal——沿用移动端既有惯例），配色与审批卡的「终端对话框
- * 选项」同款（那是现成的同形先例：编号徽标 + 纵向按钮 + 「点按即代你按对应数字键」）。
- */
-function PermissionPicker({
-  sessionId,
-  disabled,
-  onDone,
-}: {
-  sessionId: string;
-  disabled: boolean;
-  onDone: (hint: string, ok: boolean) => void;
-}) {
-  /** 面板态：null = 收起；menu = 菜单选项；confirm = 二阶段确认框选项 */
-  const [panel, setPanel] = useState<null | "menu" | "confirm">(null);
-  const [options, setOptions] = useState<ModeMenuOption[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState<string | null>(null);
-
-  const runOpen = useCallback(async () => {
-    setBusy(true);
-    setNote(null);
-    try {
-      const r = await sessionModeMenuOpen(sessionId);
-      if (r.status === "menu") {
-        setOptions(r.options);
-        setPanel("menu");
-      } else if (r.status === "confirm") {
-        // 开菜单时确认框已在屏（上次残留）——直接进二阶段
-        setOptions(r.options);
-        setPanel("confirm");
-        setNote(r.hint ?? null);
-      } else if (r.status === "failed") {
-        setNote(r.error);
-        setPanel(null);
-      } else {
-        setNote("终端没有可读的权限菜单——请人工核对终端");
-        setPanel(null);
-      }
-    } catch (e) {
-      setNote(menuErrorText(e));
-      setPanel(null);
-    } finally {
-      setBusy(false);
-    }
-  }, [sessionId]);
-
-  const runReload = useCallback(async () => {
-    setBusy(true);
-    setNote(null);
-    try {
-      const r = await fetchSessionModeMenu(sessionId);
-      if (r.status === "menu") {
-        setOptions(r.options);
-        setPanel("menu");
-      } else if (r.status === "confirm") {
-        setOptions(r.options);
-        setPanel("confirm");
-      } else if (r.status === "none") {
-        setNote("终端屏上现在没有权限菜单或确认框（可能已关闭）——可重新打开");
-      } else if (r.status === "failed") {
-        setNote(r.error);
-      }
-    } catch (e) {
-      setNote(menuErrorText(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [sessionId]);
-
-  const runPick = useCallback(
-    async (number: number) => {
-      setBusy(true);
-      setNote(null);
-      try {
-        const r = await sessionModeMenuPick(sessionId, number);
-        if (r.status === "confirm") {
-          setOptions(r.options);
-          setPanel("confirm");
-          setNote(r.hint ?? "终端弹出风险确认框——请再点一次确认项");
-        } else if (r.status === "confirm-cancelled") {
-          // T5（spec §3.2/§6-T5）：确认框阶段点 Cancel（2）→ 确认框消失、菜单已
-          // 回到终端屏上、无新回执行——显示 hint 并**自动重拉菜单选项表**（既有
-          // open 流程），面板回到菜单态（用户不用手点「重新读取」）。重开回菜单
-          // 时取消回执保留；仅当重开发现确认框仍在屏（终端残留，取消未生效）时
-          // note 让位给二阶段态——那时「菜单已回到屏上」就是假话。重开失败/读不
-          // 到菜单时选项清空 + 如实报错（不假装已同步）。
-          setPanel("menu");
-          setNote(r.hint ?? "已取消 Full Access 确认，菜单已回到屏上");
-          try {
-            const reopened = await sessionModeMenuOpen(sessionId);
-            if (reopened.status === "menu") {
-              setOptions(reopened.options);
-            } else if (reopened.status === "confirm") {
-              // 重开时确认框在屏（终端残留）——按既有 open 流程进二阶段
-              setOptions(reopened.options);
-              setPanel("confirm");
-              setNote(reopened.hint ?? null);
-            } else {
-              // 重开没读到菜单（/none 等）——选项清空 + 保留取消回执，如实交用户
-              setOptions([]);
-            }
-          } catch {
-            setOptions([]);
-            setNote("已取消 Full Access 确认——重开菜单失败，请点「重新读取」");
-          }
-        } else if (r.status === "done") {
-          setPanel(null);
-          setOptions([]);
-          onDone(r.hint ?? (r.verified ? "已切换" : "已投递，请人工核对终端"), r.verified);
-        } else if (r.status === "failed") {
-          // 失败**保留面板**（用户可重读或重选——不逼他重新开菜单）
-          setNote(r.error);
-        } else {
-          setNote("终端屏上没有菜单或确认框——请点「重新读取」");
-        }
-      } catch (e) {
-        setNote(menuErrorText(e));
-      } finally {
-        setBusy(false);
-      }
-    },
-    [sessionId, onDone]
-  );
-
-  const t = toneTokens("question");
-  const isConfirm = panel === "confirm";
-  return (
-    <>
-      <button
-        type="button"
-        data-testid="mode-picker-permission-open"
-        disabled={disabled || busy}
-        title="向终端发送 /permissions 打开权限菜单，然后由你点选档位"
-        onClick={() => void runOpen()}
-        className="rounded-full bg-[var(--btnp)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--btnpt)] disabled:opacity-40"
-      >
-        {busy && panel === null ? "读取终端菜单…" : "切换权限"}
-      </button>
-      {panel !== null && (
-        <div
-          data-testid="mode-menu-panel"
-          data-panel={panel}
-          className={`mt-1 w-full rounded-lg px-2 py-1.5 ${t.box}`}
-        >
-          <div className="mb-1 flex items-center justify-between gap-2">
-            <span className="text-[11px] font-semibold text-[var(--tx)]">
-              {isConfirm ? "终端二次确认" : "终端权限菜单"}
-            </span>
-            <span className="flex gap-1">
-              <button
-                type="button"
-                data-testid="mode-menu-reload"
-                disabled={busy}
-                onClick={() => void runReload()}
-                className="rounded-full bg-[var(--cb)] px-2 py-0.5 text-[11px] text-[var(--tx)] disabled:opacity-40"
-              >
-                重新读取
-              </button>
-              <button
-                type="button"
-                data-testid="mode-menu-close"
-                disabled={busy}
-                onClick={() => {
-                  setPanel(null);
-                  setOptions([]);
-                  setNote(null);
-                }}
-                className="rounded-full bg-[var(--cb)] px-2 py-0.5 text-[11px] text-[var(--tx)] disabled:opacity-40"
-              >
-                关闭
-              </button>
-            </span>
-          </div>
-          <p className="mb-1 text-[11px] text-[var(--tx)]/80">
-            {isConfirm
-              ? "以下选项读自终端的风险确认框，点按即代你按对应数字键"
-              : "以下选项读自终端，点按即代你按对应数字键（编号 = 屏幕上那个数字）"}
-          </p>
-          <div className="space-y-1">
-            {options.length === 0 && (
-              <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                未读到选项——请点「重新读取」再选
-              </p>
-            )}
-            {options.map((o) => (
-              <button
-                key={o.number}
-                type="button"
-                data-testid={`mode-menu-option-${o.number}`}
-                data-highlighted={o.highlighted ? "true" : "false"}
-                disabled={busy}
-                onClick={() => void runPick(o.number)}
-                className={`flex w-full items-start gap-2 rounded-lg px-2 py-1.5 text-left text-xs disabled:opacity-40 ${t.action}`}
-              >
-                <span
-                  className={`shrink-0 rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${t.badge}`}
-                >
-                  {o.number}
-                </span>
-                <span className="min-w-0 flex-1 break-words">{o.label}</span>
-              </button>
-            ))}
-          </div>
-          {note !== null && (
-            <p
-              data-testid="mode-menu-note"
-              className="mt-1 text-[11px] text-amber-700 dark:text-amber-400"
-            >
-              {note}
-            </p>
-          )}
-        </div>
-      )}
-    </>
-  );
-}
-
-/** 面板的 ApiError → 中文文案（错误码分诊与 `handleSwitch` 同口径：不把「网络挂了」
- *  和「终端有对话框」说成一句话）。 */
-function menuErrorText(e: unknown): string {
-  if (e instanceof ApiError) {
-    if (e.status === 404 && e.data?.error === "no_session") {
-      return "会话已结束，请返回看板刷新";
-    }
-    if (e.status === 409 && e.data?.error === "no_mechanism") {
-      return typeof e.data?.reason === "string" ? e.data.reason : "该工具不支持终端菜单选择";
-    }
-    if (e.status === 409 && e.data?.error === "blocked_by_dialog") {
-      return typeof e.data?.reason === "string" ? e.data.reason : "终端有待决对话框，请先处理";
-    }
-    return e.message;
-  }
-  return String(e);
 }

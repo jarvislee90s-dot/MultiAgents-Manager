@@ -4119,11 +4119,12 @@ pub async fn session_question(
     // `answerable=false` 时前端渲染只读卡 + 引导终端作答（zcode/dsh 等未实测工具；
     // codex 已于 2026-09-21 实机补测升格为可作答）
     let answerable = !tool_id.is_empty() && !question_profile_is_read_only(&tool_id);
-    // **丁T5 §2.4**：自由作答（卡内输入框）的支持面——只有 claude 的自由作答序列
-    // 已实机定案。前端据此决定「渲染输入框 + 作为回答发送」还是「渲染引导文案去终端」
+    // **丁T5 §2.4**：自由作答（卡内输入框）的支持面——claude/kimi/opencode 逐批定案，
+    // codex 于 2026-10-10 复活（0.162.1 复验四取样全通；0.160.0 期间的停用解除）。
+    // 前端据此决定「渲染输入框 + 作为回答发送」还是「渲染引导文案去终端」
     // （§2.8 降级：序列未定案的工具**不假装能发**）。
-    // 独立于 `answerable` 的理由：codex/opencode 的**点选**已实测（answerable=true）
-    // 但**自由作答**未定案——两者是不同的能力面，不能用一个布尔表示。
+    // 独立于 `answerable` 的理由：**点选**与**自由作答**是不同的能力面，
+    // 不能用一个布尔表示。
     let free_text_supported = crate::inject::question::free_text_supported(&tool_id);
     // **批次戊 E4-E6 + 2026-09-24**：多题交互能力（kimi K-5 / codex Tab 备注 /
     // opencode tab 切页 / claude Next+回车切题——用户实机取证 2.1.278）。
@@ -4250,22 +4251,50 @@ pub async fn session_question(
                         }
                         // codex 问答面板（2026-10-09，0.160.0 活体取证）：题号头+
                         // footer 锚配对解析——题号直读对位（不依赖题干匹配）。
-                        // 解析 None → null（前端维持本地状态，保守降级同口径）
+                        // 解析 None → null（前端维持本地状态，保守降级同口径）。
+                        // **2026-10-10 用户指令改轮询**：100ms/拍、总窗 10 拍——首拍
+                        // 用本次读屏，未解析出面板则重读（重绘竞态窗）；解析成功即
+                        // 止，同帧取 notes 行文本附 `noteText`（「note 位置但凡有
+                        // 输入，一定要显示在远端页面上」）。
                         if tool2 == "codex" {
-                            let snap = crate::inject::question_screen_oc::
-                                codex_question_screen_snapshot(&lines);
-                            // 闸门②日志自报（照 opencode 分支的 [question-screen] 模式）
-                            match &snap {
-                                Some(s) => log::info!(
-                                    "[question-screen] GET pid={pid} rows={} → codex 面板 Q{}/{} 未答={} 焦点={:?}",
-                                    lines.len(), s.question_idx + 1, s.question_total, s.unanswered, s.focused
-                                ),
-                                None => log::info!(
-                                    "[question-screen] GET pid={pid} rows={} → codex 面板解析失败（题号头/footer 锚不成立）",
-                                    lines.len()
-                                ),
+                            let mut first = Some(lines);
+                            for beat in 0..10usize {
+                                let lines = match first.take() {
+                                    Some(l) => l,
+                                    None => {
+                                        std::thread::sleep(std::time::Duration::from_millis(
+                                            crate::inject::timing::POLL_STEP_MS,
+                                        ));
+                                        match (st2.screen_probe)(&tool2, pid) {
+                                            Some(l) => l,
+                                            None => continue,
+                                        }
+                                    }
+                                };
+                                let Some(s) = crate::inject::question_screen_oc::
+                                    codex_question_screen_snapshot(&lines)
+                                else {
+                                    continue; // 未解析出面板——下一拍重读
+                                };
+                                // 闸门②日志自报（照 opencode 分支的 [question-screen] 模式）
+                                log::info!(
+                                    "[question-screen] GET pid={pid} rows={} → codex 面板 Q{}/{} 未答={} 焦点={:?}（第 {} 拍命中）",
+                                    lines.len(), s.question_idx + 1, s.question_total, s.unanswered, s.focused, beat + 1
+                                );
+                                let mut v = serde_json::to_value(&s).unwrap_or_default();
+                                if let Some(obj) = v.as_object_mut() {
+                                    obj.insert(
+                                        "noteText".to_string(),
+                                        serde_json::json!(crate::inject::question_screen_oc::
+                                            codex_notes_row_text(&lines)),
+                                    );
+                                }
+                                return Some(v);
                             }
-                            return snap.map(|s| serde_json::to_value(s).unwrap_or_default());
+                            log::info!(
+                                "[question-screen] GET pid={pid} → codex 面板 10 拍未解析出（题号头/footer 锚不成立）"
+                            );
+                            return None;
                         }
                         if let Some(snap) = crate::inject::question::question_screen_snapshot(&lines) {
                             return Some(snapshot_to_json(&snap));
@@ -4299,9 +4328,10 @@ pub async fn session_question(
             "navBoth": nav_both,
             // **多选卡自由作答**旗标（缺省 false → 旧后端前向兼容）。claude 此前经
             // navBoth 间接点亮，本旗标为显式能力位（前端判 `navBoth ∨ multiFreeText`，
-            // 两旗任一即可）。**2026-10-09 codex 0.160.0 取证回填移除**——notes
-            // 不落卷（回车把焦点行提交为答案，用户文本静默丢失，底料 §5），
-            // 自由作答入口随路由一并具名中止；**2026-10-06 kimi 点亮**（用户指令：多题
+            // 两旗任一即可）。**codex 不点亮（2026-10-10 复活批口径）**：notes 链
+            // 单题卡已复活（freeText 旗标），但多题 notes 归属未在 0.162.1 复采
+            // （复验档案 §4 留白）——多题面维持关闭，多题流端点侧形态门同口径拒绝；
+            // **2026-10-06 kimi 点亮**（用户指令：多题
             // 卡要有文字填写行——Other 输入格 + 发送 + 覆盖写入/清空按钮组。键序
             // 走 KimiFreeText 阶段机：Other 行编号**按屏自适应**——单选子题 Other
             // 有编号 → 全链通；多选 Other 无编号 → 第 1 段如实中止引导终端，
@@ -4315,10 +4345,18 @@ pub async fn session_question(
             // （1754 行）；kimi 加入（2026-10-06，2.1.1 定案 K7 重进带旧文本 +
             // 退格可清；清空面因「空回车 no-op」定案如实前置拒——前端收到失败
             // 回执引导终端操作）。
-            // **codex 2026-10-09 取证回填移除**：覆盖/清空键序 = Tab 清空备注
-            // （footer 活体明文「tab or esc to clear note」），随 notes 链一并停用
-            // （notes 不落卷——底料 §5），与 multiFreeText 同面收口
-            "freeTextOverwrite": matches!(tool_id.as_str(), "opencode" | "kimi"),
+            // **codex 覆盖/清空（2026-10-10 复验定案）**：notes 链已复活（单题卡
+            // freeText 旗标），覆盖键序 = 双 tab（清+退 → 重开 → 屏读确认，复验 N3），
+            // 经 freeText 请求的 overwrite 参数可达；本按钮组旗标仍不给 codex——
+            // 覆盖写入/清空按钮组挂在多题自由作答行（multiFreeText 面），codex 多题
+            // notes 未复采、该面维持关闭（留白见复验档案 §4）
+            // **claude 2026-10-10 用户裁决点亮**：claude 多选的覆盖/清空键序早在
+            // 2026-10-03 批已实机定案（空文本+overwrite=清空模式〔右移行尾→退格
+            // 清空→核验占位恢复〕；overwrite=退格清旧再打新字，编排
+            // run_multi_select_free_text_stages 原生支持）——旗标初值（方言表批）
+            // 漏了 claude，多选卡已写入态只能只读+到终端改（用户实测撞形，PR #98
+            // 时代即如此，非回归）。点亮后多选卡已写入态出「编辑/覆盖写入/清空」。
+            "freeTextOverwrite": matches!(tool_id.as_str(), "claude" | "opencode" | "kimi"),
             // **屏读快照**（2026-10-03 卡面状态权威源）：题屏 {heading,checked,freeText}
             // 或确认屏 {review:true}；null = 屏读不可用/非题屏（前端维持本地状态）
             "screen": screen_snapshot,
@@ -5127,12 +5165,12 @@ enum StagePlan {
         /// 题形态：补发回车只对多选生效（单选推进漂移，停用——用户裁决）
         multi_select: bool,
     },
-    /// **codex 自由作答·具名中止**（2026-10-09 取证回填，底料
-    /// `2026-10-08-codex-160-question-屏读底料.md` §5）：0.160.0 实测 notes 文本
-    /// 不随卷提交（回车把当前高亮项提交为答案，用户文本静默丢失）——远程自由作答
-    /// 停用，dispatch 臂零注入零读屏直接 Failed。run_codex_notes_stages 保留备用
-    /// 不删（未来版本若恢复 notes 落卷，重接前须复验）
-    CodexFreeTextRetired,
+    /// **codex 自由作答·notes 链**（2026-10-10 复活接线；0.162.1 四取样复验全通，
+    /// 档案 `research/refs/phase2-消息注入/2026-10-10-codex-0162-notes链复验.md`）：
+    /// 走位 Other → tab 开 notes → 打字（屏读验上屏）→ enter 提交「Other + 备注」。
+    /// 0.160.0 的「notes 不落卷」形态在 0.162.1 未复现；覆盖 = 双 tab（清+退 →
+    /// 重开 → 屏读确认）。单题卡形态门把守（多题 notes 归属未复采不放开）。
+    CodexFreeText { overwrite: bool },
     /// **opencode own answer 阶段机**（批次戊 E6）：行序定位 → enter 开行 →
     /// 裸打字守卫（屏读确认占位行）→ 打字 → enter 提交
     /// opencode own answer（2026-10-04 toggle 双段语义重写）：overwrite = 已存内容时
@@ -5204,10 +5242,10 @@ impl StagePlan {
                 multi_question: multi_flow,
                 multi_select: q.multi_select,
             },
-            // 2026-10-09 取证回填：codex notes 链不落卷（0.160.0 实测回车提交焦点行、
-            // 用户文本静默丢失——底料 §5）→ 具名中止；run_codex_notes_stages 保留
-            // 备用不删（函数本体与脚本测试原样，重接前须复验）
-            (A::FreeText, "codex") => Self::CodexFreeTextRetired,
+            // 2026-10-10 复活接线：0.160.0「不落卷」在 0.162.1 四取样复验未复现，
+            // run_codex_notes_stages 按 0.162.1 语义修订（双 tab 覆盖 + 走位 Other +
+            // 打字上屏核验）后重新接活；单题卡由形态门把守
+            (A::FreeText, "codex") => Self::CodexFreeText { overwrite },
             (A::FreeText, "opencode") => Self::OpencodeOwnAnswer { overwrite },
             // 2026-10-02/03：claude 自由作答路由——**多题流子题（含单选）与单题多选**
             // 走勾选框行内联编辑编排（数字定位在多题/多选屏无效；单选子题勾选兜底
@@ -5597,8 +5635,6 @@ fn free_text_terminal<'a>(
 /// codex 自由作答**具名中止**文案（2026-10-09 取证回填，0.160.0 notes 不落卷——
 /// 底料 `2026-10-08-codex-160-question-屏读底料.md` §5）。提为常量供测试对文案
 /// 内容下断言（具名中止的关键 = 用户看得懂「为什么不能远程答」）。
-const CODEX_FREE_TEXT_RETIRED_MSG: &str = "codex 自由作答（Other/notes）经实测不能安全代答：备注文本不会随卷提交（回车会把当前高亮项当作答案提交）。请到终端直接作答";
-
 #[allow(clippy::too_many_arguments)] // 阶段机臂的缝参数（评审前已 9 个；multi_flow 为本批新增的有语义参数）
 fn dispatch_question_action(
     st: &Arc<RemoteState>,
@@ -6478,10 +6514,44 @@ fn dispatch_question_action(
                 Err(e) => dispatch_abort(e),
             }
         }
-        StagePlan::CodexFreeTextRetired => {
-            // 0.160.0 取证回填（底料 §5）：notes 文本不随卷提交（回车把焦点行
-            // 提交为答案，用户文本静默丢失）——具名中止，零注入，请到终端作答
-            QuestionDispatch::Failed(CODEX_FREE_TEXT_RETIRED_MSG.to_string())
+        StagePlan::CodexFreeText { overwrite } => {
+            // **codex notes 链复活**（2026-10-10 复验接线）：0.162.1 四取样全通——
+            // 落卷实锤 N1（走位 Other + tab + 打字 + enter）/ N2（ensure 路径）/
+            // N3（覆盖双 tab）/ N4（esc 红线）；编排内每步屏读核验（footer 翻转 /
+            // 文本上屏——后者是 0.160.0「静默丢失」形态的复防线）。形态门（单题卡）
+            // 在端点把守，进不到这里的都是单题形态。
+            let Some(text) = free_text else {
+                return QuestionDispatch::Failed("自由作答缺少文本".to_string());
+            };
+            log::info!(
+                "codex-notes 路径标记：overwrite={overwrite} text_len={}",
+                text.chars().count()
+            );
+            let probe = question_probe(st, tool, pid);
+            let mut terminal =
+                free_text_terminal(|| probe("codex-notes-read"), injector, pid, spec);
+            let out = crate::inject::question::run_codex_notes_stages(
+                q_idx,
+                payload_questions.len(),
+                text,
+                *overwrite,
+                || poll_question_stage(|| probe("codex-notes-poll"), QUESTION_STAGE_POLL_TOTAL_MS),
+                &mut terminal,
+            );
+            log::info!(
+                "codex-notes 键序列={:?} receipt_seen={:?}",
+                out.as_ref().ok().map(|o| o.sent_keys.clone()),
+                out.as_ref().ok().map(|o| o.receipt_seen)
+            );
+            match out {
+                Ok(o) => QuestionDispatch::StageDone {
+                    stage: QUESTION_STAGE_FREE_TEXT,
+                    receipt_seen: o.receipt_seen,
+                    review_reached: o.review_reached,
+                    advanced: o.advanced,
+                },
+                Err(e) => dispatch_abort(e),
+            }
         }
         StagePlan::CodexSelect { index } => {
             // **codex 单选 select 阶段机**（设计 §3.2/§3.3）：入口闸读屏 + 身份闸
@@ -6646,6 +6716,12 @@ fn stage_from_abort(err: &str) -> &'static str {
     // 收走会误标 toggle-row，故本臂必须在前。
     if err.contains("codex 切题") {
         return QUESTION_STAGE_ADVANCE;
+    }
+    // codex notes 链（2026-10-10 复活批）：中止文案以「codex 备注」点名——归
+    // free-row 段（其文案含「未发提交键」会被下方通用提交臂误收进 submit-row，
+    // 实机 18:00 审计误标教训，本臂必须在通用臂之前）
+    if err.starts_with("codex 备注") {
+        return QUESTION_STAGE_FREE_ROW;
     }
     if err.starts_with("codex 单选")
         || err.starts_with("codex 末题")
@@ -10231,15 +10307,16 @@ mod tests {
         );
     }
 
-    /// **codex 自由作答具名中止锁**（2026-10-09 取证回填，底料
-    /// `2026-10-08-codex-160-question-屏读底料.md` §5：0.160.0 notes 文本不随卷提交
-    /// ——回车把焦点行提交为答案、用户文本静默丢失）：`(FreeText, "codex")` 路由到
-    /// `CodexFreeTextRetired`（不是静默失败——dispatch 臂零注入直接 Failed，文案
-    /// 讲清「为什么不能远程答」）。还原动作：把路由改回 notes 编排 → 本用例先红。
-    /// dispatch 臂本体需 RemoteState（难构造），按既有测试布局取最薄面：
-    /// for_action 路由 + 文案常量断言。
+    /// **codex 自由作答路由锁**（2026-10-10 复活接线；0.162.1 四取样复验全通——
+    /// 档案 `research/refs/phase2-消息注入/2026-10-10-codex-0162-notes链复验.md`）：
+    /// `(FreeText, "codex")` 路由到**活编排** `CodexFreeText { overwrite }`（走位
+    /// Other → tab 开 notes → 打字上屏核验 → enter——`run_codex_notes_stages` 按
+    /// 0.162.1 语义修订；具名中止变体已随复活批删除）。dispatch 臂本体需
+    /// RemoteState（难构造），按既有测试布局取最薄面：for_action 路由锁
+    /// （overwrite 位透传——双 tab 覆盖序列在编排内，路由只负责把意图带到位）。
+    /// 还原动作：把路由改回中止/通配臂 → 本用例先红。
     #[test]
-    fn codex_free_text_retired_named_abort() {
+    fn codex_free_text_routes_to_notes_stage_plan() {
         let q = crate::inject::question::parse_questions(
             r#"{"questions":[{"question":"q","multiSelect":false,"options":[{"label":"a"},{"label":"b"}]}]}"#,
         )
@@ -10256,14 +10333,22 @@ mod tests {
                 "codex",
                 1,
             ),
-            StagePlan::CodexFreeTextRetired,
-            "codex 自由作答路由到具名中止计划（notes 编排停用）"
+            StagePlan::CodexFreeText { overwrite: false },
+            "codex 自由作答路由到 notes 活编排（overwrite=false 透传）"
         );
-        // 具名中止文案：讲清根因（不落卷）+ 去向（终端作答）——不是含糊报错
-        assert!(
-            CODEX_FREE_TEXT_RETIRED_MSG.contains("不会随卷提交")
-                && CODEX_FREE_TEXT_RETIRED_MSG.contains("请到终端直接作答"),
-            "中止文案必须具名：{CODEX_FREE_TEXT_RETIRED_MSG}"
+        assert_eq!(
+            StagePlan::for_action(
+                crate::inject::question::AnswerAction::FreeText,
+                None,
+                crate::inject::question::NavDirection::Next,
+                true,
+                false,
+                &q,
+                "codex",
+                1,
+            ),
+            StagePlan::CodexFreeText { overwrite: true },
+            "overwrite=true 透传（双 tab 清+退→重开的覆盖序列在编排内）"
         );
     }
 

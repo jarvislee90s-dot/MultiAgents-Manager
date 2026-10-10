@@ -559,6 +559,74 @@ pub fn codex_question_screen_snapshot(lines: &[String]) -> Option<CodexQuestionS
     None
 }
 
+/// codex 面板 **notes 行文本**解析（2026-10-10 用户指令：「note 位置但凡有输入，
+/// 一定要显示在远端页面上」——GET/回执消费）：
+/// 题号头之后、首个 `› ` 前缀**非选项**行（选项行 `› N. label` 带编号点，已排除）。
+/// `› Add notes` 占位 = 空备注 → `None`；composer 提示行（面板外）按已知文案排除。
+///
+/// 只认**题号头之下**的首个命中——面板之下的滚回区/composer 草稿不误收。
+pub fn codex_notes_row_text(lines: &[String]) -> Option<String> {
+    // 定位最后一个题号头（面板顶；与 codex_question_screen_snapshot 的
+    // last-pair-wins 同向——只认最新面板）
+    let header = lines
+        .iter()
+        .rposition(|l| parse_codex_question_header(l).is_some())?;
+    for l in lines[header + 1..].iter() {
+        let t = l.trim_start();
+        let Some(rest) = t.strip_prefix(CODEX_FOCUS_MARK) else {
+            continue;
+        };
+        let text = rest.trim();
+        if text.is_empty() {
+            continue;
+        }
+        // 选项行（`› N. …`）跳过
+        if text.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let lower = text.to_lowercase();
+        if lower.starts_with("add notes") {
+            return None; // 占位词 = 空备注（如实 None）
+        }
+        if lower.starts_with("ask codex") {
+            continue; // composer 提示行（面板外已知文案）
+        }
+        return Some(text.to_string());
+    }
+    None
+}
+
+/// codex 面板 **notes 输入行就绪**判定（2026-10-10 实机 20:55 误拦教训：footer 翻
+/// 转后立刻打字，字符落在输入行挂载完成之前——末帧 notes 态关闭、字消失）。就绪 =
+/// 题号头之后存在 `› ` 前缀非选项行（**占位 `Add notes` 或已输入文本都算**——
+/// 占位行本身就是输入行挂载的可见标记）。
+pub fn codex_notes_input_ready(lines: &[String]) -> bool {
+    let Some(header) = lines
+        .iter()
+        .rposition(|l| parse_codex_question_header(l).is_some())
+    else {
+        return false;
+    };
+    for l in &lines[header + 1..] {
+        let t = l.trim_start();
+        let Some(rest) = t.strip_prefix(CODEX_FOCUS_MARK) else {
+            continue;
+        };
+        let text = rest.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if text.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            continue; // 选项行
+        }
+        if text.to_lowercase().starts_with("ask codex") {
+            continue; // composer 提示行（面板外）
+        }
+        return true; // 占位或文本——输入行已挂载
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

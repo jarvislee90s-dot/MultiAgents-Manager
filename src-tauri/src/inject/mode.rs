@@ -66,7 +66,8 @@
 //!
 //! `命令 → 菜单 → 屏读定位 → 闭环导航 →（codex Full Access：二次确认框）→ 成功回执核验`：
 //!
-//! - **第一段**投递开菜单命令：`/permissions`+回车（codex）、`/permission`/`/yolo`/
+//! - **第一段**投递开菜单命令：`/permissions`+tab（codex，2026-10-10 3787fa7d 用户
+//!   实测指令：文本注入+150ms 后的动作与残留补发均为 tab）、`/permission`/`/yolo`/
 //!   `/auto`+回车（kimi）——kimi 2.1.1 实测：键入文本只出**行内自动补全**，回车①
 //!   执行命令后完整菜单才打开并停留（❯ 预选目标档），回车②由闭环导航确认；
 //! - **第二段**屏读菜单定位目标档，**每发一个方向键就重新屏读复核**（高亮确实移到了
@@ -2925,11 +2926,12 @@ where
     let digit = match poll_digit() {
         Ok(d) => d,
         Err(why) => {
-            // **窗尽兜底（2026-09-23 用户实测：菜单迟迟未出现）**：enter 落下时
+            // **窗尽兜底（2026-09-23 用户实测：菜单迟迟未出现）**：提交键落下时
             // codex TUI 可能正忙（如 MCP 报错刷屏/重绘），命令**没被提交**——
             // `/permissions` 还留在输入行。判据 = composer 文本含 `/permissions`
-            // → **补发一次 enter**（命令文本还在，不重复注入）再等一窗；composer
-            // 干净/读不到屏 → 无从补救，如实失败。
+            // → **补发一次 tab**（提交键语义 2026-10-10 3787fa7d 定案：文本注入+
+            // 150ms 后的动作与残留补发均为 tab；命令文本还在，不重复注入）再等
+            // 一窗；composer 干净/读不到屏 → 无从补救，如实失败。
             //
             // 失败回执两道加固（2026-10-10 诊断批）：G2 hijack 对账（回车可能落
             // 在了审批框上 = 误批准，文案点名）+ G4 屏面摘要（三值快照，下次
@@ -7309,17 +7311,18 @@ mod tests {
         assert_eq!(out.receipt_seen, Some(true));
     }
 
-    /// **段 2 窗尽兜底：/permissions 留在输入行未提交 → 补发一次 enter**（2026-09-23
-    /// 用户实测：codex TUI 忙时 enter 被吞，菜单根本没开——轮询窗尽后检查输入行，
-    /// 命令还在就补提交再等一窗；脚本：①干净屏 ②enter 被吞（/permissions 停在
-    /// composer）③补 enter 后菜单画出 ④回执。
+    /// **段 2 窗尽兜底：/permissions 留在输入行未提交 → 补发一次 tab**（2026-09-23
+    /// 用户实测开兜底；提交键语义 2026-10-10 3787fa7d 用户实测指令改为 **tab**：文本
+    /// 注入+150ms 后的动作与残留补发均为 tab——codex TUI 忙时命令没被提交，菜单根本
+    /// 没开；轮询窗尽后检查输入行，命令还在就补提交再等一窗；脚本：①干净屏
+    /// ②命令未提交（/permissions 停在 composer）③补 tab 后菜单画出 ④回执。
     #[test]
     fn stage_flow_digit_reenter_when_command_not_submitted() {
         use std::cell::Cell;
         use std::cell::RefCell;
         // 场景脚本（按 digit 轮询的「窗」划分）：
         //   第一窗：窗尽 Err（菜单未出现）；窗尽后 read → composer 留着 /permissions
-        //   补 enter → 第二窗：Ready("1")
+        //   补 tab → 第二窗：Ready("1")
         let digit_calls = Cell::new(0usize);
         let clean = clean_idle();
         let unsubmitted = lines(&[
@@ -7357,15 +7360,15 @@ mod tests {
                 settle: || {},
             },
         );
-        let out = outcome.expect("补发 enter 后全链走通");
+        let out = outcome.expect("补发 tab 后全链走通");
         assert_eq!(
             sent.borrow().first().map(|s| s.as_str()),
-            Some("enter"),
-            "补发的 enter 是第一个键"
+            Some("tab"),
+            "补发的 tab 是第一个键（3787fa7d：残留补发键 enter→tab）"
         );
         assert_eq!(sent.borrow().last().map(|s| s.as_str()), Some("1"));
         assert_eq!(out.menu_keys, vec!["1"]);
-        // 对照：composer 干净（无 /permissions）时窗尽 → 如实失败、不补 enter
+        // 对照：composer 干净（无 /permissions）时窗尽 → 如实失败、不补 tab
         let read_hits = Cell::new(0usize);
         let sent2: RefCell<Vec<String>> = RefCell::new(Vec::new());
         let digit_calls2 = Cell::new(0usize);
