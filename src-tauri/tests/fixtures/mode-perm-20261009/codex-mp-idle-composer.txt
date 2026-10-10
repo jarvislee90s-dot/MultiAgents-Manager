@@ -1,0 +1,31 @@
+# 提取自 mpd-mpd-e5-final.txt（2026-10-10 诊断批 codex-mode-perm-diag，idle 主屏（composer 占位行在）；程序化提取，FRAME 头已去）
+  退出码：-1073741502
+  ———
+  ———
+  方式三：Git Bash (bin/bash.exe)
+  结论： 本机安装的 Git Bash 环境损坏（Cygwin 底层 CreateFileMapping / 信号管道均报 Win32 error 5「拒绝访问」），WSL 也
+        0 [main] bash (18728) D:\Program Files\Git\bin\..\usr\bin\bash.exe: *** fatal error - couldn't create signal
+  pipe, Win32 error 5
+  可选方案：
+  退出码：-1073741502
+  1. 修复或重新安装 Git for Windows
+  ———
+
+  结论： 本机安装的 Git Bash 环境损坏  Cygwin 底层 CreateFileMapping / 信号管道均报 Win32 error 5「拒绝访问」），WSL 也
+  未安装，因此无法原样运行这条 bash 命令。
+
+  可选方案： 50s • 11:58
+
+  1. 修复或重新安装 Git for Windows
+  2. 安装 WSL（wsl --install）
+  3. 我用 PowerShell 等效命令替代运行（1..20 | ForEach-Object { "count-$_"; Start-Sleep 1 }）
+
+  需要我用哪种方式继续？
+
+  Worked for 50s • 11:58
+
+
+› Ask Codex to do anything
+
+  GLM-5.3-Flash medium · ~\AppData\Local\Temp\probe-codex-mpd-20261010
+  ? for shortcuts                                                                             ⚠ 4 warnings · f2 to view

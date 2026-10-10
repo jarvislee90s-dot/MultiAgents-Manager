@@ -108,6 +108,17 @@ pub mod scenario {
     /// 确认（Trust all——实机定案数字键只移动高亮）；混杂/核验失败 → esc
     /// （屏面明示 `esc skip`，不信任只解锁）
     pub const CREATE_HOOKS: &str = "create_hooks";
+    /// codex **命令审批框**（`Would you like to run the following command?`，
+    /// 0.162.1 活体）——「Ask for approval」档下命令触发。**与权限菜单/FA 确认框
+    /// 同类的 overlay**：在屏时替换 composer 行，`/permissions` 会被吞、**回车 =
+    /// 批准待审批命令**（真实副作用，2026-10-10 诊断批 E1 实证：curl 被执行）。
+    /// 消费方 = mode.rs 的 composer 在场性闸快筛（`codex_approval_box_present`）
+    /// 与 NotYet 失败回执的屏面摘要。**与 approve.rs prompt_markers 的互引**：
+    /// `inject.approve_map` 的 codex `prompt_markers` 含前缀词形
+    /// `"would you like to run the following"`——那是**消息层**（hook 会话文件
+    /// last_message）的「审批中」检测，本行是**屏读层**锚（终端屏行 contains），
+    /// 两个检测面各有真源、互不替代（2026-10-10 诊断批 G3）。
+    pub const APPROVE_COMMAND: &str = "approve_command";
 }
 
 /// 槽位 wire 词（账本 `slot` 字段）：同一场景内的不同位置。
@@ -592,6 +603,18 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "submit with unanswered questions?",
         observed_version: "0.160.0",
         evidence: "构造词形（设计 §2.2 + 源码），非活体——2026-10-09 取证未复现",
+    },
+    // ===== codex 命令审批框标题（2026-10-10 诊断批，Ask for approval 档下命令触发；
+    //  供 preflight 的「非权限 overlay」识别使用——此框在场时 /permissions 会被吞、
+    //  回车=误批准，spec v1.3 §4.1；与 approve.rs prompt_markers 的消息层词形互引，
+    //  见 scenario::APPROVE_COMMAND 注）=====
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::APPROVE_COMMAND,
+        slot: slot::TITLE,
+        text: "would you like to run the following command",
+        observed_version: "0.162.1",
+        evidence: "mpd-mpd-e7c-tr111.txt（2026-10-10 诊断批 codex-mode-perm-diag；夹具 mode-perm-20261009/codex-mp-approval-box.txt）",
     },
 ];
 
@@ -1184,5 +1207,50 @@ mod tests {
             CODEX_PERMISSION_RECEIPT_ANCHOR,
             "mode.rs 消费侧（事件行解析锚步 / 回执核验新词形）re-export 同一常量——消费侧不另立第二份词形真源"
         );
+    }
+
+    // ==== 2026-10-10 诊断批 G3：codex 命令审批框标题锚 ====
+
+    /// **G3 审批框标题锚 × 活体夹具**：0.162.1 审批框在屏（mpd-mpd-e7c-tr111 活体
+    /// dump 提取，夹具同源）必须命中 `approve_command/TITLE`；idle/busy 主屏
+    /// （composer 在场，无审批框）不得误命中。
+    #[test]
+    fn codex_approval_box_title_anchor_recognized_on_live_fixture() {
+        // 正例：审批框活体夹具（程序化提取，非手抄）
+        let raw = include_str!(concat!(
+            "../../tests/fixtures/mode-perm-20261009/",
+            "codex-mp-approval-box.txt"
+        ));
+        let screen: Vec<String> = raw
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .map(|l| l.trim_end_matches('\r').to_lowercase())
+            .collect();
+        let hit = detect(&screen, "codex", scenario::APPROVE_COMMAND, slot::TITLE)
+            .expect("审批框标题锚必须命中活体夹具");
+        assert_eq!(hit.row.text, "would you like to run the following command");
+        assert_eq!(hit.row.observed_version, "0.162.1");
+
+        // 负例：idle / busy 主屏（composer 在场）不误命中
+        for name in [
+            include_str!(concat!(
+                "../../tests/fixtures/mode-perm-20261009/",
+                "codex-mp-idle-composer.txt"
+            )),
+            include_str!(concat!(
+                "../../tests/fixtures/mode-perm-20261009/",
+                "codex-mp-busy-composer.txt"
+            )),
+        ] {
+            let screen: Vec<String> = name
+                .lines()
+                .filter(|l| !l.starts_with("# "))
+                .map(|l| l.trim_end_matches('\r').to_lowercase())
+                .collect();
+            assert!(
+                detect(&screen, "codex", scenario::APPROVE_COMMAND, slot::TITLE).is_none(),
+                "idle/busy 主屏不得误判为审批框"
+            );
+        }
     }
 }

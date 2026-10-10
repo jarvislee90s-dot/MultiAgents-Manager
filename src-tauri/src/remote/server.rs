@@ -13306,13 +13306,18 @@ mod tests {
         assert_eq!(v["switchKind"], "unsupported");
     }
 
-    /// POST：**codex 模式组 shift+tab toggle**（2026-09-23 用户实测裁决）——显式
-    /// `group:"mode"` + `target:"plan"|"default"` → 只投递一次 `shift+tab` 键
-    /// （无斜杠命令、无额外回车）；落点由**基线差分核验**（T4-F3：前读闸 → 发键 →
-    /// 内容集差分轮询，`MODE_SWITCH_VERIFY_POLL_TOTAL_MS` 窗）在投递闭包内闭环——
-    /// 屏序列用假缝脚本化（前读=Default 夹具、核验拍出现**新** Plan 事件行 → 命中）。
-    /// CI 无屏读 → 前读闸**零投递**如实拒（spec §3.1「读不到屏 → 如实拒」分支，
-    /// 由 `..._no_screen_refuses_zero_delivery` 单独锁）。
+    /// POST：**codex 模式组 shift+tab toggle**（2026-09-23 用户实测裁决；2026-10-10
+    /// 用户指令改版——**零投递闸移除**）——显式 `group:"mode"` + `target:"plan"|"default"`
+    /// → 无论 target 是什么**都只投递一次 `shift+tab` 键**（无斜杠命令、无额外回车；
+    /// target 不再作前读闸，仅在前读不可判时作核验预期兜底）；核验预期 = **终端前读
+    /// 真值的翻转**（本测前读 = Default → 预期 Plan），落点由**基线差分核验**
+    /// （T4-F3：前读 → 发键 → 内容集差分轮询，`MODE_SWITCH_VERIFY_POLL_TOTAL_MS` 窗）
+    /// 在投递闭包内闭环——屏序列用假缝脚本化（前读=Default 夹具、核验拍出现**新**
+    /// Plan 事件行 → 命中）。两个 target 各打一轮 = 「卡面 target 过期也必然动作」
+    /// 的新语义锁（实机日志 11:13-15 六次零投递正是旧「前读==target 零投递」闸的
+    /// 根因——本测改写后该分支不复存在）。CI 无屏读 → 前读**零投递**如实拒
+    /// （spec §3.1「读不到屏 → 如实拒」分支，由
+    /// `..._no_screen_refuses_zero_delivery` 单独锁）。
     #[tokio::test]
     async fn session_mode_switch_codex_mode_group_sends_shift_tab() {
         // 屏脚本（槽序 = 读序）：① lookup 的 before 快照（既有纪律）→ ② toggle
@@ -13320,8 +13325,6 @@ mod tests {
         // 行+composer，` · ` 缺席推断 Default；事件行在 composer 区之上——真实
         // 终端形态，不进状态栏窗）；after 屏 = 状态栏翻到 Plan（模型行尾 Plan mode
         // 短语）+ **新** Plan 事件行（内容集差分双证据）。
-        // target=plan：前读 Default ≠ Plan → 发键 → 核验命中；
-        // target=default：前读 Default == 目标档 → 零投递（已在目标档分支，断言②）。
         let pre = screen_lines(&[
             "  普通输出",
             "• Model changed to deepseek-v4.1-flash high for Default mode.",
@@ -13337,7 +13340,10 @@ mod tests {
             "  ← for agents · ? for shortcuts",
             "› Ask Codex to do anything",
         ]);
-        for (target, expect_keys, zero_key) in [("plan", true, false), ("default", false, true)] {
+        // 两个 target 都必然发键（新语义）：target=plan（卡面与终端一致）与
+        // target=default（卡面过期——旧实现这里会零投递，现在照发 shift+tab，
+        // 预期 = 前读翻转 Plan，不受 target 影响）。
+        for target in ["plan", "default"] {
             let fake = FakeInjector::ok();
             let probe = scripted_screen_probe(vec![
                 Some(pre.clone()),
@@ -13373,38 +13379,29 @@ mod tests {
                 fake.recorded().is_empty(),
                 "模式组 shift+tab 不投递任何文本：{body}"
             );
-            if expect_keys {
-                assert_eq!(
-                    fake.recorded_keys(),
-                    vec![(91u32, "shift+tab".to_string())],
-                    "target={target} 只发一次 shift+tab：{body}"
-                );
-                assert_eq!(v["verified"], true, "新事件行命中 → verified：{body}");
-                assert_eq!(
-                    v["observed"], "plan",
-                    "observed = 末拍屏读档（m-6 新字段）：{body}"
-                );
-            } else {
-                assert!(
-                    fake.recorded_keys().is_empty(),
-                    "target={target} 前读已在目标档 → 零投递：{body}"
-                );
-                assert_eq!(v["verified"], true, "已在目标档 = 切换完成：{body}");
-                assert!(body.contains("已在目标档"), "零投递回执 hint：{body}");
-                assert_eq!(v["observed"], "default", "{body}");
-            }
-            // 零投递分支也要审计（zero-key 标注在审计摘要里，见断言）
+            assert_eq!(
+                fake.recorded_keys(),
+                vec![(91u32, "shift+tab".to_string())],
+                "target={target} 也无条件发一次 shift+tab（零投递闸已移除）：{body}"
+            );
+            assert_eq!(
+                v["verified"], true,
+                "预期=前读翻转（Plan）且新事件行命中 → verified：{body}"
+            );
+            assert_eq!(
+                v["observed"], "plan",
+                "observed = 末拍屏读档（m-6 新字段）：{body}"
+            );
+            // 审计照记（action=mode；新语义无 zero-key 标注态）
             let audits = state
                 .store
                 .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
             assert_eq!(audits[0].action, "mode", "{body}");
-            if zero_key {
-                assert!(
-                    audits[0].summary.contains("已在目标档"),
-                    "零投递也要审计（zero-key 标注）：{:?}",
-                    audits[0].summary
-                );
-            }
+            assert!(
+                audits[0].summary.contains("切换模式至"),
+                "审计摘要 = 切换动作本身：{:?}",
+                audits[0].summary
+            );
         }
     }
 

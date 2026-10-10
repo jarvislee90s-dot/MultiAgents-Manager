@@ -2,7 +2,7 @@
 
 | 项 | 值 |
 |---|---|
-| 版本 | v1.1（2026-10-09。v1.0 + 检查轮修订：M-1 确认框 pick 死路纳入修复面、M-2 shift+tab 生产 2 记录零改动、M-3 权限三级回落（屏读→记忆→未知）、M-4 Key 路族隔离、M-5 核验窗独立常量；m-6 observed 字段/m-7 overlay 认知修正入 T4/m-8 内容集差分/m-9 夹具入库位置）。含风险预测试定案——四项风险已真机实测出边界，加固方案随边界写入 §4 |
+| 版本 | v1.3（2026-10-10。v1.2 + 诊断批加固四项 G1–G4 入 §4.1：composer 在场性通用闸 / hijack 对账 / 审批框账本锚 / 失败回执屏面摘要——诊断证据 `codex-mode-perm-diag-20261010` mpd- 前缀 43 份。v1.1 + 用户指令改版：切档语义改 toggle 无条件（零投递闸移除，目标=前读翻转）+ 权限四档 chips 直选 UI + picker Done 轮询升级。v1.0 + 检查轮修订：M-1 确认框 pick 死路纳入修复面、M-2 shift+tab 生产 2 记录零改动、M-3 权限三级回落（屏读→记忆→未知）、M-4 Key 路族隔离、M-5 核验窗独立常量；m-6 observed 字段/m-7 overlay 认知修正入 T4/m-8 内容集差分/m-9 夹具入库位置）。含风险预测试定案——四项风险已真机实测出边界，加固方案随边界写入 §4 |
 | 状态 | 待用户终审后转实施计划 |
 | 证据基线 | codex-cli **0.160.0** Windows 11 26200；风险预测试批（2026-10-09，自建会话真机取证，证据 `%USERPROFILE%\mam-probe-m6r\evidence\codex-mode-perm-20261009\` mp- 前缀 18 份 dump + 注入日志）；既有底料 `2026-10-05-codex弹窗键序复验.md`（effort 自动降档在档）、`2026-09-21-四家模式切换shift-tab实机探测.md`（T6） |
 | 实施边界 | 本文档定**需求、行为、输入输出与加固边界**；函数/模块归属留实施计划 |
@@ -71,37 +71,43 @@
 
 ## 3. 系统行为规格
 
-### 3.1 模式切换（shift+tab）——R3/R4 主修复面
+### 3.1 模式切换（shift+tab）——R3/R4 主修复面（v1.2 用户指令改版：零投递闸移除）
+
+**v1.2 卡面 UI（2026-10-10 用户指令）**：codex 模式组渲染为三段 **[计划] [◀▶] [操作]**
+——两个标签是**指示器**（当前档高亮，来自屏读回读的 GET current），中间 ◀▶ 按钮
+点击 = 向终端发一次 shift+tab；屏读确认落在哪个档（读「Plan mode」相关内容）后
+**卡面跟随屏读结果高亮**（不跟随本地发送记忆）。
 
 ```
-[卡面点 计划⇄操作]（仅 codex 模式组——claude/opencode 的 Key 路维持现状回读，见 §5）
+[卡面点 ◀▶]（仅 codex 模式组——claude/opencode 的 Key 路维持现状回读，见 §5）
       │
       ▼
-┌─ 前读闸（双源判当前档）─────────────────────────────┐
+┌─ 前读（双源判当前档——只记录真值，不再拦截）──────────┐
 │ 屏读 → 状态栏判据（Plan mode 短语 / · 状态栏形态）    │
 │        ＋ 屏上最新「Model changed …for <M> mode.」行 │
 │  ├ 读不到屏 → 零投递，回执 failed + 审计 failed        │
 │  │   （实现取更保守口径；原稿「409 零审计」系笔误——    │
 │  │    终审 P2-5 修订）                                │
-│  ├ 当前档 == 目标档 → 回执「已在目标档」（零投递）     │
-│  ├ 当前档 ≠ 目标档（卡面预期落点）→ 继续发键，回执     │
-│  │   hint 附「前读=终端当前 <X>」如实申报（**不代卡面  │
-│  │   纠偏**——服务端不知卡面 current，卡面纠偏由前端   │
-│  │   收到回执 observed 字段后自理）                   │
-│  └ 对位一致 → 记录基线屏 → 发 shift+tab（生产 2 记录） │
+│  └ 读到屏（无论判出哪档）→ **必然发键**（v1.2：        │
+│     「前读==目标 → 零投递」分支按用户指令移除——卡面    │
+│     current 过期时点按钮也必然动作；实机日志 11:13-15  │
+│     六次零投递正是「卡面过期 + 零投递闸」的产物）      │
 └────────────────────────────────────────────────┘
-      │
+      │  核验预期 = 前读真值的翻转（Plan→Default / Default→Plan；
+      │  前读不可判 → 取前端 target 兜底）
       ▼
-┌─ 动作后核验（基线差分轮询 ≤2s）─────────────────────┐
+┌─ 动作后核验（基线差分轮询 ≤2s，100ms/拍不动）──────────┐
 │ 逐拍读屏直到 屏面 ≠ 基线（变化即验，不等固定睡）：     │
 │   变化 → 回读判档：                                  │
-│     ├ 状态栏=目标 ∨ 新「…for <目标> mode.」行         │
+│     ├ 状态栏=预期 ∨ 新「…for <预期> mode.」行         │
 │     │   （**新于基线**——基线已有旧行不算）             │
 │     │   → verified=true；刷新卡面                    │
-│     └ 变了但 ≠ 目标 → verified=false                  │
+│     └ 变了但 ≠ 预期 → verified=false                  │
 │         hint「屏已切换至 <X>（预期 <Y>）」             │
 │   窗尽无变化 → verified=false                         │
 │         hint「切换未生效（屏面无变化）——可重试」        │
+│   （回执三态：命中 / 屏已切换至 X 预期 Y / 未生效——    │
+│    v1.2 起「已在目标档，无需切换」态不复存在）          │
 └────────────────────────────────────────────────┘
 ```
 
@@ -109,7 +115,13 @@
 - **基线差分语义**：动作前记录「屏面原文 + 屏上最新事件行集合」；动作后出现「新于基线的 `for <目标> mode.` 行」**或**「状态栏翻到目标档」才 verified。防两类误确认：旧行留存误报（§4-R1b）、系统自动切换误报（§4-R1e——plan 批准也打行，核验只认**本动作时间窗内**的新行）。
 - **「视口还原揭示旧行」边界（加固判据）**：基线记录于 overlay（菜单）在屏时，overlay 关闭后正文滚回可能让**旧事件行重新入窗**——被判「新于基线」造成假 verified。防法：核验判据用「**新行内容不在基线行集合中**」（内容集差分，非纯行位差分）——同一文案旧行在基线集合里已登记，还原入窗不构成新证据；真正的新切换必然带新文案行（同文案重复切换无法与还原区分 → 该场景判据退化为「状态栏优先」，状态栏权限零显示面如实 unknown，不假 verified）。
 
-### 3.2 权限切换（picker open/pick，主链不动、屏读面补齐）
+### 3.2 权限切换（chips 直选 + picker open/pick，主链不动、屏读面补齐）
+
+**v1.2 卡面 UI（2026-10-10 用户指令）**：四档作为**卡片标签常驻**（只读/默认/自动审批/
+完全信任 ↔ ReadOnly/Default/AcceptEdits/Bypass），生效档（GET current，三级回落）
+**高亮框选中**；点某档 chip = 走 switch 端点既有 Menu 编排（`/permissions` → 屏读
+定位数字 → 发数字 → Full Access 确认框阶段代按）——「切换权限」picker 入口**保留
+为兜底**（Menu 编排意外失败/用户想直接在终端菜单上点编号时用）。
 
 ```
 [卡面点 切换权限] → open：清场（残留 overlay + composer 纯净，既有）
@@ -132,11 +144,15 @@
         选 4 不打行、确认框替换菜单（§4-R1f 边界）
         → 出现「Enable full access?」→ 回执 {status:"confirm"}（既有二阶段）
         → 用户点 1：**pick 分派确认框阶段**——前读=确认框在屏+基线 → 发「1」
-          → 新「… requested: Full Access」行（新于基线内容集）→ verified=true
+          → 有界轮询（v1.2：单拍读屏升级——100ms/拍 × MODE_SWITCH_VERIFY_
+          POLL_TOTAL_MS 总窗，与模式 toggle 核验同窗；队首拍可能还是旧态，
+          新「… requested: Full Access」行（新于基线内容集）出现即命中）
+          → verified=true
           （mode.rs 拒绝分支改「确认框阶段可投递+基线差分核验」，只认确认框
           选项域 1/2；既有零投递回归锁改写为新语义锁）
-        → 用户点 2：同路发「2」→ 预期 = 回菜单 + 无新行 → 回执
-          {status:"confirm-cancelled"}（前端据此重开菜单表）；出现新行即异常如实报
+        → 用户点 2：同路发「2」→ 同窗轮询判「回菜单 + 无新行」→ 回执
+          {status:"confirm-cancelled"}（前端据此重开菜单表）；出现新行即异常如实报；
+          窗尽（确认框仍在/读不到屏）→ 不装「已取消」，按不确定态交回用户
       窗尽无新行 → verified=false + 前后双读数 hint
 ```
 
@@ -167,6 +183,19 @@
 | **R4** 标签匹配 | `(current)` 只在非首位显示（不可定位）；档 2 回执行打全形标签；描述列无误配面（mp-perm-×） | 禁用 `(current)` 判据；标签 = 前缀匹配 + 全形归一（映射表 2.3） |
 | **附加** 重绘撕裂 | dump 偶发同行连打（读取侧瞬态） | 菜单解析容忍重复行（去重取首）；与既有「读取抖动多帧还原」同口径 |
 
+### 4.1 诊断批加固四项（v1.3，2026-10-10 实机诊断定案，证据 `codex-mode-perm-diag-20261010` mpd- 前缀 43 份）
+
+**实机复现**（codex 0.162.1）：「/permissions+回车」落在**审批框在场**的终端（Ask for approval 档下命令触发 `Would you like to run the following command? 1. Yes / 2. Yes, always / 3. No`）→ 文本被 overlay 吞、**回车=批准了待审批命令**（真实副作用：curl 被执行，mpd-e7 系列）→ 菜单不开 → 数字直达报「菜单未出现」+ composer 干净（补 enter 兜底不触发）。E5 另证：权限菜单在场时第二次 /permissions+回车 = 字符被吞、回车选在高亮行、菜单无痕关闭无回执行。
+
+| # | 加固 | 判据（实测，mpd 活体 dump） | 行为 |
+|---|---|---|---|
+| **G1** composer 在场性通用闸 | `codex_preflight` 增第 0 步 | idle/busy 主屏 composer 光标行恒在：idle `› Ask Codex to do anything`；**busy 占位行仍在**（busy 指示行 `◦ Working (… esc to interrupt)` 的 `◦`=U+25E6 非光标标记，mpd-mpd-e4-final）；overlay（权限菜单 mpd-mpd-e4b-final / 审批框 mpd-mpd-e7c-tr111）在场时该行被替换 | composer 不在场 = 有 overlay 占位：**审批框在屏（账本锚快筛命中）→ 直接 Err 零投递**（连 esc 都不发——esc 在审批框上=拒绝待审批命令，另一极副作用，处置权交用户）；其余未知 overlay → esc（VK 形态）+ 条件等待 composer 回归（`RESIDUE_CLEAR_MAX_READS` 节奏）；窗尽 → Err 零投递「终端有待处理交互…请人工核对终端」 |
+| **G2** hijack 对账 | open 流程 enter 之后窗尽失败路径 | 屏上出现审批结果新行 `you approved` / `approved to always run`（lowered contains） | 错误文案升级「权限切换未执行，且**误批准了一条待审批命令**（回车落在了审批框上）——请立即到终端核对刚才批准的命令！」；否则维持原文案。picker open 路径同款对账 |
+| **G3** 审批框标题入账本 | append-only | `would you like to run the following command`（0.162.1 活体，mpd-mpd-e7c-tr111） | 新场景 `approve_command` / `slot::TITLE`；与 `approve.rs` prompt_markers 的消息层词形（`would you like to run the following` 前缀）**互引不互替**（消息层 vs 屏读层两个检测面） |
+| **G4** 失败回执附屏面摘要 | 数字直达失败路径 | 三值快照 = 审批框（G3 锚）/权限菜单（`codex_overlay_kind`）/composer（G1 判据）——与闸同一实现 | 错误文案追加「（屏面摘要：审批框=在/菜单=不在/composer=不在）」，读不到屏如实写「读不到屏」——下次诊断免猜 |
+
+**夹具**：`src-tauri/tests/fixtures/mode-perm-20261009/` 追加三份（程序化提取自 mpd FRAME dump，禁手抄）：`codex-mp-approval-box.txt`（审批框在屏）/ `codex-mp-idle-composer.txt`（idle 主屏）/ `codex-mp-busy-composer.txt`（busy 帧）。
+
 ## 5. 分工边界
 
 - **不改**：权限切换主链形态（数字直达 + picker 两动作的交互结构）、`/permissions` open 编排（清场/纯净前置/0.5s 硬间隔均已定案）、kimi/claude/opencode 判据、**shift+tab 生产 2 记录形态**（engine.rs 在役零改动）、effort 值（不解析不干预）。
@@ -182,12 +211,13 @@
 | T1 | 账本：`permission selection requested`（PERMISSION_MENU/RECEIPT，0.160.0）；Full Access 确认回执行词形（若 T0 证实与主回执行同词形则不另立行）；事件行**不进账本**（含变量、行形解析） | anchor_ledger（TDD） |
 | T2 | `parse_codex_footer` 扩：模式事件行行形判据（`model changed to` 前缀 + `for plan|default mode` 尾段锁）；GET 优先级表（§3.3） | mode.rs（TDD） |
 | T3 | `parse_axis_from_screen` codex×Permission 实现（最新匹配行 → menu_target_label 反查，前缀匹配+全形归一）；`readback: false→true`；重绘撕裂容忍（重复行去重）；GET 权限组「屏读→记忆→未知」三级回落接线 | mode.rs + api.rs（TDD） |
-| T4 | **codex 模式组** Key 路分派改造（族隔离：`mode_switch_plan` 已分家，改造落在 dispatch 的 codex 臂——前读基线 → 注入 → 内容集差分轮询 → 回执核验；claude/opencode Key 路零改动，回归测试锁）；picker pick 确认框阶段修复（M-1：拒绝分支→确认框阶段投递，`{status:"confirm-cancelled"}` 新回执态）；既有 overlay 叠加注释与夹具认知修正（m-7：`codex_overlay_kind` 判据顺序注、dialog.rs 同源注、overlay 夹具测试）；核验窗常量**新增独立** `MODE_SWITCH_VERIFY_POLL_TOTAL_MS`（初值 2000ms，注释标注「mp-st 时延粗测 <2s，精确回填待验收」——不动既有 `MODE_READBACK_POLL_TOTAL_MS`，M-5）；「已在目标档」零投递回执态 | mode.rs + api.rs（TDD） |
-| T5 | wire/前端对位：switch 回执带 observed（前端自理卡面纠偏，m-6）；`confirm-cancelled` 消费；权限 current 三级回落的前端标注（「（上次切换）」口径不变）；probe 脚本库 shift+tab 形态补档（脚本目录，非生产代码） | api.ts/ModeBar 测试 + scripts（TDD） |
+| T4 | **codex 模式组** Key 路分派改造（族隔离：`mode_switch_plan` 已分家，改造落在 dispatch 的 codex 臂——前读基线 → 注入 → 内容集差分轮询 → 回执核验；claude/opencode Key 路零改动，回归测试锁）；picker pick 确认框阶段修复（M-1：拒绝分支→确认框阶段投递，`{status:"confirm-cancelled"}` 新回执态）；既有 overlay 叠加注释与夹具认知修正（m-7：`codex_overlay_kind` 判据顺序注、dialog.rs 同源注、overlay 夹具测试）；核验窗常量**新增独立** `MODE_SWITCH_VERIFY_POLL_TOTAL_MS`（初值 2000ms，注释标注「mp-st 时延粗测 <2s，精确回填待验收」——不动既有 `MODE_READBACK_POLL_TOTAL_MS`，M-5）。**v1.2 用户指令修订**：「已在目标档」零投递回执态**移除**（点切换必然发键，核验预期=前读翻转、前读不可判取前端 target 兜底）；picker Done（确认框 Yes/Cancel 路）核验**升级为同款有界轮询**（复用 `MODE_SWITCH_VERIFY_POLL_TOTAL_MS` + `POLL_STEP_MS`） | mode.rs + api.rs（TDD） |
+| T5 | wire/前端对位：switch 回执带 observed（前端自理卡面纠偏，m-6）；`confirm-cancelled` 消费；权限 current 三级回落的前端标注（「（上次切换）」口径不变）；**v1.2 用户指令**：模式组三段 [计划][◀▶][操作]（标签指示器+切换钮，无零投递闸）+ 权限组四档 chips 常驻直选（生效档高亮框，点 chip 走 switch Menu 编排）+ picker 兜底入口保留；probe 脚本库 shift+tab 形态补档（脚本目录，非生产代码） | api.ts/ModeBar 测试 + scripts（TDD） |
 | T6 | 门禁（cargo test --lib 豁免基线 4 红 + clippy 0 + fmt + pnpm lint/format:check）+ 实机走查（自建会话：连切 3 次模式、四档权限各一轮、**Full Access 二阶段全链**（选 4→点 1→verified；再选 4→点 2→回菜单）、每动作前后双屏读日志留证；滚出场景一轮验证三级回落） | 收口 |
 
 ## 7. 证据索引
 
+- **诊断批（2026-10-10，v1.3 加固四项）**：`%USERPROFILE%\mam-probe-m6r\evidence\codex-mode-perm-diag-20261010\`（mpd- 前缀 43 份 dump：baseline / menu-codepoints / e1–e7 系列；关键帧 mpd-mpd-e4-final（busy 形态）/ mpd-mpd-e4b-final（菜单占位）/ mpd-mpd-e7c-tr111（审批框在屏））；报告在 agent 会话记录。
 - 风险预测试：`%USERPROFILE%\mam-probe-m6r\evidence\codex-mode-perm-20261009\`（mp- 前缀 18 份 dump：baseline / perm-menu-open / perm-cancel-esc / perm-reslect-current / perm-switch-ok / perm-switch-2 / fa-confirm-open / fa-done / fa-cancel / scroll-after / scroll-far / st-1..3 / slash-plan / plan-approve-dialog / plan-exit / 基线 tasklist）+ `mam-probe-m6r\mp-shifttab.ps1`（shift+tab 4 记录参考实现）+ key logs `probe-key2-20261009-07*`。
 - 既有在档：`2026-10-05-codex弹窗键序复验.md`（effort 自动降档）、`2026-09-21-四家模式切换shift-tab实机探测.md`（T6 底栏词形）、`2026-09-22-codex权限菜单三段式屏读对账与D20时序标定.md`（0.154 菜单锚/回执锚——本批部分过期项以 §2.2/§4 为准）。
 - 用户截图三张（2026-10-09）：模式未知卡面 / 权限菜单四项 / Enable full access 确认框。

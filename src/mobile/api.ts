@@ -1046,11 +1046,13 @@ export interface ModeLegacyView {
 /** 单组（GET 载荷 `groups[]`）。`step=true` = 步进轴（shift+tab 一次一档，档位顺序即
  *  实测环序）；`readback=false` = 该组无屏读源（前端必须显示「请人工核对」）。
  *  `current=null` = 档未知（屏读失败或该组无回读源）→ **不得假装知道**（红线 4）。
- *  `layout`（2026-09-23 codex 模式切换改造）：`"toggle"` = 单钮循环（点击向终端发一次
- *  循环键——codex 模式组「计划 ⇄ 操作」= shift+tab，目标档由前端按当前档翻转）；
- *  缺省/`"tiers"` = 逐档按钮；`"picker"` = **单选面板**（codex 权限组，2026-09-23 用户
- *  方案）：单钮「切换权限」→ 后端读回**终端菜单的选项表**（编号 = 屏上实读值）→ 用户
- *  点选哪项，兔维斯 就敲哪个数字键——前端**不再硬编码「哪档对应哪个数字」**。
+ *  `layout`（2026-09-23 codex 模式切换改造；2026-10-10 用户指令改版）：
+ *  `"toggle"` = codex 模式组三段 [计划] [◀▶] [操作]——两个标签是指示器（当前档高亮），
+ *  中间按钮点击向终端发一次 shift+tab（无零投递闸，卡面过期也必然动作；target 由前端
+ *  按当前档翻转、仅作后端前读不可判时的核验预期兜底）；缺省/`"tiers"` = 逐档按钮；
+ *  `"picker"` = codex 权限组——四档 chips 常驻直选（生效档高亮框选中，点 chip 走
+ *  switch 端点 Menu 编排）+「切换权限」单选面板兜底（后端读回**终端菜单的选项表**，
+ *  编号 = 屏上实读值，兔维斯 只投递不猜）。
  *  `currentSource`（终审 P1-2）：`current` 的来源——`"screen"` = 终端屏读（实时权威）/
  *  `"memory"` = 「上次切换」记忆回落（终端手改会失真，前端标注「（上次切换）」明示
  *  口径）/ `"null"` = 未知。旧后端无此字段（undefined = 不标注）。 */
@@ -1097,9 +1099,8 @@ export interface SessionModeView {
  *  （MamMode wire 词，与 `current` 同形同源；null = 不可判）。前端**不拿它改本地
  *  状态**（卡面以重拉 GET 的权威结构为准，丁T4 纪律）；verified=false 时其档名已
  *  并入后端 hint 文案（「屏已切换至 X（预期 Y）」），前端不重复拼接。
- *  注（wire 对位）：后端实际 wire 未携带 `zeroKey` 布尔字段——「已在目标档」零投递
- *  态经 `verified=true` + hint「终端已在目标档，无需切换」表达（T4 定形），前端
- *  消费 hint 即可，不设 phantom 字段。 */
+ *  注（2026-10-10 用户指令）：「已在目标档」零投递态已删除——点切换必然发键，
+ *  后端 hint 只剩命中/不符/未生效三态，wire 从未携带 `zeroKey` 字段。 */
 export type SessionModeSwitchResult =
   | {
       status: "key_sent";

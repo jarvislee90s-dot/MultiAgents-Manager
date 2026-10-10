@@ -79,11 +79,11 @@ export default function ModeBar({ session }: { session: { id: string } }) {
             // 回读命中：回执 + 重拉一次 GET 刷新显示（**不拿回执字段去改本地状态**：
             // 回执只描述该组那一刻的观测，直接采信会把「屏读快照」当成结构表；
             // 重拉失败则保留原视图——如实，不是把旧值刷成新值）
-            // T5（spec §6-T5）：hint **原样透传**——codex toggle 臂的零投递分支
-            // （前读已在目标档）verified=true 但 hint=「终端已在目标档，无需切换」，
-            // 不能硬编码「已切换」盖掉；真发键命中 = 「已切换（屏读核验命中）」。
-            // wire 对位：后端无 zeroKey 布尔字段（已在目标档态由 hint 承载），
-            // observed（核验末拍屏读档）有值也不改本地状态——卡面以重拉 GET 为准。
+            // T5（spec §6-T5）：hint **原样透传**——codex toggle 臂命中 = 「已切换
+            // （屏读核验命中）」+ 前读申报，不能硬编码「已切换」盖掉后端口径。
+            // wire 对位：observed（核验末拍屏读档）有值也不改本地状态——卡面以
+            // 重拉 GET 为准。2026-10-10 用户指令后「已在目标档（零投递）」态已
+            // 不存在（点切换必然发键），hint 只剩命中/不符/未生效三态。
             setReceipt(res.hint ?? "已切换");
             try {
               setView(await fetchSessionMode(session.id));
@@ -246,11 +246,17 @@ function modeGroups(view: SessionModeView): ModeGroupView[] {
 
 /** 单组渲染：组标题（仅二维时显示）+ 当前档 + 切换入口。
  *  E3④：当前档按钮**高亮**（data-current + 反色样式）；问答待决时全组禁用。
- *  2026-09-23 codex 模式切换改造新增三个面：
- *  - `layout === "toggle"`（codex 模式组）→ 单钮「计划 ⇄ 操作」（点击 = 向终端发一次
- *    shift+tab，目标档按当前档翻转；**当前档未知时禁用**——盲按会 50% 误切）；
- *  - 「完全信任」二次确认（用户裁决）：点完全信任先出确认条，确认后才发——codex 会
- *    连发两次按键（4→1）并代按终端的风险确认框；
+ *  2026-09-23 codex 模式切换改造 / **2026-10-10 用户指令改版**：
+ *  - `layout === "toggle"`（codex 模式组）→ 三段 **[计划] [◀▶] [操作]**——两个标签是
+ *    **指示器**（当前档高亮，来自屏读回读的 group.current），中间 ◀▶ 按钮点击 =
+ *    向终端发一次 shift+tab（**无零投递闸**：卡面档位过期时点按钮也必然动作——
+ *    这正是「切换不了」的修复面；后端按前读翻转核验，卡面跟随屏读结果高亮）；
+ *  - `layout === "picker"`（codex 权限组）→ **四档 chips 常驻**（只读/默认/自动审批/
+ *    完全信任，来自 tiers 里 selectable 档；生效档高亮框选中），点 chip = 走 switch
+ *    端点既有 Menu 编排（数字直达 + Full Access 确认框代按）；「完全信任」保留
+ *    先武装二次确认条的前端防线；既有「切换权限」picker 入口**保留为兜底**；
+ *  - 「完全信任」二次确认（2026-09-23 用户裁决，chips 同样遵守）：点完全信任先出
+ *    确认条，确认后才发——codex 会连发两次按键（4→1）并代按终端的风险确认框；
  *  - 权限组 current 来源 = **记忆回落**（`currentSource === "memory"`，终审 P1-2：
  *    readback 全开后旧判据 `readback === false` 不可达）时标注「（上次切换）」——
  *    它是 兔维斯 的记忆，不是实时屏读（终端手改会失真，如实声明口径）；屏读来源
@@ -281,18 +287,29 @@ function ModeGroupRow({
   const hasBypass = group.tiers.some((t) => t.mode === "bypass" && t.selectable);
   return (
     <span data-testid={`mode-group-${group.id}`} className="flex flex-wrap items-center gap-2">
-      {showGroupLabel && <span className="text-[11px] text-[var(--mut)]">{group.label}</span>}
+      {showGroupLabel && (
+        <span
+          data-testid={`mode-group-label-${group.id}`}
+          className="text-xs font-bold text-[var(--tx)]"
+        >
+          {group.label}
+        </span>
+      )}
       {/* 单组（无组标题）时给当前档一个「当前」前缀；二维两行组已有组标题
           （模式/权限），再叠「模式」二字会读成「模式 模式 …」（用户 2026-09-23） */}
-      {!showGroupLabel && <span className="text-xs text-[var(--mut)]">当前</span>}
-      <span
-        data-testid={`mode-current-${group.id}`}
-        className={`text-xs font-semibold ${
-          unknown ? "text-amber-700 dark:text-amber-400" : "text-[var(--tx)]"
-        }`}
-      >
-        {currentText}
-      </span>
+      {/* 当前档文本（2026-10-10 用户指令）：toggle/picker 组当前态由 tabs/chips 高亮框
+          承载 → 不再渲染文本；其余布局（单轴家无内联指示器）保留文本回显。
+          「未知」提示与「（上次切换）」标注保留（如实申报口径不变） */}
+      {group.layout !== "toggle" && group.layout !== "picker" && (
+        <span
+          data-testid={`mode-current-${group.id}`}
+          className={`text-xs font-semibold ${
+            unknown ? "text-amber-700 dark:text-amber-400" : "text-[var(--tx)]"
+          }`}
+        >
+          {currentText}
+        </span>
+      )}
       {!unknown && group.id === "permission" && group.currentSource === "memory" && (
         <span
           data-testid={`mode-current-source-${group.id}`}
@@ -310,30 +327,87 @@ function ModeGroupRow({
         </span>
       )}
       {group.layout === "picker" ? (
-        // **单选面板**（2026-09-23 用户方案）：单钮「切换权限」→ 后端读回终端菜单的
-        // 选项表 → 用户点选哪项就敲哪个数字键。前端**不硬编码「哪档对应哪个数字」**
-        // （档位编号随 Guardian 配置前移，硬编码会错位）。
-        <PermissionPicker sessionId={sessionId} disabled={busy} onDone={onPicked} />
-      ) : group.layout === "toggle" ? ( // 单钮 toggle（codex 模式组）：点击向终端发一次 shift+tab，终端在
-        // 计划/操作间循环；目标档按当前档翻转（current 未知 → 禁用，防盲按误切）
+        <>
+          {/* **四档 chips 常驻**（2026-10-10 用户指令）：只读/默认/自动审批/完全信任
+              直选——生效档（GET current，屏读→记忆→未知三级回落）**高亮框选中**；
+              点 chip = 走 switch 端点既有 Menu 编排（/permissions → 屏读定位数字 →
+              发数字 → Full Access 确认框阶段代按）。编号猜测仍不在前端——档位→数字
+              的映射由后端屏读完成。 */}
+          <span className="flex flex-wrap items-center gap-1">
+            {group.tiers
+              .filter((t) => t.selectable)
+              .map((t) => {
+                const isCurrent = group.current !== null && group.current === t.mode;
+                return (
+                  <button
+                    key={t.mode}
+                    type="button"
+                    data-testid={`mode-switch-${group.id}-${t.mode}`}
+                    data-current={isCurrent ? "true" : "false"}
+                    disabled={busy}
+                    onClick={() => {
+                      if (t.mode === "bypass") {
+                        setBypassArmed(true); // 不直接发——等「确认启用」（二次确认防线 chips 同守）
+                      } else {
+                        onSwitch(t.mode);
+                      }
+                    }}
+                    className={`rounded-full border px-2 py-0.5 text-[11px] disabled:opacity-40 ${
+                      isCurrent
+                        ? "border-[var(--btnp)] bg-[var(--btnp)]/10 font-semibold text-[var(--tx)]"
+                        : "border-transparent bg-[var(--cb)] text-[var(--tx)]"
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                );
+              })}
+          </span>
+          {/* 「切换权限」picker 入口**保留为兜底**（2026-10-10 用户指令）：Menu 编排
+              意外失败（档位漂移/屏读形态变化）时由用户在终端菜单上直接点编号。 */}
+          <PermissionPicker sessionId={sessionId} disabled={busy} onDone={onPicked} />
+        </>
+      ) : group.layout === "toggle" ? ( // codex 模式组三段（2026-10-10 用户指令）：
+        // [计划] [◀▶] [操作]——两个标签是**指示器**（当前档高亮，来自屏读回读），
+        // 中间按钮点击 = 向终端发一次 shift+tab；**无零投递闸**——卡面档位过期时
+        // 点按钮也必然动作，落点由后端屏读核验（前读翻转），卡面跟随屏读结果高亮。
         (() => {
+          // 切换目标 = 卡面当前档的翻转（仅作后端前读不可判时的核验预期兜底；
+          // 当前档未知时兜底发 plan——动作无条件，最终落点以屏读为准）
           const toggleTarget: MamMode = group.current === "plan" ? "default" : "plan";
+          const labelFor = (m: MamMode): string =>
+            group.tiers.find((x) => x.mode === m)?.label ?? (m === "plan" ? "计划" : "操作");
           return (
-            <button
-              type="button"
-              data-testid={`mode-switch-${group.id}-toggle`}
-              data-current={group.current ?? "unknown"}
-              disabled={busy || unknown}
-              title={
-                unknown
-                  ? "请先人工核对终端当前模式（当前档未知时盲按会误切）"
-                  : "向终端发送 shift+tab，在计划/操作间切换"
-              }
-              onClick={() => onSwitch(toggleTarget)}
-              className="rounded-full bg-[var(--btnp)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--btnpt)] disabled:opacity-40"
-            >
-              计划 ⇄ 操作
-            </button>
+            <span className="flex items-center gap-1">
+              {(["plan", "default"] as const).map((m) => {
+                const isCurrent = group.current === m;
+                return (
+                  <span
+                    key={m}
+                    data-testid={`mode-toggle-label-${group.id}-${m}`}
+                    data-current={isCurrent ? "true" : "false"}
+                    className={`rounded-full px-2 py-0.5 text-[11px] ${
+                      isCurrent
+                        ? "bg-[var(--cb)] font-semibold text-[var(--tx)]"
+                        : "text-[var(--mut)]"
+                    }`}
+                  >
+                    {labelFor(m)}
+                  </span>
+                );
+              })}
+              <button
+                type="button"
+                data-testid={`mode-switch-${group.id}-toggle`}
+                data-current={group.current ?? "unknown"}
+                disabled={busy}
+                title="向终端发送一次 shift+tab，切档结果以终端屏读为准（卡面跟随高亮）"
+                onClick={() => onSwitch(toggleTarget)}
+                className="rounded-full bg-[var(--btnp)] px-2.5 py-0.5 text-[11px] font-semibold text-[var(--btnpt)] disabled:opacity-40"
+              >
+                切换模式
+              </button>
+            </span>
           );
         })()
       ) : group.step ? (
@@ -432,7 +506,9 @@ function ModeGroupRow({
   );
 }
 
-/** **终端菜单单选面板**（codex 权限组，2026-09-23 用户方案）。
+/** **终端菜单单选面板**（codex 权限组的**兜底入口**，2026-09-23 用户方案；
+ *  2026-10-10 起四档 chips 直选为主入口——本面板保留给「Menu 编排意外失败/用户
+ *  想直接在终端菜单上点编号」的场景）。
  *
  * 交互：单钮「切换权限」→ 点开后后端注入 `/permissions` + 回车并**读回终端菜单的
  * 选项表**（编号 = 屏上实读值、文本 = 屏上原文）→ 这里渲染成一列编号按钮 →

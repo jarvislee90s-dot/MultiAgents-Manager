@@ -7300,10 +7300,14 @@ pub async fn session_mode(
             // 记忆 → null（spec §3.3），来源随载荷下发——前端「上次切换」标注只对
             // "memory" 显示（旧判据 `readback === false` 在 readback 全开后不可达）。
             let (current, current_source) = if g.id == crate::inject::mode::ModeGroupId::Mode {
-                (
-                    hit.current,
-                    if hit.current.is_some() { "screen" } else { "null" },
-                )
+                // 模式组：**即时屏读**（2026-10-10 用户实测「切完卡面不高亮」根因——
+                // hit.current 是周期扫描快照，切换后一个扫描周期内读到旧档）。高亮
+                // 跟随要求 GET 反映终端当下状态；读不到 → null（未知如实；模式组
+                // 无记忆回落通道）
+                match read_mode_from_screen(&st, &hit_session, &hit_tool, g.readback) {
+                    Some(m) => (Some(m), "screen"),
+                    None => (None, "null"),
+                }
             } else {
                 match read_axis_from_screen(&st, &hit_session, &hit_tool, g.readback, g.id) {
                     Some(m) => (Some(m), "screen"),
@@ -7711,7 +7715,7 @@ pub async fn session_mode_menu(
                                 std::thread::sleep(std::time::Duration::from_millis(
                                     crate::inject::families::SUBMIT_DELAY_MS,
                                 ));
-                                injector.locate_and_send_key_spec(pid, "enter", &spec)
+                                injector.locate_and_send_key_spec(pid, "tab", &spec)
                             })
                     },
                     || poll_menu_options(pid),
@@ -7858,40 +7862,69 @@ pub async fn session_mode_menu(
                     // 分「回菜单」/「仍在确认框」/「读不到」三态如实回执
                     // （confirm-cancelled 形态供前端重开菜单表）。
                     if number == 1 {
-                        // **单拍读屏 + 0.5s 下限**（步骤间隔硬性 ≥0.5s 由发键 settle
-                        // 保证）：T6 实测时延 ≤124ms（mpa-mode/post 系列）——单拍
-                        // 足够，轮询窗暂不引入（终审 P2-3 登记；实测数据支撑，若
-                        // 未来重绘变慢再升级 poll_confirm_cluster 同款窗）。
-                        let after = read_screen_lines(pid).unwrap_or_default();
-                        let new_receipt =
-                            crate::inject::mode::latest_new_permission_receipt(&after, &baseline);
+                        // **有界轮询**（2026-10-10 用户指令：单拍读屏升级为与模式
+                        // toggle 同款核验窗——100ms/拍 × `MODE_SWITCH_VERIFY_POLL_TOTAL_MS`
+                        // 换算拍数；T6 实测时延 ≤124ms，轮询只为重绘慢的拍兜住，
+                        // 命中即停不多等）：每拍找「新于基线的回执行」，队首拍可能
+                        // 还是旧态（确认框消失/回执行打印有延迟），命中即收。
+                        let rounds = crate::inject::timing::poll_rounds(
+                            crate::inject::timing::MODE_SWITCH_VERIFY_POLL_TOTAL_MS,
+                        );
+                        let (new_receipt, after) = crate::inject::mode::poll_screen_until(
+                            rounds,
+                            || read_screen_lines(pid),
+                            || std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS)),
+                            |ls| crate::inject::mode::latest_new_permission_receipt(ls, &baseline),
+                        );
                         return Ok(PickOutcome::Done {
                             receipt: new_receipt,
                             screen_tail: after.iter().rev().take(6).cloned().collect(),
                         });
                     }
-                    // Cancel（number == 2）：确认框消失后屏上是什么
-                    let after = read_screen_lines(pid).unwrap_or_default();
-                    let low: Vec<String> = after.iter().map(|l| l.to_lowercase()).collect();
-                    let kind = crate::inject::mode::codex_overlay_kind(&low);
-                    let new_receipt =
-                        crate::inject::mode::latest_new_permission_receipt(&after, &baseline);
-                    if kind == Some(crate::inject::mode::CodexOverlay::PermissionMenu)
-                        && new_receipt.is_none()
-                    {
+                    // Cancel（number == 2）：确认框消失后屏上是什么——同款有界轮询：
+                    // 每拍先判「异常新回执行」（Cancel 却打了行 → 如实上交），再判
+                    // 「菜单回到屏上」（预期形态 → 已取消）；窗尽（确认框仍在/读不到
+                    // 屏/无菜单）→ 不装「已取消」，按不确定态交回用户。
+                    let rounds = crate::inject::timing::poll_rounds(
+                        crate::inject::timing::MODE_SWITCH_VERIFY_POLL_TOTAL_MS,
+                    );
+                    enum CancelPoll {
+                        Cancelled,
+                        NewReceipt(String),
+                    }
+                    let (poll, after) = crate::inject::mode::poll_screen_until(
+                        rounds,
+                        || read_screen_lines(pid),
+                        || std::thread::sleep(std::time::Duration::from_millis(POLL_STEP_MS)),
+                        |ls| {
+                            if let Some(seen) =
+                                crate::inject::mode::latest_new_permission_receipt(ls, &baseline)
+                            {
+                                return Some(CancelPoll::NewReceipt(seen));
+                            }
+                            let low: Vec<String> = ls.iter().map(|l| l.to_lowercase()).collect();
+                            if crate::inject::mode::codex_overlay_kind(&low)
+                                == Some(crate::inject::mode::CodexOverlay::PermissionMenu)
+                            {
+                                return Some(CancelPoll::Cancelled);
+                            }
+                            None
+                        },
+                    );
+                    match poll {
                         // 预期形态：确认框消失、菜单回到屏上、无新回执行 → 已取消
-                        return Ok(PickOutcome::ConfirmCancelled);
-                    }
-                    if let Some(seen) = new_receipt {
+                        Some(CancelPoll::Cancelled) => return Ok(PickOutcome::ConfirmCancelled),
                         // 异常：Cancel 却打了新回执行——如实上交，不装「已取消」
-                        return Ok(PickOutcome::Done {
-                            receipt: Some(seen),
-                            screen_tail: after.iter().rev().take(6).cloned().collect(),
-                        });
+                        Some(CancelPoll::NewReceipt(seen)) => {
+                            return Ok(PickOutcome::Done {
+                                receipt: Some(seen),
+                                screen_tail: after.iter().rev().take(6).cloned().collect(),
+                            });
+                        }
+                        // 窗尽：键被吞或状态不明——如实交回用户
+                        // （Confirm 空表 → 前端提示重新读取）
+                        None => return Ok(PickOutcome::ConfirmCancelledUncertain),
                     }
-                    // 其余（确认框仍在 / 读不到屏 / 无菜单）：键被吞或状态不明——
-                    // 如实交回用户（Confirm 空表 → 前端提示重新读取）
-                    return Ok(PickOutcome::ConfirmCancelledUncertain);
                 }
                 // 菜单阶段 Done：回执核验 = **新于基线**的回执行（内容集差分；
                 // 目标档未知——用户点的是屏上编号——故按「锚在屏」取最新，但旧行
@@ -8371,10 +8404,12 @@ pub async fn session_mode_switch(
         Some(match plan {
             crate::inject::mode::ModeSwitchPlan::Key(key) => {
                 // **T4-F3 族隔离分派**（spec §3.1；claude/opencode 走 else 逐字保留）：
-                // codex 模式组 Key 路 = shift+tab toggle，目标档不参与按键构造但
-                // 决定**闭环核验的预期**——前读闸 / 基线差分轮询 / 已在目标档零投递
-                // 都在 [`run_codex_mode_toggle_stages`] 内核（与 `poll_mode_readback`
-                // 同构：编排与判据在 mode.rs 可测，此处只装配屏读/发键/等待三条缝）。
+                // codex 模式组 Key 路 = shift+tab toggle，目标档不参与按键构造但决定
+                // **闭环核验的预期**——2026-10-10 用户指令：前读只记录终端真值、
+                // **不再拦截**（零投递闸移除，点切换必然发键；「已在目标档零投递」
+                // 分支删除——卡面 current 过期正是实机六次零投递的根因）；前读不可判
+                // 时核验预期取前端 target 兜底。编排与判据在 [`run_codex_mode_toggle_stages`]
+                // 内核（与 `poll_mode_readback` 同构：此处只装配屏读/发键/等待三条缝）。
                 if tool_for_inject == "codex"
                     && group_for_inject == crate::inject::mode::ModeGroupId::Mode
                 {
@@ -8406,6 +8441,7 @@ pub async fn session_mode_switch(
                         settle: key_delay,
                     };
                     crate::inject::mode::run_codex_mode_toggle_stages(
+                        // fallback_expected = 前端 target（仅前读不可判时作核验预期兜底）
                         mode,
                         // 核验窗（M-5 独立常量）：总窗按 POLL_STEP_MS 换算拍数注入
                         // 内核（与 poll_mode_readback 的 rounds 同构，D20(b) 有界）
@@ -8506,16 +8542,10 @@ pub async fn session_mode_switch(
         }
     };
     // 组+档进审计摘要（二维工具的组是语义的一部分：只记「切换至默认」无法区分
-    // 是模式组的默认还是权限组的默认）。codex toggle 零投递分支（已在目标档）
-    // 摘要带 zero-key 标注（T4-F3：零投递也要审计，result 仍是 Ok）
-    let zero_key_note = match &result {
-        Ok(ModeToggleWait::CodexModeToggle(out)) if out.already_on_target => {
-            "（zero-key：前读已在目标档，未投递按键）"
-        }
-        _ => "",
-    };
+    // 是模式组的默认还是权限组的默认）。2026-10-10 用户指令：零投递闸移除——
+    // toggle 臂恒真发键，审计摘要不再有 zero-key 标注态。
     let audit_content = if group == crate::inject::mode::ModeGroupId::Mode {
-        format!("切换模式至 {label}{zero_key_note}")
+        format!("切换模式至 {label}")
     } else {
         format!("切换{}至 {label}", group.label())
     };
@@ -8547,7 +8577,8 @@ pub async fn session_mode_switch(
             // **T4-F3 codex 模式组臂**：核验已在投递闭包内闭环完成
             // （`ModeToggleWait::CodexModeToggle`），**跳过 `poll_mode_readback` 二次
             // 回读**（再轮一次窗既拖时延又可能与内核结论相左）——回执直接由 outcome
-            // 组装（hint 文案按 spec §3.1：命中/已在目标档/不符/未生效四态；
+            // 组装（hint 文案按 spec §3.1 三态：命中/不符/未生效——2026-10-10 用户
+            // 指令后「已在目标档」态不复存在，点切换必然发键）；
             // `observed` 字段 = 末拍屏读档，前端据此前读/后读不一致时自理卡面）。
             // 其余臂（`Pending`）照旧走下方回读。
             let codex_toggle = match result_ok {
@@ -8667,12 +8698,12 @@ pub async fn session_mode_switch(
     }
 }
 
-/// codex 模式组 toggle 的**回执 hint 合成**（T4-F3，spec §3.1 四态文案；判据与
-/// 文案同源——`ModeToggleOutcome` 各字段到文案的一对一映射，勿散两处）：
-/// - `already_on_target`（零投递）：已在目标档，无需切换；
-/// - `verified=true`（真发键）：屏读核验命中；
+/// codex 模式组 toggle 的**回执 hint 合成**（T4-F3，spec §3.1 三态文案；判据与
+/// 文案同源——`ModeToggleOutcome` 各字段到文案的一对一映射，勿散两处。
+/// 2026-10-10 用户指令后「已在目标档（零投递）」态不复存在——点切换必然发键）：
+/// - `verified=true`：屏读核验命中；
 /// - `verified=false` 且 observed 判出**其它档**：屏已切换至 X（预期 Y）——请人工核对；
-/// - `verified=false` 其余（observed=None 或 o==target 之外的不可判态）：切换未生效。
+/// - `verified=false` 其余（observed=None 或不可判态）：切换未生效。
 ///
 /// 前读可判时统一附「前读=终端当前 X」如实申报（不代卡面纠偏——纠偏由前端收
 /// observed 后自理）。
@@ -8685,9 +8716,7 @@ fn codex_mode_toggle_hint(
         .pre_read
         .map(|m| format!("前读=终端当前 {}", m.label()))
         .unwrap_or_default();
-    let body = if out.already_on_target {
-        "终端已在目标档，无需切换".to_string()
-    } else if out.verified {
+    let body = if out.verified {
         "已切换（屏读核验命中）".to_string()
     } else {
         match out.observed {
@@ -8754,7 +8783,7 @@ enum InjectAttempt {
     /// （`None` = 非 Windows 无屏读 → 无法核验；回执据此如实说明）
     Menu { receipt_seen: Option<bool> },
     /// codex 模式组 Key 路（T4-F3）：`run_codex_mode_toggle_stages` 的编排产物——
-    /// 前读/核验/observed 全在 outcome 里，回执组装消费它（零投递分支也走这一态）
+    /// 前读/核验/observed 全在 outcome 里，回执组装消费它
     CodexModeToggle(crate::inject::mode::ModeToggleOutcome),
 }
 
@@ -8855,7 +8884,7 @@ fn menu_stages(
                             std::thread::sleep(std::time::Duration::from_millis(
                                 crate::inject::families::SUBMIT_DELAY_MS,
                             ));
-                            injector.locate_and_send_key_spec(pid, "enter", spec)
+                            injector.locate_and_send_key_spec(pid, "tab", spec)
                         })
                 },
                 || poll_menu_digit(pid, target),
@@ -11772,5 +11801,49 @@ mod plan_feedback_tests {
         };
         assert!(run_plan_feedback_stages(&PlanFeedbackOp::Clear, &mut t2).is_err());
         assert!(t2.clears.is_empty());
+    }
+
+    /// **picker Done（确认框 Yes 路）的核验轮询**（2026-10-10 用户指令：单拍读屏
+    /// 升级为有界轮询——`poll_screen_until` × `latest_new_permission_receipt` 的
+    /// 生产同款组合）：队首 N 拍旧态（旧行在基线集合里 → 不算新证据）→ 后拍出现
+    /// **新**回执行 → 命中即收。还原动作（变异）：把 Yes 路改回单拍读屏 → 队首
+    /// 旧态下直接判「未读到回执」（verified=false 假阴性）→ 本测试先红。
+    #[test]
+    fn picker_done_yes_polls_until_new_receipt_line() {
+        use crate::inject::mode::{
+            capture_mode_switch_baseline, latest_new_permission_receipt, poll_screen_until,
+        };
+        // 基线屏：含旧行 `…requested: Read Only`（内容集差分的「前」侧）
+        let pre = vec![
+            "  普通输出".to_string(),
+            "• Permission selection requested: Read Only".to_string(),
+        ];
+        let baseline = capture_mode_switch_baseline(&pre);
+        // 队首 2 拍 = 旧屏原样（旧行留存不作证据）；第 3 拍出**新** Full Access 行
+        let old = pre.clone();
+        let fresh = vec![
+            "  普通输出".to_string(),
+            "• Permission selection requested: Read Only".to_string(),
+            "• Permission selection requested: Full Access".to_string(),
+        ];
+        let seq = std::cell::RefCell::new(vec![Some(old), Some(pre), Some(fresh.clone())]);
+        let (receipt, last) = poll_screen_until(
+            5,
+            || {
+                if seq.borrow().is_empty() {
+                    None
+                } else {
+                    Some(seq.borrow_mut().remove(0).unwrap())
+                }
+            },
+            || {},
+            |ls| latest_new_permission_receipt(ls, &baseline),
+        );
+        assert_eq!(
+            receipt.as_deref(),
+            Some("• Permission selection requested: Full Access"),
+            "队首旧态不算证据，新回执行出现即命中"
+        );
+        assert_eq!(last, fresh, "命中拍行集 = screen_tail 消费面");
     }
 }

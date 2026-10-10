@@ -8,7 +8,9 @@ import type { SessionModeView } from "@/mobile/api";
 // ③ unsupported 工具不渲染；④ 切档回执 verified=false → 人工核对文案；
 // 丁T4 新增：⑤ 二维家（codex/kimi）两组按钮与各自的当前档；⑥ 单轴家切换钮 + 回显；
 // ⑦ 裁6 opencode「默认」（Build 已术语对齐）；⑧ 裁7 退役档不作可点按钮；
-// ⑨ 旧后端（无 groups 字段）回落单轴渲染且 POST 不带 group。
+// ⑨ 旧后端（无 groups 字段）回落单轴渲染且 POST 不带 group；
+// 2026-10-10 用户指令：⑩ codex 模式组三段 [计划][◀▶][操作]（无零投递闸）、
+// ⑪ 权限组四档 chips 常驻直选（生效档高亮框）+ picker 兜底入口。
 
 interface Routes {
   mode?: SessionModeView;
@@ -111,11 +113,12 @@ function opencodeSingleAxis(): SessionModeView {
   };
 }
 
-/** 丁T4 新后端形态：二维（codex）。2026-09-23 codex 模式切换改造后：模式组 =
- *  单钮 toggle（计划 ⇄ 操作，shift+tab 双向）；权限组 = **单选面板**（picker，
- *  用户方案：后端读回终端菜单选项，用户点选哪项就敲哪个数字键）。
- *  `modeCurrent` 驱动 toggle 的翻转方向；`permissionCurrent` 用来测「上次切换」
- *  记忆标注（null = 无记忆 → 模式未知）。
+/** 丁T4 新后端形态：二维（codex）。2026-09-23 codex 模式切换改造 + 2026-10-10
+ *  用户指令改版后：模式组 = 三段 [计划][◀▶][操作]（shift+tab 双向，无零投递闸）；
+ *  权限组 = 四档 chips 常驻直选 + 单选面板兜底（picker：后端读回终端菜单选项，
+ *  用户点选哪项就敲哪个数字键）。
+ *  `modeCurrent` 驱动 toggle 的高亮与翻转方向；`permissionCurrent` 用来测 chips
+ *  高亮与「上次切换」记忆标注（null = 无记忆 → 模式未知）。
  *  终审 P1-2 mock 改写：权限组回读源 2026-10-09 起 readback=true（最新回执行），
  *  旧 mock 的 `readback: false` 过期；「上次切换」标注改由 `currentSource` 驱动
  *  （默认：有记忆 = "memory"、无 = "null"；可显式传 "screen" 测屏读来源不标注）。 */
@@ -338,24 +341,28 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     // 两组都在
     expect(screen.getByTestId("mode-group-mode")).toBeTruthy();
     expect(screen.getByTestId("mode-group-permission")).toBeTruthy();
-    // 模式组：回读命中「计划」；权限组：屏上无回执行（current=null）→ 模式未知 + 人工核对
-    expect(screen.getByTestId("mode-current-mode").textContent).toBe("计划");
-    expect(screen.getByTestId("mode-current-permission").textContent).toBe("模式未知");
+    // 模式组：回读命中「计划」（tabs 高亮承载，2026-10-10 用户指令移除文本回显）；
+    // 权限组：屏上无回执行（current=null）→ 模式未知 + 人工核对
+    expect(
+      screen.getByTestId("mode-toggle-label-mode-plan").getAttribute("data-current")
+    ).toBe("true");
     expect(screen.getByTestId("mode-unknown-hint-permission").textContent).toContain("人工核对");
     // 组标题可见（两组才显示，帮助用户区分两个轴）
     expect(screen.getByTestId("mode-group-permission").textContent).toContain("权限");
   });
 
-  it("二维家：权限组是**单选面板**（picker）——不渲染逐档按钮，只出一颗「切换权限」钮", async () => {
+  it("二维家：权限组 = 四档 chips 常驻直选 +「切换权限」picker 兜底入口（2026-10-10）", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "t2" }} />);
-    expect(await screen.findByTestId("mode-picker-permission-open")).toBeTruthy();
-    // 旧逐档按钮**不在了**（前端不再硬编码「哪档对应哪个数字」——档位编号随
-    // Guardian 配置前移，硬编码会错位；编号一律来自终端屏读）
-    expect(screen.queryByTestId("mode-switch-permission-readOnly")).toBeNull();
-    expect(screen.queryByTestId("mode-switch-permission-bypass")).toBeNull();
-    // 面板未点开时不出
+    await screen.findByTestId("mode-bar");
+    // 四档 chips 常驻（来自 tiers 里 selectable 档）
+    expect(screen.getByTestId("mode-switch-permission-readOnly")).toBeTruthy();
+    expect(screen.getByTestId("mode-switch-permission-default")).toBeTruthy();
+    expect(screen.getByTestId("mode-switch-permission-acceptEdits")).toBeTruthy();
+    expect(screen.getByTestId("mode-switch-permission-bypass")).toBeTruthy();
+    // 「切换权限」picker 入口保留为兜底；面板未点开时不出
+    expect(screen.getByTestId("mode-picker-permission-open")).toBeTruthy();
     expect(screen.queryByTestId("mode-menu-panel")).toBeNull();
   });
 
@@ -374,17 +381,33 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     expect(screen.getByTestId("mode-legacy-permission").textContent).toContain("on-failure");
   });
 
-  it("2026-09-23：codex 模式组 = 单钮 toggle「计划 ⇄ 操作」（不再有逐档按钮/不可用档）", async () => {
+  it("2026-10-10：codex 模式组 = [计划] [◀▶] [操作] 三段（标签指示器 + 切换钮，无逐档按钮）", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "t4" }} />);
     await screen.findByTestId("mode-bar");
-    // 单钮 toggle 在（shift+tab 双向，目标档由前端按当前档翻转）
+    // 双标签指示器在（计划在左、操作在右）
+    expect(screen.getByTestId("mode-toggle-label-mode-plan").textContent).toBe("计划");
+    expect(screen.getByTestId("mode-toggle-label-mode-default").textContent).toBe("操作");
+    // ◀▶ 切换钮在（旧「计划 ⇄ 操作」单钮文案退役）
     expect(screen.getByTestId("mode-switch-mode-toggle")).toBeTruthy();
     // 不再有逐档直达按钮，也不再有「不可用」说明档
     expect(screen.queryByTestId("mode-switch-mode-default")).toBeNull();
     expect(screen.queryByTestId("mode-switch-mode-plan")).toBeNull();
     expect(screen.queryByTestId("mode-tier-disabled-mode-default")).toBeNull();
+  });
+
+  it("2026-10-10：模式组当前档高亮——current=plan 时计划标签 data-current=true、操作标签 false", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis(); // mode 组 current = plan
+    render(<ModeBar session={{ id: "t4-hl" }} />);
+    await screen.findByTestId("mode-bar");
+    expect(screen.getByTestId("mode-toggle-label-mode-plan").getAttribute("data-current")).toBe(
+      "true"
+    );
+    expect(screen.getByTestId("mode-toggle-label-mode-default").getAttribute("data-current")).toBe(
+      "false"
+    );
   });
 
   it("裁6 + 单轴：opencode 两档渲染「默认」/「计划」+ 切换钮 + 当前档回显", async () => {
@@ -481,7 +504,7 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
 
 // ==== 批次戊 E3④：当前档高亮 + 问答待决置灰 ====
 describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
-  it("当前档高亮：toggle 单钮 data-current=当前档；权限组高亮走「上次切换」记忆（无逐档按钮）", async () => {
+  it("当前档高亮：toggle 标签 data-current=当前档；权限组生效档 chips 高亮框选中（memory 来源仍标「上次切换」）", async () => {
     installFetch();
     // 终审 P1-2：标注判据 = currentSource === "memory"（显式传入驱动本用例）
     routes.mode = codexTwoAxis({
@@ -490,11 +513,20 @@ describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
     });
     render(<ModeBar session={{ id: "s-e3-hl" }} />);
     await screen.findByTestId("mode-picker-permission-open");
-    // 模式组是 toggle 单钮：data-current 直接承载当前档（plan）
+    // 模式组双标签：当前档（plan）标签高亮；◀▶ 钮 data-current 承载当前档
+    expect(screen.getByTestId("mode-toggle-label-mode-plan").getAttribute("data-current")).toBe(
+      "true"
+    );
     expect(screen.getByTestId("mode-switch-mode-toggle").getAttribute("data-current")).toBe("plan");
-    // 权限组是 picker：当前档由「上次切换」记忆显示（高亮不再落在按钮上——
-    // 逐档按钮已退役，编号一律来自终端屏读）
-    expect(screen.getByTestId("mode-current-permission").textContent).toBe("只读");
+    // 权限组 chips：生效档（只读）高亮框选中（data-current）；其余不选中
+    expect(screen.getByTestId("mode-switch-permission-readOnly").getAttribute("data-current")).toBe(
+      "true"
+    );
+    expect(screen.getByTestId("mode-switch-permission-bypass").getAttribute("data-current")).toBe(
+      "false"
+    );
+    // memory 来源仍保留「上次切换」标注（chips 高亮不取代口径声明；档名文本
+    // 回显已按 2026-10-10 用户指令移除——高亮即状态）
     expect(screen.getByTestId("mode-current-source-permission").textContent).toBe("（上次切换）");
   });
 
@@ -558,7 +590,7 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     expect(body.target).toBe("plan");
   });
 
-  it("权限组 current=未知时 toggle 禁用（盲按会 50% 误切）", async () => {
+  it("当前档未知（2026-10-10 无零投递闸）：◀▶ 不再禁用，点击照发（target=plan 仅作核验预期兜底）", async () => {
     installFetch();
     // 权限组记忆不影响模式组——用旧后端回落形态让 mode 组 current=null
     routes.mode = {
@@ -585,10 +617,28 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
         },
       ],
     };
+    routes.switchBody = { status: "key_sent", verified: true, hint: "已切换（屏读核验命中）" };
     render(<ModeBar session={{ id: "mc-t2b" }} />);
     const toggle = await screen.findByTestId("mode-switch-mode-toggle");
-    expect((toggle as HTMLButtonElement).disabled).toBe(true);
+    // 旧语义「未知即禁用（盲按会 50% 误切）」随零投递闸一并退役：动作无条件，
+    // 落点由后端屏读核验（前读不可判 → 前端 target 兜底），卡面跟随屏读结果。
+    expect((toggle as HTMLButtonElement).disabled).toBe(false);
     expect(toggle.getAttribute("data-current")).toBe("unknown");
+    // 双标签在、都不高亮（未知档无从高亮——如实）
+    expect(screen.getByTestId("mode-toggle-label-mode-plan").getAttribute("data-current")).toBe(
+      "false"
+    );
+    expect(screen.getByTestId("mode-toggle-label-mode-default").getAttribute("data-current")).toBe(
+      "false"
+    );
+    fireEvent.click(toggle);
+    await flushAsync();
+    const call = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.group).toBe("mode");
+    expect(body.target).toBe("plan", "当前档未知 → 兜底 target=plan（仅核验预期用）");
   });
 
   it("picker：点「切换权限」→ POST {action:'open'} → 渲染终端菜单选项（编号+屏上原文）", async () => {
@@ -782,7 +832,7 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     expect(screen.getByTestId("mode-menu-panel")).toBeTruthy();
   });
 
-  it("权限组记忆标注：currentSource=memory → 显示档名 +「（上次切换）」，无未知提示；screen 来源不标注", async () => {
+  it("权限组记忆标注：currentSource=memory → 显示档名 +「（上次切换）」+ 生效档 chip 高亮；screen 来源不标注", async () => {
     installFetch();
     routes.mode = codexTwoAxis({
       permissionCurrent: "readOnly",
@@ -790,11 +840,12 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     });
     const { unmount } = render(<ModeBar session={{ id: "mc-t6" }} />);
     await screen.findByTestId("mode-picker-permission-open");
-    expect(screen.getByTestId("mode-current-permission").textContent).toBe("只读");
     expect(screen.getByTestId("mode-current-source-permission").textContent).toBe("（上次切换）");
     expect(screen.queryByTestId("mode-unknown-hint-permission")).toBeNull();
-    // 权限组不渲染逐档按钮（编号一律来自终端屏读）
-    expect(screen.queryByTestId("mode-switch-permission-readOnly")).toBeNull();
+    // 生效档 chip 高亮（chips 常驻直选，2026-10-10）
+    expect(screen.getByTestId("mode-switch-permission-readOnly").getAttribute("data-current")).toBe(
+      "true"
+    );
     unmount();
 
     // 终审 P1-2 反向面：屏读来源（screen）= 实时权威 → **不标注**「上次切换」
@@ -806,38 +857,63 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     });
     render(<ModeBar session={{ id: "mc-t6-screen" }} />);
     await screen.findByTestId("mode-picker-permission-open");
-    expect(screen.getByTestId("mode-current-permission").textContent).toBe("只读");
     expect(screen.queryByTestId("mode-current-source-permission")).toBeNull();
+  });
+
+  it("权限 chips 直选：点「只读」→ POST {group:'permission', target:'readOnly'}；点「自动审批」→ target:'acceptEdits'", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.switchBody = { status: "key_sent", verified: true, hint: "已切换（屏读核验命中）" };
+    render(<ModeBar session={{ id: "mc-chips" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-permission-readOnly"));
+    await flushAsync();
+    let call = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.group).toBe("permission");
+    expect(body.target).toBe("readOnly");
+    // 第二颗 chip：acceptEdits（走同一 switch 端点 Menu 编排，前端不猜编号）。
+    // 第一次切换 verified 后组件重拉过 GET（DOM 重渲染）——用 findBy 重取当前节点。
+    fireEvent.click(await screen.findByTestId("mode-switch-permission-acceptEdits"));
+    await flushAsync();
+    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    expect(calls.length).toBe(2, "两颗 chip 各发一次 switch");
+    const body2 = JSON.parse(String((calls[calls.length - 1]![1] as RequestInit).body));
+    expect(body2.target).toBe("acceptEdits");
+  });
+
+  it("权限 chips 的「完全信任」仍守二次确认防线：先出确认条，确认后才发 bypass", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.switchBody = { status: "key_sent", verified: true, hint: null };
+    render(<ModeBar session={{ id: "mc-chips-bypass" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-permission-bypass"));
+    await flushAsync();
+    // 未确认前零请求，确认条先出
+    expect(
+      fetchMock.mock.calls.filter((c: unknown[]) =>
+        String(c[0]).includes("/session-mode/switch")
+      )
+    ).toHaveLength(0);
+    expect(screen.getByTestId("mode-bypass-confirm")).toBeTruthy();
+    fireEvent.click(screen.getByTestId("mode-bypass-confirm-yes"));
+    await flushAsync();
+    const call = fetchMock.mock.calls.find((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/switch")
+    );
+    const body = JSON.parse(String((call![1] as RequestInit).body));
+    expect(body.group).toBe("permission");
+    expect(body.target).toBe("bypass");
   });
 });
 
 // ==== T5（spec §3.1/§3.2/§6-T5）：codex 模式/权限两链的回执消费 ====
-describe("ModeBar：T5 codex 回执消费（已在目标档 / observed / confirm-cancelled）", () => {
-  it("codex 模式切换已在目标档（零投递：verified=true + hint 承载，wire 无 zeroKey 字段）→ 回执显示后端 hint 而非「已切换」", async () => {
-    installFetch();
-    routes.mode = codexTwoAxis();
-    // 后端实形（T4 定形，api.rs codex_mode_toggle_hint）：零投递分支 verified=true、
-    // hint=「终端已在目标档，无需切换」＋前读申报；observed = 核验末拍屏读档。
-    routes.switchBody = {
-      status: "key_sent",
-      verified: true,
-      hint: "终端已在目标档，无需切换；前读=终端当前 计划",
-      observed: "plan",
-      current: "plan",
-      currentLabel: "计划",
-    };
-    render(<ModeBar session={{ id: "t5-zk" }} />);
-    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
-    const receipt = await screen.findByTestId("mode-receipt");
-    // 回执语义单一来源 = 后端 hint——硬编码「已切换」不得盖掉零投递语义
-    expect(receipt.textContent).toBe("终端已在目标档，无需切换；前读=终端当前 计划");
-    // observed 有值也**不改本地状态**（丁T4 纪律）——卡面以重拉 GET 为准：
-    // 重拉照旧发生（mount 一次 + 切换后一次）
-    const gets = fetchMock.mock.calls.filter(
-      (c: unknown[]) => String(c[0]).includes("/session-mode?") && !String(c[0]).includes("switch")
-    );
-    expect(gets.length).toBeGreaterThanOrEqual(2);
-  });
+// （2026-10-10 用户指令：「已在目标档（零投递）」态删除——点切换必然发键，
+// 后端 hint 只剩命中/不符/未生效三态；原零投递回执用例随之删除。）
+describe("ModeBar：T5 codex 回执消费（observed / confirm-cancelled）", () => {
 
   it("codex 模式切换 verified=false 带 observed → 回执原样透出「屏已切换至 X（预期 Y）」，不重复拼接 observed 档名", async () => {
     installFetch();
