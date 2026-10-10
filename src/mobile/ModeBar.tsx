@@ -79,14 +79,21 @@ export default function ModeBar({ session }: { session: { id: string } }) {
             // 回读命中：回执 + 重拉一次 GET 刷新显示（**不拿回执字段去改本地状态**：
             // 回执只描述该组那一刻的观测，直接采信会把「屏读快照」当成结构表；
             // 重拉失败则保留原视图——如实，不是把旧值刷成新值）
-            setReceipt("已切换");
+            // T5（spec §6-T5）：hint **原样透传**——codex toggle 臂的零投递分支
+            // （前读已在目标档）verified=true 但 hint=「终端已在目标档，无需切换」，
+            // 不能硬编码「已切换」盖掉；真发键命中 = 「已切换（屏读核验命中）」。
+            // wire 对位：后端无 zeroKey 布尔字段（已在目标档态由 hint 承载），
+            // observed（核验末拍屏读档）有值也不改本地状态——卡面以重拉 GET 为准。
+            setReceipt(res.hint ?? "已切换");
             try {
               setView(await fetchSessionMode(session.id));
             } catch {
               /* 回读失败不清回执（切换本身已投递且已核实） */
             }
           } else {
-            // 红线 4：不假装成功——原样透出后端 hint（含「预期/实际」或「请人工核对」）
+            // 红线 4：不假装成功——原样透出后端 hint（含「预期/实际」或「请人工核对」）。
+            // T5：observed 非空且 verified=false 时，后端 hint 已含「屏已切换至 X
+            // （预期 Y）」——这里只透传，**不重复拼接** observed 的档名。
             setReceipt(res.hint ?? "已发送切换，请人工核对终端模式");
           }
         } else {
@@ -244,8 +251,11 @@ function modeGroups(view: SessionModeView): ModeGroupView[] {
  *    shift+tab，目标档按当前档翻转；**当前档未知时禁用**——盲按会 50% 误切）；
  *  - 「完全信任」二次确认（用户裁决）：点完全信任先出确认条，确认后才发——codex 会
  *    连发两次按键（4→1）并代按终端的风险确认框；
- *  - 权限组（无屏读源）current 有值时标注「（上次切换）」——它是 兔维斯 的记忆，不是
- *    实时屏读（终端手改会失真，如实声明口径）。 */
+ *  - 权限组 current 来源 = **记忆回落**（`currentSource === "memory"`，终审 P1-2：
+ *    readback 全开后旧判据 `readback === false` 不可达）时标注「（上次切换）」——
+ *    它是 兔维斯 的记忆，不是实时屏读（终端手改会失真，如实声明口径）；屏读来源
+ *    （"screen"）是实时权威，不标注。 */
+
 function ModeGroupRow({
   group,
   showGroupLabel,
@@ -283,7 +293,7 @@ function ModeGroupRow({
       >
         {currentText}
       </span>
-      {!unknown && group.id === "permission" && group.readback === false && (
+      {!unknown && group.id === "permission" && group.currentSource === "memory" && (
         <span
           data-testid={`mode-current-source-${group.id}`}
           className="text-[10px] text-[var(--mut)]"
@@ -521,6 +531,32 @@ function PermissionPicker({
           setOptions(r.options);
           setPanel("confirm");
           setNote(r.hint ?? "终端弹出风险确认框——请再点一次确认项");
+        } else if (r.status === "confirm-cancelled") {
+          // T5（spec §3.2/§6-T5）：确认框阶段点 Cancel（2）→ 确认框消失、菜单已
+          // 回到终端屏上、无新回执行——显示 hint 并**自动重拉菜单选项表**（既有
+          // open 流程），面板回到菜单态（用户不用手点「重新读取」）。重开回菜单
+          // 时取消回执保留；仅当重开发现确认框仍在屏（终端残留，取消未生效）时
+          // note 让位给二阶段态——那时「菜单已回到屏上」就是假话。重开失败/读不
+          // 到菜单时选项清空 + 如实报错（不假装已同步）。
+          setPanel("menu");
+          setNote(r.hint ?? "已取消 Full Access 确认，菜单已回到屏上");
+          try {
+            const reopened = await sessionModeMenuOpen(sessionId);
+            if (reopened.status === "menu") {
+              setOptions(reopened.options);
+            } else if (reopened.status === "confirm") {
+              // 重开时确认框在屏（终端残留）——按既有 open 流程进二阶段
+              setOptions(reopened.options);
+              setPanel("confirm");
+              setNote(reopened.hint ?? null);
+            } else {
+              // 重开没读到菜单（/none 等）——选项清空 + 保留取消回执，如实交用户
+              setOptions([]);
+            }
+          } catch {
+            setOptions([]);
+            setNote("已取消 Full Access 确认——重开菜单失败，请点「重新读取」");
+          }
         } else if (r.status === "done") {
           setPanel(null);
           setOptions([]);

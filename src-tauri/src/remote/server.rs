@@ -8117,8 +8117,11 @@ mod tests {
             assert_eq!(v["questions"].as_array().unwrap().len(), 2);
         }
         // **批次戊 E4 更新**：kimi 多题升格为**交互**（K-5 数字直选+自动推进+Review
-        // 汇总屏）——select 走 DigitAdvance 单数字键（**禁尾 Enter**，A3），200 key_sent；
-        // codex 多题在 E4 时点仍只读（E5 升格），409 tool_readonly。
+        // 汇总屏）——select 走 DigitAdvance 单数字键（**禁尾 Enter**，A3），200 key_sent。
+        // **2026-10-09 codex 升格**：单选 select 走 CodexSelect 阶段机（数字=选中+
+        // 推进原子、双投核验——旧盲发数字档退役），advance 走 CodexAdvance（h/l 底料
+        // 定案）。测试缝 screen_probe=None → 入口闸「读不到屏」**零键中止**：200
+        // 回执 failed+aborted（不出手纪律），不落任何键。
         // claude 多题只读由 question_answer_multi_questions_refused 继续钉住。
         let r = app
             .clone()
@@ -8150,17 +8153,23 @@ mod tests {
             ))
             .await
             .unwrap();
-        // codex 多题（E4 时点）：单选题的 select 走既有 SingleDigitSubmit 档
-        // （数字即交，200 key_sent）；多题完整交互（Tab 备注/切题）在 E5 升格
-        assert_eq!(r.status(), 200, "codex 单选题 select：既有数字直选档放行");
+        // codex（2026-10-09 升格后）：select 走 CodexSelect 阶段机——测试缝读不到屏，
+        // 入口闸**零键中止**（200 failed+aborted；盲发数字档已退役），且不得碰 kimi
+        // 已发的那个数字（断言零注入增量）
+        assert_eq!(
+            r.status(),
+            200,
+            "codex select：阶段机入口闸中止也是 200（failed+aborted 语义）"
+        );
+        let body = body_string(r).await;
         assert!(
-            body_string(r).await.contains("key_sent"),
-            "codex 单选题 select 照常 key_sent"
+            body.contains("\"status\":\"failed\"") && body.contains("\"aborted\":true"),
+            "codex select 零键中止 = failed+aborted（不出手纪律）：{body}"
         );
         assert_eq!(
             fake.recorded_keys(),
-            vec![(61u32, "1".to_string()), (60u32, "1".to_string())],
-            "kimi 多题 DigitAdvance + codex 单选直选，各恰一键"
+            vec![(61u32, "1".to_string())],
+            "kimi 多题 DigitAdvance 恰一键；codex 阶段机中止零注入"
         );
     }
 
@@ -8214,9 +8223,14 @@ mod tests {
     }
 
     /// **能力位契约逐工具断言**（2026-10-05 推广批 T8/F6）：GET 载荷的
-    /// `multiFreeText` / `screen` 按取证状态给值——codex 点亮（探测批 C 实证）且
-    /// 无快照（解析器留位）；kimi 全关（探测批 K：多选自由作答未定案）；快照失败
-    /// 保守 None。
+    /// `multiFreeText` / `screen` 按取证状态给值——**codex 2026-10-09 取证回填
+    /// 关闭**（0.160.0 notes 不落卷——回车把焦点行提交为答案、用户文本静默丢失，
+    /// 底料 §5；freeText 入口随路由一并具名中止）；kimi 多选关（Other 无编号，
+    /// 单选走旗标同面）；快照失败保守 None。
+    /// **codex 旗标面 2026-10-09 扩充**：多题载荷 → advance=true + navBoth=true
+    /// （0.160.0 h/l 双向环形）；单题载荷 → advance=false（无切题面）但 navBoth
+    /// 仍 true（旗标与题数解耦，前端按 advance 分流渲染）。wire 的 `screen` 断言
+    /// 在 `question_get_carries_codex_screen_snapshot`（本用例屏读探针无夹具 → null）。
     #[tokio::test]
     async fn question_capability_flags_by_tool() {
         let fake = FakeInjector::ok();
@@ -8237,10 +8251,12 @@ mod tests {
         }
         let app = router(state.clone());
         // (sid, multiFreeText, freeTextOverwrite)：覆盖写入/清空能力位逐工具断言
-        // （2026-10-05 深夜；2026-10-06 扩 codex）——opencode=多选回删语义实证；
-        // codex=Tab 清空备注（footer 活体明文「tab or esc to clear note」）；
-        // kimi 多选自由作答未接入 → false
-        for (sid, expect_mft, expect_ovw) in [("sess_al", true, true), ("sess_an", false, false)] {
+        // ——opencode=多选回删语义实证；kimi=2.1.1 定案 K7 重进带旧文本 + 退格可清
+        // （清空面因「空回车 no-op」定案如实前置拒——前端收到失败回执引导终端操作）；
+        // **codex 2026-10-09 取证回填双双关闭**：notes 链（含 Tab 清空备注的覆盖
+        // 语义）不落卷，multiFreeText/freeTextOverwrite 同面收口
+        for (sid, expect_mft, expect_ovw) in [("sess_al", false, false), ("sess_an", false, false)]
+        {
             let r = app
                 .clone()
                 .oneshot(req(
@@ -8266,6 +8282,71 @@ mod tests {
                 "{sid} 快照解析器留位 → null（前端维持本地状态）"
             );
         }
+        // **codex 旗标面（2026-10-09，单题载荷）**：advance=false（单题无切题面）
+        // + navBoth=true（h/l 双向环形旗标与题数解耦）
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_al",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["advance"], false,
+            "codex 单题卡 advance=false（无切题面）"
+        );
+        assert_eq!(
+            v["navBoth"], true,
+            "codex navBoth=true（h/l 双向环形——切题无方向限制）"
+        );
+    }
+
+    /// **codex 多题载荷旗标**（2026-10-09，0.160.0 h/l 切题底料定案）：多题 codex
+    /// 会话 GET → advance=true + navBoth=true——前端渲染 ◀/▶ 双钮（navBoth 分流）
+    /// 且切题动作放行（advance 门）。与 [`question_capability_flags_by_tool`] 的
+    /// 单题 false 断言配对，锁住「旗标乘题数门」的两端。
+    #[tokio::test]
+    async fn question_codex_multi_question_flags() {
+        let fake = FakeInjector::ok();
+        let state = question_state(fake.clone());
+        persist_named_device(&state, "mm", "测试设备");
+        let payload = r#"{"questions":[{"header":"h1","multiSelect":false,"question":"q1?","options":[{"label":"a"}]},{"header":"h2","multiSelect":true,"question":"q2?","options":[{"label":"b"}]}]}"#;
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "codex",
+                "sess_al",
+                1_000,
+                "等待回答",
+                Some(payload),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_al",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        assert_eq!(v["questions"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            v["advance"], true,
+            "codex 多题卡 advance=true（h/l 切题已取证）"
+        );
+        assert_eq!(
+            v["navBoth"], true,
+            "codex 多题卡 navBoth=true（h/l 双向环形）"
+        );
     }
 
     /// **opencode 屏读快照**（2026-10-05 推广批 F3）：opencode 会话 + 屏读探针返回
@@ -8374,6 +8455,74 @@ mod tests {
             .unwrap();
         let v2: serde_json::Value = serde_json::from_str(&body_string(r2).await).unwrap();
         assert_eq!(v2["screen"]["review"], true, "Confirm 页 → review 快照");
+    }
+
+    /// **codex 屏读快照**（2026-10-09，0.160.0 活体取证）：codex 会话 + 屏读探针
+    /// 返回题页夹具（题号头 + footer 锚配对形态）→ GET 载荷带
+    /// `screen.questionIdx/questionTotal/unanswered/isLast/options/focused`（camelCase
+    /// 七键 wire 形状，与 [`CodexQuestionSnapshot`] 序列化一致——题号直读对位契约）。
+    /// 夹具用 `live_fixtures::codex_s1_q2`（活体逐字取证，禁手抄改写——
+    /// 屏读纪律四闸门之一）。
+    #[tokio::test]
+    async fn question_get_carries_codex_screen_snapshot() {
+        let fake = FakeInjector::ok();
+        let probe_page = crate::inject::question::live_fixtures::codex_s1_q2();
+        let state = question_state_full(
+            fake.clone(),
+            Box::new(|_, _, _| Err("测试桩：未注入内容源".to_string())),
+            std::sync::Arc::new(move |tool: &str, _pid: u32| -> Option<Vec<String>> {
+                if tool == "codex" {
+                    Some(probe_page.clone())
+                } else {
+                    None
+                }
+            }),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        // 载荷两题，第 2 题题干/选项与夹具屏面对齐（fixture = S1 Q2 屏）
+        let payload = r#"{"questions":[{"header":"h1","multiSelect":false,"question":"Which DB?","options":[{"label":"Postgres"},{"label":"SQLite"},{"label":"None of the above"}]},{"header":"h2","multiSelect":false,"question":"Which cache?","options":[{"label":"Redis"},{"label":"Memcached"},{"label":"None needed"},{"label":"None of the above"}]}]}"#;
+        state.store.with(|conn| {
+            crate::database::dao::question_wait::mark(
+                conn,
+                "codex",
+                "sess_al",
+                1_000,
+                "等待回答",
+                Some(payload),
+            )
+        });
+        let app = router(state.clone());
+        let r = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/m/api/v1/session-question?session_id=sess_al",
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["available"], true);
+        let screen = &v["screen"];
+        assert!(screen.is_object(), "codex 题页必须回快照：{v}");
+        // camelCase 七键形状锁（CodexQuestionSnapshot 直接 serde 序列化——
+        // 不经 snapshot_to_json，独立类型独立形状）
+        assert_eq!(screen["questionIdx"], 1, "题号直读（0 起）——对位主键");
+        assert_eq!(screen["questionTotal"], 2);
+        assert_eq!(screen["unanswered"], 1, "计数段 (1 unanswered) 直读");
+        assert_eq!(screen["isLast"], true);
+        assert_eq!(
+            screen["options"],
+            serde_json::json!(["Redis", "Memcached", "None needed", "None of the above"]),
+            "选项 label 剥焦点标记/编号/(Recommended) 尾缀与描述列"
+        );
+        assert_eq!(screen["focused"], 0, "› 焦点行读得到 → Some(0)");
+        assert_eq!(
+            screen["heading"],
+            serde_json::json!("Which cache?"),
+            "题干也在快照里（题号对位为主、heading 供显示）"
+        );
     }
 
     /// **claude 多题接入**（2026-09-24）：GET 旗标（multiQuestion=true + advance=true）
@@ -12726,8 +12875,9 @@ mod tests {
     // 这对本组无碍：T4 的新面是**结构表与组路由**（纯表 + 请求面），屏读词表本身由
     // `inject::mode` 的单测覆盖（夹具 = T6 探测档案的真机屏幕原文逐字快照）。
 
-    /// GET /session-mode 下发**结构表与两组**（裁5 的接口面）：codex 两组、权限组
-    /// 无回读源 → current=null；模式组 readback=true。裁7 的退役档也在载荷里
+    /// GET /session-mode 下发**结构表与两组**（裁5 的接口面）：codex 两组；模式组
+    /// readback=true；权限组 2026-10-09 起回读源 = 最新事件行（readback=true），
+    /// 屏读缝恒 None → 回落记忆、无记忆仍 current=null。裁7 的退役档也在载荷里
     /// （`legacy`）——**前端不渲染为按钮**，由 `tests/mobile/ModeBar.test.tsx` 锁住。
     #[tokio::test]
     async fn session_mode_reports_two_axis_structure_for_codex() {
@@ -12756,8 +12906,10 @@ mod tests {
         assert_eq!(groups.len(), 2, "二维家出两组（裁5）");
         assert_eq!(groups[0]["id"], "mode");
         assert_eq!(groups[1]["id"], "permission");
-        // 权限组：无底栏回读源 → readback=false 且 current=null（**如实**，不假装知道）
-        assert_eq!(groups[1]["readback"], false);
+        // 权限组：2026-10-09 起回读源 = 最新事件行（readback=true）——本测试屏读缝
+        // 恒 None（事件行不在屏/滚出）→ current=null 并回落记忆通道（无记忆仍 null，
+        // 「屏读→记忆→未知」三级如实，spec §3.3）
+        assert_eq!(groups[1]["readback"], true);
         assert!(groups[1]["current"].is_null());
         assert_eq!(groups[0]["readback"], true);
         // 档位：模式组 [操作(可选), 计划(可选)] = shift+tab toggle；权限组 [只读, 默认, 完全信任]
@@ -12832,6 +12984,8 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
         assert!(v["groups"][1]["current"].is_null(), "无记忆 → 模式未知");
+        // 终审 P1-2：来源随载荷下发——都无 = "null"（前端不标注「上次切换」）
+        assert_eq!(v["groups"][1]["currentSource"], "null", "{v}");
 
         // 记忆后：GET 回放为 current/currentLabel（模拟一次 verified=true 的切换）
         crate::remote::api::remember_permission_tier(&state.store, &sid, "readOnly");
@@ -12848,6 +13002,202 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
         assert_eq!(v["groups"][1]["current"], "readOnly");
         assert_eq!(v["groups"][1]["currentLabel"], "只读");
+        // 终审 P1-2：屏读缝 None（无屏）→ 记忆回落 → 来源 = "memory"
+        // （前端「上次切换」标注的唯一判据）
+        assert_eq!(v["groups"][1]["currentSource"], "memory", "{v}");
+    }
+
+    /// GET（终审 P1-2）：权限组屏读命中时 current 来源 = **"screen"**——
+    /// codex 权限轴唯一屏读源 = 最新回执行（`parse_axis_from_screen`）；回执行在屏
+    /// 时即使有记忆也以屏为准（屏读 → 记忆 → null 三级回落，spec §3.3），来源如实
+    /// 随载荷下发。
+    #[tokio::test]
+    async fn session_mode_permission_current_source_screen_when_receipt_on_screen() {
+        let fake = FakeInjector::ok();
+        let probe = scripted_screen_probe(vec![Some(screen_lines(&[
+            "  普通输出",
+            "• Permission selection requested: Read Only",
+            "› Ask Codex to do anything",
+        ]))]);
+        let (state, sid) = mode_state_with_screen(
+            fake,
+            "sess_fr1_perm_src",
+            crate::session::AgentType::Codex,
+            94,
+            crate::session::SessionStatus::Waiting,
+            std::sync::Arc::new(|_, _| None),
+            probe,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        // 记忆里是旧档（readOnly 之外再种一个 bypass）——屏读命中时**以屏为准**
+        crate::remote::api::remember_permission_tier(&state.store, &sid, "bypass");
+        let r = router(state)
+            .oneshot(req(
+                "GET",
+                &format!("/m/api/v1/session-mode?session_id={sid}"),
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(
+            v["groups"][1]["current"], "readOnly",
+            "屏读命中（最新回执行）优先于记忆：{v}"
+        );
+        assert_eq!(v["groups"][1]["currentSource"], "screen", "{v}");
+    }
+
+    /// 终审 P0-1 回归锁：switch 端点的**权限档记忆写入**。
+    ///
+    /// 回归史：T4 重构把回执段拆成两臂后，Pending 臂（kimi 两段式 / codex 数字直达
+    /// 等非闭环路）提前 return，丢掉了旧公共尾的 `remember_permission_tier` 写入
+    /// （kimi 权限切换 verified 后 GET 无「上次切换」可回放）；唯一残存写入点在
+    /// codex toggle 臂内、被 `group == Permission` 守卫恒 false（死码，toggle 臂只在
+    /// group==Mode 时进入）。
+    ///
+    /// 为什么不是纯端点测试：菜单路投递要真 conhost 屏读（`menu_stages` 内的
+    /// `read_screen_lines` 不走 screen_probe 缝），端点级单测驱动不到
+    /// 「verified=true」——正向写入判定抽
+    /// [`remember_permission_tier_if_verified`] 单点锁判定表，「写入 → GET 回放」
+    /// 链走端点（不是直接种 PERMISSION_TIER_MEMORY——既有 GET 回落测试直接种数据，
+    /// 掩盖了本回归）；端点级另锁「失败不写」（见下一个测试）。
+    #[tokio::test]
+    async fn session_mode_verified_permission_writes_memory_and_get_replays() {
+        let (state, sid) = mode_state_with_status(
+            "sess_fr1_perm_mem",
+            crate::session::AgentType::Codex,
+            93,
+            crate::session::SessionStatus::Waiting,
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        // 判定表：verified=false × 权限组 → 不写（不假成功）
+        crate::remote::api::remember_permission_tier_if_verified(
+            false,
+            crate::inject::mode::ModeGroupId::Permission,
+            &state.store,
+            &sid,
+            crate::inject::mode::MamMode::Bypass,
+        );
+        assert!(
+            crate::remote::api::recall_permission_tier(&state.store, &sid).is_none(),
+            "verified=false 不得写权限档记忆"
+        );
+        // 判定表：verified=true × 模式组 → 不写（Mode 组不是 Permission 组，spec §3.1）
+        crate::remote::api::remember_permission_tier_if_verified(
+            true,
+            crate::inject::mode::ModeGroupId::Mode,
+            &state.store,
+            &sid,
+            crate::inject::mode::MamMode::Plan,
+        );
+        assert!(
+            crate::remote::api::recall_permission_tier(&state.store, &sid).is_none(),
+            "Mode 组零写入"
+        );
+        // 判定表：verified=true × 权限组 → 写；GET 端点回放「上次切换」（写入→回放链）
+        crate::remote::api::remember_permission_tier_if_verified(
+            true,
+            crate::inject::mode::ModeGroupId::Permission,
+            &state.store,
+            &sid,
+            crate::inject::mode::MamMode::Bypass,
+        );
+        let app = router(state);
+        let r = app
+            .oneshot(req(
+                "GET",
+                &format!("/m/api/v1/session-mode?session_id={sid}"),
+                Some("mam_device=mm"),
+                None,
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["groups"][1]["current"], "bypass", "GET 回放记忆档：{v}");
+        assert_eq!(v["groups"][1]["currentLabel"], "完全信任", "{v}");
+    }
+
+    /// 终审 P0-1 配套：switch 端点**失败路零记忆写入**（不假成功的负向面）——
+    /// kimi 权限组 Bypass 两段式在假体（无真 conhost）必然失败（同
+    /// `..._kimi_permission_bypass_is_menu_two_stage_not_blind_confirm` 的形态），
+    /// 回执 failed 后「上次切换」必须仍为空。还原动作（变异）：把写入从
+    /// verified 判定里摘出来（失败也写）→ 本测试先红。
+    #[tokio::test]
+    async fn session_mode_switch_failed_permission_does_not_write_memory() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_fr1_perm_fail",
+            crate::session::AgentType::Kimi,
+            98,
+            crate::session::SessionStatus::Idle,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let r = router(state.clone())
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"{sid}","target":"bypass","group":"permission"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&body_string(r).await).unwrap();
+        assert_eq!(v["status"], "failed", "假体下菜单路必然如实失败：{v}");
+        assert!(
+            crate::remote::api::recall_permission_tier(&state.store, &sid).is_none(),
+            "failed 切换不得写权限档记忆：{v}"
+        );
+    }
+
+    /// 终审 P0-1：picker Done 的权限档记忆**回填**判定（抽
+    /// [`remember_permission_tier_from_screen`] 单点——pick 端点同样要真 conhost
+    /// 读缝，端点级驱动不了 Done）。反查 = 屏面自底向上**最新可解析**回执行
+    /// （0.160.0 词形）；0.154 旧锚行不进解析 → 不写（不猜档）。
+    #[test]
+    fn picker_done_backfill_takes_newest_parseable_event_line() {
+        let store = crate::remote::pairing::DeviceStore::memory();
+        // 底部 6 行窗：旧行（Read Only）在上、最新行（Full Access）在下 → 取最新
+        let screen = screen_lines(&[
+            "  普通输出",
+            "• Permission selection requested: Read Only",
+            "• Permission selection requested: Full Access",
+        ]);
+        crate::remote::api::remember_permission_tier_from_screen(
+            &store,
+            "sess_fr1_pick_done",
+            &screen,
+        );
+        assert_eq!(
+            crate::remote::api::recall_permission_tier(&store, "sess_fr1_pick_done"),
+            Some(crate::inject::mode::MamMode::Bypass),
+            "自底向上取最新回执行（不是首条）"
+        );
+        // 无回执行 / 认不出的档 → 不写（既有记忆不被冲掉）
+        crate::remote::api::remember_permission_tier_from_screen(
+            &store,
+            "sess_fr1_pick_done",
+            &screen_lines(&["  普通输出", "Update Model Permissions"]),
+        );
+        assert_eq!(
+            crate::remote::api::recall_permission_tier(&store, "sess_fr1_pick_done"),
+            Some(crate::inject::mode::MamMode::Bypass),
+            "屏面无可解析回执行 → 保持既有记忆"
+        );
+        // 0.154 旧锚行（`permissions updated to`）不进事件行解析 → 不写（不猜档）
+        crate::remote::api::remember_permission_tier_from_screen(
+            &store,
+            "sess_fr1_pick_done_old",
+            &screen_lines(&["• Permissions updated to Full Access"]),
+        );
+        assert!(
+            crate::remote::api::recall_permission_tier(&store, "sess_fr1_pick_done_old").is_none(),
+            "0.154 旧锚行不在反查判据内 → 如实无记忆"
+        );
     }
 
     /// GET：kimi 两组 + **权限组的屏显标签是工具自己的词**（§2.6 kimi 列）
@@ -12958,22 +13308,53 @@ mod tests {
 
     /// POST：**codex 模式组 shift+tab toggle**（2026-09-23 用户实测裁决）——显式
     /// `group:"mode"` + `target:"plan"|"default"` → 只投递一次 `shift+tab` 键
-    /// （无斜杠命令、无额外回车）；落点由回读轮询核验（CI 无屏读 → Unverifiable，
-    /// 不影响投递本身）。
+    /// （无斜杠命令、无额外回车）；落点由**基线差分核验**（T4-F3：前读闸 → 发键 →
+    /// 内容集差分轮询，`MODE_SWITCH_VERIFY_POLL_TOTAL_MS` 窗）在投递闭包内闭环——
+    /// 屏序列用假缝脚本化（前读=Default 夹具、核验拍出现**新** Plan 事件行 → 命中）。
+    /// CI 无屏读 → 前读闸**零投递**如实拒（spec §3.1「读不到屏 → 如实拒」分支，
+    /// 由 `..._no_screen_refuses_zero_delivery` 单独锁）。
     #[tokio::test]
     async fn session_mode_switch_codex_mode_group_sends_shift_tab() {
-        for target in ["plan", "default"] {
+        // 屏脚本（槽序 = 读序）：① lookup 的 before 快照（既有纪律）→ ② toggle
+        // 内核的 read_pre → ③ 核验拍。pre 屏 = Default 态（底 3 行 = 模型行+快捷键
+        // 行+composer，` · ` 缺席推断 Default；事件行在 composer 区之上——真实
+        // 终端形态，不进状态栏窗）；after 屏 = 状态栏翻到 Plan（模型行尾 Plan mode
+        // 短语）+ **新** Plan 事件行（内容集差分双证据）。
+        // target=plan：前读 Default ≠ Plan → 发键 → 核验命中；
+        // target=default：前读 Default == 目标档 → 零投递（已在目标档分支，断言②）。
+        let pre = screen_lines(&[
+            "  普通输出",
+            "• Model changed to deepseek-v4.1-flash high for Default mode.",
+            "  deepseek-v4.1-flash high · ~\\proj",
+            "  ← for agents · ? for shortcuts",
+            "› Ask Codex to do anything",
+        ]);
+        let after = screen_lines(&[
+            "  普通输出",
+            "• Model changed to glm-5.3-flash max for Plan mode.",
+            "• Model changed to deepseek-v4.1-flash high for Default mode.",
+            "  deepseek-v4.1-flash high · ~\\proj                    Plan mode",
+            "  ← for agents · ? for shortcuts",
+            "› Ask Codex to do anything",
+        ]);
+        for (target, expect_keys, zero_key) in [("plan", true, false), ("default", false, true)] {
             let fake = FakeInjector::ok();
-            let (state, sid) = mode_state_with_injector(
+            let probe = scripted_screen_probe(vec![
+                Some(pre.clone()),
+                Some(pre.clone()),
+                Some(after.clone()),
+            ]);
+            let (state, sid) = mode_state_with_screen(
                 fake.clone(),
                 "sess_mc_mode_toggle",
                 crate::session::AgentType::Codex,
                 91,
                 crate::session::SessionStatus::Waiting,
                 std::sync::Arc::new(|_, _| None),
+                probe,
             );
             persist_named_device(&state, "mm", "测试设备");
-            let app = router(state);
+            let app = router(state.clone());
             let r = app
                 .oneshot(req(
                     "POST",
@@ -12987,16 +13368,82 @@ mod tests {
                 .unwrap();
             assert_eq!(r.status(), 200);
             let body = body_string(r).await;
+            let v: serde_json::Value = serde_json::from_str(&body).unwrap();
             assert!(
                 fake.recorded().is_empty(),
                 "模式组 shift+tab 不投递任何文本：{body}"
             );
-            assert_eq!(
-                fake.recorded_keys(),
-                vec![(91u32, "shift+tab".to_string())],
-                "目标档 {target} 同样只发一次 shift+tab：{body}"
-            );
+            if expect_keys {
+                assert_eq!(
+                    fake.recorded_keys(),
+                    vec![(91u32, "shift+tab".to_string())],
+                    "target={target} 只发一次 shift+tab：{body}"
+                );
+                assert_eq!(v["verified"], true, "新事件行命中 → verified：{body}");
+                assert_eq!(
+                    v["observed"], "plan",
+                    "observed = 末拍屏读档（m-6 新字段）：{body}"
+                );
+            } else {
+                assert!(
+                    fake.recorded_keys().is_empty(),
+                    "target={target} 前读已在目标档 → 零投递：{body}"
+                );
+                assert_eq!(v["verified"], true, "已在目标档 = 切换完成：{body}");
+                assert!(body.contains("已在目标档"), "零投递回执 hint：{body}");
+                assert_eq!(v["observed"], "default", "{body}");
+            }
+            // 零投递分支也要审计（zero-key 标注在审计摘要里，见断言）
+            let audits = state
+                .store
+                .with(|c| crate::database::dao::write_audit::recent_conn(c, 10));
+            assert_eq!(audits[0].action, "mode", "{body}");
+            if zero_key {
+                assert!(
+                    audits[0].summary.contains("已在目标档"),
+                    "零投递也要审计（zero-key 标注）：{:?}",
+                    audits[0].summary
+                );
+            }
         }
+    }
+
+    /// POST：codex 模式组 **CI 无屏读 → 前读闸零投递如实拒**（spec §3.1 第一分支）：
+    /// 无屏读探针 → Err「读不到屏」→ status=failed、零键零文本、审计如实记录失败。
+    /// 还原动作（变异）：把前读闸删掉（读不到屏也盲发 shift+tab）→ 本测试先红。
+    #[tokio::test]
+    async fn session_mode_switch_codex_mode_group_no_screen_refuses_zero_delivery() {
+        let fake = FakeInjector::ok();
+        let (state, sid) = mode_state_with_injector(
+            fake.clone(),
+            "sess_mc_toggle_noscreen",
+            crate::session::AgentType::Codex,
+            911,
+            crate::session::SessionStatus::Waiting,
+            std::sync::Arc::new(|_, _| None),
+        );
+        persist_named_device(&state, "mm", "测试设备");
+        let r = router(state)
+            .oneshot(req(
+                "POST",
+                "/m/api/v1/session-mode/switch",
+                Some("mam_device=mm"),
+                Some(&format!(
+                    r#"{{"sessionId":"{sid}","target":"plan","group":"mode"}}"#
+                )),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(r.status(), 200);
+        let body = body_string(r).await;
+        assert!(
+            fake.recorded().is_empty() && fake.recorded_keys().is_empty(),
+            "读不到屏零投递（不盲发）：{body}"
+        );
+        assert!(
+            body.contains("\"status\":\"failed\"") && body.contains("读不到屏"),
+            "如实拒：{body}"
+        );
     }
 
     /// POST：**显式 group 路由**（丁T4 新增字段）——codex 权限组「完全信任」→ 走
@@ -13061,17 +13508,39 @@ mod tests {
 
     /// POST：**旧客户端不带 group** —— codex 的 `default` 由后端推断到模式组
     /// （2026-09-23 起 Default 两组都可选 → 歧义消解与 kimi 同规：取模式组，
-    /// shift+tab toggle；见 `resolve_group` 文档与 `group_inference_rules`）
+    /// shift+tab toggle；见 `resolve_group` 文档与 `group_inference_rules`）。
+    /// T4-F3 后模式组 Key 路 = codex toggle 闭环（前读闸需要屏读）——屏脚本：
+    /// 前读 = Plan 态（`Plan mode` 短语在状态栏窗）≠ 目标 default → 发键 → 核验拍
+    /// 状态栏翻 Default（` · ` 形态）→ verified（本测关注组推断与投递本身）。
     #[tokio::test]
     async fn session_mode_switch_infers_group_for_legacy_client() {
         let fake = FakeInjector::ok();
-        let (state, sid) = mode_state_with_injector(
+        // 前读屏 = Plan 态（底 3 行窗内模型行尾带 Plan mode 短语）；核验拍 = 状态栏
+        // 翻 Default（` · ` 形态、无模式字样 → 缺席推断）。槽序：① before 快照
+        // ② read_pre ③ 核验拍（命中即停）。
+        let pre = screen_lines(&[
+            "  普通输出",
+            "• Model changed to deepseek-v4.1-flash high for Default mode.",
+            "  deepseek-v4.1-flash high · ~\\proj                    Plan mode",
+            "  ← for agents · ? for shortcuts",
+            "› Ask Codex to do anything",
+        ]);
+        let after = screen_lines(&[
+            "  普通输出",
+            "• Model changed to deepseek-v4.1-flash high for Default mode.",
+            "  deepseek-v4.1-flash high · ~\\proj",
+            "  ← for agents · ? for shortcuts",
+            "› Ask Codex to do anything",
+        ]);
+        let probe = scripted_screen_probe(vec![Some(pre.clone()), Some(pre), Some(after)]);
+        let (state, sid) = mode_state_with_screen(
             fake.clone(),
             "sess_t4_infer",
             crate::session::AgentType::Codex,
             86,
             crate::session::SessionStatus::Waiting,
             std::sync::Arc::new(|_, _| None),
+            probe,
         );
         persist_named_device(&state, "mm", "测试设备");
         let app = router(state.clone());

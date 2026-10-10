@@ -76,8 +76,9 @@
 //!   `/permissions` 之后实际哪个权限被选择了」；
 //! - **第三段**（**仅** codex × Full Access，档案 §3 证实 1/2/3 档无此段）：二次确认框
 //!   `Enable full access?` → 定位**唯一**含 `continue` 的肯定项 → 同一套闭环 → 提交；
-//! - **成功回执核验**：屏读工具自己的成功回执行（codex `• Permissions updated to …`
-//!   / kimi `Permission mode: …`）——见 [`permission_receipt_verified`]。
+//! - **成功回执核验**：屏读工具自己的成功回执行（codex **双代词形**：0.160.0
+//!   `• Permission selection requested: …` ／ 0.154 旧锚 `Permissions updated to …`；
+//!   kimi `Permission mode: …`）——见 [`permission_receipt_verified`]。
 //!
 //! 第二段与丁T3 对话框守卫的关系是本任务最需要想清楚的冲突——详见
 //! [`crate::remote::api::session_mode_switch`] 的文档（那里是菜单路径唯一实现点）。
@@ -559,8 +560,11 @@ pub fn mode_structure(tool: &str) -> ModeStructure {
                 id: ModeGroupId::Permission,
                 label: ModeGroupId::Permission.label(),
                 step: false,
-                // 权限档**没有**底栏回读源（实测底栏只有模式文本）→ 前端「请人工核对」
-                readback: false,
+                // 权限档**状态栏零显示**（0.160.0 复核定案）——旧「底栏只有模式文本
+                // → 无回读源」在底栏面仍真，但回读源已换**事件行**（最新
+                // `• Permission selection requested: <标签>`；滚出 → None → GET 侧
+                // 回落「上次切换」记忆，spec §3.3 权限轴三级回落）
+                readback: true,
                 // **单选面板**（2026-09-23 用户方案）：兔维斯 读回终端菜单的选项表交给
                 // 用户点，点哪项敲哪个数字键——不再由后端猜「该敲哪个数」（档位编号
                 // 随 Guardian 配置前移，硬编码「4→1」会错）
@@ -1036,13 +1040,19 @@ fn parse_kimi_permission_footer(lines: &[String]) -> Option<MamMode> {
 /// 屏读文本 → **指定组的当前档**（模式轴 / 权限轴分发的单一入口）。
 ///
 /// - 模式轴：四家各自底栏（[`parse_mode_from_screen`]）；
-/// - 权限轴：**仅 kimi 有底栏回读源**（2.1.1 起）；codex 权限组底栏仍只有模式文本
-///   → None；其余工具无两轴结构 → None。
+/// - 权限轴：kimi 走底栏（[`parse_kimi_permission_footer`]，2.1.1 起）；codex 走
+///   **最新回执行**（[`codex_permission_current_from_screen`]，2026-10-09——状态栏
+///   零显示、事件行滚出即 None → 调用方回落记忆，spec §3.3）；其余工具无两轴结构
+///   → None。
 pub fn parse_axis_from_screen(tool: &str, group: ModeGroupId, lines: &[String]) -> Option<MamMode> {
     match group {
         ModeGroupId::Mode => parse_mode_from_screen(tool, lines),
         ModeGroupId::Permission => match tool {
             "kimi" => parse_kimi_permission_footer(lines),
+            // codex 权限轴回读（2026-10-09）：状态栏零显示——唯一屏读源 = 最新
+            // 回执行（`• Permission selection requested: <标签>`）；滚出 → None
+            // → 调用方回落记忆（api.rs recall_permission_tier，三级回落 spec §3.3）
+            "codex" => codex_permission_current_from_screen(lines),
             _ => None,
         },
     }
@@ -1089,6 +1099,431 @@ fn contains_word(haystack: &str, word: &str) -> bool {
         from = end;
     }
     false
+}
+
+/// codex **模式切换事件行**行形判据（2026-10-09 风险预测试批，底料 §1/§5）：
+/// `• Model changed to <model> <effort> for <Plan|Default> mode.`
+/// ——模型名/effort 是变量不参与匹配；判据锁**前缀 + 尾段**：
+/// 前缀 `model changed to`、尾段 `for plan mode.` / `for default mode.`
+/// （含句号）。**不进账本**（含变量，行形解析不 contains——spec §6-T2）。
+/// 返回该行表意档（Plan/Default）；无变量中段校验（两锚之间非空即收）。
+/// **事件行只是「最近一次切换」的记录，不是当前档的权威**——消费优先级见
+/// [`codex_mode_current_from_screen`]（状态栏权威、事件行兜底）。
+///
+/// 判据选型（以底料 §1 逐字为准）：实测行恒带 `• ` 前缀与句号，但取
+/// 「contains `model changed to` + 以 `for plan mode.` / `for default mode.`
+/// 结尾（trim_end 后）」两锚交集——前缀 contains 已被句号尾段双重锁死误命中面
+/// （正文引用该句的概率远低于缺 bullet 的重绘撕裂变体，底料 §5.1/§6 交叠形态）；
+/// `starts_with("• model changed to ")` 会把撕裂帧里 bullet 被吞的变体整行漏掉。
+/// 两锚取交集是「少漏 + 误命中面已被尾段封死」的平衡点。
+pub(crate) fn parse_codex_mode_event_line(line: &str) -> Option<MamMode> {
+    let lower = line.to_lowercase();
+    if !lower.contains("model changed to") {
+        return None;
+    }
+    let trimmed = lower.trim_end();
+    if trimmed.ends_with("for plan mode.") {
+        Some(MamMode::Plan)
+    } else if trimmed.ends_with("for default mode.") {
+        Some(MamMode::Default)
+    } else {
+        None
+    }
+}
+
+/// codex 状态栏**行窗**行数（底料 §6 定案「状态栏可跨 1–2 行渲染 + composer 上方
+/// 模型行」：mp-st-3 / mp-scroll-after 实测状态栏块恒占底部 3 行——模型行、提示行、
+/// 撕裂残段行；事件行恒在 composer 区之上，不进此窗）。
+const CODEX_STATUS_BAR_WINDOW_ROWS: usize = 3;
+
+/// codex 模式轴**当前档双源判定**（spec §3.3 优先级表）：
+/// 1. **状态栏在场即权威**——按 T4 的**行窗单源**（[`codex_state_bar_mode`]：先
+///    剔除事件行、再取底部 [`CODEX_STATUS_BAR_WINDOW_ROWS`] 行交
+///    [`parse_codex_footer`]）判读。行窗构造依据（底料 §6）：「状态栏可跨 1–2 行
+///    渲染，解析按『行窗』不按『单行』取词」。终审 P2-4 判据一致化：本函数曾用
+///    **裸** `parse_codex_footer`（窗不剔事件行）——事件行落进底 3 行窗时其
+///    `for <M> mode.` 短语会抢在真状态栏之前被误读成「状态栏在场」（事件行是
+///    「切换记录」不是状态栏；与 [`codex_switch_verified`] 的状态栏判据两路不一）；
+/// 2. 状态栏行窗不可判（None——形态漂移/被滚出/无锚）→ **自底向上找最新事件行**
+///    兜底（[`parse_codex_mode_event_line`]）。
+///
+/// 返回 None = 两源都不可判（调用方「未知」如实，不猜）。
+pub(crate) fn codex_mode_current_from_screen(lines: &[String]) -> Option<MamMode> {
+    if let Some(mode) = codex_state_bar_mode(lines) {
+        return Some(mode);
+    }
+    lines
+        .iter()
+        .rev()
+        .find_map(|l| parse_codex_mode_event_line(l))
+}
+
+/// codex **权限切换回执行**解析（2026-10-09 风险预测试批，底料 §1/§7）：
+/// `• Permission selection requested: <菜单项标签去编号>`——标签 = 菜单项本名
+/// 全形（档 2 = `Ask for approval (non-admin sandbox)`）。判据 = 行含账本锚
+/// `permission selection requested`（[`crate::inject::anchor_ledger`] PERMISSION_MENU/
+/// RECEIPT，0.160.0 词形）→ 冒号后标签 → 与 [`menu_target_label`] 四档
+/// **前缀匹配**（回执行标签 starts_with 菜单短形标签——`ask for approval (non-admin
+/// sandbox)` starts_with `ask for approval`；反向不行；描述列无交叉词——底料 §7
+/// 无误配面实证）。
+///
+/// 两步判据（锚步 + 冒号步）各自如实：锚不命中 = 不是回执行（菜单行/标题/普通正文
+/// → None）；锚命中但冒号后标签匹配不到任何档 = 认不出的档（→ None，**不猜**——
+/// 上游新档位/文案变更时宁可「未知」也不能把新档误归旧档）。0.154 旧锚
+/// `permissions updated to` 不进本判据（无冒号标签段，锚步即放行）——GET 的记忆
+/// 回落与回执核验各自沿用旧通道，与本屏读面互不污染。
+///
+/// **多行并存取最新**（底料 §4：最新一条 = 当前档）——本函数单行判定，扫屏取最新
+/// 在 [`codex_permission_current_from_screen`]。
+///
+/// # 重绘撕裂容忍（spec §4-附加）
+///
+/// 撕裂会产出「同一行连续两行」（读取侧瞬态）——本函数是**纯单行判定**，撕裂行
+/// 与原行内容相同、解析结果一致；扫屏侧 `find_map` 自底向上取「最新一条有效行」，
+/// 重复行不改变结论，**无需去重**（去重反而多一道假阴性面：撕裂行内容可能被交叠
+/// 破坏——底料 §9-3「撕裂行不满足行形判据时跳过」，跳过即本函数返回 None，
+/// 自然落到上一条有效行，正是想要的容忍形态）。
+///
+/// 返回 None 的情形：行不是回执行 / 标签匹配不到任何档（不猜）。
+pub(crate) fn parse_codex_permission_event_line(line: &str) -> Option<MamMode> {
+    // 锚步：行含账本锚才可能是回执行（小写比较，与账本全小写词形一致；P2-1
+    // 单点常量 = 账本 RECEIPT 新行 text）
+    let lower = line.to_lowercase();
+    if !lower.contains(CODEX_PERMISSION_RECEIPT_ANCHOR) {
+        return None;
+    }
+    // 冒号步：取冒号后标签段（`split_once` 取**首个**冒号——标签自身不含冒号，
+    // 底料 §7 四档标签均无）
+    let (_anchor_part, label_part) = lower.split_once(':')?;
+    let label = label_part.trim();
+    // 匹配步：与四个菜单短形标签做前缀匹配；**唯一命中**才 Some
+    // （四档标签互不为前缀——read only / ask for approval / approve for me /
+    // full access 首词即分家，唯一性是表性质；多命中是防御分支）
+    let tiers = [
+        (
+            menu_target_label("codex", MamMode::ReadOnly),
+            MamMode::ReadOnly,
+        ),
+        (
+            menu_target_label("codex", MamMode::Default),
+            MamMode::Default,
+        ),
+        (
+            menu_target_label("codex", MamMode::AcceptEdits),
+            MamMode::AcceptEdits,
+        ),
+        (menu_target_label("codex", MamMode::Bypass), MamMode::Bypass),
+    ];
+    let mut hit: Option<MamMode> = None;
+    for (label_opt, mode) in tiers {
+        let Some(short) = label_opt else {
+            continue;
+        };
+        if label.starts_with(&short.to_lowercase()) {
+            if hit.is_some() {
+                return None; // 多命中（不可能但防御）：混入正文 → 不猜
+            }
+            hit = Some(mode);
+        }
+    }
+    hit
+}
+
+/// codex 权限轴**当前档屏读判定**（spec §3.3）：权限档状态栏零显示（0.160.0
+/// 定案，底料 §4-R2——约 30 行输出即滚出、屏上零权限痕迹）——唯一屏读源 =
+/// 最新回执行。自底向上找第一条可解析的回执行（= 最新）。
+///
+/// None = 屏上无回执行（滚出/未切换过）→ 调用方回落记忆通道（api.rs
+/// [`crate::remote::api::recall_permission_tier`]，既有）→ 都无 = 未知如实
+/// （「屏读 → 记忆 → 未知」三级回落，spec §3.3 权限轴行）。
+pub(crate) fn codex_permission_current_from_screen(lines: &[String]) -> Option<MamMode> {
+    lines
+        .iter()
+        .rev()
+        .find_map(|l| parse_codex_permission_event_line(l))
+}
+
+// ===== 切换闭环核验：内容集差分（2026-10-09 T4，spec §3.1/§3.2/§4-R5）=====
+
+/// codex 模式/权限切换的**闭环核验**基线（动作前记录）：屏上全部事件行文本集合
+/// （模式+权限两类）。动作后核验用「新于基线」= 内容集差分
+/// （[`codex_switch_verified`]）——防两类误确认：旧行留存（spec §4-R1d/e）、
+/// 视口还原揭示旧行（§4-R5）；系统自动切换（§4-R3b/c——plan 批准也打事件行）
+/// 由「只认本动作时间窗内的新行」挡住（基线在此动作前 capture）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModeSwitchBaseline {
+    /// 动作前屏上全部事件行文本（模式+权限两类；trim + lowercase 入集——
+    /// 「新于基线」按该归一形态比较，撕裂瞬态不参与判据）
+    pub event_lines: std::collections::HashSet<String>,
+}
+
+/// 记录切换动作前的**内容集基线**（[`ModeSwitchBaseline`]）：
+/// `event_lines` = 屏上所有满足 [`parse_codex_mode_event_line`] 或
+/// [`parse_codex_permission_event_line`] 的行（trim + lowercase 入集）。
+pub(crate) fn capture_mode_switch_baseline(lines: &[String]) -> ModeSwitchBaseline {
+    let mut event_lines = std::collections::HashSet::new();
+    for l in lines {
+        if parse_codex_mode_event_line(l).is_some()
+            || parse_codex_permission_event_line(l).is_some()
+        {
+            event_lines.insert(l.trim().to_lowercase());
+        }
+    }
+    ModeSwitchBaseline { event_lines }
+}
+
+/// 该行是否**新于基线**（内容集差分）：trim + lowercase 后不在基线事件行集合中。
+///
+/// 语义边界（spec §4-R5 如实申报）：同文案重复切换与视口还原**不可区分**——
+/// 同文案旧行在基线集合里已登记，还原/重选都不构成新证据；该面判据退化为
+/// 状态栏优先（模式轴状态栏可判；权限轴状态栏零显示 → 如实 unknown，不假 verified）。
+///
+/// 撕裂变体边界（登记不修，终审 P2-6）：中段损坏、前缀/尾段完好的撕裂行，其归一
+/// 文本不在基线集 → 可判「新」——低概率假阳性边界（撕裂是读取侧瞬态、同帧通常
+/// 伴随内容完好的原行已在基线集；且状态栏判据在模式轴先行兜底），如实登记不修。
+///
+/// `pub(crate)`：picker 的回执核验（api.rs pick 分支，T4-F4）用同一差分判据——
+/// 「新于基线的回执行」才算本次成功的证据（判据单点，勿在调用侧重写）。
+pub(crate) fn event_line_is_new(baseline: &ModeSwitchBaseline, line: &str) -> bool {
+    !baseline.event_lines.contains(&line.trim().to_lowercase())
+}
+
+/// picker 链共用的**最新新回执行**（单点判据，终审 nit 提炼——api.rs 三处
+/// 「parse + is_new」重复手拼收口于此）：自底向上找第一条「可解析为权限回执行
+/// **且** 新于基线内容集」的行。调用方拿到行文本后再做目标档/标签的二次判定
+/// （本函数不绑档——确认框 Yes 路 / 菜单段 Done 路的判定时机不同）。
+/// None = 屏上没有新于基线的回执行（未生效/旧行留存/视口还原，R1c/R5）。
+pub(crate) fn latest_new_permission_receipt(
+    lines: &[String],
+    baseline: &ModeSwitchBaseline,
+) -> Option<String> {
+    lines
+        .iter()
+        .rev()
+        .find(|l| {
+            parse_codex_permission_event_line(l).is_some() && event_line_is_new(baseline, l)
+        })
+        .cloned()
+}
+
+/// codex 模式/权限切换的**闭环核验**（单拍判据，纯函数；spec §3.1/§3.2/§4-R5）。
+///
+/// # 判据（单拍，任一命中即 verified；轮询形态由调用方逐拍驱动，窗尽 = 未生效）
+/// - **模式轴**：状态栏翻到目标档（[`codex_mode_current_from_screen`] == expected）
+///   ∨ 屏上出现**不在基线行集合**中的 `for <目标> mode.` 事件行；
+/// - **权限轴**：屏上出现**不在基线行集合**中的 `• Permission selection requested:
+///   <目标档标签>` 行（[`parse_codex_permission_event_line`] == expected）∨
+///   旧锚 `permissions updated to <label>` 新于基线（0.154 兼容——label 用
+///   [`menu_target_label`] 短形前缀匹配，`ask for approval` 覆盖全形回执行）。
+///
+/// 返回 true = 本拍有切换生效的新证据；false = 无证据（不区分「未生效」与
+/// 「未重绘」——那是轮询窗的事，D20(b) 由调用方的窗尽回执区分）。
+pub(crate) fn codex_switch_verified(
+    lines: &[String],
+    baseline: &ModeSwitchBaseline,
+    group: ModeGroupId,
+    expected: MamMode,
+) -> bool {
+    match group {
+        ModeGroupId::Mode => {
+            // 状态栏权威（spec §3.3「在场即权威」）：状态栏行窗判出目标档 → 直接
+            // verified。行窗是底部 3 行的**独立单源**（[`codex_state_bar_mode`]），
+            // 不吃 [`codex_mode_current_from_screen`] 的事件行兜底——兜底读出的档
+            // 可能正是**旧行还原**的产物，必须走下面的「新于基线」核验，不能借道
+            // 状态栏判据绕过差分（R5 的同一道闸）。
+            if codex_state_bar_mode(lines) == Some(expected) {
+                return true;
+            }
+            // 事件行路径：`for <目标> mode.` 行且**新于基线**（旧行留存/视口还原
+            // 都不算——R1d/e、R5）
+            lines.iter().rev().any(|l| {
+                parse_codex_mode_event_line(l) == Some(expected) && event_line_is_new(baseline, l)
+            })
+        }
+        ModeGroupId::Permission => {
+            // 新锚：目标档回执行（新于基线）
+            let new_receipt = lines.iter().rev().any(|l| {
+                parse_codex_permission_event_line(l) == Some(expected)
+                    && event_line_is_new(baseline, l)
+            });
+            if new_receipt {
+                return true;
+            }
+            // 旧锚（0.154 兼容）：`permissions updated to <label>`（新于基线）——
+            // label 用菜单短形前缀（回执行全形 starts_with 短形，同 §3.3 匹配纪律）
+            let Some(label) = menu_target_label("codex", expected) else {
+                return false;
+            };
+            let label_lower = label.to_lowercase();
+            lines.iter().rev().any(|l| {
+                let lower = l.trim().to_lowercase();
+                lower.contains("permissions updated to")
+                    && lower.contains(&label_lower)
+                    && event_line_is_new(baseline, l)
+            })
+        }
+    }
+}
+
+/// codex **状态栏行窗**的当前档（单源：只判状态栏，不吃事件行兜底）——
+/// [`codex_mode_current_from_screen`] 与 [`codex_switch_verified`] 共用的拆分视图。
+/// None = 状态栏行窗不可判（形态漂移/被滚出）。
+///
+/// 行窗构造前**剔除事件行**（模式+权限两类）：事件行是「切换记录」，不是状态栏——
+/// 事件行尾段的 `for Plan mode.` 含 `plan mode` 短语，若混进行窗会被
+/// [`parse_codex_footer`] 的短语判据误读成「状态栏在场」（核验路径的假 verified 面；
+/// 小屏/短行集时事件行必然落进底 3 行窗）。真实底栏行不含 `model changed to`
+/// 前缀、不解析为事件行，不受剔除影响。
+fn codex_state_bar_mode(lines: &[String]) -> Option<MamMode> {
+    let body: Vec<String> = lines
+        .iter()
+        .filter(|l| {
+            parse_codex_mode_event_line(l).is_none()
+                && parse_codex_permission_event_line(l).is_none()
+        })
+        .cloned()
+        .collect();
+    let start = body.len().saturating_sub(CODEX_STATUS_BAR_WINDOW_ROWS);
+    let window = body[start..].join("\n");
+    parse_codex_footer(&[window])
+}
+
+// ===== codex 模式组 Key 路闭环编排（2026-10-09 T4，spec §3.1；api.rs 装配、本处纯逻辑）=====
+
+/// codex 模式组 shift+tab 切换**编排内核**的产物（api.rs 据此合成回执 wire 字段）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModeToggleOutcome {
+    /// 前读即已在目标档（零投递分支；回执 status=done、零键也要审计）
+    pub already_on_target: bool,
+    /// 闭环核验结论（零投递分支恒 true；窗尽无变化 = false）
+    pub verified: bool,
+    /// 前读判定的当前档（None = 状态栏+事件行都不可判——**不拒绝**，判据缺 ≠ 档不符）
+    pub pre_read: Option<MamMode>,
+    /// 末拍屏读的当前档（回执 `observed` 字段——前端据此前读/后读不一致时自理卡面）
+    pub observed: Option<MamMode>,
+    /// 实际投递的键序列（审计与测试断言用；零投递 = 空）
+    pub sent_keys: Vec<String>,
+}
+
+/// codex 模式组切换（shift+tab）的**闭环编排内核**（spec §3.1 流程图的代码面；
+/// 纯逻辑——屏读/发键/等待全部注入，与 [`run_codex_permission_stages`] 同款理由：
+/// 段间控制流是判据的一部分，写在端点 `#[cfg(windows)]` 闭包里就只有实机能覆盖）。
+///
+/// # 编排（spec §3.1 逐段）
+///
+/// 1. **前读闸**：`read_pre()` 读一屏——None（读不到屏）→ `Err`（**零投递**；api.rs
+///    把 Err 转成 failed 回执 + failed 审计——实现取比 spec §3.1 原稿「零审计」更
+///    保守的口径，终审 P2-5 如实对齐）；Some → [`codex_mode_current_from_screen`]：
+///    - 判出目标档 → **零投递**回 [`ModeToggleOutcome`]（`already_on_target=true`、
+///      `verified=true`、`sent_keys` 空）——已在目标档无需切换，但 api.rs 仍要审计
+///      （action=mode，标注 zero-key）；
+///    - 判出其它档 / **判不出（None）** → 继续发键——**判据缺 ≠ 档不符**，不拒绝
+///      （spec §3.1 前读闸第三分支）。
+/// 2. **基线**：发键前 [`capture_mode_switch_baseline`]（内容集差分的「前」侧）。
+/// 3. **发键**：`send_key("shift+tab")`（生产 2 记录形态零改动——api.rs 的
+///    `locate_and_send_key_spec` 装配）；成功后 `settle()`。
+/// 4. **核验**：`poll_verify()` 有界轮询（拍数上界 = `verify_rounds`——生产侧由
+///    [`crate::inject::timing::poll_rounds`] 把 [`crate::inject::timing::
+///    MODE_SWITCH_VERIFY_POLL_TOTAL_MS`] 按 [`crate::inject::timing::POLL_STEP_MS`]
+///    换算成拍数注入，与 [`poll_mode_readback`] 的 `rounds` 同构，窗 = 步长 × 拍数，
+///    D20(b) 的「有界」就体现在这两项上）——每拍 [`codex_switch_verified`]（Mode 组）：
+///    - 命中 → `verified=true`，`observed` = 该拍 [`codex_mode_current_from_screen`]
+///      （命中即停，D20(a)）；
+///    - `Ok(None)` = 该拍读不到屏 → 停止轮询（保持最后读数，不空转）；
+///    - `Err` = 读屏基础设施异常（键已投递，屏读瞬态不否定切换）→ 按「本轮无读数」
+///      继续，**不向外传播**；
+///    - 窗尽 → `verified=false`，`observed` = 最后一拍读数。
+///
+/// # 参数
+///
+/// `target` 目标档；`verify_rounds` 核验窗拍数上界（`.max(1)` 纵深防御照抄
+/// [`poll_mode_readback`]——0 拍 = 不读 = 无产物，不是有界轮询而是放弃；
+/// `timing::poll_rounds` 已保证不下发 0）；`read_pre` 前读（单拍，D20(c) 瞬时快照
+/// 语义）；`poll_verify` 核验拍（返回 `Some(lines)` = 该拍屏读原文，None = 该拍
+/// 读不到屏；`Err` = 屏读基础设施异常——按无读数处理）；`settle` 拍间等待
+/// （生产 = [`crate::inject::timing::POLL_STEP_MS`]）；`terminal` 发键与 settle 的
+/// 终端缝（[`MenuTerminal`] 三件套——发键经 `terminal.send("shift+tab")`，
+/// **生产 2 记录形态由 api.rs 的 send 装配决定**，内核只发键名）。
+pub fn run_codex_mode_toggle_stages<Rd, Pv, W, T>(
+    target: MamMode,
+    verify_rounds: u32,
+    mut read_pre: Rd,
+    mut poll_verify: Pv,
+    mut settle: W,
+    terminal: &mut T,
+) -> Result<ModeToggleOutcome, String>
+where
+    Rd: FnMut() -> Option<Vec<String>>,
+    Pv: FnMut() -> Result<Option<Vec<String>>, String>,
+    W: FnMut(),
+    T: MenuTerminal,
+{
+    // ===== 段 1：前读闸（D20(c) 瞬时快照——单次读，不轮询）=====
+    let Some(lines) = read_pre() else {
+        return Err(
+            "读不到屏——零投递（模式切换需要屏读确认当前档；请人工核对终端后重试）".to_string(),
+        );
+    };
+    let pre_read = codex_mode_current_from_screen(&lines);
+    if pre_read == Some(target) {
+        log::info!("codex 模式切换：前读已在目标档 {target:?} → 零投递回执（零键也要审计）");
+        return Ok(ModeToggleOutcome {
+            already_on_target: true,
+            verified: true,
+            pre_read,
+            observed: pre_read,
+            sent_keys: Vec::new(),
+        });
+    }
+    if pre_read.is_none() {
+        log::debug!("codex 模式切换：前读无法判定当前档（判据缺 ≠ 档不符）→ 如实继续发键");
+    }
+    // ===== 段 2：基线（内容集差分的「前」侧）=====
+    let baseline = capture_mode_switch_baseline(&lines);
+    // ===== 段 3：发键（生产 2 记录形态在 api.rs 装配；这里只发键名）=====
+    terminal.send("shift+tab")?;
+    terminal.settle();
+    let sent_keys = vec!["shift+tab".to_string()];
+    // ===== 段 4：核验（基线差分轮询——变化即验，命中即停；拍数上界防挂死）=====
+    let mut verified = false;
+    let mut observed: Option<MamMode> = pre_read; // 一拍都没读到时以前读为最后读数
+    for round in 0..verify_rounds.max(1) {
+        match poll_verify() {
+            Ok(Some(lines)) => {
+                observed = codex_mode_current_from_screen(&lines);
+                if codex_switch_verified(&lines, &baseline, ModeGroupId::Mode, target) {
+                    verified = true;
+                    log::debug!(
+                        "codex 模式切换：核验第 {}/{r} 拍命中目标档 {target:?}（变化即验，命中即停）",
+                        round + 1,
+                        r = verify_rounds.max(1)
+                    );
+                    break;
+                }
+            }
+            // 该拍读不到屏 → 停止（保持最后读数，不空转）
+            Ok(None) => break,
+            // 屏读基础设施异常：键已投递，屏读瞬态不否定切换 → 按无读数继续
+            Err(e) => log::debug!(
+                "codex 模式切换：核验第 {} 拍读屏异常（按无读数继续）：{e}",
+                round + 1
+            ),
+        }
+        // 末拍不再等（等下去也没有下一拍可读）
+        if round + 1 < verify_rounds.max(1) {
+            settle();
+        }
+    }
+    if !verified {
+        log::debug!("codex 模式切换：核验窗尽 → verified=false（末拍读数 {observed:?}）——如实回执");
+    }
+    Ok(ModeToggleOutcome {
+        already_on_target: false,
+        verified,
+        pre_read,
+        observed,
+        sent_keys,
+    })
 }
 
 // ===== 回读确认（裁5「回读确认」/ 红线 4「不假装成功」）=====
@@ -1574,9 +2009,11 @@ pub(crate) enum CodexOverlay {
     PermissionMenu,
     /// Full Access 二次确认框（`Enable full access?`）
     ///
-    /// **判据顺序**：确认框优先——确认框弹出时菜单**可能仍在屏上**（overlay 叠加，
-    /// 见 [`crate::inject::dialog::parse_dialog_clusters`] 的同源注记），此时用户要
-    /// 面对的是确认框。
+    /// **判据顺序**：确认框优先。0.160.0 实测（底料 §2 实证，mp-fa-confirm-open
+    /// 同帧零菜单要素）：确认框**替换**菜单（非叠加）——确认框出现时菜单已不在屏，
+    /// 本枚举的「确认框优先」顺序在 0.160.0 下两判据互斥、顺序无实际影响；判据顺序
+    /// 保留以兼容旧版本可能的 overlay 叠加形态（见
+    /// [`crate::inject::dialog::parse_dialog_clusters`] 的同源注记）。
     FullAccessConfirm,
 }
 
@@ -2300,7 +2737,10 @@ where
 ///    等确认框簇 → 肯定项（唯一含 `continue` 项）的**屏上编号**直达（用户实测：
 ///    `Enable full access?` 按 `1` = Yes, continue anyway）；确认框缺席**不当作失败**
 ///    （用户可能关过该警告，与 [`run_menu_stages`] 同语义）；
-/// 4. **回执核验**：`poll_receipt()` 找 `permissions updated to <目标档>`。
+/// 4. **回执核验**：`poll_receipt()` 找「切到目标档」的回执行——**双代词形**
+///    （0.160.0 `Permission selection requested: <标签>` 优先，0.154 旧锚
+///    `permissions updated to <label>` 兼容；P1-1 终审，判据单点
+///    [`permission_receipt_verified`]）。
 ///
 /// 抽进内核的理由与 [`run_menu_stages`] 同源：段间控制流（残留防护、确认框缺席
 /// 不算失败）是判据的一部分，写在端点 `#[cfg(windows)]` 闭包里就只有实机能覆盖。
@@ -2496,8 +2936,18 @@ where
 /// 敲键前**必须**屏读确认「菜单或确认框确实在屏」：
 /// - 都不在屏 → `Err`（零投递：用户看到的可能是过期面板，敲进去会落到输入行）；
 /// - 在屏 → 发该数字键；随后再读屏：
-///   - **确认框在屏** → 交回调用方（[`MenuPick::Confirm`]，二阶段由用户点）；
+///   - **确认框在屏**（菜单阶段点了 Full Access）→ 交回调用方
+///     （[`MenuPick::Confirm`]，二阶段由用户点）；
 ///   - 否则 → 回执核验（[`MenuPick::Done`]）。
+///
+/// # 确认框**阶段**（0.160.0 实测，T4-F4 修复；spec §3.2 Full Access 分叉）
+///
+/// 旧版把「确认框在屏」一律零投递拒回（二阶段第二跳死路）；现在**确认框在屏时的
+/// 数字键按确认框阶段投递**：
+/// - `number` ∈ {1, 2}（确认框只有 Yes/Cancel 两项，**越界零投递**——菜单编号
+///   混进确认框是面板过期，敲 3/4 会落空或误触）；发键后确认框消失 →
+///   [`MenuPick::Done`]（Yes 路径，回执核验交调用方）；确认框仍在 →
+///   [`MenuPick::Confirm`]（键被吞/Cancel 回菜单读不到簇时如实交回用户）。
 ///
 /// 本段**绝不做 esc 清场**（overlay 在屏正是本次操作对象，不是"残留"——这正是它
 /// 不能走 [`codex_preflight`] 的原因）。
@@ -2530,11 +2980,34 @@ where
         );
     };
     if kind == CodexOverlay::FullAccessConfirm {
-        // 确认框在屏：本次该点的是确认框里的项，不是菜单项（面板与终端不一致）
-        return Err(
-            "屏上当前是 Full Access 确认框——请点确认框里的选项（面板数据已过期，请重新读取）"
-                .to_string(),
-        );
+        // 确认框阶段（T4-F4：旧版在此一律零投递——二阶段第二跳死路）：
+        // 只认确认框选项域 1/2；越界 = 面板过期（菜单编号混进确认框）零投递
+        if !matches!(number, 1 | 2) {
+            return Err(format!(
+                "Full Access 确认框只有 1（Yes）/ 2（Cancel）两项，屏上编号 {number} 越界——零投递（面板数据可能已过期，请重新读取）"
+            ));
+        }
+        terminal.send(&number.to_string())?;
+        terminal.settle();
+        // 步骤硬性 ≥0.5s（与菜单阶段同一条）
+        wait_floor();
+        // 判走向：确认框消失 → 走 Done（Yes 生效，回执核验交调用方）；仍在 → 键被吞
+        // （或 Cancel 回菜单但确认框探测窗读数滞后）——如实交回调用方
+        let confirm_gone = match read_screen() {
+            Some(l) => {
+                let low: Vec<String> = l.iter().map(|x| x.to_lowercase()).collect();
+                codex_overlay_kind(&low) != Some(CodexOverlay::FullAccessConfirm)
+            }
+            None => false, // 读不到屏复核 = 无法确认已生效 → 保守交回用户
+        };
+        if confirm_gone {
+            return Ok(MenuPick::Done {
+                screen: Vec::new(),
+                from_confirm_box: true,
+            });
+        }
+        let cluster = poll_confirm()?.unwrap_or_default();
+        return Ok(MenuPick::Confirm(cluster));
     }
     terminal.send(&number.to_string())?;
     terminal.settle();
@@ -2550,9 +3023,15 @@ where
             if codex_overlay_kind(&low) == Some(CodexOverlay::FullAccessConfirm) {
                 return Ok(MenuPick::Confirm(Vec::new()));
             }
-            Ok(MenuPick::Done { screen: l })
+            Ok(MenuPick::Done {
+                screen: l,
+                from_confirm_box: false,
+            })
         }
-        None => Ok(MenuPick::Done { screen: Vec::new() }),
+        None => Ok(MenuPick::Done {
+            screen: Vec::new(),
+            from_confirm_box: false,
+        }),
     }
 }
 
@@ -2560,10 +3039,16 @@ where
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MenuPick {
     /// 敲键后屏上出现二次确认框（Full Access）——选项表交用户点；空表 = 读不到选项
-    /// （前端提示「请重新读取」）。
+    /// （前端提示「请重新读取」）。确认框阶段发键后被吞时也走本走向（如实交回用户）。
     Confirm(Vec<DialogOption>),
-    /// 已投递且无确认框；`screen` = 敲键后的屏（供回执核验）。
-    Done { screen: Vec<String> },
+    /// 已投递且无确认框；`screen` = 敲键后的屏（供回执核验）。确认框阶段发键且
+    /// 确认框消失也走本走向（Yes 生效；`screen` 为空集——回执核验由调用方重读）。
+    /// `from_confirm_box` = 本次键发在**确认框阶段**（api.rs 回执判向用：Yes/Cancel
+    /// 语义不同——Yes 走核验回执，Cancel 可能只是「回菜单」而非完成切换）。
+    Done {
+        screen: Vec<String>,
+        from_confirm_box: bool,
+    },
 }
 ///
 /// 依据 = 实机取证档案 §3 + 用户 2026-09-23 实机走查：切 1/2/3 档**不出现**确认框，
@@ -2573,12 +3058,25 @@ pub fn needs_full_access_confirm(tool: &str, group: ModeGroupId, target: MamMode
     tool == "codex" && group == ModeGroupId::Permission && target == MamMode::Bypass
 }
 
-/// 工具的成功回执行**锚**（实机原文逐字；真源经账本，见
+/// codex **0.160.0 新锚词形**（回执改印 `• Permission selection requested: <标签>`
+/// ——底料 §1 实打）。P1-1 终审：0.154 锚 `permissions updated to` 在 0.160.0
+/// 恒缺席，回执核验若只认账本首行旧锚则恒 verified=false（段 4 回执自证全灭）。
+/// 消费侧判据 = 双代词形（本常量 + 旧锚）。P2-1 起词形**单点**在账本
+/// （[`crate::inject::anchor_ledger::CODEX_PERMISSION_RECEIPT_ANCHOR`]——账本
+/// RECEIPT 新行 `text` 与本消费侧引用同一字符串，改词形只动账本一处），此处
+/// 同名 re-export 供锚步 / 回执核验 / 绑定测试使用（不另立第二份词形真源）。
+pub(crate) use crate::inject::anchor_ledger::CODEX_PERMISSION_RECEIPT_ANCHOR;
+
+/// 工具的**旧代/现行**成功回执行锚（实机原文逐字；真源经账本，见
 /// [`crate::inject::anchor_ledger`] 的 `slot::RECEIPT` 行）：
-/// - codex：`• Permissions updated to Full Access`（档案 §3，1/2/3 与 4 档同形）；
-/// - kimi：`Permission mode: Always Ask`（档案 §5.1–5.3）。
+/// - codex：`• Permissions updated to Full Access`（档案 §3，1/2/3 与 4 档同形）
+///   ——**0.154 旧代词形**，0.160.0 起改印新词形（见
+///   [`CODEX_PERMISSION_RECEIPT_ANCHOR`]），旧行保留（旧版本终端兼容 + 账本
+///   append-only）；
+/// - kimi：`Permission mode: Always Ask`（档案 §5.1–5.3）——现行词形。
 ///
-/// 未入账的工具 → `None`（[`permission_receipt_verified`] 据此返回 false，不出手）。
+/// 返回 `candidates().first()`（账本序），未入账的工具 → `None`
+/// （[`permission_receipt_verified`] 据此对旧词形不出手）。
 fn permission_receipt_anchor(tool: &str) -> Option<&'static str> {
     crate::inject::anchor_ledger::candidates(
         tool,
@@ -2589,19 +3087,26 @@ fn permission_receipt_anchor(tool: &str) -> Option<&'static str> {
     .map(|r| r.text)
 }
 
-/// **成功回执核验**（纯函数，可测）：屏读行集里是否出现「成功切到**目标档**」的回执行。
-///
-/// 判据 = 某一行同时含该工具的**回执锚**与**目标档标签**（大小写不敏感）：
-/// - codex：`• Permissions updated to Full Access` 含锚 + 含 `Full Access` → 真；
-/// - kimi：`Permission mode: Always Ask` 含锚 + 含 `Always Ask` → 真。
+/// **成功回执核验**（纯函数，可测）：屏读行集里是否出现「成功切到**目标档**」的
+/// 回执行。判据 = **双代词形**（P1-1 终审修复，spec §3.2）：
+/// - **新词形（codex 0.160.0）**：行含 `permission selection requested` 且**冒号后
+///   标签段**前缀匹配目标档标签（与 [`parse_codex_permission_event_line`] 的匹配
+///   步同纪律——`ask for approval` 覆盖全形回执行）；
+/// - **旧词形（codex 0.154 / kimi 现行）**：行含该工具账本锚
+///   （[`permission_receipt_anchor`]）且含目标档标签（大小写不敏感）。
 ///
 /// **为什么不能只找锚**：菜单本身与说明文都可能含档位词，而**别的档**的旧回执行会
 /// 在屏上停留（用户先前切过档）——只认锚会把旧回执当成本次成功（正是「不假装成功」
 /// 要防的谎报）。锚 + 目标档标签两者同在，才是「本次确实切到了目标档」的证据。
 ///
-/// 未实测工具 → `false`（不出手）。**返回 false 不等于失败**：回执可能被后续输出刷走，
-/// 或用户此前关过该警告——调用方据此下发「请人工核对」，见
-/// [`crate::remote::api::session_mode_switch`]。
+/// **为什么不能只认旧锚**（本函数曾经的回归面）：0.160.0 的回执不再印
+/// `permissions updated to`——单锚判据在新版终端上恒 verified=false，菜单路径段 4
+/// 的「工具自证」证据链全灭（`receipt_and_verdict` 的一票之力失效）。
+///
+/// 未实测工具 → 旧词形 `false`（不出手）；新词形 gate 在 codex（其它工具的屏面
+/// 不出现该英文词形，gate 工具出身让「未实测不出手」契约保持可读）。**返回 false
+/// 不等于失败**：回执可能被后续输出刷走，或用户此前关过该警告——调用方据此下发
+/// 「请人工核对」，见 [`crate::remote::api::session_mode_switch`]。
 ///
 /// **空标签必须短路**（本函数唯一的失败开保险）：`contains("")` 恒真，调用方若因任何
 /// 原因传进空标签（如未实测工具的 `menu_target_label` 返回 `None` 后被 `unwrap_or("")`
@@ -2609,21 +3114,29 @@ fn permission_receipt_anchor(tool: &str) -> Option<&'static str> {
 /// 故此处显式短路（这条与 `menu_target_label` 的调用方兜底**成对**：任一侧改松都不会
 /// 静默放行）。
 pub fn permission_receipt_verified(tool: &str, lines: &[String], target_label: &str) -> bool {
-    let Some(anchor) = permission_receipt_anchor(tool) else {
-        return false; // 未入账工具：不出手（与旧实现的 `_ => return false` 同口径）
-    };
     if target_label.trim().is_empty() {
         return false; // 见文档「空标签必须短路」
     }
     let want = target_label.to_lowercase();
     lines.iter().any(|l| {
         let lower = l.to_lowercase();
-        lower.contains(anchor) && lower.contains(want.as_str())
+        // 新词形（codex 0.160.0）：锚在 + 冒号后标签段前缀匹配目标标签
+        if tool == "codex"
+            && lower.contains(CODEX_PERMISSION_RECEIPT_ANCHOR)
+            && lower
+                .split_once(':')
+                .is_some_and(|(_, label)| label.trim().starts_with(want.as_str()))
+        {
+            return true;
+        }
+        // 旧词形（codex 0.154 / kimi 现行）：锚 + 目标标签同在
+        permission_receipt_anchor(tool)
+            .is_some_and(|anchor| lower.contains(anchor) && lower.contains(want.as_str()))
     })
 }
 
-/// **成功回执行**原文提取（picker 用）：屏上出现该工具的回执锚即返回**该行原文**
-/// （未出现 → `None`）。
+/// **成功回执行**原文提取（picker 用）：屏上出现该工具的**任一代**回执锚即返回
+/// **该行原文**（未出现 → `None`）。
 ///
 /// # 与 [`permission_receipt_verified`] 的差别（为什么两个都要）
 ///
@@ -2632,11 +3145,19 @@ pub fn permission_receipt_verified(tool: &str, lines: &[String], target_label: &
 /// 后端不知道它对应哪个 wire 档（档位集合随 Guardian 配置变化，用户也可能点了本机
 /// codex 新加的档）。故 picker 只能判「有没有成功回执行」，并把**原文**回给前端显示
 /// （用户自己看得见切到了哪档）——这是「如实」，不是「假装知道」。
+///
+/// P1-1 终审：判据同样**双代词形**（0.154 锚在 0.160.0 恒缺席——单锚兼容通道在
+/// 新版终端永不命中，picker 的「锚在屏」兜底失效）。
 pub fn permission_receipt_seen(tool: &str, lines: &[String]) -> Option<String> {
-    let anchor = permission_receipt_anchor(tool)?;
     lines
         .iter()
-        .find(|l| l.to_lowercase().contains(anchor))
+        .find(|l| {
+            let lower = l.to_lowercase();
+            // 新词形（codex 0.160.0）：选择事件行即「有回执」——目标档未知场景，
+            // 档名交前端原文显示
+            (tool == "codex" && lower.contains(CODEX_PERMISSION_RECEIPT_ANCHOR))
+                || permission_receipt_anchor(tool).is_some_and(|a| lower.contains(a))
+        })
         .map(|l| l.trim().to_string())
 }
 
@@ -3179,10 +3700,11 @@ mod tests {
             ),
             Some(MamMode::Plan)
         );
-        // codex 权限组：直达但**无回读源**（底栏只有模式文本）→ None
+        // codex 权限组 **2026-10-09 起有回读源**（最新回执行——状态栏零显示，
+        // 事件行即唯一屏读面，spec §3.3）→ Some（旧值 None 已过期，kimi 2.1.1 同款先例）
         assert_eq!(
             expected_mode_after("codex", ModeGroupId::Permission, MamMode::Bypass, None),
-            None
+            Some(MamMode::Bypass)
         );
         // kimi 权限组 **2.1.1 起有回读源**（底栏权限标签）→ Some（旧值 None 已过期）
         assert_eq!(
@@ -3602,6 +4124,487 @@ mod tests {
         assert_eq!(
             parse_mode_from_screen("codex", &lines(&["  Planning next steps"])),
             None
+        );
+    }
+
+    // ==== codex 模式事件行 × 模式轴双源判定（2026-10-09 风险预测试批 T2）====
+
+    /// mode-perm-20261009 屏读夹具读取（e_stage2_screen 同款惯例；注意目录层级：
+    /// e-stage2 在仓库根 `tests/fixtures/`，本目录在 `src-tauri/tests/fixtures/`）
+    #[cfg(test)]
+    fn mp_screen(name: &str) -> Vec<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/mode-perm-20261009")
+            .join(name);
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取夹具失败 {path:?}: {e}"));
+        raw.trim_start_matches('\u{feff}')
+            .lines()
+            .filter(|l| !l.starts_with("# "))
+            .map(|l| l.trim_end_matches('\r').to_string())
+            .collect()
+    }
+
+    /// codex 模式事件行判据（2026-10-09 底料 §1 逐字；变量中段不参与匹配）
+    #[test]
+    fn codex_mode_event_line_parses_both_modes() {
+        assert_eq!(
+            parse_codex_mode_event_line(
+                "• Model changed to deepseek-v4.1-flash medium for Plan mode."
+            ),
+            Some(MamMode::Plan)
+        );
+        assert_eq!(
+            parse_codex_mode_event_line(
+                "• Model changed to deepseek-v4.1-flash high for Default mode."
+            ),
+            Some(MamMode::Default)
+        );
+        // 变量无关：换模型名/effort 仍命中
+        assert_eq!(
+            parse_codex_mode_event_line("• Model changed to glm-5.3-flash max for Plan mode."),
+            Some(MamMode::Plan)
+        );
+        // 负例：正文引用/半句/无尾段句号不命中
+        assert_eq!(
+            parse_codex_mode_event_line("Model changed to X for Plan mode"),
+            None,
+            "缺句号（尾段锁含句号）"
+        );
+        assert_eq!(
+            parse_codex_mode_event_line("I asked for Plan mode."),
+            None,
+            "无前缀锚"
+        );
+        assert_eq!(parse_codex_mode_event_line(""), None);
+    }
+
+    /// codex 模式轴双源优先级（spec §3.3）：状态栏权威优先；事件行兜底；
+    /// 两源皆无 → None
+    #[test]
+    fn codex_mode_current_state_bar_wins_over_event_lines() {
+        // Plan 态夹具：状态栏 Plan mode 短语在场 + 事件行也在——状态栏可判即采信
+        // （结果同为 Plan；优先级语义由滚出态测试反向锁定：事件行滚出后状态栏
+        // 仍独立判档 Default，证明不是事件行在出答案）
+        let plan = mp_screen("codex-mp-plan-mode.txt");
+        assert_eq!(codex_mode_current_from_screen(&plan), Some(MamMode::Plan));
+        // Default 态：状态栏 ` · ` 形态（无模式字样）→ Default（缺席推断）
+        let default = mp_screen("codex-mp-default-mode.txt");
+        assert_eq!(
+            codex_mode_current_from_screen(&default),
+            Some(MamMode::Default)
+        );
+    }
+
+    #[test]
+    fn codex_mode_current_event_line_fallback_when_state_bar_unreadable() {
+        // 构造：状态栏被挤掉（删掉含 ` · ` 与 Plan mode 的行），只剩事件行
+        let mut lines = mp_screen("codex-mp-plan-mode.txt");
+        lines.retain(|l| {
+            let lo = l.to_lowercase();
+            !(lo.contains(" · ") || lo.contains("plan mode") && !lo.contains("model changed"))
+        });
+        assert_eq!(
+            codex_mode_current_from_screen(&lines),
+            Some(MamMode::Plan),
+            "状态栏不可判 → 自底向上最新事件行兜底"
+        );
+        // 全空 → None
+        assert_eq!(codex_mode_current_from_screen(&["".to_string()]), None);
+    }
+
+    #[test]
+    fn codex_mode_current_scrolled_returns_none_or_default() {
+        // 滚出态夹具（源 mp-scroll-after）：事件行滚出、状态栏 ` · ` 行仍在
+        // → 状态栏权威照常，缺席推断 Default（夹具实测钉死，不留双态断言）
+        let scrolled = mp_screen("codex-mp-scrolled.txt");
+        assert_eq!(
+            codex_mode_current_from_screen(&scrolled),
+            Some(MamMode::Default),
+            "滚出后状态栏仍可判（` · ` 在场）→ Default 缺席推断"
+        );
+    }
+
+    /// 终审 P2-4：事件行落进底 3 行窗**不误判**——事件行（`for Plan mode.`）与真
+    /// 状态栏同窗时，状态栏步骤不得把事件行短语误读成「状态栏在场」（旧裸窗把底
+    /// 3 行拼成整串判 `plan mode` 短语，事件行的短语抢在真状态栏的 ` · ` 形态之前
+    /// 命中 → 误判 Plan，状态栏 Default 权威被遮蔽）。与 [`codex_switch_verified`]
+    /// 一致化后事件行先剔除 → 状态栏 ` · ` 形态判 Default。还原动作（变异）：把
+    /// 状态栏步骤改回裸窗 → 本测试先红。
+    #[test]
+    fn codex_current_state_bar_window_ignores_event_lines() {
+        let screen = lines(&[
+            "  普通输出",
+            "  glm-5.3-flash high · ~\\proj", // 真状态栏：Default
+            "• Model changed to glm-5.3-flash max for Plan mode.", // 事件行（切换记录）
+            "› Ask Codex to do anything",
+        ]);
+        assert_eq!(
+            codex_mode_current_from_screen(&screen),
+            Some(MamMode::Default),
+            "窗内事件行不算状态栏——状态栏权威不被遮蔽"
+        );
+    }
+
+    // ==== codex 权限回执行解析 × 权限轴屏读（2026-10-09 风险预测试批 T3）====
+
+    /// codex 权限回执行解析（底料 §1/§7 逐字）：四档标签全形前缀匹配
+    #[test]
+    fn codex_permission_event_line_parses_all_tiers() {
+        assert_eq!(
+            parse_codex_permission_event_line("• Permission selection requested: Read Only"),
+            Some(MamMode::ReadOnly)
+        );
+        assert_eq!(
+            parse_codex_permission_event_line(
+                "• Permission selection requested: Ask for approval (non-admin sandbox)"
+            ),
+            Some(MamMode::Default),
+            "档 2 回执行打菜单全形标签（底料 §7）→ 前缀匹配到短形"
+        );
+        assert_eq!(
+            parse_codex_permission_event_line("• Permission selection requested: Approve for me"),
+            Some(MamMode::AcceptEdits)
+        );
+        assert_eq!(
+            parse_codex_permission_event_line("• Permission selection requested: Full Access"),
+            Some(MamMode::Bypass)
+        );
+        // 负例：菜单行/标题/认不出的档（不猜）
+        assert_eq!(
+            parse_codex_permission_event_line("1. Ask for approval (non-admin sandbox)"),
+            None,
+            "菜单行无账本锚 → 不命中"
+        );
+        assert_eq!(
+            parse_codex_permission_event_line("Update Model Permissions"),
+            None,
+            "标题行无账本锚 → 不命中"
+        );
+        assert_eq!(
+            parse_codex_permission_event_line("• Permission selection requested: Unknown Tier"),
+            None,
+            "锚命中但标签匹配不到任何档 → None（不猜）"
+        );
+        // 0.154 旧回执锚（无冒号标签段）：锚步放行、冒号步自然 None——不混入新判据
+        assert_eq!(
+            parse_codex_permission_event_line("• Permissions updated to Full Access"),
+            None
+        );
+    }
+
+    /// codex 权限轴屏读（最新回执行=当前档；撕裂容忍；滚出=None）
+    #[test]
+    fn codex_permission_current_latest_line_wins() {
+        // 夹具 codex-mp-fa-done.txt：四行回执行并存（底料 §8），Full Access 最新 → Bypass
+        let done = mp_screen("codex-mp-fa-done.txt");
+        assert_eq!(
+            codex_permission_current_from_screen(&done),
+            Some(MamMode::Bypass)
+        );
+        // 夹具 codex-mp-receipt-readonly.txt：单行 Read Only 回执行 → ReadOnly
+        let ro = mp_screen("codex-mp-receipt-readonly.txt");
+        assert_eq!(
+            codex_permission_current_from_screen(&ro),
+            Some(MamMode::ReadOnly)
+        );
+        // 滚出态夹具（mp-scroll-after）：零回执行 → None（调用方回落记忆通道）
+        let scrolled = mp_screen("codex-mp-scrolled.txt");
+        assert_eq!(codex_permission_current_from_screen(&scrolled), None);
+        // 多行并存：Read Only 回执行后追加 Full Access → 取最新（Full Access）
+        let mut multi = ro.clone();
+        multi.push("• Permission selection requested: Full Access".to_string());
+        assert_eq!(
+            codex_permission_current_from_screen(&multi),
+            Some(MamMode::Bypass)
+        );
+        // 撕裂容忍：同一回执行连打两行 → 判定不变（重复行内容相同、解析结果一致，
+        // find_map 自底向上取最新有效行——无需去重）
+        multi.push("• Permission selection requested: Full Access".to_string());
+        assert_eq!(
+            codex_permission_current_from_screen(&multi),
+            Some(MamMode::Bypass)
+        );
+    }
+
+    // ==== 切换闭环核验：内容集差分（2026-10-09 T4，spec §3.1/§3.2/§4-R5）====
+
+    /// **新事件行命中**（模式轴）：基线含旧行 `…for Plan mode.` → 动作后屏出现
+    /// **新行** `…high for Default mode.`（不在基线集合）→ verified（R1d/e 锁：
+    /// 旧行留存不作证据，新行才是）。
+    #[test]
+    fn switch_verified_by_new_event_line() {
+        let baseline_screen = lines(&[
+            "  普通输出",
+            "• Model changed to deepseek-v4.1-flash medium for Plan mode.",
+        ]);
+        let baseline = capture_mode_switch_baseline(&baseline_screen);
+        let after = lines(&[
+            "  普通输出",
+            "• Model changed to deepseek-v4.1-flash medium for Plan mode.",
+            "• Model changed to deepseek-v4.1-flash high for Default mode.",
+        ]);
+        assert!(
+            codex_switch_verified(&after, &baseline, ModeGroupId::Mode, MamMode::Default),
+            "新于基线的 Default 事件行 = 切换生效"
+        );
+        // 反向：新 Default 行在屏、目标却是 Plan → 不 verified（目标不符）
+        assert!(
+            !codex_switch_verified(&after, &baseline, ModeGroupId::Mode, MamMode::Plan),
+            "新行是 Default 不是 Plan——不得假 verified"
+        );
+    }
+
+    /// **视口还原旧行不构成证据**（R5 核心锁）：基线含 `…for Default mode.` 旧行 →
+    /// 动作后**同一行原样**还原（无新行）→ 不 verified。还原动作（变异）：把判据
+    /// 退化成纯「行存在」→ 本测试先红（旧行留存误确认的形态）。
+    #[test]
+    fn switch_not_verified_by_stale_line() {
+        let stale = "• Model changed to deepseek-v4.1-flash high for Default mode.";
+        let baseline_screen = lines(&["  普通输出", stale]);
+        let baseline = capture_mode_switch_baseline(&baseline_screen);
+        let after = baseline_screen.clone(); // 视口还原 = 同一屏原样
+        assert!(
+            !codex_switch_verified(&after, &baseline, ModeGroupId::Mode, MamMode::Default),
+            "旧行还原不是新证据（内容集差分）"
+        );
+    }
+
+    /// **状态栏权威**：无新事件行、状态栏翻到目标档 → verified（spec §3.3
+    /// 「状态栏在场即权威」；同文案重复切换无法与还原区分时判据退化到这一路）。
+    #[test]
+    fn switch_verified_by_state_bar_even_without_new_line() {
+        // 基线 = Plan 态夹具（状态栏 Plan mode 短语 + 旧行 `for Plan mode.` 都在集合里）
+        let baseline_screen = mp_screen("codex-mp-plan-mode.txt");
+        let baseline = capture_mode_switch_baseline(&baseline_screen);
+        // 动作后 = Default 态夹具（状态栏 ` · ` 形态 → Default 缺席推断；无新事件行）
+        let after = mp_screen("codex-mp-default-mode.txt");
+        assert!(
+            codex_switch_verified(&after, &baseline, ModeGroupId::Mode, MamMode::Default),
+            "状态栏翻到 Default = 切换生效（权威源优先）"
+        );
+    }
+
+    /// **权限轴新回执行命中**：基线 = receipt-readonly 夹具（含 Read Only 行）→
+    /// 动作后追加 `… requested: Approve for me` 新行 → AcceptEdits verified。
+    #[test]
+    fn permission_switch_verified_by_new_receipt_line() {
+        let baseline = capture_mode_switch_baseline(&mp_screen("codex-mp-receipt-readonly.txt"));
+        let mut after = mp_screen("codex-mp-receipt-readonly.txt");
+        after.push("• Permission selection requested: Approve for me".to_string());
+        assert!(
+            codex_switch_verified(
+                &after,
+                &baseline,
+                ModeGroupId::Permission,
+                MamMode::AcceptEdits
+            ),
+            "新于基线的 Approve for me 回执行 = 切换生效"
+        );
+    }
+
+    /// **权限轴视口还原旧行**（R5 同款）：基线含 Full Access 行 → 动作后同一行
+    /// 原样还原（无新行）→ Bypass 不 verified。权限轴状态栏零显示 → 退化为
+    /// 「无新行即不 verified」，如实 false，不假确认。
+    #[test]
+    fn permission_switch_not_verified_by_restored_line() {
+        let restore = "• Permission selection requested: Full Access";
+        let baseline_screen = lines(&["  普通输出", restore]);
+        let baseline = capture_mode_switch_baseline(&baseline_screen);
+        let after = baseline_screen.clone();
+        assert!(
+            !codex_switch_verified(&after, &baseline, ModeGroupId::Permission, MamMode::Bypass),
+            "旧行还原不是新证据（权限轴零状态栏 → 无新行即不 verified）"
+        );
+    }
+
+    /// **0.154 旧锚兼容**：`permissions updated to <label>` 行（新于基线）同样
+    /// 构成权限轴证据（spec §3.2——旧锚新于基线 ∨ 新锚）。
+    #[test]
+    fn permission_switch_verified_by_legacy_anchor_line() {
+        let baseline = capture_mode_switch_baseline(&lines(&["  普通输出"]));
+        let after = lines(&["  普通输出", "• Permissions updated to Full Access"]);
+        assert!(
+            codex_switch_verified(&after, &baseline, ModeGroupId::Permission, MamMode::Bypass),
+            "旧锚 permissions updated to Full Access（新于基线）= 0.154 兼容证据"
+        );
+    }
+
+    // ==== codex 模式组 Key 路闭环编排（2026-10-09 T4，spec §3.1）====
+
+    /// **前读已在目标档 → 零投递**：read 返回 plan-mode 夹具、target=Plan → Ok 且
+    /// `sent_keys` 空、`already_on_target=true`（spec §3.1「零投递回执」分支）。
+    #[test]
+    fn mode_toggle_already_on_target_zero_keys() {
+        let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let plan = mp_screen("codex-mp-plan-mode.txt");
+        let out = run_codex_mode_toggle_stages(
+            MamMode::Plan,
+            3,
+            || Some(plan.clone()),
+            // 核验轮询也不应进（零投递后无核验必要）
+            || panic!("已在目标档不应进核验轮询"),
+            || {},
+            &mut Closures {
+                read: || None,
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        )
+        .expect("已在目标档应 Ok");
+        assert!(out.already_on_target, "already_on_target=true");
+        assert!(out.verified, "已在目标档 = 切换完成（无需动作）");
+        assert!(out.sent_keys.is_empty(), "零投递：{:?}", out.sent_keys);
+        assert_eq!(out.pre_read, Some(MamMode::Plan));
+        assert_eq!(out.observed, Some(MamMode::Plan));
+        assert!(sent.borrow().is_empty());
+    }
+
+    /// **基线差分核验命中**：脚本化三屏——前读屏（Default 夹具）→ 发键 →
+    /// 核验拍出现**新** Plan 事件行 → verified=true 且命中即停（读 1 拍）。
+    #[test]
+    fn mode_toggle_verifies_by_baseline_diff() {
+        let pre = mp_screen("codex-mp-default-mode.txt");
+        let baseline = capture_mode_switch_baseline(&pre);
+        // 动作后屏 = 前读屏 + 一条**新** Plan 事件行。注意：夹具里已有
+        // `deepseek-…medium for Plan mode.` 旧行——内容集差分下同文案不算新，
+        // 必须用变量段不同的行（parse 只认尾段 `for <目标> mode.`）才是新证据。
+        let mut after = pre.clone();
+        after.push("• Model changed to glm-5.3-flash max for Plan mode.".to_string());
+        let verify_screens = std::cell::RefCell::new(vec![after.clone()]);
+        let reads = std::cell::Cell::new(0u32);
+        let out = run_codex_mode_toggle_stages(
+            MamMode::Plan,
+            3,
+            || Some(pre.clone()),
+            || {
+                reads.set(reads.get() + 1);
+                Ok(verify_screens.borrow_mut().pop())
+            },
+            || {},
+            &mut Closures {
+                read: || None,
+                send: |k: &str| {
+                    assert_eq!(k, "shift+tab", "发的是生产在役键");
+                    Ok(())
+                },
+                settle: || {},
+            },
+        )
+        .expect("编排应成功");
+        assert!(!out.already_on_target);
+        assert!(out.verified, "新事件行命中 → verified");
+        assert_eq!(out.pre_read, Some(MamMode::Default), "前读=Default");
+        // 终审 P2-4 判据一致化后本断言随实态改写：合成屏 = Default 夹具（状态栏
+        // 未翻转）+ 追加新 Plan 事件行——observed = 末拍屏读的当前档，**状态栏在场
+        // 即权威**（spec §3.3；事件行只是切换记录）→ 如实取 Default；verified 仍由
+        // 「新于基线」的事件行命中（两判据各司其职，P2-4 前旧窗判据会误取事件行的
+        // Plan——正是被一致化掉的遮蔽面）。
+        assert_eq!(
+            out.observed,
+            Some(MamMode::Default),
+            "末拍屏读=状态栏权威档"
+        );
+        assert_eq!(out.sent_keys, vec!["shift+tab".to_string()]);
+        assert_eq!(reads.get(), 1, "第 1 拍即命中（命中即停）");
+        let _ = baseline; // 基线由编排内部 capture（此处只保证前读屏被差分消费）
+    }
+
+    /// **窗尽无变化 → verified=false**：核验拍恒返回同屏（无新行、状态栏不变），
+    /// rounds 上界 = 3 拍 → 3 拍耗尽后如实 false（**上界的正确测试形态**：闭包
+    /// 永不 None，靠 rounds 兜住——生产挂死回归锁）。
+    #[test]
+    fn mode_toggle_reports_no_change_on_window_exhaust() {
+        let pre = mp_screen("codex-mp-default-mode.txt");
+        let reads = std::cell::Cell::new(0u32);
+        let out = run_codex_mode_toggle_stages(
+            MamMode::Plan,
+            3,
+            || Some(pre.clone()),
+            || {
+                reads.set(reads.get() + 1);
+                Ok(Some(pre.clone())) // 每拍同一屏：无新行、状态栏仍是 Default
+            },
+            || {},
+            &mut Closures {
+                read: || None,
+                send: |k: &str| {
+                    let _ = k;
+                    Ok(())
+                },
+                settle: || {},
+            },
+        )
+        .expect("编排应成功（窗尽不是 Err，是如实 false）");
+        assert!(!out.verified, "窗尽无变化 → verified=false");
+        assert!(!out.already_on_target);
+        assert_eq!(
+            out.observed,
+            Some(MamMode::Default),
+            "末拍屏读=Default（未切走）"
+        );
+        assert_eq!(
+            reads.get(),
+            3,
+            "拍数上界生效：恰读 3 拍后窗尽退出（不挂死）"
+        );
+    }
+
+    /// **前读判定进 outcome**：前读屏判 Default、目标 Plan → `pre_read=Some(Default)`
+    /// （api.rs 回执 hint 据此申报「前读=终端当前 X」——spec §3.1 不代卡面纠偏）。
+    #[test]
+    fn mode_toggle_hint_carries_pre_read() {
+        let pre = mp_screen("codex-mp-default-mode.txt");
+        let out = run_codex_mode_toggle_stages(
+            MamMode::Plan,
+            3,
+            || Some(pre.clone()),
+            || Ok(Some(pre.clone())),
+            || {},
+            &mut Closures {
+                read: || None,
+                send: |k: &str| {
+                    let _ = k;
+                    Ok(())
+                },
+                settle: || {},
+            },
+        )
+        .expect("编排应成功");
+        assert_eq!(out.pre_read, Some(MamMode::Default));
+        assert_eq!(out.observed, Some(MamMode::Default));
+    }
+
+    /// **前读不可判 → 不拒绝**（spec §3.1「判据缺 ≠ 档不符」）：前读返回空屏
+    /// （状态栏+事件行都判不出）→ 继续发键，`pre_read=None` 如实上报。
+    #[test]
+    fn mode_toggle_continues_when_pre_read_indeterminate() {
+        let blank = lines(&["  普通输出", "  另一行"]);
+        let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let out = run_codex_mode_toggle_stages(
+            MamMode::Plan,
+            3,
+            || Some(blank.clone()),
+            || Ok(Some(blank.clone())),
+            || {},
+            &mut Closures {
+                read: || None,
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        )
+        .expect("前读不可判不是拒绝理由");
+        assert_eq!(out.pre_read, None, "前读不可判 → None 如实");
+        assert_eq!(
+            sent.borrow().as_slice(),
+            ["shift+tab".to_string()],
+            "继续发键"
         );
     }
 
@@ -4767,6 +5770,81 @@ mod tests {
         );
     }
 
+    /// P1-1 终审：回执核验**双代词形**——0.160.0 新词形
+    /// （`• Permission selection requested: <标签>`）与 0.154 旧词形
+    /// （`permissions updated to <label>`）各自命中；他档标签不命中（不假成功）。
+    ///
+    /// 回归史：单锚判据（账本首行 = 0.154 旧锚）在 0.160.0 恒 verified=false——
+    /// 段 4 的工具自证一票失效。还原动作（变异）：删掉新词形分支 → 本测试先红。
+    #[test]
+    fn permission_receipt_verified_dual_word_forms() {
+        // 新词形（0.160.0 实打，底料 §1）：目标标签 = 菜单短形，冒号后段**前缀**匹配
+        // （全形回执行覆盖短形，同 parse_codex_permission_event_line 匹配纪律）
+        assert!(permission_receipt_verified(
+            "codex",
+            &lines(&["• Permission selection requested: Full Access"]),
+            "Full Access"
+        ));
+        assert!(
+            permission_receipt_verified(
+                "codex",
+                &lines(&[
+                    "  普通输出",
+                    "• Permission selection requested: Ask for approval (non-admin sandbox)",
+                ]),
+                "Ask for approval"
+            ),
+            "全形回执行 starts_with 菜单短形标签"
+        );
+        // 旧词形（0.154）仍命中（旧版本终端兼容，append-only 旧行仍在账）
+        assert!(permission_receipt_verified(
+            "codex",
+            &lines(&["• Permissions updated to Read Only"]),
+            "Read Only"
+        ));
+        // 负例：新词形锚在、**他档**标签 → 不命中（防旧回执冒充本次成功）
+        assert!(!permission_receipt_verified(
+            "codex",
+            &lines(&["• Permission selection requested: Read Only"]),
+            "Full Access"
+        ));
+        // 负例：目标标签出现在锚**之前**（冒号前段）→ 冒号后段不含目标 → 不命中
+        assert!(!permission_receipt_verified(
+            "codex",
+            &lines(&["Full Access (permission selection requested: Read Only)"]),
+            "Full Access"
+        ));
+        // seen（picker 兜底通道）同走双词形：新词形行原文可取；0.154 旧行仍可取
+        assert_eq!(
+            permission_receipt_seen(
+                "codex",
+                &lines(&["• Permission selection requested: Full Access"])
+            ),
+            Some("• Permission selection requested: Full Access".to_string())
+        );
+        assert_eq!(
+            permission_receipt_seen("codex", &lines(&["• Permissions updated to Full Access"])),
+            Some("• Permissions updated to Full Access".to_string())
+        );
+        assert_eq!(
+            permission_receipt_seen("codex", &lines(&["  普通输出"])),
+            None,
+            "无回执行 → None"
+        );
+        // kimi 不受双词形影响（现行词形 = 账本锚，判据不变）
+        assert!(permission_receipt_verified(
+            "kimi",
+            &lines(&["Permission mode: Always Ask"]),
+            "Always Ask"
+        ));
+        // 未实测工具：新词形 gate 在 codex → 恒 false（不出手契约不变）
+        assert!(!permission_receipt_verified(
+            "zcode",
+            &lines(&["• Permission selection requested: Full Access"]),
+            "Full Access"
+        ));
+    }
+
     /// **第三段/回执核验的接线**（纯函数层）：`needs_full_access_confirm` 只对
     /// **codex × 权限组 × Bypass** 为真（实机取证档案 §3：1/2/3 无第三段）。
     #[test]
@@ -5569,9 +6647,85 @@ mod tests {
         assert!(sent.borrow().is_empty(), "零投递：{:?}", sent.borrow());
     }
 
-    /// **picker：确认框在屏时不得按菜单项**（面板与终端不一致）→ 零投递。
+    /// **picker：确认框阶段可投递**（T4-F4 改写；spec §3.2 Full Access 分叉）：
+    /// 确认框在屏 + number=1 → 照发「1」（旧版零投递——二阶段第二跳死路），确认框
+    /// 消失 → Done。还原动作（变异）：把确认框分支改回一律 Err → 本测试先红
+    /// （sent 变空、Err 冒头）。
     #[test]
-    fn pick_refuses_when_confirm_box_on_screen() {
+    fn pick_delivers_on_confirm_box_stage() {
+        let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let mut confirm_screen = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
+        confirm_screen.push("  Enable full access?".to_string());
+        // 发键后读屏：确认框已消失（Yes 生效）——用干净屏表示
+        let after = lines(&["  普通输出", "• Permissions updated to Full Access"]);
+        let stage = std::cell::Cell::new(0u32);
+        let r = run_codex_menu_pick(
+            1,
+            || {
+                if stage.get() == 0 {
+                    stage.set(1);
+                    Some(confirm_screen.clone())
+                } else {
+                    Some(after.clone())
+                }
+            },
+            || Ok(None),
+            || {},
+            &mut Closures {
+                read: || None,
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        match r {
+            Ok(MenuPick::Done {
+                from_confirm_box: true,
+                ..
+            }) => {}
+            other => panic!("确认框阶段发 1 且确认框消失 → Done：{other:?}"),
+        }
+        assert_eq!(
+            sent.borrow().as_slice(),
+            ["1".to_string()],
+            "确认框阶段照发数字键：{:?}",
+            sent.borrow()
+        );
+    }
+
+    /// **picker：确认框阶段越界零投递**（T4-F4 新增）：确认框只有 1/2 两项，
+    /// number=3（菜单编号混进确认框 = 面板过期）→ Err 且零投递。
+    #[test]
+    fn pick_rejects_out_of_domain_on_confirm_box() {
+        let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+        let mut confirm_screen = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
+        confirm_screen.push("  Enable full access?".to_string());
+        let r = run_codex_menu_pick(
+            3,
+            || Some(confirm_screen.clone()),
+            || Ok(None),
+            || {},
+            &mut Closures {
+                read: || Some(confirm_screen.clone()),
+                send: |k: &str| {
+                    sent.borrow_mut().push(k.to_string());
+                    Ok(())
+                },
+                settle: || {},
+            },
+        );
+        let err = r.unwrap_err();
+        assert!(err.contains("只有 1（Yes）/ 2（Cancel）"), "{err}");
+        assert!(err.contains("零投递"), "{err}");
+        assert!(sent.borrow().is_empty(), "越界零投递：{:?}", sent.borrow());
+    }
+
+    /// **picker：确认框阶段发 2（Cancel）后确认框仍在屏**（键被吞/回菜单读数滞后）
+    /// → Confirm 如实交回用户（零投递不装成功）。
+    #[test]
+    fn pick_confirm_stage_still_on_screen_returns_confirm() {
         let sent: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
         let mut confirm_screen = e_stage2_screen("codex-perm-menu-newfooter-escback.txt");
         confirm_screen.push("  Enable full access?".to_string());
@@ -5589,9 +6743,11 @@ mod tests {
                 settle: || {},
             },
         );
-        let err = r.unwrap_err();
-        assert!(err.contains("Full Access 确认框"), "{err}");
-        assert!(sent.borrow().is_empty(), "零投递：{:?}", sent.borrow());
+        match r {
+            Ok(MenuPick::Confirm(_)) => {}
+            other => panic!("确认框仍在屏 → Confirm 交回用户：{other:?}"),
+        }
+        assert_eq!(sent.borrow().as_slice(), ["2".to_string()]);
     }
 
     /// **picker：overlay 在屏 → 发该数字键（无回车）**，屏上出现确认框 → 返回 Confirm。

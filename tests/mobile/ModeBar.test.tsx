@@ -19,6 +19,10 @@ interface Routes {
   /** 2026-09-23 picker：/session-mode/menu 的响应体（open/pick/GET 重读同形） */
   menuBody?: Record<string, unknown>;
   menuStatus?: number;
+  /** T5：菜单端点的**按次响应队列**——每次菜单 fetch 先消费一项，取尽后回落
+   *  `menuBody` 静态值。confirm-cancelled 的「pick 回执 → 自动重开菜单」在同一条
+   *  异步链里连发两次菜单请求，静态单值无法区分两次响应，故加队列。 */
+  menuBodyQueue?: Record<string, unknown>[];
 }
 
 let routes: Routes;
@@ -37,12 +41,14 @@ function installFetch() {
     const url = String(input);
     // 长路径必须先判（否则被 `/session-mode` 前缀吞）：picker 的菜单端点在 switch 之前
     if (url.includes("/session-mode/menu")) {
+      const queued = routes.menuBodyQueue?.shift();
+      const body = queued ?? routes.menuBody;
       if (routes.menuStatus) {
-        return new Response(JSON.stringify(routes.menuBody ?? { error: "internal" }), {
+        return new Response(JSON.stringify(body ?? { error: "internal" }), {
           status: routes.menuStatus,
         });
       }
-      return new Response(JSON.stringify(routes.menuBody ?? { status: "none", options: [] }), {
+      return new Response(JSON.stringify(body ?? { status: "none", options: [] }), {
         status: 200,
       });
     }
@@ -109,13 +115,19 @@ function opencodeSingleAxis(): SessionModeView {
  *  单钮 toggle（计划 ⇄ 操作，shift+tab 双向）；权限组 = **单选面板**（picker，
  *  用户方案：后端读回终端菜单选项，用户点选哪项就敲哪个数字键）。
  *  `modeCurrent` 驱动 toggle 的翻转方向；`permissionCurrent` 用来测「上次切换」
- *  记忆标注（null = 无记忆 → 模式未知）。 */
+ *  记忆标注（null = 无记忆 → 模式未知）。
+ *  终审 P1-2 mock 改写：权限组回读源 2026-10-09 起 readback=true（最新回执行），
+ *  旧 mock 的 `readback: false` 过期；「上次切换」标注改由 `currentSource` 驱动
+ *  （默认：有记忆 = "memory"、无 = "null"；可显式传 "screen" 测屏读来源不标注）。 */
 function codexTwoAxis(opts?: {
   modeCurrent?: MamMode;
   permissionCurrent?: MamMode | null;
+  permissionCurrentSource?: "screen" | "memory" | "null";
 }): SessionModeView {
   const modeCurrent = opts?.modeCurrent ?? "plan";
   const permissionCurrent = opts?.permissionCurrent ?? null;
+  const permissionCurrentSource =
+    opts?.permissionCurrentSource ?? (permissionCurrent === null ? "null" : "memory");
   return {
     tool: "codex",
     current: modeCurrent,
@@ -132,6 +144,7 @@ function codexTwoAxis(opts?: {
         layout: "toggle",
         current: modeCurrent,
         currentLabel: modeCurrent === "plan" ? "计划" : "操作",
+        currentSource: "screen",
         tiers: [
           { mode: "default", label: "操作", selectable: true },
           { mode: "plan", label: "计划", selectable: true },
@@ -142,10 +155,11 @@ function codexTwoAxis(opts?: {
         id: "permission",
         label: "权限",
         step: false,
-        readback: false,
+        readback: true,
         layout: "picker",
         current: permissionCurrent,
         currentLabel: permissionCurrent === null ? null : "只读",
+        currentSource: permissionCurrentSource,
         tiers: [
           { mode: "readOnly", label: "只读", selectable: true },
           { mode: "default", label: "默认", selectable: true },
@@ -314,7 +328,7 @@ describe("乙T3 对话框在场拒绝对接（blocked_by_dialog）", () => {
 
 // ==== 丁T4 §2.6：二维结构 / 单轴 / 裁6 / 裁7 ====
 describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
-  it("二维家（codex）：渲染模式组 + 权限组两组，各自显示当前档；权限组无回读源 → 人工核对", async () => {
+  it("二维家（codex）：渲染模式组 + 权限组两组，各自显示当前档；权限组 current=null（屏上无回执行）→ 人工核对", async () => {
     installFetch();
     routes.mode = codexTwoAxis();
     render(<ModeBar session={{ id: "t1" }} />);
@@ -324,7 +338,7 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
     // 两组都在
     expect(screen.getByTestId("mode-group-mode")).toBeTruthy();
     expect(screen.getByTestId("mode-group-permission")).toBeTruthy();
-    // 模式组：回读命中「计划」；权限组：无回读源 → 模式未知 + 人工核对
+    // 模式组：回读命中「计划」；权限组：屏上无回执行（current=null）→ 模式未知 + 人工核对
     expect(screen.getByTestId("mode-current-mode").textContent).toBe("计划");
     expect(screen.getByTestId("mode-current-permission").textContent).toBe("模式未知");
     expect(screen.getByTestId("mode-unknown-hint-permission").textContent).toContain("人工核对");
@@ -469,7 +483,11 @@ describe("丁T4 模式二维与回读（§2.6 规格表）", () => {
 describe("ModeBar：E3④ 当前档高亮与待决置灰", () => {
   it("当前档高亮：toggle 单钮 data-current=当前档；权限组高亮走「上次切换」记忆（无逐档按钮）", async () => {
     installFetch();
-    routes.mode = codexTwoAxis({ permissionCurrent: "readOnly" });
+    // 终审 P1-2：标注判据 = currentSource === "memory"（显式传入驱动本用例）
+    routes.mode = codexTwoAxis({
+      permissionCurrent: "readOnly",
+      permissionCurrentSource: "memory",
+    });
     render(<ModeBar session={{ id: "s-e3-hl" }} />);
     await screen.findByTestId("mode-picker-permission-open");
     // 模式组是 toggle 单钮：data-current 直接承载当前档（plan）
@@ -764,15 +782,126 @@ describe("ModeBar：codex toggle 与完全信任二次确认（2026-09-23）", (
     expect(screen.getByTestId("mode-menu-panel")).toBeTruthy();
   });
 
-  it("权限组记忆标注：current 有值（上次切换）→ 显示档名 +「（上次切换）」，无未知提示", async () => {
+  it("权限组记忆标注：currentSource=memory → 显示档名 +「（上次切换）」，无未知提示；screen 来源不标注", async () => {
     installFetch();
-    routes.mode = codexTwoAxis({ permissionCurrent: "readOnly" });
-    render(<ModeBar session={{ id: "mc-t6" }} />);
+    routes.mode = codexTwoAxis({
+      permissionCurrent: "readOnly",
+      permissionCurrentSource: "memory",
+    });
+    const { unmount } = render(<ModeBar session={{ id: "mc-t6" }} />);
     await screen.findByTestId("mode-picker-permission-open");
     expect(screen.getByTestId("mode-current-permission").textContent).toBe("只读");
     expect(screen.getByTestId("mode-current-source-permission").textContent).toBe("（上次切换）");
     expect(screen.queryByTestId("mode-unknown-hint-permission")).toBeNull();
     // 权限组不渲染逐档按钮（编号一律来自终端屏读）
     expect(screen.queryByTestId("mode-switch-permission-readOnly")).toBeNull();
+    unmount();
+
+    // 终审 P1-2 反向面：屏读来源（screen）= 实时权威 → **不标注**「上次切换」
+    // （旧判据 readback:false 在 readback 全开后不可达——此用例同时锁「不误标」）
+    installFetch();
+    routes.mode = codexTwoAxis({
+      permissionCurrent: "readOnly",
+      permissionCurrentSource: "screen",
+    });
+    render(<ModeBar session={{ id: "mc-t6-screen" }} />);
+    await screen.findByTestId("mode-picker-permission-open");
+    expect(screen.getByTestId("mode-current-permission").textContent).toBe("只读");
+    expect(screen.queryByTestId("mode-current-source-permission")).toBeNull();
+  });
+});
+
+// ==== T5（spec §3.1/§3.2/§6-T5）：codex 模式/权限两链的回执消费 ====
+describe("ModeBar：T5 codex 回执消费（已在目标档 / observed / confirm-cancelled）", () => {
+  it("codex 模式切换已在目标档（零投递：verified=true + hint 承载，wire 无 zeroKey 字段）→ 回执显示后端 hint 而非「已切换」", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    // 后端实形（T4 定形，api.rs codex_mode_toggle_hint）：零投递分支 verified=true、
+    // hint=「终端已在目标档，无需切换」＋前读申报；observed = 核验末拍屏读档。
+    routes.switchBody = {
+      status: "key_sent",
+      verified: true,
+      hint: "终端已在目标档，无需切换；前读=终端当前 计划",
+      observed: "plan",
+      current: "plan",
+      currentLabel: "计划",
+    };
+    render(<ModeBar session={{ id: "t5-zk" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
+    const receipt = await screen.findByTestId("mode-receipt");
+    // 回执语义单一来源 = 后端 hint——硬编码「已切换」不得盖掉零投递语义
+    expect(receipt.textContent).toBe("终端已在目标档，无需切换；前读=终端当前 计划");
+    // observed 有值也**不改本地状态**（丁T4 纪律）——卡面以重拉 GET 为准：
+    // 重拉照旧发生（mount 一次 + 切换后一次）
+    const gets = fetchMock.mock.calls.filter(
+      (c: unknown[]) => String(c[0]).includes("/session-mode?") && !String(c[0]).includes("switch")
+    );
+    expect(gets.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("codex 模式切换 verified=false 带 observed → 回执原样透出「屏已切换至 X（预期 Y）」，不重复拼接 observed 档名", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    routes.switchBody = {
+      status: "key_sent",
+      verified: false,
+      hint: "屏已切换至 操作（预期 计划）——请人工核对终端",
+      observed: "default",
+      current: "default",
+      currentLabel: "操作",
+    };
+    render(<ModeBar session={{ id: "t5-obs" }} />);
+    fireEvent.click(await screen.findByTestId("mode-switch-mode-toggle"));
+    const receipt = await screen.findByTestId("mode-receipt");
+    // 整串等值 = 前端只透传未拼接（observed 档名已并入后端 hint，前端不再叠一次）
+    expect(receipt.textContent).toBe("屏已切换至 操作（预期 计划）——请人工核对终端");
+  });
+
+  it("codex picker confirm-cancelled（Cancel 回菜单）→ 显示 hint + 自动重拉菜单选项表（既有 open 流程），面板回菜单态", async () => {
+    installFetch();
+    routes.mode = codexTwoAxis();
+    // 菜单端点按次响应：open→menu、pick(4)→confirm、pick(2)→confirm-cancelled、
+    // 自动重开（open）→menu
+    const menuOptions = [
+      { number: 1, label: "Read Only", highlighted: false },
+      { number: 4, label: "Full Access", highlighted: false },
+    ];
+    routes.menuBodyQueue = [
+      { status: "menu", options: menuOptions },
+      {
+        status: "confirm",
+        options: [
+          { number: 1, label: "Yes, continue anyway", highlighted: true },
+          { number: 2, label: "Cancel", highlighted: false },
+        ],
+      },
+      { status: "confirm-cancelled", hint: "已取消 Full Access 确认，菜单已回到屏上" },
+      { status: "menu", options: menuOptions },
+    ];
+    render(<ModeBar session={{ id: "t5-cc" }} />);
+    fireEvent.click(await screen.findByTestId("mode-picker-permission-open"));
+    await flushPanel();
+    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("menu");
+    // 选 Full Access → 二阶段确认框
+    fireEvent.click(screen.getByTestId("mode-menu-option-4"));
+    await flushPanel();
+    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("confirm");
+    // 点 Cancel（2）→ confirm-cancelled → 前端自动重开菜单
+    fireEvent.click(screen.getByTestId("mode-menu-option-2"));
+    await flushPanel();
+    await flushPanel();
+    // 面板回到菜单态（用户不用手点「重新读取」）
+    expect(screen.getByTestId("mode-menu-panel").getAttribute("data-panel")).toBe("menu");
+    // 取消回执保留为面板 note
+    expect(screen.getByTestId("mode-menu-note").textContent).toContain("已取消 Full Access 确认");
+    // 重开的选项表渲染出来（第 4 项回来可选）
+    expect(screen.getByTestId("mode-menu-option-4")).toBeTruthy();
+    // 第 4 次菜单请求 = 自动重开（POST action=open）
+    const calls = fetchMock.mock.calls.filter((c: unknown[]) =>
+      String(c[0]).includes("/session-mode/menu")
+    );
+    expect(calls.length).toBe(4);
+    const lastBody = JSON.parse(String((calls[calls.length - 1]![1] as RequestInit).body));
+    expect(lastBody.action).toBe("open");
   });
 });

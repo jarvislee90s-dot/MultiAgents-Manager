@@ -830,7 +830,8 @@ export interface QuestionInfoView {
   /** **屏读快照**（2026-10-03 卡面状态权威源）：GET 时终端若停在题屏 →
    *  {heading, checked, freeText}（前端据此对位当前题并纠偏 mqIndex/勾选/输入框）；
    *  停在 Review 确认屏 → {review:true}（前端直接进确认卡）；null = 屏读不可用/
-   *  非题屏（前端维持本地状态）。 */
+   *  非题屏（前端维持本地状态）。codex（2026-10-09，0.160.0）形状不同：
+   *  题号对位主键 questionIdx + 未答计数（见下方 codex 字段组）。 */
   screen?: {
     review?: boolean;
     /** Review 页逐题摘要（2026-10-07 确认卡权威源切换：Q/→ 行解析，以终端为准） */
@@ -839,6 +840,13 @@ export interface QuestionInfoView {
     checked?: (boolean | null)[];
     freeText?: string | null;
     freeTextPresent?: boolean;
+    /** codex 面板形状（2026-10-09 设计 §3.1）：题号对位主键 + 未答驱动进度提示 */
+    questionIdx?: number;
+    questionTotal?: number;
+    unanswered?: number;
+    isLast?: boolean;
+    options?: string[];
+    focused?: number | null;
   } | null;
   questions: QuestionView[];
   source?: "mark" | "scan" | null;
@@ -871,7 +879,9 @@ export type QuestionAnswerAction =
 /** 阶段机动作的**段名**（回执 `stage` 字段的取值；与后端
  *  `remote::api::QUESTION_STAGE_*` 常量逐字对应，勿漂移）。
  *  提交链推进序：`submit-row`→`review`→`confirm`→`receipt`；
- *  自由作答：`free-row`→`free-text`；claude 切勾链：`toggle-row`；切题：`advance`。 */
+ *  自由作答：`free-row`→`free-text`；claude 切勾链：`toggle-row`；切题：`advance`；
+ *  `select`：单选定位/选择段（opencode 焦点守卫 + **codex select 链全部中止**——
+ *  2026-10-09 后端 `stage_from_abort` 的 codex 映射臂统一落此段名）。 */
 export type QuestionAnswerStage =
   | "submit-row"
   | "review"
@@ -912,13 +922,29 @@ export type QuestionAnswerResult =
        *  确认 echo 与请求 direction 一致（opencode 旧回执无此字段 → 维持回绕行为） */
       direction?: string;
       /** claude 交互回执的**屏读快照**（2026-10-03 屏读为准）：toggle=切勾后整屏、
-       *  select=发后整屏、advance=新题屏——TS 行内容/勾选态随回执回传（交互后核对） */
+       *  select=发后整屏、advance=新题屏——TS 行内容/勾选态随回执回传（交互后核对）。
+       *  codex 回执（CodexSelectDone/CodexAdvanceDone）的 screen 同为 codex 面板
+       *  形状（GET 的 screen 用 questionIdx 直读对位；回执 screen 同形状——
+       *  advance/select 路径的消费见 QuestionCard） */
       screen?: {
         heading: string;
         checked: (boolean | null)[];
         freeText: string | null;
         freeTextPresent?: boolean;
+        /** codex 面板形状（2026-10-09 设计 §3.1）：题号对位主键 + 未答驱动进度提示 */
+        questionIdx?: number;
+        questionTotal?: number;
+        unanswered?: number;
+        isLast?: boolean;
+        options?: string[];
+        focused?: number | null;
       };
+      /** codex select 回执旗标（2026-10-09 设计 §3.7 wire 契约）：
+       *  `reanswered` = 改答分支（题号推进而计数未减）；`alreadySubmitted` =
+       *  双条件闸读到面板消失且未发提交键（如 notes 回车连带交卷）。
+       *  前端当前仅透传展示或暂不消费——先补契约（与后端 json! 逐字对应）。 */
+      reanswered?: boolean;
+      alreadySubmitted?: boolean;
       /** claude 多选自由作答（2026-10-03 屏读为准）：该行的屏上文本（勾选态复用
        *  上方 `checked` 字段——与 toggle 回执同字段同语义）；null = 收尾读屏失败
        *  （未核验，前端不得虚报已写入） */
@@ -1024,7 +1050,10 @@ export interface ModeLegacyView {
  *  循环键——codex 模式组「计划 ⇄ 操作」= shift+tab，目标档由前端按当前档翻转）；
  *  缺省/`"tiers"` = 逐档按钮；`"picker"` = **单选面板**（codex 权限组，2026-09-23 用户
  *  方案）：单钮「切换权限」→ 后端读回**终端菜单的选项表**（编号 = 屏上实读值）→ 用户
- *  点选哪项，兔维斯 就敲哪个数字键——前端**不再硬编码「哪档对应哪个数字」**。 */
+ *  点选哪项，兔维斯 就敲哪个数字键——前端**不再硬编码「哪档对应哪个数字」**。
+ *  `currentSource`（终审 P1-2）：`current` 的来源——`"screen"` = 终端屏读（实时权威）/
+ *  `"memory"` = 「上次切换」记忆回落（终端手改会失真，前端标注「（上次切换）」明示
+ *  口径）/ `"null"` = 未知。旧后端无此字段（undefined = 不标注）。 */
 export interface ModeGroupView {
   id: ModeGroupId;
   label: string;
@@ -1033,6 +1062,7 @@ export interface ModeGroupView {
   layout?: "tiers" | "toggle" | "picker";
   current: MamMode | null;
   currentLabel: string | null;
+  currentSource?: "screen" | "memory" | "null";
   tiers: ModeTierView[];
   legacy?: ModeLegacyView[];
 }
@@ -1062,7 +1092,14 @@ export interface SessionModeView {
  *  ——切换已投递但无法自动验证（屏读缺失），前端据此渲染提示而非「已切到 X 档」。
  *  丁T3：`dialogChecked` = 本次是否真的做过对话框在场检测（false = 平台无屏读或
  *  屏读失败；此时守卫按「无法判定」放行，前端不得声称已检查）。
- *  丁T4：`current`/`currentLabel` = 投递后回读到的档（命中时前端可直接用它刷新）。 */
+ *  丁T4：`current`/`currentLabel` = 投递后回读到的档（命中时前端可直接用它刷新）。
+ *  T5（spec §6-T5，m-6）：`observed` = codex 模式组 toggle 臂的**核验末拍屏读档**
+ *  （MamMode wire 词，与 `current` 同形同源；null = 不可判）。前端**不拿它改本地
+ *  状态**（卡面以重拉 GET 的权威结构为准，丁T4 纪律）；verified=false 时其档名已
+ *  并入后端 hint 文案（「屏已切换至 X（预期 Y）」），前端不重复拼接。
+ *  注（wire 对位）：后端实际 wire 未携带 `zeroKey` 布尔字段——「已在目标档」零投递
+ *  态经 `verified=true` + hint「终端已在目标档，无需切换」表达（T4 定形），前端
+ *  消费 hint 即可，不设 phantom 字段。 */
 export type SessionModeSwitchResult =
   | {
       status: "key_sent";
@@ -1071,6 +1108,7 @@ export type SessionModeSwitchResult =
       dialogChecked?: boolean;
       current?: MamMode | null;
       currentLabel?: string | null;
+      observed?: MamMode | null;
     }
   | { status: "failed"; error: string; dialogChecked?: boolean };
 
@@ -1143,6 +1181,9 @@ export interface ModeMenuOption {
  *  - `done`：已投递且无确认框。`verified` = 屏上是否读到成功回执行；
  *    `hint` 原样带出后端文案（含回执行原文）——**不假装成功**（目标档未知：
  *    用户点的是屏上编号，后端不知道对应哪个 wire 档，故只报「有没有回执」）；
+ *  - `confirm-cancelled`：确认框阶段点了 Cancel（2）→ 确认框消失、**菜单已回到
+ *    终端屏上**、无新回执行（T5 消费，spec §3.2/§6-T5）——前端显示 hint 并自动
+ *    重拉菜单选项表（既有 open 流程），面板回到菜单态；
  *  - `none`：屏上无菜单/确认框（仅 GET 重读会给）；
  *  - `failed`：如实失败文案。 */
 export type ModeMenuResult =
@@ -1156,6 +1197,11 @@ export type ModeMenuResult =
   | {
       status: "done";
       verified: boolean;
+      hint?: string | null;
+      dialogChecked?: boolean;
+    }
+  | {
+      status: "confirm-cancelled";
       hint?: string | null;
       dialogChecked?: boolean;
     }

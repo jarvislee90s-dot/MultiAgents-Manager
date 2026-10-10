@@ -112,6 +112,13 @@ pub const RECEIPT_POLL_TOTAL_MS: u64 = 1_500;
 /// 「动作 → 首次读到目标档」的耗时，用于标定本值）。
 pub const MODE_READBACK_POLL_TOTAL_MS: u64 = 1_500;
 
+/// **codex 模式/权限切换的闭环核验窗**（毫秒）——基线差分轮询（spec
+/// 2026-10-09-codex-mode-permission-screen-read §3.1/§3.2「变化即验」）：
+/// 与既有 [`MODE_READBACK_POLL_TOTAL_MS`]（1500ms，期望比对窗）**并存不替换**——
+/// 本窗消费「内容集差分」判据（spec §4-R5），时延依据 = 2026-10-09 风险预测试
+/// st-1..3 粗测 <2s（精确回填待 T6 实机走查，回填通道同模块文档三处一起改）。
+pub const MODE_SWITCH_VERIFY_POLL_TOTAL_MS: u64 = 2_000;
+
 /// **问答阶段机**单段轮询窗（毫秒）：多选提交（提交屏 → Review 屏 → 终态）与自由作答
 /// （定位行 → 文本 → 终态）的每一段各给一个窗。
 ///
@@ -279,6 +286,10 @@ mod tests {
         assert_eq!(RECEIPT_POLL_TOTAL_MS, 1_500);
         assert_eq!(MODE_READBACK_POLL_TOTAL_MS, 1_500, "D20：观察①的修复窗");
         assert_eq!(
+            MODE_SWITCH_VERIFY_POLL_TOTAL_MS, 2_000,
+            "codex 切换闭环核验窗（内容集差分判据；st-1..3 粗测 <2s，精确回填待 T6）"
+        );
+        assert_eq!(
             QUESTION_STAGE_POLL_TOTAL_MS, 3_000,
             "2026-10-06 与菜单窗同批扩（同一重载场景，依据见其文档）"
         );
@@ -300,6 +311,11 @@ mod tests {
         assert_eq!(poll_rounds(CONFIRM_POLL_TOTAL_MS), 15);
         assert_eq!(poll_rounds(RECEIPT_POLL_TOTAL_MS), 15);
         assert_eq!(poll_rounds(MODE_READBACK_POLL_TOTAL_MS), 15);
+        assert_eq!(
+            poll_rounds(MODE_SWITCH_VERIFY_POLL_TOTAL_MS),
+            20,
+            "codex 切换核验窗 = 2000ms / 100ms 步长 = 20 拍"
+        );
         assert_eq!(poll_rounds(QUESTION_STAGE_POLL_TOTAL_MS), 30);
         assert_eq!(
             poll_rounds(TURN_STOP_POLL_TOTAL_MS),
@@ -342,6 +358,7 @@ mod tests {
             ("确认框窗", CONFIRM_POLL_TOTAL_MS),
             ("回执窗", RECEIPT_POLL_TOTAL_MS),
             ("模式回读窗", MODE_READBACK_POLL_TOTAL_MS),
+            ("codex 切换核验窗", MODE_SWITCH_VERIFY_POLL_TOTAL_MS),
         ] {
             assert!(
                 total >= SUBMIT_DELAY_MS * 5,

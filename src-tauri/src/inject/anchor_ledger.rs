@@ -39,6 +39,19 @@
 //! 账本存**锚点**（短、可判别，运行时用）；整屏 dump 存成**测试夹具**（TDD 用）。
 //! 每行的 `evidence` 字段指向其来源夹具/截图——**禁止手造**（与夹具红线同源）。
 //!
+//! # evidence 豁免类别（评审 P2-8 登记，2026-10-09）
+//!
+//! `evidence` 的常规形态 = 活体 dump 文件名。唯一豁免类别：
+//! **`构造词形（设计/源码在档），非活体`**——仅当同时满足以下三条件时可用：
+//! 1. 锚词来自设计说明书**逐字转写**（非临场编造）；
+//! 2. 官方源码在档（上游仓内可查证该词形）；
+//! 3. 活体取证已尝试且标注不可达（如确认屏只在「未答完 Enter」路径出现，取证
+//!    批未复现）。
+//!
+//! 先例：codex 确认屏 TITLE（`submit with unanswered questions?`，
+//! `scenario::QUESTION_REVIEW` / `slot::TITLE`，2026-10-09）。**活体可得的锚一律
+//! 以 dump 文件名为 evidence**，不得套用本豁免。
+//!
 //! # KV 覆盖通道
 //!
 //! 与 `inject.approve_map` 同款：`inject.anchor_ledger` 可覆盖/追加条目，上游改词
@@ -115,6 +128,13 @@ pub mod slot {
     /// 选项行）——计划批准卡批（2026-10-04）：命中即认定该对话框为计划批准框，
     /// 同时锁定反馈入口的目标编号（dialog.rs `plan_feedback_option_number` 消费）
     pub const FEEDBACK_OPTION: &str = "feedback_option";
+    /// codex 问答面板 footer 的 navigate 段（仅多题渲染——单题三段无此段，
+    /// 2026-10-09 活体取证实证修正）
+    pub const Q_FOOTER_NAVIGATE: &str = "q_footer_navigate";
+    /// codex 问答 footer 的 submit answer 段（非末题词形；全卷只剩当前题未答或单题）
+    pub const Q_FOOTER_SUBMIT_ANSWER: &str = "q_footer_submit_answer";
+    /// codex 问答 footer 的 submit all 段（末题词形；S1 实测：其它题未答时即使当前题已答也是 all）
+    pub const Q_FOOTER_SUBMIT_ALL: &str = "q_footer_submit_all";
 }
 
 /// 账本单行：一条**屏读文案**及其取证元数据。
@@ -133,6 +153,14 @@ pub struct AnchorRow {
     /// 取证出处（探针日期 + dump 文件名 / 用户截图；禁止手造）
     pub evidence: &'static str,
 }
+
+/// codex 权限切换回执行 **0.160.0 锚词形**（P2-1 终审：跨模块**单点常量**）——
+/// 账本 PERMISSION_MENU/RECEIPT 新行的 `text` 与 mode.rs 消费侧判据
+/// （[`crate::inject::mode::parse_codex_permission_event_line`] 锚步 /
+/// [`crate::inject::mode::permission_receipt_verified`] 新词形分支）引用同一字符串，
+/// 改词形只动这里，两边不会漂移（绑定测试
+/// `codex_permission_receipt_anchor_row_binds_mode_rs_predicate` 锁对齐）。
+pub(crate) const CODEX_PERMISSION_RECEIPT_ANCHOR: &str = "permission selection requested";
 
 /// 账本内置表（**append-only**；新文案追加在末尾，旧行永不移除）。
 ///
@@ -182,6 +210,23 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "permissions updated to",
         observed_version: "0.154.0",
         evidence: "实机取证档案 §3（用户 2026-09-23 走查复现）",
+    },
+    // ===== codex 权限切换回执行·0.160.0 词形（2026-10-09 风险预测试批，
+    // 底料 §1；append-only 追加）=====
+    // 0.154 锚 `permissions updated to` 在 0.160.0 不再出现（实打
+    // `• Permission selection requested: <标签>`）——本行为**词形登记**（消费侧
+    // 判据在 mode.rs 双词谓词 / 回执核验：新词形 + 0.154 旧锚并行，见
+    // CODEX_PERMISSION_RECEIPT_ANCHOR 的消费点），旧行保留（旧版本终端兼容 +
+    // candidates 诊断供料）。语义 = 选择事件（确认后），核验必须带基线内容集差分
+    // （spec §3.2/§4-R1c）——判据在消费侧，账本只登记词形。Full Access 二阶段
+    // 确认后的回执行与普通切换同词形（底料 §3-f），不另立行。
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::PERMISSION_MENU,
+        slot: slot::RECEIPT,
+        text: CODEX_PERMISSION_RECEIPT_ANCHOR,
+        observed_version: "0.160.0",
+        evidence: "mp-perm-switch-ok.txt / mp-perm-reslect-current.txt / mp-fa-done.txt（2026-10-09 风险预测试批，底料 §1）",
     },
     // ===== kimi 权限菜单（已入档，本次一并对齐账本口径）=====
     AnchorRow {
@@ -321,6 +366,19 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "# questions",
         observed_version: "1.18.32",
         evidence: "戊探A E-A1 提交后 transcript 摘要段 `# Questions`（question.rs OPENCODE_ANSWERED_ANCHOR）",
+    },
+    // ===== codex 问答终态回执·特异锚（评审 P2-3）：裸词 "answered"（0.155.1 在档）
+    // 的 contains 误命中面（正文复述/任意 answered 单词）由本行收窄——codex 该槽
+    // 的判定**优先用双词组合谓词** `codex_receipt_present`（question.rs：`questions`
+    // + `answered` 同行齐备，摘要头专属词形 `Questions n/n answered`）；旧行保留作
+    // 向后兼容（append-only，candidates 全集试匹配的泛化语义对此槽过宽）。
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::QUESTION,
+        slot: slot::RECEIPT,
+        text: "questions",
+        observed_version: "0.160.0",
+        evidence: "codex-q-20261009-s1-summary-recap.txt（摘要头 `• Questions 2/2 answered`）",
     },
     // ===== 「新建会话」场景（Phase C Task C1；锚文案逐字取 2026-09-27 新建会话
     // 四家探测定案 §4/§5/§6/§7，Windows run 20260927-100552 / Mac run 20260927-100524）=====
@@ -497,6 +555,43 @@ pub const ANCHOR_LEDGER: &[AnchorRow] = &[
         text: "trust all and continue",
         observed_version: "0.160.0",
         evidence: "C8 实机捕获（同上；选项行 `› 1. Review hooks / 2. Trust all and continue / 3. Continue without trusting`，屏面明示 `esc skip`——处置键序见 run_pipeline 核验分支）",
+    },
+    // ===== codex 问答面板 footer 锚（2026-10-09 取证批，底料 §7；append-only）=====
+    // navigate 段仅多题渲染（单题 footer 三段——对原计划「单题仍含」的实证修正）；
+    // submit all↔answer 随全卷未答切换（S1 实测：Q1 已答 Q2 未答时已是 all）
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::QUESTION,
+        slot: slot::Q_FOOTER_NAVIGATE,
+        text: "←/→ to navigate questions",
+        observed_version: "0.160.0",
+        evidence: "codex-q-20261009-s1-q1.txt（2026-10-09 取证批，底料 §7 多帧还原）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::QUESTION,
+        slot: slot::Q_FOOTER_SUBMIT_ANSWER,
+        text: "enter to submit answer",
+        observed_version: "0.160.0",
+        evidence: "codex-q-20261009-s3-single.txt（单题三段 footer）",
+    },
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::QUESTION,
+        slot: slot::Q_FOOTER_SUBMIT_ALL,
+        text: "enter to submit all",
+        observed_version: "0.160.0",
+        evidence: "codex-q-20261009-s1-q1-after-digit.txt（末题未答词形）",
+    },
+    // 确认屏点名（设计 §3.6）：0.160.0 活体未复现（未答完 Enter 直接交卷），
+    // 词形取设计 §2.2 + openai/codex 源码在档——防御性检测行，命中 = 屏上是确认屏
+    AnchorRow {
+        tool: "codex",
+        scenario: scenario::QUESTION_REVIEW,
+        slot: slot::TITLE,
+        text: "submit with unanswered questions?",
+        observed_version: "0.160.0",
+        evidence: "构造词形（设计 §2.2 + 源码），非活体——2026-10-09 取证未复现",
     },
 ];
 
@@ -950,5 +1045,144 @@ mod tests {
         ));
         // 既有场景零影响（append-only 基线）
         assert!(!candidates("codex", scenario::PERMISSION_MENU, slot::TITLE).is_empty());
+    }
+
+    /// codex 问答 footer 三槽位（2026-10-09 取证批定案）：navigate 段仅多题渲染
+    /// （单题 footer 三段——对原计划「单题仍含」的实证修正）+ submit answer/all
+    /// 双词形按全卷未答切换（S1 实测：Q1 已答 Q2 未答时已是 all）。append-only，
+    /// evidence 指向取证批 dump。
+    #[test]
+    fn codex_question_footer_slots_match_live_dump() {
+        // 多题四段 · submit answer 词形（全卷只剩当前题未答）
+        let multi_answer = lower(&[
+            "  tab to add notes | enter to submit answer | ←/→ to navigate questions | esc to interrupt",
+        ]);
+        assert!(detect(
+            &multi_answer,
+            "codex",
+            scenario::QUESTION,
+            slot::Q_FOOTER_NAVIGATE
+        )
+        .is_some());
+        assert!(detect(
+            &multi_answer,
+            "codex",
+            scenario::QUESTION,
+            slot::Q_FOOTER_SUBMIT_ANSWER
+        )
+        .is_some());
+        assert!(
+            detect(
+                &multi_answer,
+                "codex",
+                scenario::QUESTION,
+                slot::Q_FOOTER_SUBMIT_ALL
+            )
+            .is_none(),
+            "answer 与 all 互斥词形，不得交叉命中"
+        );
+        // 多题四段 · submit all 词形（S1 实测：Q1 已答 Q2 未答时已是 all）
+        let multi_all = lower(&[
+            "  tab to add notes | enter to submit all | ←/→ to navigate questions | esc to interrupt",
+        ]);
+        assert!(detect(
+            &multi_all,
+            "codex",
+            scenario::QUESTION,
+            slot::Q_FOOTER_SUBMIT_ALL
+        )
+        .is_some());
+        assert!(
+            detect(
+                &multi_all,
+                "codex",
+                scenario::QUESTION,
+                slot::Q_FOOTER_SUBMIT_ANSWER
+            )
+            .is_none(),
+            "all 与 answer 互斥词形，不得交叉命中"
+        );
+        // 单题三段（取证实测：无 navigate 段）
+        let single = lower(&["  tab to add notes | enter to submit answer | esc to interrupt"]);
+        assert!(
+            detect(
+                &single,
+                "codex",
+                scenario::QUESTION,
+                slot::Q_FOOTER_NAVIGATE
+            )
+            .is_none(),
+            "单题 footer 无 navigate 段，navigate 锚不得命中"
+        );
+        assert!(detect(
+            &single,
+            "codex",
+            scenario::QUESTION,
+            slot::Q_FOOTER_SUBMIT_ANSWER
+        )
+        .is_some());
+    }
+
+    /// codex 确认屏点名（设计 §3.6）：未答完确认屏 TITLE 锚——0.160.0 活体取证
+    /// 未复现该屏（直接交卷），本行按设计 §2.2 词形 + 源码在档入账作防御性检测，
+    /// evidence 标注「构造词形，非活体」。
+    #[test]
+    fn codex_confirm_screen_title_anchor() {
+        let confirm = lower(&["  Submit with unanswered questions?"]);
+        assert!(detect(&confirm, "codex", scenario::QUESTION_REVIEW, slot::TITLE).is_some());
+    }
+
+    /// codex 权限/模式切换回执行锚（2026-10-09 风险预测试批，底料 §1）：
+    /// 0.160.0 实际词形 `• Permission selection requested: <标签>`——替换
+    /// 0.154 旧锚的判定职责（旧行 append-only 保留兼容）。
+    #[test]
+    fn codex_permission_receipt_anchor_0160() {
+        let hit = |line: &str| {
+            detect(
+                &[line.to_lowercase()],
+                "codex",
+                scenario::PERMISSION_MENU,
+                slot::RECEIPT,
+            )
+            .is_some()
+        };
+        assert!(hit("• Permission selection requested: Read Only"));
+        assert!(hit(
+            "• Permission selection requested: Ask for approval (non-admin sandbox)"
+        ));
+        assert!(hit("• Permission selection requested: Approve for me"));
+        // Full Access 二阶段确认后的回执行与普通切换**同词形**（底料 §3-f 实证：
+        // 确认 1 后打 `… requested: Full Access`）——不另立行，本断言即覆盖。
+        assert!(hit("• Permission selection requested: Full Access"));
+        // 负例：菜单标题 / 菜单项行 / 题号头类不误命中
+        assert!(!hit("Update Model Permissions"));
+        assert!(!hit("1. Read Only"));
+        assert!(!hit("  Question 1/2 (2 unanswered)"));
+    }
+
+    /// P2-1 终审：账本 RECEIPT 新行 text 与 mode.rs 消费侧锚字符串**同源单点**——
+    /// 两处引用同一常量 [`CODEX_PERMISSION_RECEIPT_ANCHOR`]，本测试把对齐钉死
+    /// （还原动作：任何一侧改回内联字面量 / 常量改词形未同步消费侧 → 本测试先红，
+    /// mode.rs 的 `permission_receipt_verified_dual_word_forms` 会同步红）。
+    #[test]
+    fn codex_permission_receipt_anchor_row_binds_mode_rs_predicate() {
+        let row = ANCHOR_LEDGER
+            .iter()
+            .find(|r| {
+                r.tool == "codex"
+                    && r.scenario == scenario::PERMISSION_MENU
+                    && r.slot == slot::RECEIPT
+                    && r.observed_version == "0.160.0"
+            })
+            .expect("0.160.0 RECEIPT 词形行在账（append-only）");
+        assert_eq!(
+            row.text, CODEX_PERMISSION_RECEIPT_ANCHOR,
+            "账本行 text 引用单点常量（不内联字面量）"
+        );
+        assert_eq!(
+            crate::inject::mode::CODEX_PERMISSION_RECEIPT_ANCHOR,
+            CODEX_PERMISSION_RECEIPT_ANCHOR,
+            "mode.rs 消费侧（事件行解析锚步 / 回执核验新词形）re-export 同一常量——消费侧不另立第二份词形真源"
+        );
     }
 }
