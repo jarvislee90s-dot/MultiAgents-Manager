@@ -27,7 +27,7 @@ export function ExtensionList() {
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   return (
     <div className="space-y-4">

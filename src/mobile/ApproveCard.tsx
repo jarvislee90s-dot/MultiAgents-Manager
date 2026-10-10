@@ -19,7 +19,7 @@
 // 局限（本任务范围裁决）：mount 只拉一次选项，卡内不做轮询——红卡的出现/消失依赖
 // 页面数据刷新（SSE 快照 → 详情页重挂/卸载）自然带动；SSE 驱动卡内 re-fetch 属
 // Task 12 后优化，不在本任务范围。
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import InteractiveCard, { type InteractiveCardTone } from "./InteractiveCard";
@@ -120,6 +120,23 @@ export default function ApproveCard({ session, onPlanFeedbackReady }: ApproveCar
   // 丁T2：「检查终端对话框」进行中（防连点）+ 检查后仍未读到选项的降级提示
   const [checking, setChecking] = useState(false);
   const [checkMissed, setCheckMissed] = useState(false);
+  // **降级态（命中审批 ∧ 未读到终端对话框）**：二元键可能错位（2026-10-10 21:55
+  // 实机——多选问题面板被误读成审批框，点「允许」真实发键）。此态下按钮禁用 +
+  // 自动重读，读到选项即恢复可用（2026-10-10 用户裁决「读不到就别给钮」）。
+  const degraded = typeof options?.degradedHint === "string" && options.degradedHint.trim() !== "";
+
+  // 降级态自动重读：每 2.5s 重拉一次选项端点（现场屏读）——真审批框一旦绘制完成
+  // 即读到选项、degraded 解除按钮亮起；假审批（多选面板等）永远读不到、按钮恒禁用。
+  // 手动「检查终端对话框」按钮同样保留。sent 后不再轮询（终态）。handleCheck 定义
+  // 在下方——经 ref 间接调用（本 effect 声明在前）。
+  const handleCheckRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!degraded || sent) return;
+    const t = window.setInterval(() => {
+      handleCheckRef.current?.();
+    }, 2500);
+    return () => window.clearInterval(t);
+  }, [degraded, sent]);
 
   // 挂载拉取一次选项可用性；拉取失败 → 静默保持隐藏。
   // ready 只表示「载荷已落地」（available/reason 的分诊移到渲染侧——严格档
@@ -227,6 +244,19 @@ export default function ApproveCard({ session, onPlanFeedbackReady }: ApproveCar
       setBusy(false);
     }
   }, [busy, sent, session.id, onPlanFeedbackReady]);
+
+  // 降级态自动重读 effect（handleCheckRef 提交后同步 + 每 2.5s 重拉）——置于全部
+  // useCallback 之后（React Compiler：memoized 链中间插 ref 写入会跳过其记忆化）
+  useEffect(() => {
+    handleCheckRef.current = handleCheck;
+  }, [handleCheck]);
+  useEffect(() => {
+    if (!degraded || sent) return;
+    const t = window.setInterval(() => {
+      handleCheckRef.current?.();
+    }, 2500);
+    return () => window.clearInterval(t);
+  }, [degraded, sent]);
 
   // 加载中 / 拉取失败 / options 未落地：不渲染
   if (!ready || options === null) return null;
@@ -349,6 +379,30 @@ export default function ApproveCard({ session, onPlanFeedbackReady }: ApproveCar
               已发送按键
             </p>
           )}
+          {/* **降级态（读不到终端对话框）不给出键**（2026-10-10 用户裁决「读不到就
+              别给钮」）：按钮已禁用，这里给「核对中/未读到」两种状态文案 + 手动检查
+              钮；自动重读每 2.5s 一次，读到选项即整卡切换为可点形态 */}
+          {degraded && (
+            <>
+              <button
+                type="button"
+                data-testid="approve-degraded-check"
+                disabled={checking}
+                onClick={handleCheck}
+                className="mt-2 rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
+              >
+                {checking ? "检查中…" : "检查终端对话框"}
+              </button>
+              <p
+                data-testid="approve-degraded-state"
+                className="mt-1 text-xs text-amber-700 dark:text-amber-400"
+              >
+                {checkMissed
+                  ? "仍未读到终端对话框选项——上方按键保持禁用，请到终端确认当前面板"
+                  : "正在核对终端对话框——读到选项后上方按键可用"}
+              </p>
+            </>
+          )}
         </>
       }
       actions={
@@ -368,7 +422,7 @@ export default function ApproveCard({ session, onPlanFeedbackReady }: ApproveCar
                 key={o.id}
                 type="button"
                 data-testid={isFeedback ? "approve-option-feedback" : `approve-option-${o.id}`}
-                disabled={busy || sent}
+                disabled={busy || sent || degraded}
                 onClick={() => (isFeedback ? handleFeedbackStart() : handleAnswer(o.id))}
                 className={`flex w-full items-start gap-2 rounded-lg px-2.5 py-1.5 text-left text-sm disabled:opacity-40 ${
                   // 行形态与问答卡选项行同款（2026-10-04 蓝系统一批：同内距/字号/

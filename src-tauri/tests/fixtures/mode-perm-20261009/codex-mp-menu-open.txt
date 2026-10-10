@@ -1,0 +1,30 @@
+
+
+  >_ OpenAI Codex (v0.160.0)
+     ~\AppData\Local\Temp\probe-codex-mp-20261009
+
+  Welcome to our little rectangle of possibility.
+
+  To get started, describe a task or try one of these commands:
+
+  /init - create an AGENTS.md file with instructions for Codex
+  /status - show current session configuration
+  /permissions - choose what Codex is allowed to do
+  /model - choose what model and reasoning effort to use
+  /review - review any changes and find issues
+
+
+  Update Model Permissions
+
+
+› 1. Read Only                             Read workspace files, with approval required for edits or internet access
+  2. Ask for approval (non-admin sandbox)  Read and edit workspace files and run commands, with approval required for
+                                           internet access or edits outside the workspace
+  3. Approve for me                        Only ask for actions detected as potentially unsafe
+  4. Full Access                           Use with caution: Codex can edit files outside this workspace and access the
+                                           internet without approval
+
+  The non-admin sandbox protects your files and prevents network access under most circumstances. However, it carries
+  greater risk if prompt injected. To upgrade to the default sandbox, run /setup-default-sandbox.
+  enter select · esc back
+

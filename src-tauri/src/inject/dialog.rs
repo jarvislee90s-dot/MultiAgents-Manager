@@ -136,10 +136,11 @@ pub(crate) fn parse_option_line(line: &str) -> Option<(u32, String, bool)> {
 /// 从屏读行集解析**全部**连续编号簇（1 → 2 → 3 …，步长必须为 1），按出现顺序返回。
 ///
 /// 这是 [`parse_dialog_options`] 的**同一套算法**的「不取最长」视图——丁T4 收尾的
-/// Full Access 二次确认框需要它：确认框出现时，权限菜单可能**仍在屏上**（overlay），
-/// 此时屏上同时有两个编号簇（菜单 1..4 与确认框 1..2），而「取最长簇」的
-/// [`parse_dialog_options`] 会选中**菜单**（4 > 2）→ 肯定项关键词找不到 → 永远切不了
-/// Full Access。按簇逐一看「哪一簇里恰好有一个肯定项」才能定位到确认框。
+/// Full Access 二次确认框需要它。overlay 认知修正（2026-10-09 m-7，与
+/// `inject::mode::CodexOverlay` 的注记同源）：0.160.0 实测确认框**替换**菜单
+/// （非叠加，mp-fa-confirm-open 同帧零菜单要素）；历史上按「叠加」假设设计了
+/// 「逐簇找肯定项」的算法——该算法在替换语义下同样成立（屏上只有确认框一簇，
+/// 逐簇扫描即命中），保留不改。
 ///
 /// 簇的构造与切断规则与 [`parse_dialog_options`] **逐字同源**（空行/横线不切断，
 /// 其余非选项行切断）——两处不得各写一遍（本仓既往的「同一判据两处实现」教训）。
@@ -267,6 +268,23 @@ pub fn parse_dialog_options(lines: &[String]) -> Option<Vec<DialogOption>> {
         None => eligible.last(),
     };
     let best = chosen.map(|(_, c)| c)?;
+    // **多选问题面板不冒充审批对话框**（2026-10-10 21:55 实机）：claude 2.1.287 的
+    // AskUserQuestion（多选）不再把待答问题写进 transcript（attachment 快照替代）
+    // → 问题卡缺席，本屏读把「1. [✔] 太阳呼吸感」编号行读成了对话框选项 → 二元
+    // 审批卡，误批准风险。选项 label 带复选框记号 = 多选问题面板 → 不出对话框
+    // 选项（审批卡缺位，用户到终端作答——「未验不出手」）。
+    if best.iter().any(|o| {
+        let squeezed = o.label.replace(' ', "");
+        squeezed.contains("[ ]")
+            || squeezed.contains("[]")
+            || squeezed.contains("[x]")
+            || squeezed.contains("[X]")
+            || squeezed.contains("[✔]")
+            || squeezed.contains("[✓]")
+            || squeezed.contains("[v]")
+    }) {
+        return None;
+    }
     // 编号必须严格连续（1..=len）——簇的构造已保证，此处为显式不变式断言
     if best
         .iter()

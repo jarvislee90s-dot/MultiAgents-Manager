@@ -864,7 +864,10 @@ export default function MessageComposer({ session }: MessageComposerProps) {
           整个禁用是刻意的：用户可能正想把内容复制到卡片输入框；发送按钮仍可点，
           点了会按分流走。四态各一句话：可自由作答 → 承诺「作为回答发送」；
           不可作答/审批 → 指路卡片按钮或终端）。文案与回执同源常量，两处不会漂移。 */}
-      {injectable && cardPresence !== "none" && (
+      {/* questionBlocked（待答问题不可在本框作答）不在此渲染——ModeBar 的
+          「终端有待回答的问题」提示 + 输入框占位语已各说一次（2026-10-10 用户
+          指令：同一条指引只显示一遍，三条同义提示堆叠是噪音） */}
+      {injectable && cardPresence !== "none" && cardPresence !== "questionBlocked" && (
         <p
           data-testid="composer-card-presence"
           data-presence={cardPresence}
@@ -872,9 +875,7 @@ export default function MessageComposer({ session }: MessageComposerProps) {
         >
           {cardPresence === "approve"
             ? "终端等待审批——本输入框直发已被拦截，请用上方卡片按钮应答"
-            : cardPresence === "questionFreeText"
-              ? "终端正在等待回答——本输入框发送的内容将作为本题的回答送到终端"
-              : "终端正在等待回答（本题不能在输入框作答）——请在问答卡中作答，或直接在终端作答"}
+            : "终端正在等待回答——本输入框发送的内容将作为本题的回答送到终端"}
         </p>
       )}
       {/* 投递中（灰3）：send await 全程在场——慢消费者长文投递可达分钟级，

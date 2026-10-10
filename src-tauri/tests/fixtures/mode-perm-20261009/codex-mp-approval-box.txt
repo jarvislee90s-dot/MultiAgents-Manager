@@ -1,0 +1,31 @@
+# 提取自 mpd-mpd-e7c-tr111.txt（2026-10-10 诊断批 codex-mode-perm-diag，审批框在屏（composer 不在）；程序化提取，FRAME 头已去）
+› proval-test-777.txt with the single line hello. Use the file writing capability directly, not a shell command.
+  Worked for 1m 21s • 12:11
+
+
+› Run this exact command: curl.exe -s https://httpbin.org/get
+
+
+• Failed (exit 1) curl.exe -s https://httpbin.org/get
+  └ (no output)
+
+• 沙箱代理阻断了网络访问（退出码 1、无输出）。需要提升权限清除代理设置后重试：
+
+• Running $env:https_proxy=''; $env:http_proxy=''; curl.exe -s https://httpbin.org/get
+
+
+  Would you like to run the following command?
+
+  Environment: local
+
+  Reason: 沙箱代理阻断了网络访问，需要提升权限清除代理设置并访问 httpbin.org/get，是否允许？
+
+  $ $env:https_proxy=''; $env:http_proxy=''; curl.exe -s https://httpbin.org/get
+
+
+› 1. Yes, proceed (y)
+  2. Yes, and don't ask again for commands that start with `$env:https_proxy=''; $env:http_proxy=''; curl.exe -s
+     https://httpbin.org/get` (p)
+  3. No, and tell Codex what to do differently (esc)
+
+  Press enter to confirm or esc to cancel

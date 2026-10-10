@@ -188,7 +188,10 @@ mod tests {
             strip_marker_suffix("华为投资 — TUVIS:build"),
             "华为投资 — TUVIS:build"
         );
-        assert_eq!(strip_marker_suffix("华为投资 — TUVIS:"), "华为投资 — TUVIS:");
+        assert_eq!(
+            strip_marker_suffix("华为投资 — TUVIS:"),
+            "华为投资 — TUVIS:"
+        );
     }
 
     #[test]

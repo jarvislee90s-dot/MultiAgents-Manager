@@ -1115,6 +1115,152 @@ describe("QuestionCard：E4 多题交互（multiQuestion 旗标）", () => {
     expect(screen.getByTestId("question-confirm-hint")).toBeTruthy();
   });
 
+  it("codex 题号直读对位（2026-10-09 设计 §3.1）：questionIdx 纠偏 mqIndex + unanswered 驱动进度提示", async () => {
+    installFetch();
+    const info = twoQuestionInteractive();
+    // codex 面板形状快照：终端停在第 2 题（questionIdx=1，0 起）且还有 1 题未答。
+    // 题号直读对位不依赖题干匹配（codex 题干区可能带状态栏杂讯）——heading 仅随形
+    info.screen = {
+      questionIdx: 1,
+      questionTotal: 2,
+      unanswered: 1,
+      isLast: true,
+      options: ["b1", "b2"],
+      focused: 0,
+      heading: "Which cache?",
+    };
+    routes.question = info;
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-codex-idx" }} />);
+    await screen.findByTestId("question-multi-current");
+    // 核心断言①：卡直接对位到第 2 题（questionIdx=1 → mqIndex=1，不是 0）
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    expect(screen.getByTestId("question-multi-current").textContent).not.toContain("First?");
+    // 核心断言②：unanswered=1 → 进度提示渲染「1 题未答」
+    expect(screen.getByTestId("question-unanswered-hint").textContent).toBe("1 题未答");
+    // 不调 writeSnapshotState：codex 快照无 checked/freeText——本地状态不被
+    // 异形状快照破坏（选中态维持本地乐观显示，设计 §5.3 边界）
+    expect(
+      screen.getByTestId("question-multi-option-0").getAttribute("data-checked")
+    ).toBeNull();
+  });
+
+  it("codex 快照 unanswered=0 → 进度提示不渲染（0 不制造噪音）", async () => {
+    installFetch();
+    const info = twoQuestionInteractive();
+    info.screen = {
+      questionIdx: 0,
+      questionTotal: 2,
+      unanswered: 0,
+      isLast: false,
+      options: ["a1", "a2"],
+      focused: 0,
+      heading: "First?",
+    };
+    routes.question = info;
+    routes.answer = { status: "key_sent" };
+    render(<QuestionCard session={{ id: "sess-codex-zero" }} />);
+    await screen.findByTestId("question-multi-current");
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("First?");
+    expect(screen.queryByTestId("question-unanswered-hint")).toBeNull();
+  });
+
+  it("codex advance 回执 questionIdx=0（2026-10-09 评审 F3）：末题 ▶ 环形回首题——卡面停第 1 题而非确认卡", async () => {
+    installFetch();
+    const info = twoQuestionInteractive();
+    // 挂载 GET 快照：终端停在第 2 题（末题）
+    info.screen = {
+      questionIdx: 1,
+      questionTotal: 2,
+      unanswered: 0,
+      isLast: true,
+      options: ["b1", "b2"],
+      focused: 0,
+      heading: "Second?",
+    };
+    // **动作后读屏**（2026-10-10「每次操作后都读一次屏」）：advance 成功后组件会
+    // 重拉一次 GET——第 1 次 GET（挂载）供翻题前屏，第 2 次起供回首题真值
+    // （questionIdx=0/unanswered=1，环形回首的终端事实）。按调用次数翻转。
+    let questionGets = 0;
+    const wrappedInfo = {
+      ...info,
+      screen: {
+        questionIdx: 0,
+        questionTotal: 2,
+        unanswered: 1,
+        isLast: false,
+        options: ["a1", "a2"],
+        focused: 0,
+        heading: "First?",
+      },
+    };
+    Object.defineProperty(routes, "question", {
+      configurable: true,
+      get() {
+        questionGets += 1;
+        return questionGets === 1 ? info : wrappedInfo;
+      },
+    });
+    // advance 回执：questionIdx=0（环形回首题）+ unanswered=1
+    routes.answer = {
+      status: "key_sent",
+      done: true,
+      stage: "advance",
+      direction: "next",
+      screen: {
+        heading: "First?",
+        checked: [],
+        freeText: null,
+        questionIdx: 0,
+        questionTotal: 2,
+        unanswered: 1,
+        isLast: false,
+      },
+    };
+    render(<QuestionCard session={{ id: "sess-codex-adv-wrap" }} />);
+    await screen.findByTestId("question-multi-current");
+    // 先把卡面带到第 2 题（点选/切换等价——这里直接靠 GET 快照 questionIdx=1 对位）
+    fireEvent.click(screen.getByTestId("question-multi-advance"));
+    await flushAsync();
+    // 核心断言①：回执 questionIdx=0 → 卡面停第 1 题（**不是确认卡**——
+    // 直读对位 clamp 覆盖环形回首；heading 对位不适用 codex 快照）
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("First?");
+    expect(screen.getByTestId("question-multi-current").textContent).not.toContain("Second?");
+    expect(screen.queryByTestId("question-confirm-hint")).toBeNull();
+    // 核心断言②：unanswered=1 随回执更新 → 进度提示在场
+    expect(screen.getByTestId("question-unanswered-hint").textContent).toBe("1 题未答");
+  });
+
+  it("codex select 回执 questionIdx 对位（2026-10-09 评审 F4）：卡面直读切到落点题", async () => {
+    installFetch();
+    routes.question = twoQuestionInteractive();
+    // select 回执：codex 到达帧快照 questionIdx=1（自动推进到第 2 题）
+    routes.answer = {
+      status: "key_sent",
+      done: true,
+      stage: "select",
+      reanswered: false,
+      alreadySubmitted: false,
+      screen: {
+        heading: "Second?",
+        checked: [],
+        freeText: null,
+        questionIdx: 1,
+        questionTotal: 2,
+        unanswered: 1,
+        isLast: true,
+      },
+    };
+    render(<QuestionCard session={{ id: "sess-codex-sel-idx" }} />);
+    await screen.findByTestId("question-multi-current");
+    fireEvent.click(screen.getByTestId("question-multi-option-0"));
+    await flushAsync();
+    // 直读对位：questionIdx=1 → 卡面停第 2 题（而非旧逻辑 mqIndex+1 的纯本地推进）
+    expect(screen.getByTestId("question-multi-current").textContent).toContain("Second?");
+    // unanswered=1 随回执更新
+    expect(screen.getByTestId("question-unanswered-hint").textContent).toBe("1 题未答");
+  });
+
   it("GET 快照 review+summary 形态（db45945 回归锁）：刷新后确认卡摘要落位", async () => {
     installFetch();
     const info = twoQuestionInteractive();

@@ -792,7 +792,9 @@ mod tests {
         let r = disable_step_with(
             9420,
             false,
-            |_, _| Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
+            |_, _| {
+                Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into())
+            },
             || panic!("撤销失败不得落开关位（否则就是『开关说已关、实际公网还开着』）"),
             |_, _| panic!("撤销失败不得发审计（专测见 failed_revoke_emits_no_audit）"),
             |_, _| {
@@ -878,7 +880,9 @@ mod tests {
         let r = disable_step_with(
             9420,
             false,
-            |_, _| Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
+            |_, _| {
+                Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into())
+            },
             || {
                 panic!(
                     "撤销失败不得落开关位（防线见 failed_revoke_does_not_land_the_channel_flag）"
@@ -957,7 +961,9 @@ mod tests {
         let r = disable_step_with(
             9420,
             false,
-            |_, _| Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into()),
+            |_, _| {
+                Err("检测到非 兔维斯 的 Tailscale serve/Funnel 配置，为避免覆盖已中止撤销".into())
+            },
             || {
                 panic!(
                     "撤销失败不得落开关位（防线见 failed_revoke_does_not_land_the_channel_flag）"

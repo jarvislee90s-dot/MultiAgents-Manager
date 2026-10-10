@@ -192,6 +192,9 @@ mod tests {
         // 幂等：新目录已存在时再执行不得触碰
         std::fs::write(new.join("tuvis.db"), "db2").unwrap();
         migrate_legacy_data_home_at(&legacy, &new);
-        assert_eq!(std::fs::read_to_string(new.join("tuvis.db")).unwrap(), "db2");
+        assert_eq!(
+            std::fs::read_to_string(new.join("tuvis.db")).unwrap(),
+            "db2"
+        );
     }
 }

@@ -59,6 +59,7 @@ public static class ConIn
         public ushort wRepeatCount;
         public ushort wVirtualKeyCode;
         public ushort wVirtualScanCode;
+        [MarshalAs(UnmanagedType.U2)] // CJK 实证批修复：默认 Ansi 封送把 char 当 1 字节——ASCII 碰巧低位对位，CJK 封送错乱 0x8007007A（2026-10-10 cxzh 批）
         public char UnicodeChar;
         public uint dwControlKeyState;
     }

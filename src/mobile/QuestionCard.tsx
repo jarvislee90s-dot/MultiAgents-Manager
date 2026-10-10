@@ -26,12 +26,13 @@
 // - **进行中态**（§2.3「卡片进行中态替代『已发送按键』」）：请求在途期间卡片显示
 //   「进行中（走到哪一段）」——后端的段推进是同步的（一次请求内走完），故前端只需
 //   一个总进行中态 + 段名文案（`QUESTION_STAGE_LABELS`）；
-// - 自由文本（**丁T5 §2.4 入口 1；复评 F6-3 收紧为「仅单选单题卡 + 仅 claude」**）：
-//   卡内嵌输入框 + 「作为回答发送」→ POST freeText{text}。后端序列 = 定位
-//   `Type something` 行（数字，仅移动焦点）→ 文本（**字符通道**）→ 回车；文本经归一
+// - 自由文本（**丁T5 §2.4 入口 1**；支持面随批次逐步放开——2026-10-10 起
+//   claude/kimi/opencode/**codex** 四家全通；codex = 0.162.1 复验复活，走位
+//   Other → tab 开备注 → 文本 → 回车，序列与其三家不同族由后端编排屏蔽）：
+//   卡内嵌输入框 + 「作为回答发送」→ POST freeText{text}。文本经归一
 //   且**不带** `[mobile]` 签名。
 //   **两个不渲染输入框的情形**（都渲染「请在终端作答」引导，**不假装能发**）：
-//   ① 工具未定案（codex/kimi/opencode/未知；`info.freeText !== true`，§2.8）；
+//   ① 工具未定案（未知工具；`info.freeText !== true`，§2.8）；
 //   ② **多选题**（复评 F6-3）：多选屏的自由作答行带勾选框
 //      （`4. [ ] Type something`，实机截图 `C-s8-cursor-submit-*.png`），定位判据
 //      （剥编号后以 `Type something` 开头）不匹配 → 后端恒拒 409；前端同步不给按钮。
@@ -142,6 +143,19 @@ function findQuestionByHeading(questions: QuestionView[], heading: string): numb
   if (exact.length === 1) return exact[0];
   if (exact.length === 0 && partial.length === 1) return partial[0];
   return null; // 0 个或多个匹配 → 不猜
+}
+
+/** codex 回执快照的**附带勾选/TS 通道守卫**（评审 F4.3）：codex 面板形状无
+ *  checked/freeText 通道（快照只携带题号头计数与焦点），直读 questionIdx 对位
+ *  后不调 writeSnapshotState；仅当 heading 恰好唯一命中 dest（防御：其他工具
+ *  形状夹带 questionIdx 的字段膨胀）才走 writeSnapshotState 回填勾选/TS 行。 */
+function landedCodexHeadingMatches(
+  info: QuestionInfoView,
+  dest: number,
+  heading: string | undefined
+): boolean {
+  if (heading == null) return false;
+  return findQuestionByHeading(info.questions, heading) === dest;
 }
 
 /** 确认卡摘要查询（2026-10-07 权威源切换）：题干归一键 → 终端 Review 页答案。
@@ -309,8 +323,20 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const [abortedStage, setAbortedStage] = useState<QuestionAnswerStage | null>(null);
   // 自由作答输入框内容（**仅单题卡 + info.freeText === true 时渲染**）
   const [freeText, setFreeText] = useState("");
+  /** freeText 现值镜像（供 applyScreenSync 等零依赖回调读现值——不进依赖数组，
+   *  避免 GET 重拉 effect 随每次按键重建） */
+  const freeTextRef = useRef("");
+  // 提交后同步（react-hooks/refs 禁止渲染期写 ref）——applyScreenSync 均在
+  // 异步回调里读，commit 后的镜像值即现值
+  useEffect(() => {
+    freeTextRef.current = freeText;
+  }, [freeText]);
+  /** 上次 GET 屏读的题号（0 起；null = 尚无屏读）——换题检测用 */
+  const lastScreenIdxRef = useRef<number | null>(null);
   // E4-E6 多题交互：当前作答到第几题（0 起；answer 成功且非末题时 +1）
   const [mqIndex, setMqIndex] = useState(0);
+  // codex 面板快照的未答数（2026-10-09 设计 §3.1）——0/null 不显示
+  const [unansweredHint, setUnansweredHint] = useState<number | null>(null);
 
   // 拉取（挂载一次 + 状态跃迁重拉，丁T1 复评 F-1）：deps 含 `session.status`——
   // 详情页停留期间 Board 数据通道把活会话 status 对齐进 selected（App.tsx
@@ -325,6 +351,33 @@ export default function QuestionCard({ session }: QuestionCardProps) {
   const [confirmSummary, setConfirmSummary] = useState<Record<string, string>>({});
   const applyScreenSync = useCallback((v: QuestionInfoView) => {
     if (!v.available || !v.screen) return;
+    // codex 题号对位（2026-10-09 设计 §3.1）：questionIdx 直读对位——不依赖
+    // 题干文本匹配（codex 题干区可能带状态栏杂讯）。unanswered 驱动进度提示。
+    // 不调 writeSnapshotState：codex 快照形状不同（无 checked/freeText）——
+    // 题号对位即可，选中态维持本地乐观显示（与 kimi mqSelected 同口径，
+    // 设计 §5.3 明示的边界）
+    if (typeof v.screen.questionIdx === "number") {
+      const qi = Math.min(v.screen.questionIdx, v.questions.length - 1);
+      setMqIndex(qi);
+      setUnansweredHint(v.screen.unanswered ?? null);
+      // **换题即清输入**（2026-10-10 21:23 教训）：屏读题号与上次不同 = 终端已翻题
+      // ——输入框里旧题残留文字会与新题 note 状态矛盾（用户实测撞形），清掉
+      let clearedInput = false;
+      if (lastScreenIdxRef.current !== null && lastScreenIdxRef.current !== v.screen.questionIdx) {
+        setFreeText("");
+        freeTextRef.current = "";
+        clearedInput = true;
+      }
+      lastScreenIdxRef.current = v.screen.questionIdx;
+      // **终端 note 文字同步进输入框**（2026-10-10 用户指令：「对话框里应该同步
+      // 把字给同步出来」）——note 有字 ∧ 输入框还没打字（含刚换题清空）→ 回填
+      // （用户可见、可改后覆盖写入）；用户已打字不覆盖（本地优先，避免顶掉输入）
+      const nt = v.screen.noteText;
+      if (nt != null && nt !== "" && (clearedInput || freeTextRef.current.trim() === "")) {
+        setFreeText(nt);
+      }
+      return;
+    }
     if (v.screen.review) {
       // **确认卡摘要权威源切换**（2026-10-07）：summary = Review 页屏读解析的
       // 逐题（题干, 答案）——覆盖本地缓存记录（终端真值优先；终端没答的题如实
@@ -423,6 +476,22 @@ export default function QuestionCard({ session }: QuestionCardProps) {
     };
   }, [session.id, status, reloadTick, applyScreenSync]);
 
+  /** 动作后重拉 GET 并应用屏读同步（2026-10-10「每次操作后都读一次屏」）：freeText
+   *  提交/清空、advance 翻页、freeText 中止四条路径共用——noteText/题号随新屏回来，
+   *  卡面与输入框跟随终端真值。epoch 防旧回执覆盖新交互（评审 I4 同源）。 */
+  const repullAndSync = useCallback(
+    (epoch: number) => {
+      void fetchSessionQuestion(session.id)
+        .then((v2) => {
+          if (interactionEpoch.current !== epoch) return;
+          setInfo(v2);
+          applyScreenSync(v2);
+        })
+        .catch(() => {});
+    },
+    [session.id, applyScreenSync]
+  );
+
   const handleAnswer = useCallback(
     async (
       action: QuestionAnswerAction,
@@ -520,10 +589,25 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             // 请求下一题时回执 `advanced:false`（零按键，已在终点）→ **不推进**，
             // 停在确认卡（opencode 的 Confirm 页 tab=回绕第 1 题，回执无该字段且
             // 无 direction → 维持回绕行为）
+            // **翻页后读 note**（2026-10-10 用户指令）：翻页后 note 行换题了——
+            // 重拉 GET 让 noteText 随新题屏回来，输入框同步新题的终端备注
+            repullAndSync(epoch);
             if (res.advanced === false) {
               // 已在 Review 屏（零按键）→ 前端直接进确认卡（评审 C1 前端面）
               setInProgress(null);
               if (info !== null) setMqIndex(info.questions.length);
+            } else if (res.screen && typeof res.screen.questionIdx === "number" && info !== null) {
+              // **codex 回执直读对位**（2026-10-09 评审 F3）：codex 面板形状快照的
+              // 题号对位主键是 questionIdx（题干区可能带状态栏杂讯，heading 归属
+              // 校验不适用）——直读 + Math.min clamp（末题 ▶ 回执 questionIdx=0
+              // = 环形回首题，自然覆盖）。unanswered 随回执更新（评审 F6）。
+              const dest = Math.min(res.screen.questionIdx, info.questions.length - 1);
+              setMqIndex(dest);
+              if (typeof res.screen.unanswered === "number") {
+                setUnansweredHint(res.screen.unanswered);
+              }
+              // codex 快照无 checked/freeText 通道——选中态维持本地乐观显示
+              //（设计 §5.3 明示的边界，与 GET 路径的 questionIdx 分支同口径）
             } else {
               // **目的地计算 + 屏读快照纠偏**（2026-10-03 屏读为准）：prev echo 确认
               // = 退回上一题；next 沿用既有推进/回绕；快照随回执到达 → 新题的勾选/
@@ -551,6 +635,11 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               });
               const snapCheckedLen = (res.screen?.checked ?? []).length;
               const headingOnly = res.screen?.heading != null && snapCheckedLen === 0;
+              // **unanswered 随回执更新**（评审 F6）：快照带未答计数（codex 面板
+              // 形状扩展面）→ 直读刷新进度提示
+              if (typeof res.screen?.unanswered === "number") {
+                setUnansweredHint(res.screen.unanswered);
+              }
               if (
                 res.screen &&
                 res.screen.heading &&
@@ -585,13 +674,39 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             setMqIndex(questionIndex + 1);
             // **交互后屏读核对**（2026-10-03 屏读为准）：select 回执带发后快照——
             // TS 行内容回填当前题的 mqFreeText（卡面「已写入」态以屏读为准）
-            if (res.screen) {
+            if (res.screen && typeof res.screen.questionIdx === "number") {
+              // **codex 回执直读对位**（2026-10-09 评审 F4.3）：codex 面板形状的
+              // questionIdx 是题号对位主键——跳过 findQuestionByHeading（codex
+              // 题干区带状态栏杂讯，heading 对位不成立）。unanswered 随回执更新
+              //（评审 F6）。
+              const dest = Math.min(res.screen.questionIdx, info.questions.length - 1);
+              if (typeof res.screen.unanswered === "number") {
+                setUnansweredHint(res.screen.unanswered);
+              }
+              if (landedCodexHeadingMatches(info, dest, res.screen.heading)) {
+                // heading 恰好唯一命中 dest（claude/opencode 形状夹带 questionIdx
+                // 的防御分支）→ 勾选/TS 行照旧走 writeSnapshotState
+                writeSnapshotState(
+                  res.screen,
+                  dest,
+                  info.questions.length === 1,
+                  { setChecked, setMqChecked, setMqFreeText, setMqSelected },
+                  info.questions[dest]?.multiSelect ?? true
+                );
+              }
+              // 选中态维持本地乐观显示（下方 setMqSelected 已按点击记录，不动）
+              setMqIndex(dest);
+            } else if (res.screen) {
               // **屏读归属按 heading 对位**（2026-10-06 修复）：快照拍的是发键后
               // **到达页**——推进工具 landed=qi+1；**停留工具**（opencode 2.0.22
               // 单选选中不推进，✓ 标记在原页，2026-10-06 活体定案）landed=qi。
               // 旧实现盲目归属 questionIndex 且无条件 mqIndex+1——到达题的占位态
               // 写进本题（清掉已存文字）、停留被误当推进（卡面漂移到确认卡）。
               // 对位失败（无 heading/多义）→ 维持旧归属（不猜纪律）。
+              // **unanswered 随回执更新**（评审 F6）：快照带未答计数 → 直读刷新
+              if (typeof res.screen.unanswered === "number") {
+                setUnansweredHint(res.screen.unanswered);
+              }
               const landed =
                 res.screen.heading != null
                   ? findQuestionByHeading(info.questions, res.screen.heading)
@@ -685,28 +800,67 @@ export default function QuestionCard({ session }: QuestionCardProps) {
               setFtUnverified(true);
             }
             setInProgress(null);
+            // **动作后读 note**（2026-10-10 用户指令「清空了之后不应该读一下屏幕吗」）：
+            // 多题卡 freeText 各成功分支（保存/清空/推进）都改变终端 note 行——重拉
+            // GET 让 noteText 随新屏回来，按钮面（发送 ↔ 清空/覆盖写入）随之切换
+            repullAndSync(epoch);
           } else {
-            // select（单题）/ submit / cancel：终态
-            setSent(true);
-            // 阶段机动作带回 verified（三态）；单键动作无该字段 → 保持 null
-            setVerified(typeof res.verified === "boolean" ? res.verified : null);
-            // 自由作答成功后清空输入框（已投递；留着会让用户以为没发出去）
-            if (action === "freeText") setFreeText("");
+            // **清空请求（单题卡）**：非终态——note 清掉即回「发送」初态（setSent
+            // 会把卡标成已发送伪终态，不适用）；重拉 GET 刷新 noteText/按钮面
+            const wasClear = action === "freeText" && overwrite === true && (text ?? "") === "";
+            if (wasClear) {
+              setFreeText("");
+              repullAndSync(epoch);
+            } else {
+              // select（单题）/ submit / 覆盖写入：终态
+              setSent(true);
+              // 阶段机动作带回 verified（三态）；单键动作无该字段 → 保持 null
+              setVerified(typeof res.verified === "boolean" ? res.verified : null);
+              // 自由作答成功后清空输入框（已投递；留着会让用户以为没发出去）
+              if (action === "freeText") setFreeText("");
+              // **动作后重拉 GET**（2026-10-10 用户指令：「页面上有过操作的按键
+              // 之后都做一次读屏」）——freeText 提交后 notes 行/摘要态变化，重拉
+              // 把终端 noteText 顶到卡面（abort 路径既有同款重拉，评审 I6）
+              if (action === "freeText") {
+                void fetchSessionQuestion(session.id)
+                  .then((v2) => {
+                    if (interactionEpoch.current !== epoch) return;
+                    setInfo(v2);
+                    applyScreenSync(v2);
+                  })
+                  .catch(() => {});
+              }
+            }
           }
         } else {
           // failed：区分「阶段机中止」（aborted+stage）与普通投递失败（可重试）
-          setError(res.error);
+          // **notes 上屏核验失败的静默调和**（2026-10-10 21:23 用户指令）：核验窗
+          // 内终端恰好翻题/提交（终端侧合法动作）→ 旧题 note 必然读不到——不是需
+          // 要用户处理的错误，红字只制造恐慌；不显示，靠下面的中止重拉把卡面刷到
+          // 终端真值（题/notes 同步、输入框随新题重置）
+          const silentReconcile =
+            action === "freeText" &&
+            res.aborted === true &&
+            typeof res.error === "string" &&
+            (res.error.includes("备注文本") || res.error.includes("备注态意外关闭"));
+          if (!silentReconcile) {
+            setError(res.error);
+          }
           if (res.aborted === true && res.stage) {
+            if (!silentReconcile) {
+              setAbortedStage(res.stage);
+            } else {
+              // **2 秒后二次重拉**：核验窗（~1.2s）内没读到的文字可能稍后落地
+              // （终端重绘慢）——立即重拉时 noteText 还没回来，再补一拍让它被
+              // 读到并同步进输入框
+              setTimeout(() => {
+                repullAndSync(epoch);
+              }, 2000);
+            }
             setAbortedStage(res.stage);
             // **中止后重拉**（评审 I6）：键可能在轮询窗尽后才被终端消费——重拉 GET
             // 用屏读快照把卡面拉回与终端一致（快照对位失败则维持现状）
-            void fetchSessionQuestion(session.id)
-              .then((v2) => {
-                if (interactionEpoch.current !== epoch) return;
-                setInfo(v2);
-                applyScreenSync(v2);
-              })
-              .catch(() => {});
+            repullAndSync(epoch);
           }
         }
       } catch (e) {
@@ -722,7 +876,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
         setInProgress(null);
       }
     },
-    [busy, sent, session.id, info, mqIndex, applyScreenSync]
+    [busy, sent, session.id, info, mqIndex, applyScreenSync, repullAndSync]
   );
 
   // 加载中 / 拉取失败 / info 未落地 / 不可用：不渲染（卡自隐）
@@ -804,10 +958,45 @@ export default function QuestionCard({ session }: QuestionCardProps) {
           className="min-w-0 flex-1 rounded-lg border border-[var(--cb)] bg-[var(--cbg)] px-2 py-1.5 text-xs text-[var(--tx)] placeholder:text-[var(--mut)] focus:border-[var(--btnp)] focus:outline-none disabled:opacity-60"
           placeholder="输入内容后点发送（勿在终端按回车）"
         />
-        {/* 覆盖写入/编辑/清空按能力位门控（2026-10-05 深夜）：键序语义逐工具取证——
-            opencode 已取证渲染全套；codex/kimi 等未取证工具已写入后只读 + 终端引导
-            （「未取证不出手」——发送过一次的覆盖语义未验证，盲发会追加/破坏已存内容） */}
-        {mqFreeText[qi] !== undefined && info.freeTextOverwrite !== true ? (
+        {/* codex 屏驱按钮面（2026-10-10 用户规格）：按钮跟随终端 note 行屏读——
+            无字 → 「发送」（overwrite=false，tab→脚注核验→打字→上屏核验→回车）；
+            有字 → 「清空」「覆盖写入」（tab 循环清空 ≤2 下每下读屏；覆盖 = 清空 +
+            重开 + 打字 + 核验 + 回车）。screen.questionIdx 非空 = codex 面板形状
+            （noteText 才有意义）；其他工具走下方既有能力位门控链 */}
+        {info.screen?.questionIdx != null ? (
+          info.screen?.noteText != null && info.screen.noteText !== "" ? (
+            <>
+              <button
+                type="button"
+                data-testid="question-multi-freetext-clear"
+                disabled={busy}
+                onClick={() => handleAnswer("freeText", undefined, "", qi, undefined, true)}
+                className="shrink-0 rounded-full bg-rose-500/10 px-3 py-1.5 text-xs text-rose-700 hover:bg-rose-500/20 disabled:opacity-40 dark:bg-rose-400/10 dark:text-rose-300"
+              >
+                清空
+              </button>
+              <button
+                type="button"
+                data-testid="question-multi-freetext-overwrite"
+                disabled={busy || freeText.trim() === ""}
+                onClick={() => handleAnswer("freeText", undefined, freeText, qi, undefined, true)}
+                className="shrink-0 rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
+              >
+                覆盖写入
+              </button>
+            </>
+          ) : (
+            <button
+              type="button"
+              data-testid="question-multi-freetext-send"
+              disabled={busy || freeText.trim() === ""}
+              onClick={() => handleAnswer("freeText", undefined, freeText, qi)}
+              className="rounded-full bg-[var(--btnp)] px-3 py-1.5 text-xs font-medium text-[var(--btnpt)] hover:bg-[var(--btnp)] disabled:opacity-40"
+            >
+              发送
+            </button>
+          )
+        ) : mqFreeText[qi] !== undefined && info.freeTextOverwrite !== true ? (
           <p className="mt-1.5 rounded-lg bg-slate-500/10 px-2 py-1.5 text-xs text-slate-600 dark:bg-slate-400/10 dark:text-slate-300">
             已写入。该工具的卡内覆盖/清空尚未实机验证——修改请到终端完成
           </p>
@@ -1061,6 +1250,16 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             </span>
           )}
         </p>
+        {/* codex 未答进度提示（2026-10-09 设计 §3.1）：GET/回执快照的 unanswered
+            直读——0/null 不显示（全答完不制造噪音）；非 codex 快照恒 null 不渲染 */}
+        {unansweredHint !== null && unansweredHint > 0 && (
+          <p
+            data-testid="question-unanswered-hint"
+            className="mt-1 text-xs text-amber-700 dark:text-amber-400"
+          >
+            {unansweredHint} 题未答
+          </p>
+        )}
         <div className="mt-1.5 space-y-1">
           {q.options.map((o, i) => {
             // 多选题的勾选高亮：按题记忆（mqChecked），仅在 toggle 成功回执后变化；
@@ -1150,7 +1349,7 @@ export default function QuestionCard({ session }: QuestionCardProps) {
 
   const q = questions[0];
   // 自由作答入口的**渲染条件**（丁T5 §2.4；复评 F6-3 收紧）：
-  // - `info.freeText === true`（后端按**工具**判：只有 claude 定案）；
+  // - `info.freeText === true`（后端按**工具**判：四家定案，2026-10-10 codex 复活）；
   // - **且题目形态是单选**（后端 `free_text_shape_supported`）——多选屏的自由作答行
   //   渲染为 `4. [ ] Type something`（带勾选框，实机截图
   //   `C-s8-cursor-submit-20260921-015844.png` 第 4 行），与「剥编号后以
@@ -1295,33 +1494,84 @@ export default function QuestionCard({ session }: QuestionCardProps) {
             取消回答
           </button>
           {/* ===== 丁T5 §2.4：卡内自由作答输入框（入口 1；仅单题卡，本分支恒单题）===== */}
+          {info.screen?.noteText != null && info.screen.noteText !== "" && (
+            // **终端 notes 行屏读回显**（2026-10-10 用户指令：note 位置但凡有输入，
+            // 一定要显示在远端页面上）——只读事实行，与输入框互不干扰
+            <p data-testid="question-note-text" className="mt-1.5 text-xs text-[var(--mut)]">
+              终端备注（屏读）：<span className="text-[var(--tx)]">{info.screen.noteText}</span>
+            </p>
+          )}
           {freeTextEnabled ? (
             <div className="mt-2" data-testid="question-freetext">
               <p data-testid="question-freetext-label" className="mb-1 text-xs text-[var(--mut)]">
                 或直接输入回答（将作为本题的答案发送到终端）
               </p>
-              <div className="flex gap-1.5">
-                <input
-                  data-testid="question-freetext-input"
-                  aria-label="回答内容"
-                  type="text"
-                  value={freeText}
-                  maxLength={MAX_FREE_TEXT_CHARS}
-                  disabled={busy}
-                  onChange={(e) => setFreeText(e.target.value.slice(0, MAX_FREE_TEXT_CHARS))}
-                  placeholder="输入你的回答…"
-                  className="min-w-0 flex-1 rounded-lg border border-[var(--cb)] px-2.5 py-1.5 text-sm text-[var(--tx)] placeholder:text-[var(--mut)] focus:ring-2 focus:ring-[var(--btnp)] focus:outline-none disabled:opacity-50"
-                />
-                <button
-                  type="button"
-                  data-testid="question-freetext-send"
-                  disabled={busy || freeText.trim() === ""}
-                  onClick={() => handleAnswer("freeText", undefined, freeText)}
-                  className="shrink-0 rounded-full bg-[var(--btnp)] px-3 py-1.5 text-sm font-medium text-[var(--btnpt)] disabled:opacity-40"
-                >
-                  作为回答发送
-                </button>
-              </div>
+              {(() => {
+                // **按钮面由终端 note 行屏读驱动**（2026-10-10 用户规格）：
+                // note 无字 → 只有「发送」（tab→脚注核验→打字→上屏核验→回车提交）；
+                // note 有字 → 「清空」「覆盖写入」两键（tab 循环清空 ≤2 下、每下读屏
+                // 字消失即停；覆盖 = 清空 + 重开 + 打字 + 核验 + 回车提交）。noteText
+                // 是 codex 屏读形状字段，claude 等不带 → 恒走「发送」，行为不变。
+                const hasNote = info.screen?.noteText != null && info.screen.noteText !== "";
+                return (
+                  <div className="flex gap-1.5">
+                    <input
+                      data-testid="question-freetext-input"
+                      aria-label="回答内容"
+                      type="text"
+                      value={freeText}
+                      maxLength={MAX_FREE_TEXT_CHARS}
+                      disabled={busy}
+                      onChange={(e) => setFreeText(e.target.value.slice(0, MAX_FREE_TEXT_CHARS))}
+                      placeholder={hasNote ? "终端已有备注——覆盖写入将替换它" : "输入你的回答…"}
+                      className="min-w-0 flex-1 rounded-lg border border-[var(--cb)] px-2.5 py-1.5 text-sm text-[var(--tx)] placeholder:text-[var(--mut)] focus:ring-2 focus:ring-[var(--btnp)] focus:outline-none disabled:opacity-50"
+                    />
+                    {hasNote ? (
+                      <>
+                        <button
+                          type="button"
+                          data-testid="question-freetext-clear"
+                          disabled={busy}
+                          onClick={() =>
+                            handleAnswer("freeText", undefined, "", undefined, undefined, true)
+                          }
+                          className="shrink-0 rounded-full bg-rose-500/10 px-3 py-1.5 text-sm text-rose-700 hover:bg-rose-500/20 disabled:opacity-40 dark:bg-rose-400/10 dark:text-rose-300"
+                        >
+                          清空
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="question-freetext-overwrite"
+                          disabled={busy || freeText.trim() === ""}
+                          onClick={() =>
+                            handleAnswer(
+                              "freeText",
+                              undefined,
+                              freeText,
+                              undefined,
+                              undefined,
+                              true
+                            )
+                          }
+                          className="shrink-0 rounded-full bg-[var(--btnp)] px-3 py-1.5 text-sm font-medium text-[var(--btnpt)] disabled:opacity-40"
+                        >
+                          覆盖写入
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid="question-freetext-send"
+                        disabled={busy || freeText.trim() === ""}
+                        onClick={() => handleAnswer("freeText", undefined, freeText)}
+                        className="shrink-0 rounded-full bg-[var(--btnp)] px-3 py-1.5 text-sm font-medium text-[var(--btnpt)] disabled:opacity-40"
+                      >
+                        作为回答发送
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
             </div>
           ) : multiFreeTextEnabled ? (
             renderMultiFreeText(0)

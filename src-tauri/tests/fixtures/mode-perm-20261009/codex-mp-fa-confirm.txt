@@ -1,0 +1,30 @@
+  >_ OpenAI Codex (v0.160.0)ctask/orltryeoneaofsthese commands:
+     ~\AppD ta\Local\Temp\probe-codex-mp-20261009
+  /init - create an AGENTS.md file with instructions for Codex
+  Welcome to our little rectangle of possibility.
+
+  To get started, describe a task or try gne of these commands:
+
+  Winit - create an AGENTS.md fileow thssnbtructions for Codex
+• /status - show current session configuration
+  /permi siont - choose what Codex is allowed to dose commands:
+• /model - choose what model and reasoning effort to use
+  /revtew - review any changes and find issues
+• Permission selection requested: Ask for approval (non-admin sandbox)
+                                  Read Only
+
+• Permission selection requested: Approve for me
+
+• Permission selection requested: Ask for approval (non-admin sandbox)
+
+
+› Enable full access?
+  When Codex runs with full access, it can edit any file on your computer and run commands with network, without your
+  approval. Exercise caution when enabling full access. This significantly increases the risk of data loss, leaks, or
+  unexpected behavior.
+›
+
+› 1. Yes, continue anyway  Apply full access for this session
+  2. Cancel                Go back without enabling full access
+
+
