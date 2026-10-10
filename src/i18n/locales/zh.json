@@ -1,6 +1,6 @@
 {
   "app": {
-    "title": "兔维斯",
+    "title": "Tuvis",
     "welcome": "欢迎使用 Tauri + React",
     "description": "你的桌面多 Agent 指挥台"
   },

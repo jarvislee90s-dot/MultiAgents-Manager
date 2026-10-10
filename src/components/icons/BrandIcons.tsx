@@ -1,5 +1,24 @@
 // 品牌图标 — path 取自 assets/icons/*.svg（simple-icons / opencode 官网），currentColor 随文字色
 
+// 兔维斯品牌标（扁平几何版吉祥物：兔耳 + 白框蓝片目镜 + 下巴绿色状态灯）
+// 固定品牌色（同 OpenCodeIcon 做法）；单色场合可把填充全部换成 currentColor
+export function TuvisLogoMark({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" role="img" aria-label="Tuvis">
+      {/* 兔耳 ×2（微外张） */}
+      <rect x="6" y="1" width="3.6" height="9.4" rx="1.8" fill="#AEB9C6" transform="rotate(-9 7.8 5.7)" />
+      <rect x="14.4" y="1" width="3.6" height="9.4" rx="1.8" fill="#AEB9C6" transform="rotate(9 16.2 5.7)" />
+      {/* 头（银白） */}
+      <circle cx="12" cy="14.2" r="8.1" fill="#E8EDF3" />
+      {/* 目镜：白框 + 蓝镜片 */}
+      <rect x="4.4" y="10.6" width="15.2" height="6" rx="3" fill="#F7FAFD" />
+      <rect x="5.9" y="11.8" width="12.2" height="3.6" rx="1.8" fill="#39A7D9" />
+      {/* 胡萝卜状态灯（绿·运行） */}
+      <circle cx="12" cy="19.8" r="1.5" fill="#34D399" />
+    </svg>
+  );
+}
+
 export function ClaudeIcon({ className }: { className?: string }) {
   return (
     <svg

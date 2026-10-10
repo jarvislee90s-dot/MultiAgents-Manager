@@ -1,7 +1,7 @@
 {
-  "name": "兔维斯远程",
+  "name": "Tuvis 远程",
   "short_name": "Tuvis",
-  "description": "兔维斯移动会话看板",
+  "description": "Tuvis 移动会话看板",
   "start_url": ".",
   "display": "standalone",
   "background_color": "#0f172a",
@@ -9,8 +9,9 @@
   "icons": [
     {
       "src": "icon-mobile.png",
-      "sizes": "128x128",
-      "type": "image/png"
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
     }
   ]
 }

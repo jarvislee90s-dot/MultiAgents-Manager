@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Archive, Moon, Power, Sun, Volume2, VolumeX } from "lucide-react";
 import CreateSessionSheet from "./CreateSessionSheet";
+import logoLight from "./assets/logo-light.png";
+import logoDark from "./assets/logo-dark.png";
 import {
   closeSession,
   connectEvents,
@@ -455,16 +457,20 @@ export default function Board({
 
   return (
     <div className="min-h-screen bg-[var(--pg)] px-4 py-4 [font-family:var(--font-ui)] text-[var(--tx)]">
-      {/* 品牌行（P8a+P8b）：兔维斯 + 版本号 + 本机名（右侧，双机双子域辨识）；
-          host 未拉到时整行隐藏（静默降级，见上方 state 注释）。
-          内层不再加 px-4（M3 Task 2 顺手修）：容器已有 px-4，双层内边距导致品牌行偏右 */}
-      {host && (
-        <header className="flex items-center gap-2 pt-4 pb-2">
-          <span className="text-lg font-bold">兔维斯</span>
-          <span className="font-mono text-xs text-[var(--mut)]">v{host.version}</span>
-          <span className="ml-auto text-sm">{host.name}</span>
-        </header>
-      )}
+      {/* 品牌行（P8a+P8b 常驻改）：logo + Tuvis 常驻（不随 host 拉取成败进退）；
+          版本号与本机名仍依赖 host，未拉到时静默隐藏。
+          logo 双份随主题切换（亮色用浅底版、暗色用深底版，dark: 变体与全站约定一致） */}
+      <header className="flex items-center gap-2 pt-4 pb-2">
+        <img src={logoLight} alt="" className="h-7 w-7 rounded-lg dark:hidden" />
+        <img src={logoDark} alt="" className="hidden h-7 w-7 rounded-lg dark:block" />
+        <span className="text-lg font-bold">Tuvis</span>
+        {host && (
+          <>
+            <span className="font-mono text-xs text-[var(--mut)]">v{host.version}</span>
+            <span className="ml-auto text-sm">{host.name}</span>
+          </>
+        )}
+      </header>
       {/* 标题行右端常驻 P8f 主题切换 + 提示音开关（不随 host 拉取成败进退）：
           图标 + 可达名描述「点下去切到什么」，aria-label 供测试与无障碍精确定位。
           会话计数在窄屏会让位（主题/音效两个按钮优先）——计数是信息、按钮是操作 */}
