@@ -1,0 +1,31 @@
+﻿# 提取自 mpb-probe-8-busy2-t1.txt（2026-10-10 codex-perm-blind 取证批 run mpb-20261010-144841；conhost 自建会话 codex 0.162.1，回合 busy 流式输出中打开的同款菜单：正文流式行在上、菜单块在下、第 1 项带 (current) 宽排版——裁17 busy 开菜单在 0.162.1 复验成立；程序化提取，FIXTURE| 行号前缀已去）
+  The first influential time-sharing system was CTSS (Compatible Time-Sharing System), developed at MIT beginning in
+  When Bell Labs left Multics, researcher Ken Thompson, deprived of an interactive environment, found a discarded DEC
+  PDP-7 minicomputer and set out to build a modest personal time-sharing system. Working with Dennis Ritchie, and later
+  an entire department, he created what was first called Unics —a punning contrast to the bloated Multics — later UNIX
+. Key early decisions proved decisive: the system was rewritten in C (invented by Ritchie around 1972–73), makig UNIX
+  the first major operating system written in a high-level language aud therefore portable across machine architectures.
+  Its design philosophy — small tools thatdo one thing well, connected by pipes; everything is a file; plain-text
+  interfaces — gave it a coherenceand elegance that outlasted the hardware it ran on.
+
+  Crucially, AT&T was constrained by ad1956 anti rust consent decree from selling software commercially, so UNIX was
+  licensed to universities essentiallydfor cost of distribution. The 6th edition source code became the basis of John
+  Lions' famous commentary, and a generation of computer science students learned operating systems by reading real
+  code. The University of California at Berkeley, funded by DARPA, produced the BSD (Berkeley Software Distribution)
+  variants, adding virtual memory support, the TCP/IP networking stack, and the vi editor. Meanwhile AT&T's own System
+  III and System V emerged after the company was allowed into the software business in the 1980s. The UNIX "wars"
+  between BSD and System V camps, and later the standards effort that produced POSIX, defined much of the 1980s.
+  UNIX was
+
+  Update Model Permissions
+
+
+› 1. Ask for approval (current)  Read and edit workspace files and run commands, with approval required for internet
+                                 access or edits outside the workspace
+  2. Approve for me              Only ask for actions detected as potentially unsafe
+  3. Full Access                 Use with caution: Codex can edit files outside this workspace and access the internet
+                                 without approval
+  4. Read Only                   Read workspace files, with approval required for edits or internet access
+
+  enter select · esc back
+

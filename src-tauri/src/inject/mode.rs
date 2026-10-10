@@ -2846,18 +2846,32 @@ fn hijack_reconciled_error(base: String, last: Option<&Vec<String>>) -> String {
 /// G4 **屏面摘要**（2026-10-10 诊断批，推论 5）——数字直达失败回执附三值摘要
 /// （审批框在场？/权限菜单在场？/composer 在场？），下次诊断免猜。三值分别用
 /// G3 账本锚 / [`codex_overlay_kind`] / G1 composer 判据，与闸同一实现。
+///
+/// **「菜单=不在 且 composer=在」附主屏注记**（2026-10-10 codex-perm-blind 活体
+/// 取证批）：菜单判据在 codex 0.162.1（conhost+WT 双宿主、idle/busy/重开/选档
+/// 六形态）活体全绿——该组合 = 读屏那一刻终端停在**主屏**（`/permissions` 未开出
+/// 菜单：回合忙、命令未被执行、或读的不是用户看的那块屏），**不是判据失明**。
+/// 注记点名这一结论与「核对会话卡对应窗口」的动作，免得下次再走「探针瞎了」的
+/// 弯路（本次事故的直接教训）。
 fn codex_screen_summary(last: Option<&Vec<String>>) -> String {
     let Some(l) = last else {
         return "（屏面摘要：读不到屏）".to_string();
     };
     let lowered: Vec<String> = l.iter().map(|x| x.to_lowercase()).collect();
     let in_out = |b: bool| if b { "在" } else { "不在" };
-    format!(
+    let mut s = format!(
         "（屏面摘要：审批框={}/菜单={}/composer={}）",
         in_out(codex_approval_box_present(&lowered)),
         in_out(codex_overlay_kind(&lowered) == Some(CodexOverlay::PermissionMenu)),
         in_out(codex_composer_present(l)),
-    )
+    );
+    if codex_composer_present(l)
+        && codex_overlay_kind(&lowered).is_none()
+        && !codex_approval_box_present(&lowered)
+    {
+        s.push_str("〔读屏时终端停在主屏——/permissions 未开出菜单（回合忙或命令未被执行）；若终端屏上确有菜单，请核对会话卡对应的终端窗口是否为本会话〕");
+    }
+    s
 }
 
 /// **codex 权限组的数字直达编排**（2026-09-23 用户实测裁决；取代 [`run_menu_stages`]
@@ -4384,8 +4398,16 @@ mod tests {
     /// e-stage2 在仓库根 `tests/fixtures/`，本目录在 `src-tauri/tests/fixtures/`）
     #[cfg(test)]
     fn mp_screen(name: &str) -> Vec<String> {
+        mp_screen_in("mode-perm-20261009", name)
+    }
+
+    /// mode-perm 屏读夹具读取的**目录变体**（2026-10-10 起多批次夹具并存：
+    /// `mode-perm-20261009` 诊断批 / `mode-perm-20261010` codex-perm-blind 取证批）
+    #[cfg(test)]
+    fn mp_screen_in(dir: &str, name: &str) -> Vec<String> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/mode-perm-20261009")
+            .join("tests/fixtures")
+            .join(dir)
             .join(name);
         let raw =
             std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("读取夹具失败 {path:?}: {e}"));
@@ -7573,6 +7595,177 @@ mod tests {
         }
     }
 
+    /// **codex 权限菜单逐环诊断探针（#[ignore]，零注入——「探针失明」的眼睛）**：
+    /// 对 `MAM_PROBE_PID` 指定的 codex 进程跑生产同款 `read_screen_window`，把
+    /// 权限菜单判据的**每一环**逐级打印（None/失败打印「到哪断了」）。
+    ///
+    /// 背景（2026-10-10 用户实机视频 vs 错误回执）：终端屏上 `Update Model
+    /// Permissions` 菜单明明开着（视频帧可见标题+四项+footer），生产回执 G4 摘要
+    /// 却报「菜单=不在/composer=在」——mpd 诊断批的 PS 采样器验证过菜单可读，但
+    /// 那不是 Rust 生产代码路径。本探针把生产 Rust 判据链拆环取证，分歧点一眼
+    /// 可见：
+    ///
+    /// 1. lowered 全屏（FIXTURE|行号|原文 dump，夹具红线的程序化提取源）；
+    /// 2. `anchor_ledger::detect` PERMISSION_MENU/TITLE → 命中行号（未命中打印
+    ///    疑似标题行，直接看词形漂移）；
+    /// 3. PERMISSION_MENU/FOOTER **两个变体各自**逐行扫（账本 detect 认任意一句，
+    ///    此处逐变体点名——footer 漂移时直接看到「哪句在、哪句不在」+ 码点 dump，
+    ///    防中点类不可见字符漂移）；
+    /// 4. `codex_menu_window` → (title_idx, footer_idx) 或 None；
+    /// 5. `codex_overlay_kind` → 结果；
+    /// 6. 生产定位路径：`locate_menu_items(lines, menu_labels("codex"))`（与
+    ///    `MenuNavPlan::PermissionTier` 同款实参）→ 项数与各项 number/label/
+    ///    highlighted + `menu_items_coherent` 结论 + `codex_permission_digit_probe`
+    ///    端到端三态；
+    /// 7. G1 `codex_composer_present` 判定（含两分支内部值）。
+    ///
+    /// 跑法：`MAM_PROBE_PID=<pid> cargo test --lib codex_permission_menu_live_probe -- --ignored --nocapture`
+    /// 红线：只读零注入（不碰 CONIN$、不发键）；pid 由调用方显式给定（只碰自建会话）。
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "实机只读探针：codex 权限菜单逐环诊断（前置=MAM_PROBE_PID=<codex pid>，菜单开着跑）"]
+    fn codex_permission_menu_live_probe() {
+        use crate::inject::anchor_ledger::{scenario, slot};
+        let Some(pid) = std::env::var("MAM_PROBE_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+        else {
+            eprintln!("未设 MAM_PROBE_PID——跳过（红线：只碰显式指定的进程）");
+            return;
+        };
+        let Ok(lines) = crate::inject::windows_console::read_screen_window(pid) else {
+            eprintln!("pid={pid} 屏读失败（无控制台/权限不足）——断点：read_screen_window");
+            return;
+        };
+        let lowered: Vec<String> = lines.iter().map(|l| l.to_lowercase()).collect();
+        eprintln!(
+            "==== 环1 pid={pid} 可见窗 {} 行（FIXTURE|行号|原文）====",
+            lines.len()
+        );
+        for (i, l) in lines.iter().enumerate() {
+            eprintln!("FIXTURE|{i:02}|{l}");
+        }
+        // 疑似相关行的码点 dump（中点/光标标记类不可见字符漂移在此现形）
+        eprintln!("---- 疑似行码点（含 permission/model/esc/select 的行）----");
+        for (i, l) in lowered.iter().enumerate() {
+            if l.contains("permission")
+                || l.contains("model")
+                || l.contains("esc")
+                || l.contains("select")
+            {
+                let codes: Vec<String> = l
+                    .chars()
+                    .map(|c| {
+                        if (c as u32) < 0x80 {
+                            format!("{c}")
+                        } else {
+                            format!("U+{:04X}", c as u32)
+                        }
+                    })
+                    .collect();
+                eprintln!("行{i:02} {:?}", codes.join(""));
+            }
+        }
+        // 环2：标题锚
+        eprintln!("==== 环2 标题锚 detect（codex/PERMISSION_MENU/TITLE）====");
+        match crate::inject::anchor_ledger::detect(
+            &lowered,
+            "codex",
+            scenario::PERMISSION_MENU,
+            slot::TITLE,
+        ) {
+            Some(hit) => eprintln!(
+                "命中：行{} 文案「{}」（实测于 {}）",
+                hit.line_index, hit.row.text, hit.row.observed_version
+            ),
+            None => {
+                eprintln!("未命中 → overlay_kind 必 None、menu_window 必 None（断点=标题锚）");
+                for (i, l) in lowered.iter().enumerate() {
+                    if l.contains("permission") || l.contains("model") {
+                        eprintln!("  疑似标题行 行{i}：{:?}", lines[i]);
+                    }
+                }
+            }
+        }
+        // 环3：footer 两个变体各自逐行扫（与账本候选同词形）
+        eprintln!("==== 环3 footer 锚两变体各自扫（codex/PERMISSION_MENU/FOOTER）====");
+        const FOOTER_OLD: &str = "press enter to confirm or esc to go back";
+        const FOOTER_NEW: &str = "enter select · esc back";
+        for (name, text) in [("0.154.0 旧", FOOTER_OLD), ("0.156.1 新", FOOTER_NEW)] {
+            let hits: Vec<usize> = lowered
+                .iter()
+                .enumerate()
+                .filter(|(_, l)| l.contains(text))
+                .map(|(i, _)| i)
+                .collect();
+            if hits.is_empty() {
+                eprintln!("变体[{name}]「{text}」：未命中");
+            } else {
+                eprintln!("变体[{name}]「{text}」：命中行 {hits:?}");
+            }
+        }
+        // 账本合口（认任意一句）的结论
+        match crate::inject::anchor_ledger::detect(
+            &lowered,
+            "codex",
+            scenario::PERMISSION_MENU,
+            slot::FOOTER,
+        ) {
+            Some(hit) => eprintln!(
+                "账本 FOOTER detect：命中行{} 文案「{}」（{}）",
+                hit.line_index, hit.row.text, hit.row.observed_version
+            ),
+            None => eprintln!("账本 FOOTER detect：None（两变体都不在 → footer 锚断）"),
+        }
+        // 环4：锚窗
+        eprintln!("==== 环4 codex_menu_window ====");
+        match codex_menu_window(&lowered) {
+            Some((t, f)) => eprintln!(
+                "Some((title_idx={t}, footer_idx={f}))，窗内 {} 行",
+                f - t - 1
+            ),
+            None => eprintln!("None（标题或 footer 锚不成窗——见环2/环3 哪个缺）"),
+        }
+        // 环5：overlay 种类
+        eprintln!("==== 环5 codex_overlay_kind ====");
+        eprintln!("{:?}", codex_overlay_kind(&lowered));
+        // 环6：生产定位路径（MenuNavPlan::PermissionTier 同款实参）
+        eprintln!("==== 环6 locate_menu_items（生产实参 menu_labels(codex)）====");
+        match locate_menu_items(&lines, menu_labels("codex")) {
+            Some(items) => {
+                eprintln!("Some（{} 项）：", items.len());
+                for o in &items {
+                    eprintln!(
+                        "  编号 {} | 高亮={} | {:?}",
+                        o.number, o.highlighted, o.label
+                    );
+                }
+                let coherent = menu_items_coherent(&items, "codex");
+                eprintln!("menu_items_coherent = {coherent}");
+            }
+            None => eprintln!("None（无标题锚 或 窗内合法行 <2——见环2/环4）"),
+        }
+        eprintln!("==== 环6' codex_permission_digit_probe（ReadOnly 端到端三态）====");
+        eprintln!(
+            "{:?}",
+            codex_permission_digit_probe(&lines, MamMode::ReadOnly)
+        );
+        // 环7：G1 composer 在场性（两分支内部值）
+        eprintln!("==== 环7 codex_composer_present（G1）====");
+        let placeholder_branch = lines.iter().any(|l| {
+            let (rest, marked) = crate::inject::dialog::strip_cursor_marker(l);
+            marked
+                && CODEX_COMPOSER_PLACEHOLDERS
+                    .iter()
+                    .any(|p| rest.to_lowercase().contains(p))
+        });
+        let composer_text = codex_composer_text(&lines);
+        eprintln!(
+            "占位标记分支={placeholder_branch}；codex_composer_text={composer_text:?}；codex_composer_present={}",
+            codex_composer_present(&lines)
+        );
+    }
+
     /// **kimi 只读屏读探针（#[ignore]）**：dump 指定 pid 的整屏原文，并跑一遍
     /// kimi 权限菜单定位器，输出「屏上有什么 / 现有判据认不认」——屏读故障诊断与
     /// 版本复验的活体取证入口（四闸门 Gate-1：判据结论前必有活体 dump）。
@@ -7931,6 +8124,113 @@ mod tests {
         );
         // 读不到屏的摘要形态
         assert_eq!(codex_screen_summary(None), "（屏面摘要：读不到屏）");
+    }
+
+    // ==== 2026-10-10 codex-perm-blind 取证批：0.162.1 权限菜单活体夹具锁 ====
+    //
+    // 背景：用户实机视频里菜单开着、生产回执 G4 却报「菜单=不在/composer=在」，
+    // 怀疑「PS 同构 ≠ Rust 同构」。本批活体取证（探针 codex_permission_menu_live_probe，
+    // 证据 %USERPROFILE%\mam-probe-m6r\evidence\codex-perm-blind-20261010\）证明生产
+    // Rust 判据链在 0.162.1 双宿主六形态**全绿**——判据不失明；夹具按红线由真机
+    // dump 程序化提取（脚本 %TEMP%\extract-perm-fixtures-20261010.ps1），锁住 0.162.1
+    // 的三个新屏形与一个主屏负例。
+
+    /// **0.162.1 活体三形态 × 生产定位链**：conhost 新开菜单（窗内混 `Loading
+    /// permissionapprovals…` 瞬态行）/ WT 描述折行 / busy 流式中开菜单（`(current)`
+    /// 宽排版）——`locate_menu_items` 必须命中四项、一致性闸通过、数字直达四档
+    /// 屏上编号齐备。**0.162.1 屏序 = 1:Ask for approval / 2:Approve for me /
+    /// 3:Full Access / 4:Read Only**（与 0.154 的 1:Read Only 相反）——「编号取屏上
+    /// 实读值」的语义由本锁钉死；菜单在屏时 composer 必判不在场。
+    #[test]
+    fn codex_permission_menu_0162_live_fixtures_locate_four_tiers() {
+        for name in [
+            "codex-mp-menu-fresh-loading.txt",
+            "codex-mp-menu-wt-fold.txt",
+            "codex-mp-menu-busy-overlay.txt",
+        ] {
+            let screen = mp_screen_in("mode-perm-20261010", name);
+            let items = locate_menu_items(&screen, menu_labels("codex"))
+                .unwrap_or_else(|| panic!("{name}：0.162.1 真机菜单必须解析"));
+            assert_eq!(items.len(), 4, "{name}：四档齐备：{items:?}");
+            assert!(menu_items_coherent(&items, "codex"), "{name}：四真项自洽");
+            // 高亮恰一处（第 1 项 Ask for approval = 取证时的 current 档）
+            assert!(items[0].highlighted, "{name}：高亮在第 1 项");
+            assert_eq!(
+                items.iter().filter(|o| o.highlighted).count(),
+                1,
+                "{name}：唯一高亮"
+            );
+            // 数字直达：四档各自的**屏上编号**（0.162.1 屏序，实测探针 Ready 同值）
+            for (mode, want) in [
+                (MamMode::Default, "1"),
+                (MamMode::AcceptEdits, "2"),
+                (MamMode::Bypass, "3"),
+                (MamMode::ReadOnly, "4"),
+            ] {
+                match codex_permission_digit_probe(&screen, mode) {
+                    PollStep::Ready(d) => {
+                        assert_eq!(d, want, "{name}:{mode:?} 屏上编号取实读值")
+                    }
+                    other => panic!("{name}:{mode:?} 应 Ready，实际 {other:?}"),
+                }
+            }
+            // 菜单占位 → composer 不在场（G1 与锚判据同向）
+            assert!(
+                !codex_composer_present(&screen),
+                "{name}：菜单在屏时 composer 必不在场"
+            );
+        }
+    }
+
+    /// **Loading 瞬态行不产项**（0.162.1 新形态）：开菜单瞬间窗内混有
+    /// `›    Loading permissionapprovals…`——带光标标记但非编号行，夹在第 3、4 项
+    /// 之间。不得产生第 5 项、不得破坏一致性、不得多出高亮位（真机夹具锁定）。
+    #[test]
+    fn codex_permission_menu_loading_line_is_not_an_item() {
+        let screen = mp_screen_in("mode-perm-20261010", "codex-mp-menu-fresh-loading.txt");
+        assert!(
+            screen
+                .iter()
+                .any(|l| l.contains("Loading permissionapprovals")),
+            "夹具必须含 Loading 瞬态行（取证特征在位）"
+        );
+        let items = locate_menu_items(&screen, menu_labels("codex")).expect("菜单必须解析");
+        assert_eq!(items.len(), 4, "Loading 行不得产项：{items:?}");
+        assert!(
+            items
+                .iter()
+                .all(|o| !o.label.to_lowercase().contains("loading")),
+            "Loading 行不得入表：{items:?}"
+        );
+        assert_eq!(
+            items.iter().filter(|o| o.highlighted).count(),
+            1,
+            "瞬态行的 `›` 不得多出高亮位"
+        );
+        assert!(menu_items_coherent(&items, "codex"));
+    }
+
+    /// **esc 后 idle 主屏 = 用户失败回执 G4「菜单=不在/composer=在」的同态**
+    /// （0.162.1 真机）：零锚、定位 None、composer 在场——判据对该态的判定全部
+    /// 正确（读屏那一刻菜单不在那块屏上）。G4 摘要对本态附**主屏注记**。
+    #[test]
+    fn codex_idle_after_esc_fixture_reads_as_main_screen() {
+        let screen = mp_screen_in("mode-perm-20261010", "codex-mp-idle-after-esc.txt");
+        let lowered: Vec<String> = screen.iter().map(|l| l.to_lowercase()).collect();
+        assert_eq!(codex_overlay_kind(&lowered), None, "idle 主屏零锚");
+        assert!(locate_menu_items(&screen, menu_labels("codex")).is_none());
+        assert!(codex_composer_present(&screen), "composer 占位在场");
+        let summary = codex_screen_summary(Some(&screen));
+        assert!(
+            summary.contains("主屏"),
+            "「菜单=不在+composer=在」摘要要点名主屏态（非判据失明）：{summary}"
+        );
+        // 对照：审批框在场的摘要不附主屏注记（既有断言的精确文本不含注记）
+        let approval = mp_screen("codex-mp-approval-box.txt");
+        assert!(
+            !codex_screen_summary(Some(&approval)).contains("主屏"),
+            "审批框占位（composer=不在）不附主屏注记"
+        );
     }
 
     /// **kimi 两段式**（无第三段）：菜单闭环 → enter → 回执 `Permission mode: Always Ask`。
